@@ -461,6 +461,17 @@ impl Runtime {
             2,
         )?;
 
+        // Chez-style resume trampoline. Invoked as a closure body by the
+        // handler when it calls resume(v). Copies the captured body frames
+        // back onto the stack above the handle site and jumps to the
+        // resume point.
+        self.add_builtin_function(
+            "beagle.builtin/continuation-trampoline-v2",
+            continuation_trampoline_v2 as *const u8,
+            false,
+            2,
+        )?;
+
         self.add_builtin_with_doc(
             "beagle.core/set-thread-exception-handler!",
             set_thread_exception_handler as *const u8,

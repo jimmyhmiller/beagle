@@ -196,11 +196,12 @@ pub unsafe extern "C" fn perform_effect_runtime_v2(
     frame_pointer: usize,
     enum_type_ptr: usize,
     op_value: usize,
-    _resume_address: usize,
-    _result_local_offset_raw: usize,
+    resume_address: usize,
+    result_local_offset_raw: usize,
     _saved_regs_ptr: *const usize,
 ) -> ! {
     save_gc_context!(stack_pointer, frame_pointer);
+    let result_local_offset = result_local_offset_raw as isize;
 
     // Find the topmost prompt handler. For the minimum viable version, we use
     // the most recently pushed prompt. Proper enum-type matching can come later.
@@ -210,12 +211,143 @@ pub unsafe extern "C" fn perform_effect_runtime_v2(
             panic!("perform_effect_runtime_v2 called without an enclosing handle block")
         })
     };
-    // Record pending perform state. The cont is null for now (multi-shot
-    // resume not implemented yet on v2). The handle wrapper will pass the
-    // op and the (null) cont to the handler method.
+
+    // Root op_value and enum_type_ptr across allocations.
+    let runtime = get_runtime().get_mut();
+    let op_root = if BuiltInTypes::is_heap_pointer(op_value) {
+        Some(runtime.register_temporary_root(op_value))
+    } else {
+        None
+    };
+    let enum_type_root = if BuiltInTypes::is_heap_pointer(enum_type_ptr) {
+        Some(runtime.register_temporary_root(enum_type_ptr))
+    } else {
+        None
+    };
+
+    // Walk the FP chain to find the topmost body frame — the one whose
+    // saved caller FP equals the prompt's handle_fp. Body frames are the
+    // frames that will be captured into the continuation segment.
+    let handle_fp = prompt.frame_pointer;
+    let mut fp = frame_pointer;
+    let topmost_body_fp = loop {
+        if fp == 0 || fp >= handle_fp {
+            panic!(
+                "perform_effect_runtime_v2: walked past handle_fp ({:#x}) without finding it (fp={:#x})",
+                handle_fp, fp
+            );
+        }
+        let saved_fp = unsafe { *(fp as *const usize) };
+        if saved_fp == handle_fp {
+            break fp;
+        }
+        if saved_fp <= fp {
+            panic!(
+                "perform_effect_runtime_v2: corrupt FP chain at {:#x} -> {:#x}",
+                fp, saved_fp
+            );
+        }
+        fp = saved_fp;
+    };
+
+    // Captured byte range: [stack_pointer, topmost_body_fp + 16).
+    // +16 includes the saved FP+LR pair of the topmost body frame.
+    let segment_size = topmost_body_fp + 16 - stack_pointer;
+    let segment_fp_offset = topmost_body_fp - stack_pointer;
+    let prompt_sp = prompt.stack_pointer;
+
+    // Allocate the opaque-bytes heap object for the captured segment.
+    let seg_tagged: usize =
+        match runtime.allocate_opaque_bytes_from_bytes(prompt_sp, &vec![0u8; segment_size]) {
+            Ok(ptr) => ptr.into(),
+            Err(_) => unsafe {
+                throw_runtime_error(
+                    prompt_sp,
+                    "AllocationError",
+                    "Failed to allocate continuation segment".to_string(),
+                );
+            },
+        };
+
+    // Copy the body frame bytes into the segment.
+    let seg_obj = HeapObject::from_tagged(seg_tagged);
+    let data_ptr = seg_obj.untagged() + seg_obj.header_size();
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            stack_pointer as *const u8,
+            data_ptr as *mut u8,
+            segment_size,
+        );
+    }
+
+    // Root the segment across the continuation allocation.
+    let seg_root = runtime.register_temporary_root(seg_tagged);
+
+    // Allocate the continuation object.
+    let cont_ptr = match runtime.allocate(21, prompt_sp, BuiltInTypes::HeapObject) {
+        Ok(ptr) => ptr,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                prompt_sp,
+                "AllocationError",
+                "Failed to allocate continuation object".to_string(),
+            );
+        },
+    };
+    let seg_tagged = runtime.peek_temporary_root(seg_root);
+    runtime.unregister_temporary_root(seg_root);
+
+    let mut cont_obj = HeapObject::from_tagged(cont_ptr);
+    ContinuationObject::initialize(
+        &mut cont_obj,
+        resume_address,
+        result_local_offset,
+        &prompt,
+        seg_tagged,
+        segment_fp_offset,
+        0, // segment_gc_frame_offset — not used on v2 path
+        segment_size,
+    );
+
+    // Build a resume closure wrapping the continuation.
+    let cont_root = runtime.register_temporary_root(cont_ptr);
+    let trampoline_fn = runtime
+        .get_function_by_name("beagle.builtin/continuation-trampoline-v2")
+        .expect("continuation-trampoline-v2 not found");
+    let tagged_trampoline =
+        BuiltInTypes::Function.tag(usize::from(trampoline_fn.pointer) as isize) as usize;
+    let cont_ptr_now = runtime.peek_temporary_root(cont_root);
+    let resume_closure = match runtime.make_closure(prompt_sp, tagged_trampoline, &[cont_ptr_now]) {
+        Ok(closure) => closure,
+        Err(_) => unsafe {
+            throw_runtime_error(
+                prompt_sp,
+                "AllocationError",
+                "Failed to allocate resume closure".to_string(),
+            );
+        },
+    };
+    runtime.unregister_temporary_root(cont_root);
+
+    // Refresh op_value and enum_type_ptr after allocations.
+    let op_value = op_root
+        .map(|r| runtime.peek_temporary_root(r))
+        .unwrap_or(op_value);
+    let enum_type_ptr = enum_type_root
+        .map(|r| runtime.peek_temporary_root(r))
+        .unwrap_or(enum_type_ptr);
+    if let Some(r) = op_root {
+        runtime.unregister_temporary_root(r);
+    }
+    if let Some(r) = enum_type_root {
+        runtime.unregister_temporary_root(r);
+    }
+
+    // Record pending perform state; handle_completed_runtime will pick it
+    // up after the longjmp returns control to the handle wrapper.
     {
         let ptd = crate::runtime::per_thread_data();
-        ptd.set_pending_perform(op_value, BuiltInTypes::null_value() as usize, enum_type_ptr);
+        ptd.set_pending_perform(op_value, resume_closure, enum_type_ptr);
     }
 
     // Longjmp back to the post-body code path in the enclosing function.
@@ -257,6 +389,93 @@ pub unsafe extern "C" fn perform_effect_runtime_v2(
                 prompt.frame_pointer,
                 0,
                 prompt.handler_address,
+                std::ptr::null(),
+                0,
+            );
+        }
+    }
+}
+
+/// Chez-style continuation resume: called as a regular closure body from
+/// the handler when it invokes `resume(v)`. Does not return — instead
+/// copies the captured frames back onto the stack, writes `value` into
+/// the resume point's result slot, and jumps to the resume address.
+///
+/// The body frames are copied at [prompt_sp - segment_size, prompt_sp),
+/// directly above the handle site. When the body eventually completes,
+/// it returns normally via the stack frame chain back to the handle
+/// wrapper's post-body code in the enclosing function — bypassing the
+/// handler's stack entirely (tail-call semantics for resume).
+///
+/// Multi-shot where the handler calls `resume` non-tail (then continues
+/// execution after the resume call) is NOT supported on this path — the
+/// handler's stack frames are implicitly destroyed when SP is moved.
+#[allow(dead_code)]
+pub unsafe extern "C" fn continuation_trampoline_v2(closure_ptr: usize, value: usize) -> ! {
+    // Extract cont_ptr from closure free variables (layout matches
+    // continuation_trampoline: header + fn_ptr + cont_ptr at offset 32).
+    let untagged_closure = BuiltInTypes::untag(closure_ptr);
+    let cont_ptr = unsafe { *((untagged_closure + 32) as *const usize) };
+
+    let cont = ContinuationObject::from_tagged(cont_ptr)
+        .expect("continuation_trampoline_v2: invalid continuation pointer");
+    let segment_ptr = cont.segment_ptr();
+    let segment_size = cont.segment_size();
+    let segment_fp_offset = cont.segment_frame_pointer_offset();
+    let resume_address = cont.resume_address();
+    let result_local_offset = cont.result_local();
+    let prompt_sp = cont.prompt_stack_pointer();
+
+    // Compute placement: body frames go at [prompt_sp - segment_size, prompt_sp).
+    // This places them directly above the handle site on the main stack,
+    // overwriting whatever the handler's stack was using.
+    let new_sp = prompt_sp - segment_size;
+    let new_fp = new_sp + segment_fp_offset;
+
+    // Copy the captured bytes from the heap segment to their new stack position.
+    let seg_obj = HeapObject::from_tagged(segment_ptr);
+    let data_ptr = seg_obj.untagged() + seg_obj.header_size();
+    unsafe {
+        std::ptr::copy_nonoverlapping(data_ptr as *const u8, new_sp as *mut u8, segment_size);
+    }
+
+    // Write the resumed value into the result local slot of the innermost
+    // body frame. The body's resume-point code reads from this slot.
+    let result_ptr = (new_fp as isize).wrapping_add(result_local_offset) as *mut usize;
+    unsafe {
+        *result_ptr = value;
+    }
+
+    // Jump via the return-jump trampoline with new SP/FP and resume address.
+    let runtime = get_runtime().get();
+    let return_jump_fn = runtime
+        .get_function_by_name("beagle.builtin/return-jump")
+        .expect("return-jump trampoline not found");
+    let ptr: *const u8 = return_jump_fn.pointer.into();
+
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "x86_64")] {
+            let return_jump: extern "C" fn(
+                usize, usize, usize, usize, *const usize, *const u8, usize,
+            ) -> ! = unsafe { std::mem::transmute(ptr) };
+            return_jump(
+                new_sp,
+                new_fp,
+                0,
+                resume_address,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            );
+        } else {
+            let return_jump: extern "C" fn(
+                usize, usize, usize, usize, *const usize, usize,
+            ) -> ! = unsafe { std::mem::transmute(ptr) };
+            return_jump(
+                new_sp,
+                new_fp,
+                0,
+                resume_address,
                 std::ptr::null(),
                 0,
             );
