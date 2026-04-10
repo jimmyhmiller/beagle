@@ -4096,9 +4096,8 @@ impl ContinuationObject {
     /// The data base address at capture time. Used by compacting GC to compute
     /// the relocation delta when the segment object moves.
     const FIELD_SEGMENT_ORIGINAL_DATA_BASE: usize = 17;
-    const FIELD_PROMPT_FRAME_LOCALS: usize = 18;
-    const FIELD_PROMPT_FRAME_TRAILING: usize = 19;
-    const FIELD_PROMPT_FRAME_SIZE: usize = 20;
+    // FIELD_PROMPT_FRAME_LOCALS, FIELD_PROMPT_FRAME_TRAILING, and
+    // FIELD_PROMPT_FRAME_SIZE were removed — the snapshot was never restored.
     pub fn from_tagged(tagged: usize) -> Option<Self> {
         let heap_obj = HeapObject::try_from_tagged(tagged)?;
         Self::from_heap_object(heap_obj)
@@ -4238,88 +4237,8 @@ impl ContinuationObject {
         );
     }
 
-    pub fn prompt_frame_locals_ptr(&self) -> usize {
-        self.heap_obj.get_field(Self::FIELD_PROMPT_FRAME_LOCALS)
-    }
-
-    pub fn prompt_frame_trailing_ptr(&self) -> usize {
-        self.heap_obj.get_field(Self::FIELD_PROMPT_FRAME_TRAILING)
-    }
-
-    pub fn prompt_frame_size(&self) -> usize {
-        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_PROMPT_FRAME_SIZE))
-    }
-
-    pub fn set_prompt_frame_snapshot(
-        &mut self,
-        locals_ptr: usize,
-        trailing_ptr: usize,
-        frame_size: usize,
-    ) {
-        self.heap_obj
-            .write_field(Self::FIELD_PROMPT_FRAME_LOCALS as i32, locals_ptr);
-        self.heap_obj
-            .write_field(Self::FIELD_PROMPT_FRAME_TRAILING as i32, trailing_ptr);
-        self.heap_obj.write_field(
-            Self::FIELD_PROMPT_FRAME_SIZE as i32,
-            BuiltInTypes::Int.tag(frame_size as isize) as usize,
-        );
-    }
-
     pub fn set_segment_ptr_with_barrier(&mut self, runtime: &mut Runtime, segment_ptr: usize) {
         runtime.set_field_with_barrier(self.tagged_ptr(), Self::FIELD_SEGMENT_PTR, segment_ptr);
-    }
-
-    pub fn set_prompt_frame_snapshot_with_barrier(
-        &mut self,
-        runtime: &mut Runtime,
-        locals_ptr: usize,
-        trailing_ptr: usize,
-        frame_size: usize,
-    ) {
-        runtime.set_field_with_barrier(
-            self.tagged_ptr(),
-            Self::FIELD_PROMPT_FRAME_LOCALS,
-            locals_ptr,
-        );
-        runtime.set_field_with_barrier(
-            self.tagged_ptr(),
-            Self::FIELD_PROMPT_FRAME_TRAILING,
-            trailing_ptr,
-        );
-        self.heap_obj.write_field(
-            Self::FIELD_PROMPT_FRAME_SIZE as i32,
-            BuiltInTypes::Int.tag(frame_size as isize) as usize,
-        );
-    }
-
-    pub fn restore_prompt_frame_snapshot(&self, target_fp: usize) {
-        let locals_ptr = self.prompt_frame_locals_ptr();
-        if let Some(locals_obj) = HeapObject::try_from_tagged(locals_ptr) {
-            let num_locals = locals_obj.fields_size() / 8;
-            for i in 0..num_locals {
-                let slot_addr = target_fp.wrapping_sub(24).wrapping_sub(i * 8);
-                let slot_value = locals_obj.get_field(i);
-                unsafe { *(slot_addr as *mut usize) = slot_value };
-            }
-        }
-
-        let trailing_ptr = self.prompt_frame_trailing_ptr();
-        if let Some(trailing_obj) = HeapObject::try_from_tagged(trailing_ptr) {
-            let frame_size = self.prompt_frame_size();
-            let frame_bottom = target_fp
-                .checked_add(16)
-                .and_then(|v| v.checked_sub(frame_size))
-                .expect("Prompt frame restore underflow computing frame_bottom");
-            let trailing_bytes = trailing_obj.get_opaque_bytes();
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    trailing_bytes.as_ptr(),
-                    frame_bottom as *mut u8,
-                    trailing_bytes.len(),
-                );
-            }
-        }
     }
 
     fn normalized_segment_base(&self) -> Option<(usize, usize)> {
@@ -4505,18 +4424,6 @@ impl ContinuationObject {
         // Store 0 initially — will be set after we know the data base address
         heap_obj.write_field(
             Self::FIELD_SEGMENT_ORIGINAL_DATA_BASE as i32,
-            BuiltInTypes::Int.tag(0) as usize,
-        );
-        heap_obj.write_field(
-            Self::FIELD_PROMPT_FRAME_LOCALS as i32,
-            BuiltInTypes::null_value() as usize,
-        );
-        heap_obj.write_field(
-            Self::FIELD_PROMPT_FRAME_TRAILING as i32,
-            BuiltInTypes::null_value() as usize,
-        );
-        heap_obj.write_field(
-            Self::FIELD_PROMPT_FRAME_SIZE as i32,
             BuiltInTypes::Int.tag(0) as usize,
         );
     }

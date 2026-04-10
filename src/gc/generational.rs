@@ -1381,36 +1381,18 @@ impl GenerationalGC {
         if std::env::var("BEAGLE_DEBUG_CONT_LIVE").is_ok() {
             let mut continuation_count = 0usize;
             let mut continuation_segment_bytes = 0usize;
-            let mut continuation_prompt_frame_bytes = 0usize;
-            let mut max_prompt_frame_bytes = 0usize;
-            let mut continuation_prompt_snapshot_heap_bytes = 0usize;
             self.old.walk_objects_mut(|_, heap_obj| {
                 let object = HeapObject::from_untagged(heap_obj.untagged() as *const u8);
                 if let Some(cont) = ContinuationObject::from_heap_object(object) {
                     continuation_count += 1;
                     continuation_segment_bytes += cont.segment_size();
-                    continuation_prompt_frame_bytes += cont.prompt_frame_size();
-                    max_prompt_frame_bytes = max_prompt_frame_bytes.max(cont.prompt_frame_size());
-                    if let Some(locals_obj) =
-                        HeapObject::try_from_tagged(cont.prompt_frame_locals_ptr())
-                    {
-                        continuation_prompt_snapshot_heap_bytes += locals_obj.full_size();
-                    }
-                    if let Some(trailing_obj) =
-                        HeapObject::try_from_tagged(cont.prompt_frame_trailing_ptr())
-                    {
-                        continuation_prompt_snapshot_heap_bytes += trailing_obj.full_size();
-                    }
                 }
             });
             eprintln!(
-                "[cont-live] gc_count={} continuations={} segment_bytes={} prompt_frame_bytes={} max_prompt_frame_bytes={} prompt_snapshot_heap_bytes={} old_free={}",
+                "[cont-live] gc_count={} continuations={} segment_bytes={} old_free={}",
                 self.gc_count,
                 continuation_count,
                 continuation_segment_bytes,
-                continuation_prompt_frame_bytes,
-                max_prompt_frame_bytes,
-                continuation_prompt_snapshot_heap_bytes,
                 self.old.free_bytes()
             );
         }

@@ -51,16 +51,6 @@ pub fn debug_captured_continuation_refs(cont_ptr: usize) {
             );
         }
     }
-    if let Some(locals_obj) = HeapObject::try_from_tagged(cont.prompt_frame_locals_ptr()) {
-        for i in 0..(locals_obj.fields_size() / 8) {
-            let slot_value = locals_obj.get_field(i);
-            if let Some(obj) = HeapObject::try_from_tagged(slot_value)
-                && ContinuationObject::from_heap_object(obj).is_some()
-            {
-                refs.push((i, slot_value));
-            }
-        }
-    }
     if !refs.is_empty() {
         eprintln!(
             "[cont-refs] cont={:#x} prompt_id={} refs={:?}",
@@ -69,77 +59,6 @@ pub fn debug_captured_continuation_refs(cont_ptr: usize) {
             refs
         );
     }
-}
-
-pub unsafe fn allocate_prompt_frame_locals_snapshot(
-    runtime: &mut Runtime,
-    prompt_sp: usize,
-    fallback_cont_ptr: usize,
-    prompt_num_slots: usize,
-    prompt_frame_size: usize,
-) {
-    if prompt_num_slots == 0 {
-        return;
-    }
-
-    // This snapshot is attached to the continuation before we populate it, so it
-    // must be GC-safe immediately. Zero-initialize the slots so an intervening
-    // GC sees only null roots rather than uninitialized garbage.
-    let locals_ptr =
-        match runtime.allocate_zeroed(prompt_num_slots, prompt_sp, BuiltInTypes::HeapObject) {
-            Ok(ptr) => ptr,
-            Err(_) => unsafe {
-                throw_runtime_error(
-                    prompt_sp,
-                    "AllocationError",
-                    "Failed to allocate prompt frame locals snapshot".to_string(),
-                );
-            },
-        };
-
-    let cont_ptr = current_saved_continuation_ptr(fallback_cont_ptr);
-    let mut cont = ContinuationObject::from_tagged(cont_ptr)
-        .expect("continuation moved to invalid pointer after locals allocation");
-    cont.set_prompt_frame_snapshot_with_barrier(
-        runtime,
-        locals_ptr,
-        cont.prompt_frame_trailing_ptr(),
-        prompt_frame_size,
-    );
-}
-
-pub unsafe fn allocate_prompt_frame_trailing_snapshot(
-    runtime: &mut Runtime,
-    prompt_sp: usize,
-    fallback_cont_ptr: usize,
-    trailing_bytes: usize,
-    prompt_frame_size: usize,
-) {
-    if trailing_bytes == 0 {
-        return;
-    }
-
-    let trailing_ptr =
-        match runtime.allocate_opaque_bytes_from_bytes(prompt_sp, &vec![0u8; trailing_bytes]) {
-            Ok(ptr) => usize::from(ptr),
-            Err(_) => unsafe {
-                throw_runtime_error(
-                    prompt_sp,
-                    "AllocationError",
-                    "Failed to allocate prompt frame trailing snapshot".to_string(),
-                );
-            },
-        };
-
-    let cont_ptr = current_saved_continuation_ptr(fallback_cont_ptr);
-    let mut cont = ContinuationObject::from_tagged(cont_ptr)
-        .expect("continuation moved to invalid pointer after trailing allocation");
-    cont.set_prompt_frame_snapshot_with_barrier(
-        runtime,
-        cont.prompt_frame_locals_ptr(),
-        trailing_ptr,
-        prompt_frame_size,
-    );
 }
 
 pub fn decode_arm_mov_imm3(words: &[u32], reg: u8) -> Option<usize> {
@@ -637,70 +556,6 @@ pub unsafe fn capture_continuation_runtime_inner(
     // Set the original data base so compacting GC can detect segment moves.
     if segment_heap_ptr != BuiltInTypes::null_value() as usize {
         cont.set_segment_original_data_base(segment_data_base_at_capture);
-    }
-
-    let prompt_header = Header::from_usize(unsafe { *((prompt_fp - 8) as *const usize) });
-    if prompt_header.type_id == TYPE_ID_FRAME {
-        let prompt_num_slots = prompt_header.size as usize;
-        let prompt_frame_size = (prompt_fp + 16).saturating_sub(prompt_sp);
-        let prompt_header_and_locals_bytes = 16 + prompt_num_slots * 8;
-        let trailing_bytes =
-            prompt_frame_size.saturating_sub(16 + prompt_header_and_locals_bytes) & !0x7;
-
-        let cont_ptr = current_saved_continuation_ptr(cont_ptr);
-        let mut cont = ContinuationObject::from_tagged(cont_ptr)
-            .expect("continuation moved to invalid pointer before prompt snapshot allocation");
-        cont.set_prompt_frame_snapshot(
-            BuiltInTypes::null_value() as usize,
-            BuiltInTypes::null_value() as usize,
-            prompt_frame_size,
-        );
-
-        unsafe {
-            allocate_prompt_frame_locals_snapshot(
-                runtime,
-                prompt_sp,
-                cont_ptr,
-                prompt_num_slots,
-                prompt_frame_size,
-            );
-            allocate_prompt_frame_trailing_snapshot(
-                runtime,
-                prompt_sp,
-                cont_ptr,
-                trailing_bytes,
-                prompt_frame_size,
-            );
-        }
-
-        let cont_ptr = current_saved_continuation_ptr(cont_ptr);
-        let cont = ContinuationObject::from_tagged(cont_ptr)
-            .expect("continuation moved to invalid pointer after prompt snapshot allocation");
-        let prompt_locals_ptr = cont.prompt_frame_locals_ptr();
-        let prompt_trailing_ptr = cont.prompt_frame_trailing_ptr();
-
-        // Capture the prompt frame only after the final allocation so any GC that
-        // happened during allocation has already updated the main-stack locals.
-        let prompt_frame = crate::runtime::SuspendedFrame::capture_from_stack(
-            prompt_fp,
-            prompt_num_slots,
-            prompt_sp,
-        );
-        if let Some(locals_obj) = HeapObject::try_from_tagged(prompt_locals_ptr) {
-            for (i, slot_value) in prompt_frame.locals.iter().copied().enumerate() {
-                locals_obj.write_field(i as i32, slot_value);
-                runtime.write_barrier(prompt_locals_ptr, slot_value);
-            }
-        }
-        if let Some(mut trailing_obj) = HeapObject::try_from_tagged(prompt_trailing_ptr) {
-            let trailing_raw = unsafe {
-                std::slice::from_raw_parts(
-                    prompt_frame.trailing_words.as_ptr() as *const u8,
-                    prompt_frame.trailing_words.len() * 8,
-                )
-            };
-            trailing_obj.get_opaque_bytes_mut()[..trailing_raw.len()].copy_from_slice(trailing_raw);
-        }
     }
 
     let cont_ptr = crate::runtime::per_thread_data()
