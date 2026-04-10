@@ -138,6 +138,52 @@ pub unsafe extern "C" fn push_prompt_runtime(
     segment_top
 }
 
+/// Chez-style prompt push: records the prompt marker without allocating a
+/// separate execution segment. The body runs on the caller's stack. The
+/// frame_pointer argument is the FP of the handle wrapper function — it
+/// identifies where to "return" when a perform happens.
+///
+/// The PromptHandler fields that describe a longjmp target (handler_address,
+/// stack_pointer, link_register, result_local) are recorded as zero on this
+/// path — the v2 perform runtime walks the handle frame to find the real
+/// return-from-handle SP/FP/LR instead of using these fields.
+///
+/// Not wired up yet; left for the handle compilation to switch over to once
+/// the v2 perform and handler dispatch machinery is in place.
+#[allow(dead_code)]
+pub unsafe extern "C" fn push_prompt_runtime_v2(
+    _handler_address: usize,
+    _result_local: isize,
+    _link_register: usize,
+    stack_pointer: usize,
+    frame_pointer: usize,
+) -> usize {
+    print_call_builtin(get_runtime().get(), "push_prompt_v2");
+    let runtime = get_runtime().get_mut();
+
+    let prompt_id = runtime
+        .prompt_id_counter
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    let handler = crate::runtime::PromptHandler {
+        // The longjmp-target fields are unused on the v2 path.
+        handler_address: 0,
+        stack_pointer: 0,
+        link_register: 0,
+        result_local: 0,
+        // frame_pointer IS used: it's the FP of the handle wrapper, used by
+        // perform to locate the handle frame and read its return context.
+        frame_pointer,
+        prompt_id,
+    };
+
+    runtime.push_prompt_handler(handler);
+
+    // No SP switch. Return the caller's SP unchanged so the IR codegen's
+    // stack-pointer reassignment becomes a no-op.
+    stack_pointer
+}
+
 /// Pop the current prompt handler.
 /// If there's an invocation return point (continuation was invoked), returns via
 /// return_from_shift_runtime to enable multi-shot continuations.

@@ -368,6 +368,16 @@ impl Runtime {
             5, // handler_address, result_local, link_register, stack_pointer, frame_pointer
         )?;
 
+        // Chez-style prompt push (v2). Same signature for IR compatibility,
+        // but does not allocate a separate execution segment. Not wired up
+        // to the default handle compilation yet.
+        self.add_builtin_function(
+            "beagle.builtin/push-prompt-v2",
+            push_prompt_runtime_v2 as *const u8,
+            false,
+            5,
+        )?;
+
         self.add_builtin_function(
             "beagle.builtin/pop-prompt",
             pop_prompt_runtime as *const u8,
