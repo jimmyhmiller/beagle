@@ -574,6 +574,14 @@ impl MarkAndSweep {
                         "pending-perform-cont",
                     );
                 }
+                if ptd.pending_perform_enum_type != 0 {
+                    push_root(
+                        &mut to_mark,
+                        ptd.pending_perform_enum_type,
+                        0,
+                        "pending-perform-enum-type",
+                    );
+                }
             }
         }
 

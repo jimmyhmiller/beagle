@@ -378,6 +378,25 @@ impl Runtime {
             5,
         )?;
 
+        // Chez-style prompt pop (v2). Pops the prompt handler and returns
+        // the caller's SP unchanged.
+        self.add_builtin_function(
+            "beagle.builtin/pop-prompt-v2",
+            pop_prompt_runtime_v2 as *const u8,
+            false,
+            3,
+        )?;
+
+        // Chez-style handle completion dispatcher. Called after body returns
+        // to check for pending perform state and dispatch to the handler.
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/handle-completed",
+            handle_completed_runtime as *const u8,
+            true,
+            true,
+            3, // stack_pointer, frame_pointer, body_result
+        )?;
+
         self.add_builtin_function(
             "beagle.builtin/pop-prompt",
             pop_prompt_runtime as *const u8,
@@ -1974,6 +1993,17 @@ impl Runtime {
         self.add_builtin_function_with_fp(
             "beagle.builtin/perform-effect",
             perform_effect_runtime_with_saved_regs as *const u8,
+            true,
+            true,
+            7, // stack_pointer, frame_pointer, enum_type_ptr, op_value, resume_address, result_local_offset, saved_regs_ptr
+        )?;
+
+        // Chez-style perform. Captures body frames between perform site and
+        // the handle wrapper's frame, stores operation state in thread-local
+        // pending_perform slots, and longjmps back to the handle call site.
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/perform-effect-v2",
+            perform_effect_runtime_v2 as *const u8,
             true,
             true,
             7, // stack_pointer, frame_pointer, enum_type_ptr, op_value, resume_address, result_local_offset, saved_regs_ptr

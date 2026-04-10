@@ -184,6 +184,106 @@ pub unsafe extern "C" fn push_prompt_runtime_v2(
     stack_pointer
 }
 
+/// Chez-style perform: captures the body frames between the perform site
+/// and the handle wrapper's frame, stores operation state in the
+/// per-thread pending_perform slots, and longjmps back to the handle
+/// call site as if the handle function returned normally.
+///
+/// The handle wrapper's IR will check pending_perform after its body call
+/// returns and dispatch to the handler at that point — so this function
+/// does not call the handler directly.
+///
+/// Multi-shot / resume is not yet implemented on this path.
+#[allow(dead_code)]
+pub unsafe extern "C" fn perform_effect_runtime_v2(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    enum_type_ptr: usize,
+    op_value: usize,
+    _resume_address: usize,
+    _result_local_offset_raw: usize,
+    _saved_regs_ptr: *const usize,
+) -> ! {
+    save_gc_context!(stack_pointer, frame_pointer);
+
+    // Find the topmost prompt handler. For the minimum viable version, we use
+    // the most recently pushed prompt. Proper enum-type matching can come later.
+    let prompt = {
+        let runtime = get_runtime().get_mut();
+        runtime.pop_prompt_handler().unwrap_or_else(|| {
+            panic!("perform_effect_runtime_v2 called without an enclosing handle block")
+        })
+    };
+    let handle_fp = prompt.frame_pointer;
+    let ctx = unsafe { read_handle_return_context(handle_fp) };
+
+    // Record pending perform state. The cont is null for now (multi-shot
+    // resume not implemented yet on v2). The handle wrapper will pass the
+    // op and the (null) cont to the handler method.
+    {
+        let ptd = crate::runtime::per_thread_data();
+        ptd.set_pending_perform(op_value, BuiltInTypes::null_value() as usize, enum_type_ptr);
+    }
+
+    // Longjmp back to the handle's caller via the return-jump trampoline.
+    // From the caller's perspective, the handle function returns normally
+    // (with whatever value happens to be in the return register — the handle
+    // wrapper will overwrite it via handle_completed_runtime).
+    let runtime = get_runtime().get();
+    let return_jump_fn = runtime
+        .get_function_by_name("beagle.builtin/return-jump")
+        .expect("return-jump trampoline not found");
+    let ptr: *const u8 = return_jump_fn.pointer.into();
+
+    cfg_if::cfg_if! {
+        if #[cfg(target_arch = "x86_64")] {
+            // x86-64 return-jump signature:
+            //   (new_sp, new_fp, value, return_address, callee_saved_ptr, frame_src, frame_size)
+            let return_jump: extern "C" fn(
+                usize, usize, usize, usize, *const usize, *const u8, usize,
+            ) -> ! = unsafe { std::mem::transmute(ptr) };
+            return_jump(
+                ctx.sp_after_return,
+                ctx.saved_caller_fp,
+                0,
+                ctx.return_address,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+            );
+        } else {
+            // ARM64 return-jump signature:
+            //   (new_sp, new_fp, new_lr, jump_target, callee_saved_ptr, value)
+            let return_jump: extern "C" fn(
+                usize, usize, usize, usize, *const usize, usize,
+            ) -> ! = unsafe { std::mem::transmute(ptr) };
+            return_jump(
+                ctx.sp_after_return,
+                ctx.saved_caller_fp,
+                0,
+                ctx.return_address,
+                std::ptr::null(),
+                0,
+            );
+        }
+    }
+}
+
+/// Chez-style prompt pop: removes the prompt marker without segment
+/// bookkeeping. Returns the caller's SP unchanged so the IR codegen's
+/// stack-pointer reassignment becomes a no-op.
+#[allow(dead_code)]
+pub unsafe extern "C" fn pop_prompt_runtime_v2(
+    stack_pointer: usize,
+    _frame_pointer: usize,
+    _result_value: usize,
+) -> usize {
+    print_call_builtin(get_runtime().get(), "pop_prompt_v2");
+    let runtime = get_runtime().get_mut();
+    let _ = runtime.pop_prompt_handler();
+    stack_pointer
+}
+
 /// The return context of a handle wrapper's frame, as seen by a perform
 /// operation that wants to simulate a normal return from the handle call.
 ///

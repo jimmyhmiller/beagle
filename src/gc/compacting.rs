@@ -590,6 +590,12 @@ impl CompactingHeap {
                 ptd.pending_perform_cont =
                     self.copy_using_cheneys_algorithm(ptd.pending_perform_cont);
             }
+            if ptd.pending_perform_enum_type != 0
+                && BuiltInTypes::is_heap_pointer(ptd.pending_perform_enum_type)
+            {
+                ptd.pending_perform_enum_type =
+                    self.copy_using_cheneys_algorithm(ptd.pending_perform_enum_type);
+            }
         }
     }
 }

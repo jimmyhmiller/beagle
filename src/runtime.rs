@@ -4482,10 +4482,11 @@ pub struct PerThreadData {
     /// Pending perform state for the Chez-style handle dispatch path.
     /// Set by perform_effect_runtime_v2 before longjmping back to the handle
     /// call site. Read and cleared by the handle wrapper after its body call
-    /// returns. When set, both fields are populated together; neither is valid
-    /// independently. Zero means "no pending perform".
+    /// returns. When set, all fields are populated together; none is valid
+    /// independently. Zero pending_perform_op means "no pending perform".
     pub pending_perform_op: usize,
     pub pending_perform_cont: usize,
+    pub pending_perform_enum_type: usize,
 }
 
 impl PerThreadData {
@@ -4516,28 +4517,32 @@ impl PerThreadData {
 
             pending_perform_op: 0,
             pending_perform_cont: 0,
+            pending_perform_enum_type: 0,
         }
     }
 
     /// Set pending perform state. Called by perform_effect_runtime_v2 before
     /// longjmping back to the handle call site.
-    pub fn set_pending_perform(&mut self, op: usize, cont: usize) {
+    pub fn set_pending_perform(&mut self, op: usize, cont: usize, enum_type: usize) {
         self.pending_perform_op = op;
         self.pending_perform_cont = cont;
+        self.pending_perform_enum_type = enum_type;
     }
 
-    /// Take pending perform state and clear it. Returns (op, cont) if set,
-    /// or None if there is no pending perform. Called by the handle wrapper
-    /// after its body call returns.
-    pub fn take_pending_perform(&mut self) -> Option<(usize, usize)> {
+    /// Take pending perform state and clear it. Returns (op, cont, enum_type)
+    /// if set, or None if there is no pending perform. Called by the handle
+    /// wrapper after its body call returns.
+    pub fn take_pending_perform(&mut self) -> Option<(usize, usize, usize)> {
         if self.pending_perform_op == 0 {
             return None;
         }
         let op = self.pending_perform_op;
         let cont = self.pending_perform_cont;
+        let enum_type = self.pending_perform_enum_type;
         self.pending_perform_op = 0;
         self.pending_perform_cont = 0;
-        Some((op, cont))
+        self.pending_perform_enum_type = 0;
+        Some((op, cont, enum_type))
     }
 
     /// Allocate a segment from the pool, or create a new one.

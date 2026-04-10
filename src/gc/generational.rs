@@ -611,6 +611,14 @@ impl GenerationalGC {
                     ptd.pending_perform_cont = self.copy(ptd.pending_perform_cont);
                 }
             }
+            if ptd.pending_perform_enum_type != 0
+                && BuiltInTypes::is_heap_pointer(ptd.pending_perform_enum_type)
+            {
+                let untagged = BuiltInTypes::untag(ptd.pending_perform_enum_type);
+                if self.young.contains(untagged as *const u8) {
+                    ptd.pending_perform_enum_type = self.copy(ptd.pending_perform_enum_type);
+                }
+            }
         }
     }
 
