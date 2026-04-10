@@ -355,6 +355,97 @@ fn compile_arm_continuation_return_stub(runtime: &mut Runtime) {
     }
 
     // ========================================================================
+    // ARM64 resume-jump-v2 trampoline
+    //
+    // Used by continuation_trampoline_v2 for Chez-style continuation resume.
+    // Copies captured body frames from a heap buffer onto the main stack
+    // (which may overlap with the current stack frame — but we're running
+    // only on registers, so that's fine), then sets SP/FP and jumps to
+    // the resume address.
+    //
+    // Args:
+    //   X0 = src_ptr           (source bytes in the heap segment)
+    //   X1 = dst_ptr           (destination address on the stack)
+    //   X2 = size_bytes        (must be a multiple of 8)
+    //   X3 = new_sp
+    //   X4 = new_fp
+    //   X5 = jump_target       (resume code address)
+    //   X6 = value             (to write into result local slot)
+    //   X7 = result_local_off  (signed offset added to new_fp)
+    // ========================================================================
+    {
+        use crate::machine_code::arm_codegen::{
+            ArmAsm, LdrImmGenSelector, StrImmGenSelector, X0, X1, X2, X3, X4, X5, X6, X7, X16, X17,
+            ZERO_REGISTER,
+        };
+        let mut lang = arm::LowLevelArm::new();
+
+        // pos 0: cmp X2, xzr
+        lang.instructions.push(arm::compare(X2, ZERO_REGISTER));
+        // pos 1: b.eq +6  (jump over 5 copy loop instructions to pos 7)
+        lang.instructions.push(arm::jump_equal(6));
+
+        // pos 2: ldr X16, [X0], #8    (post-index, auto-increment X0)
+        lang.instructions.push(ArmAsm::LdrImmGen {
+            rt: X16,
+            rn: X0,
+            imm9: 8,
+            imm12: 0,
+            size: 0b11,
+            class_selector: LdrImmGenSelector::PostIndex,
+        });
+        // pos 3: str X16, [X1], #8    (post-index, auto-increment X1)
+        lang.instructions.push(ArmAsm::StrImmGen {
+            rt: X16,
+            rn: X1,
+            imm9: 8,
+            imm12: 0,
+            size: 0b11,
+            class_selector: StrImmGenSelector::PostIndex,
+        });
+        // pos 4: sub X2, X2, #8
+        lang.instructions.push(arm::sub_imm(X2, X2, 8));
+        // pos 5: cmp X2, xzr
+        lang.instructions.push(arm::compare(X2, ZERO_REGISTER));
+        // pos 6: b.ne -4  (loop back to pos 2)
+        lang.instructions.push(arm::jump_not_equal((-4i32) as u32));
+
+        // pos 7: add X16, X4, X7   (X16 = new_fp + result_local_offset)
+        lang.instructions.push(arm::add(X16, X4, X7));
+        // pos 8: str X6, [X16]
+        lang.instructions.push(ArmAsm::StrImmGen {
+            rt: X6,
+            rn: X16,
+            imm9: 0,
+            imm12: 0,
+            size: 0b11,
+            class_selector: StrImmGenSelector::UnsignedOffset,
+        });
+
+        // pos 9: save jump_target in X17 scratch before clobbering X5
+        lang.mov_reg(X17, X5);
+        // pos 10: mov sp, X3
+        lang.mov_reg(SP, X3);
+        // pos 11: mov x29, X4
+        lang.mov_reg(X29, X4);
+        // pos 12: br X17
+        lang.instructions.push(ArmAsm::Br { rn: X17 });
+
+        let code: Vec<u8> = lang
+            .instructions
+            .iter()
+            .flat_map(|instr| instr.encode().to_le_bytes())
+            .collect();
+        runtime
+            .add_function_mark_executable("beagle.builtin/resume-jump-v2".to_string(), &code, 0, 8)
+            .unwrap();
+        let function = runtime
+            .get_function_by_name_mut("beagle.builtin/resume-jump-v2")
+            .unwrap();
+        function.is_builtin = true;
+    }
+
+    // ========================================================================
     // ARM64 stack-switch trampoline
     // Args: X0=stack_top, X1=target function pointer
     // ========================================================================

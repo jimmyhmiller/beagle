@@ -203,11 +203,13 @@ pub unsafe extern "C" fn perform_effect_runtime_v2(
     save_gc_context!(stack_pointer, frame_pointer);
     let result_local_offset = result_local_offset_raw as isize;
 
-    // Find the topmost prompt handler. For the minimum viable version, we use
-    // the most recently pushed prompt. Proper enum-type matching can come later.
+    // Find the topmost prompt handler. Do NOT pop it — the prompt stays
+    // active so that when the handler calls resume and the body re-enters
+    // the prompt scope, subsequent performs can still find it. The prompt
+    // is popped by pop_prompt_runtime_v2 when the handle wrapper exits.
     let prompt = {
-        let runtime = get_runtime().get_mut();
-        runtime.pop_prompt_handler().unwrap_or_else(|| {
+        let ptd = crate::runtime::per_thread_data();
+        ptd.prompt_handlers.last().cloned().unwrap_or_else(|| {
             panic!("perform_effect_runtime_v2 called without an enclosing handle block")
         })
     };
@@ -427,60 +429,36 @@ pub unsafe extern "C" fn continuation_trampoline_v2(closure_ptr: usize, value: u
     let prompt_sp = cont.prompt_stack_pointer();
 
     // Compute placement: body frames go at [prompt_sp - segment_size, prompt_sp).
-    // This places them directly above the handle site on the main stack,
-    // overwriting whatever the handler's stack was using.
+    // Delegate to the resume-jump-v2 assembly trampoline so the copy loop
+    // runs in registers only — the copy may overwrite the memory we're
+    // currently executing in, which is only safe to do from code that
+    // makes no stack accesses.
     let new_sp = prompt_sp - segment_size;
     let new_fp = new_sp + segment_fp_offset;
 
-    // Copy the captured bytes from the heap segment to their new stack position.
     let seg_obj = HeapObject::from_tagged(segment_ptr);
-    let data_ptr = seg_obj.untagged() + seg_obj.header_size();
-    unsafe {
-        std::ptr::copy_nonoverlapping(data_ptr as *const u8, new_sp as *mut u8, segment_size);
-    }
+    let src_ptr = seg_obj.untagged() + seg_obj.header_size();
+    let dst_ptr = new_sp;
 
-    // Write the resumed value into the result local slot of the innermost
-    // body frame. The body's resume-point code reads from this slot.
-    let result_ptr = (new_fp as isize).wrapping_add(result_local_offset) as *mut usize;
-    unsafe {
-        *result_ptr = value;
-    }
-
-    // Jump via the return-jump trampoline with new SP/FP and resume address.
     let runtime = get_runtime().get();
-    let return_jump_fn = runtime
-        .get_function_by_name("beagle.builtin/return-jump")
-        .expect("return-jump trampoline not found");
-    let ptr: *const u8 = return_jump_fn.pointer.into();
+    let resume_jump_fn = runtime
+        .get_function_by_name("beagle.builtin/resume-jump-v2")
+        .expect("resume-jump-v2 trampoline not found");
+    let ptr: *const u8 = resume_jump_fn.pointer.into();
 
-    cfg_if::cfg_if! {
-        if #[cfg(target_arch = "x86_64")] {
-            let return_jump: extern "C" fn(
-                usize, usize, usize, usize, *const usize, *const u8, usize,
-            ) -> ! = unsafe { std::mem::transmute(ptr) };
-            return_jump(
-                new_sp,
-                new_fp,
-                0,
-                resume_address,
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-            );
-        } else {
-            let return_jump: extern "C" fn(
-                usize, usize, usize, usize, *const usize, usize,
-            ) -> ! = unsafe { std::mem::transmute(ptr) };
-            return_jump(
-                new_sp,
-                new_fp,
-                0,
-                resume_address,
-                std::ptr::null(),
-                0,
-            );
-        }
-    }
+    // Signature: (src, dst, size, new_sp, new_fp, jump_target, value, result_local_offset)
+    let resume_jump: extern "C" fn(usize, usize, usize, usize, usize, usize, usize, isize) -> ! =
+        unsafe { std::mem::transmute(ptr) };
+    resume_jump(
+        src_ptr,
+        dst_ptr,
+        segment_size,
+        new_sp,
+        new_fp,
+        resume_address,
+        value,
+        result_local_offset,
+    );
 }
 
 /// Chez-style prompt pop: removes the prompt marker without segment
