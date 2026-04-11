@@ -446,6 +446,184 @@ fn compile_arm_continuation_return_stub(runtime: &mut Runtime) {
     }
 
     // ========================================================================
+    // ARM64 invoke-continuation trampoline
+    //
+    // Called from continuation_trampoline (the Rust builtin that wraps each
+    // captured continuation as a closure). Does not return — it copies the
+    // captured stack bytes onto the calling trampoline's own stack region
+    // such that the outermost captured frame's saved FP/LR slots coincide
+    // with the trampoline's own saved caller FP/LR. The trampoline's
+    // prologue has already stored the invoker's FP and LR at [X7] and
+    // [X7+8]; by laying the outermost captured frame on top of that pair,
+    // the natural "ret" at the end of the resumed body unwinds directly
+    // back to the invoker. No side tables, no return stub, no prompt push.
+    //
+    // Multi-shot: the source bytes in the heap continuation object are
+    // never mutated. Each invocation copies fresh bytes onto the stack.
+    //
+    // Inputs:
+    //   X0 = src_base            (heap segment data pointer, normalized)
+    //   X1 = copy_size           (bytes to copy; seg_size - 16)
+    //   X2 = innermost_offset    (offset from base to innermost captured FP)
+    //   X3 = seg_total_size      (used as FP-walk range check)
+    //   X4 = resume_address      (PC to branch to after switching stack)
+    //   X5 = result_local_offset (FP-relative; 0 means no write)
+    //   X6 = value               (written into the result slot)
+    //   X7 = trampoline_fp       (Rust trampoline's own frame pointer =
+    //                             position where bottom captured frame lands)
+    //
+    // Scratch (no need to preserve): X9, X10, X11, X12, X13, X14, X15,
+    // X16, X17.
+    //
+    // NOTE on safety of writing to [dst, dst+copy_size): this region
+    // overlaps the Rust trampoline's own local area. That is fine because
+    // the trampoline has already loaded every value it cares about into
+    // argument registers X0..X7 before the branch into this code, and
+    // this code never returns — control transfers to resume_address with
+    // a fresh SP/FP, never back to Rust.
+    // ========================================================================
+    {
+        use crate::machine_code::arm_codegen::{
+            ArmAsm, LdrImmGenSelector, StrImmGenSelector, X0, X1, X2, X3, X4, X5, X6, X7, X9, X10,
+            X11, X12, X13, X14, X15, X16, X17, ZERO_REGISTER,
+        };
+        let mut lang = arm::LowLevelArm::new();
+
+        // pos 0: dst = trampoline_fp - copy_size
+        lang.instructions.push(arm::sub(X9, X7, X1));
+
+        // Copy loop: X10=src_ptr, X11=dst_ptr, X12=counter.
+        // pos 1
+        lang.mov_reg(X10, X0);
+        // pos 2
+        lang.mov_reg(X11, X9);
+        // pos 3
+        lang.mov_reg(X12, X1);
+        // pos 4: cmp X12, xzr
+        lang.instructions.push(arm::compare(X12, ZERO_REGISTER));
+        // pos 5: b.eq +5 (skip 4 loop body + cmp to fall through past loop)
+        // Loop body is pos 6..9, final cmp at pos 9, b.ne at pos 10 loops back.
+        // We need to skip from pos 5 past pos 10 = 6 instructions ahead.
+        lang.instructions.push(arm::jump_equal(6));
+        // pos 6: ldr X16, [X10], #8
+        lang.instructions.push(ArmAsm::LdrImmGen {
+            rt: X16,
+            rn: X10,
+            imm9: 8,
+            imm12: 0,
+            size: 0b11,
+            class_selector: LdrImmGenSelector::PostIndex,
+        });
+        // pos 7: str X16, [X11], #8
+        lang.instructions.push(ArmAsm::StrImmGen {
+            rt: X16,
+            rn: X11,
+            imm9: 8,
+            imm12: 0,
+            size: 0b11,
+            class_selector: StrImmGenSelector::PostIndex,
+        });
+        // pos 8: sub X12, X12, #8
+        lang.instructions.push(arm::sub_imm(X12, X12, 8));
+        // pos 9: cmp X12, xzr
+        lang.instructions.push(arm::compare(X12, ZERO_REGISTER));
+        // pos 10: b.ne -4 (back to pos 6)
+        lang.instructions.push(arm::jump_not_equal((-4i32) as u32));
+
+        // pos 11: new_fp = dst + innermost_offset
+        lang.instructions.push(arm::add(X13, X9, X2));
+        // pos 12: delta = dst - src_base
+        lang.instructions.push(arm::sub(X14, X9, X0));
+
+        // FP chain walk. fp = new_fp, iterate relocating saved_fps by delta
+        // until a saved_fp lies outside [src_base, src_base + seg_total_size).
+        // pos 13: fp = new_fp
+        lang.mov_reg(X15, X13);
+        // pos 14 (fp_loop): ldr X16, [X15]
+        lang.instructions.push(ArmAsm::LdrImmGen {
+            rt: X16,
+            rn: X15,
+            imm9: 0,
+            imm12: 0,
+            size: 0b11,
+            class_selector: LdrImmGenSelector::UnsignedOffset,
+        });
+        // pos 15: X17 = X16 - X0   (saved_fp - src_base)
+        lang.instructions.push(arm::sub(X17, X16, X0));
+        // pos 16: cmp X17, X3      (compare to seg_total_size)
+        lang.instructions.push(arm::compare(X17, X3));
+        // pos 17: b.hs +5          (unsigned >= size → out of range → done)
+        // Jump to pos 22 (the "mov sp" instruction, past the walk body).
+        // Walk body: pos 18..21 (4 instructions) + unconditional back-branch at pos 21.
+        // Offset from pos 17 to pos 22 = 5.
+        lang.instructions.push(ArmAsm::BCond {
+            imm19: 5,
+            cond: 2, // HS (unsigned higher or same)
+        });
+        // pos 18: add X16, X16, X14  (saved += delta)
+        lang.instructions.push(arm::add(X16, X16, X14));
+        // pos 19: str X16, [X15]     (write back)
+        lang.instructions.push(ArmAsm::StrImmGen {
+            rt: X16,
+            rn: X15,
+            imm9: 0,
+            imm12: 0,
+            size: 0b11,
+            class_selector: StrImmGenSelector::UnsignedOffset,
+        });
+        // pos 20: mov X15, X16       (fp = new saved_fp)
+        lang.mov_reg(X15, X16);
+        // pos 21: b -7               (back to pos 14 = fp_loop)
+        // Offset from pos 21 to pos 14 = -7.
+        lang.instructions.push(ArmAsm::BCond {
+            imm19: -7,
+            cond: 14, // AL (always)
+        });
+
+        // pos 22: write value to result slot if offset is non-zero.
+        // cmp X5, xzr; b.eq +3 — skip the 2-instruction write if zero.
+        lang.instructions.push(arm::compare(X5, ZERO_REGISTER));
+        // pos 23: b.eq +3
+        lang.instructions.push(arm::jump_equal(3));
+        // pos 24: add X16, X13, X5  (result_addr = new_fp + offset)
+        lang.instructions.push(arm::add(X16, X13, X5));
+        // pos 25: str X6, [X16]
+        lang.instructions.push(ArmAsm::StrImmGen {
+            rt: X6,
+            rn: X16,
+            imm9: 0,
+            imm12: 0,
+            size: 0b11,
+            class_selector: StrImmGenSelector::UnsignedOffset,
+        });
+
+        // pos 26: mov sp, X9
+        lang.mov_reg(SP, X9);
+        // pos 27: mov x29, X13
+        lang.mov_reg(X29, X13);
+        // pos 28: br X4
+        lang.instructions.push(ArmAsm::Br { rn: X4 });
+
+        let code: Vec<u8> = lang
+            .instructions
+            .iter()
+            .flat_map(|instr| instr.encode().to_le_bytes())
+            .collect();
+        runtime
+            .add_function_mark_executable(
+                "beagle.builtin/invoke-cont-jump".to_string(),
+                &code,
+                0,
+                8,
+            )
+            .unwrap();
+        let function = runtime
+            .get_function_by_name_mut("beagle.builtin/invoke-cont-jump")
+            .unwrap();
+        function.is_builtin = true;
+    }
+
+    // ========================================================================
     // ARM64 stack-switch trampoline
     // Args: X0=stack_top, X1=target function pointer
     // ========================================================================

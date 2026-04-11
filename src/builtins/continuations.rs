@@ -720,12 +720,13 @@ pub unsafe fn capture_continuation_runtime_inner(
         result_local_offset
     );
 
-    // Walk the FP chain to find the prompt boundary — the innermost
-    // `beagle.core/__reset__` frame. `topmost_body_fp` is the topmost frame
-    // whose saved return address points into `__reset__`; it is the last
-    // frame of the reset body that shift is capturing. `reset_fp` is
-    // `__reset__`'s own FP.
-    let (topmost_body_fp, _reset_fp) = unsafe { find_enclosing_reset_frame(frame_pointer) }
+    // Walk the FP chain to find the prompt boundary — the outermost
+    // captured body frame is the topmost frame whose saved return address
+    // points into `__reset__`. That frame was called directly by
+    // `__reset__` (i.e., body_thunk). The captured bytes run from the
+    // current SP (innermost) up through the outermost body frame's saved
+    // FP+LR pair.
+    let (outermost_body_fp, _reset_fp) = unsafe { find_enclosing_reset_frame(frame_pointer) }
         .unwrap_or_else(|| {
             panic!(
                 "capture_continuation: shift without an enclosing reset. Walked FP chain \
@@ -736,14 +737,25 @@ pub unsafe fn capture_continuation_runtime_inner(
         });
 
     // Captured byte range: from the current SP up to and including the
-    // saved FP+LR pair of the topmost body frame. That saved pair is what
-    // returns "into __reset__" in the original execution — copying it
-    // preserves the original chain, and invocation will rewrite it to
-    // return to the invoker instead.
-    let capture_top = topmost_body_fp + 16;
+    // saved FP+LR pair of the outermost body frame.
+    let capture_top = outermost_body_fp + 16;
     let stack_size = capture_top.saturating_sub(stack_pointer);
-    let segment_frame_pointer_offset = topmost_body_fp - stack_pointer;
-    let segment_gc_frame_offset = (topmost_body_fp - 8) - stack_pointer;
+
+    // `segment_frame_pointer_offset` is the offset from capture base to the
+    // INNERMOST frame (the frame shift is running in). This is the canonical
+    // "resume FP" — where execution picks up when the continuation is
+    // invoked — and also where the saved-FP-chain relocation walk starts,
+    // since the chain goes from innermost upward to outermost.
+    //
+    // `segment_gc_frame_offset` is reused here to store the OUTERMOST frame
+    // offset. Invoke needs this to place the copy at exactly the right
+    // destination so that the outermost frame's saved FP/LR slots overlay
+    // the trampoline's own saved caller FP/LR slots — making normal body
+    // return flow back to the invoker automatic with no slot patching.
+    let innermost_fp_offset = frame_pointer - stack_pointer;
+    let outermost_fp_offset = outermost_body_fp - stack_pointer;
+    let segment_frame_pointer_offset = innermost_fp_offset;
+    let segment_gc_frame_offset = outermost_fp_offset;
 
     let runtime = get_runtime().get_mut();
 
@@ -2003,81 +2015,82 @@ pub unsafe fn invoke_continuation_runtime_with_caller_context(
 /// and need to get SP/FP ourselves.
 #[allow(unused_variables)]
 pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usize) -> ! {
-    // Get current stack pointer and frame pointer via JIT trampolines
-    #[cfg(target_arch = "x86_64")]
-    let stack_pointer: usize;
-    let frame_pointer: usize;
-
-    {
-        let runtime = get_runtime().get();
-        #[cfg(target_arch = "x86_64")]
-        {
-            let fn_entry = runtime
-                .get_function_by_name("beagle.builtin/read-sp-fp")
-                .expect("read-sp-fp trampoline not found");
-            let read_sp_fp: extern "C" fn() -> (usize, usize) =
-                unsafe { std::mem::transmute::<_, _>(fn_entry.pointer) };
-            let (sp, fp) = read_sp_fp();
-            stack_pointer = sp;
-            frame_pointer = fp;
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            let fn_entry = runtime
-                .get_function_by_name("beagle.builtin/read-fp")
-                .expect("read-fp trampoline not found");
-            let read_fp: extern "C" fn() -> usize =
-                unsafe { std::mem::transmute::<_, _>(fn_entry.pointer) };
-            frame_pointer = read_fp();
-        }
-    }
-
-    // Extract the continuation pointer from the closure's free variables
-    // Closure layout: header(8) + fn_ptr(8) + num_free(8) + num_locals(8) + free_vars...
-    // First free variable is at offset 32
+    // Extract the continuation from the closure's free variables.
+    // Closure layout: header(8) + fn_ptr(8) + num_free(8) + num_locals(8) + free_var[0]...
+    // cont_ptr is the first free variable at offset 32.
     let untagged_closure = BuiltInTypes::untag(closure_ptr);
-
-    // SAFETY: closure memory layout is known
     let cont_ptr = unsafe { *((untagged_closure + 32) as *const usize) };
-    let cont_ptr = cont_ptr;
+    let cont = ContinuationObject::from_tagged(cont_ptr)
+        .expect("continuation_trampoline: closure free var is not a ContinuationObject");
 
-    if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
-        let thread_id = std::thread::current().id();
-        let resume_fn = ContinuationObject::from_tagged(cont_ptr)
-            .and_then(|cont| {
-                get_runtime()
-                    .get()
-                    .get_function_containing_pointer(cont.resume_address() as *const u8)
-                    .map(|(function, offset)| format!("{}+{:#x}", function.name, offset))
-            })
-            .unwrap_or_else(|| "unknown".to_string());
-        eprintln!(
-            "[continuation_trampoline][{:?}] closure={:#x} value={:#x} cont={:#x} resume={}",
-            thread_id, closure_ptr, value, cont_ptr, resume_fn
-        );
-    }
+    // Normalize segment — handles GC moves by re-relocating the in-segment
+    // saved-FP chain to the current heap data base before we read it.
+    let (seg_base, _seg_top, _innermost_fp_heap) = cont
+        .segment_frame_info()
+        .expect("continuation_trampoline: continuation has no segment data");
+    let seg_size = cont.segment_size();
+    let innermost_offset = cont.segment_frame_pointer_offset();
+    let resume_address = cont.resume_address();
+    let result_local_offset = cont.result_local();
 
-    // Now invoke the continuation, passing the saved callee-saved registers
-    // SAFETY: invoke_continuation_runtime is an unsafe function
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        let beagle_fp = *(frame_pointer as *const usize);
-        let beagle_return_address = *((frame_pointer + 8) as *const usize);
-        let beagle_sp = frame_pointer + 16;
-        invoke_continuation_runtime_with_caller_context(
-            cont_ptr,
-            value,
-            get_runtime().get().get_command_line_args().debug,
-            beagle_sp,
-            beagle_fp,
-            beagle_return_address,
-            false,
-        )
-    }
-    #[cfg(not(target_arch = "aarch64"))]
-    unsafe {
-        invoke_continuation_runtime(stack_pointer, frame_pointer, cont_ptr, value)
-    }
+    // Get our own frame pointer. `read-fp` is a tiny Beagle-side JIT
+    // trampoline that returns the caller's x29, which is exactly this
+    // function's FP on entry (before any inline operations).
+    let trampoline_fp = {
+        let runtime = get_runtime().get();
+        let fn_entry = runtime
+            .get_function_by_name("beagle.builtin/read-fp")
+            .expect("read-fp trampoline not found");
+        let read_fp: extern "C" fn() -> usize =
+            unsafe { std::mem::transmute::<_, _>(fn_entry.pointer) };
+        read_fp()
+    };
+
+    // Bytes to copy = seg_size - 16. The final 16 bytes are the outermost
+    // captured frame's saved FP and saved LR slots, which we deliberately
+    // skip: we lay the outermost frame's FP directly on top of the
+    // trampoline's own FP, so the trampoline's already-saved caller FP/LR
+    // (at [trampoline_fp, trampoline_fp+16)) serve as the outermost
+    // frame's saved FP/LR. When the resumed body eventually returns past
+    // its own bottom, the natural ldp/ret unwinds control to the invoker
+    // without any additional state tracking.
+    //
+    // If the capture is a single-frame/empty corner case where seg_size
+    // is 16 or less, copy_size is 0 — the asm trampoline's copy loop
+    // handles that by short-circuiting.
+    let copy_size = seg_size.saturating_sub(16);
+
+    // Hand off to the asm trampoline. It does: memcpy, FP-chain relocate,
+    // result slot write, SP/FP switch, and branch to resume_address.
+    // Does not return.
+    let jump_fn = {
+        let runtime = get_runtime().get();
+        runtime
+            .get_function_by_name("beagle.builtin/invoke-cont-jump")
+            .expect("invoke-cont-jump trampoline not found")
+            .pointer
+    };
+    let ptr: *const u8 = jump_fn.into();
+    let invoke_jump: extern "C" fn(
+        usize, // X0: src_base
+        usize, // X1: copy_size
+        usize, // X2: innermost_offset
+        usize, // X3: seg_total_size (range check)
+        usize, // X4: resume_address
+        isize, // X5: result_local_offset
+        usize, // X6: value
+        usize, // X7: trampoline_fp
+    ) -> ! = unsafe { std::mem::transmute(ptr) };
+    invoke_jump(
+        seg_base,
+        copy_size,
+        innermost_offset,
+        seg_size,
+        resume_address,
+        result_local_offset,
+        value,
+        trampoline_fp,
+    );
 }
 
 #[cfg(target_arch = "aarch64")]
