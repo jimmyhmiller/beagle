@@ -4003,25 +4003,27 @@ impl AstCompiler<'_> {
                 Ok(result)
             }
             Ast::Reset { body, token_range } => {
-                // Delimited continuation reset: establishes a prompt
-                // Pattern: push prompt, execute body, pop prompt on success or when continuation captured
+                // Delimited continuation reset: establishes a prompt boundary.
+                //
+                // New model: reset compiles to `__reset__(body_thunk)` — a
+                // normal closure call to the Beagle stdlib function
+                // `beagle.core/__reset__`, whose body is literally `thunk()`.
+                // Its only purpose is to leave a recognizable frame on the
+                // stack. `capture_continuation` and `return_from_shift` walk
+                // the FP chain at shift time looking for the frame whose
+                // child's saved LR lies inside `__reset__`'s code range; that
+                // frame IS the prompt. No side-channel prompt handler data
+                // structure, no SP/FP snapshots anywhere.
+                //
+                // When shift body invokes the captured continuation via `k(v)`,
+                // the trampoline copies the captured bytes back above the
+                // invoker's frame — the `__reset__` frame is not involved in
+                // that path. When shift body completes normally,
+                // `return_from_shift` longjmps back by walking for `__reset__`
+                // and simulating its normal return to its caller with the shift
+                // body's result as the return value.
 
-                // Create labels for after-reset continuation
-                let after_reset = self.ir.label("after_reset");
-                let prompt_handler = self.ir.label("prompt_handler");
-
-                // Create a result register that will hold the final value
-                let result_reg = self.ir.assign_new(Value::Null);
-
-                // Allocate local for captured value (when shift returns a value)
-                let unique_captured_name = format!("__captured_val_{}__", token_range.start);
-                let captured_local = self.find_or_insert_local(&unique_captured_name);
-                let null_reg = self.ir.assign_new(Value::Null);
-                self.ir.store_local(captured_local, null_reg.into());
-
-                // Outline the reset body into a thunk so it runs in its own frame.
-                // This is required for prompt-owned stack segments to have a real
-                // callable frame boundary instead of executing inline in the caller.
+                // Outline body into a zero-arg thunk closure.
                 let thunk_fn = Ast::Function {
                     name: None,
                     args: vec![],
@@ -4032,45 +4034,17 @@ impl AstCompiler<'_> {
                 };
                 self.not_tail_position();
                 let body_thunk = self.call_compile(&thunk_fn)?;
+                let body_thunk_reg = self.ir.assign_new(body_thunk);
 
-                // Get builtin function pointers
-                let push_prompt_fn = self
-                    .compiler
-                    .find_function("beagle.builtin/push-prompt")
-                    .expect("push-prompt builtin not found");
-                let push_prompt_fn_ptr = usize::from(push_prompt_fn.pointer);
-
-                let pop_prompt_fn = self
-                    .compiler
-                    .find_function("beagle.builtin/pop-prompt")
-                    .expect("pop-prompt builtin not found");
-                let pop_prompt_fn_ptr = usize::from(pop_prompt_fn.pointer);
-
-                // Push the prompt handler
-                self.ir.push_prompt_handler(
-                    prompt_handler,
-                    Value::Local(captured_local),
-                    push_prompt_fn_ptr,
-                );
-
-                // Execute the reset body through the outlined thunk so the body
-                // gets a fresh native frame on the prompt-owned stack.
-                self.not_tail_position();
-                let body_result = self.compile_closure_call_from_value(body_thunk, vec![]);
-
-                // Normal path: store result, pop prompt and skip handler
-                self.ir.assign(result_reg, body_result);
-                // Pass the result value so pop_prompt can check for continuation invocation
-                self.ir.pop_prompt_handler(result_reg.into(), pop_prompt_fn_ptr);
-                self.ir.jump(after_reset);
-
-                // Prompt handler block (target of shift returning)
-                self.ir.write_label(prompt_handler);
-                // The value from shift is already stored in captured_local by shift
-                let captured_value = self.ir.load_local(captured_local);
-                self.ir.assign(result_reg, captured_value);
-
-                self.ir.write_label(after_reset);
+                // Call `beagle.core/__reset__` with the thunk. The call's
+                // return value IS reset's result: either the thunk's own
+                // return value (no shift happened) or the value that
+                // `return_from_shift` longjmped with (shift body produced it).
+                let result = self.call_builtin(
+                    "beagle.core/__reset__",
+                    vec![body_thunk_reg.into()],
+                )?;
+                let result_reg = self.ir.assign_new(result);
                 Ok(result_reg.into())
             }
             Ast::Shift {

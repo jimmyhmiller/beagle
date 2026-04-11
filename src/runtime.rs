@@ -4836,6 +4836,12 @@ pub struct Runtime {
     /// Struct ID for the built-in Function struct (beagle.core/Function).
     /// Function objects are regular HeapObject structs with this struct_id.
     pub function_struct_id: usize,
+    /// Cached code range of `beagle.core/__reset__`, lazily populated on
+    /// first use. Capture-continuation and return-from-shift walk the FP
+    /// chain and use this range to identify the nearest enclosing reset
+    /// frame. Pair is (start, end), end exclusive. Both zero means
+    /// "not yet cached — function may not be compiled yet".
+    pub reset_code_range: (usize, usize),
 }
 
 /// A stack segment for the Chez Scheme-style segmented stack.
@@ -5114,6 +5120,7 @@ impl Runtime {
             event_loops: EventLoopRegistry::new(),
             callbacks: Vec::new(),
             function_struct_id: 0, // Will be set by register_function_struct()
+            reset_code_range: (0, 0),
         }
     }
 
@@ -9173,6 +9180,25 @@ impl Runtime {
 
     pub fn get_function_by_name(&self, name: &str) -> Option<&Function> {
         self.functions.iter().find(|f| f.name == name)
+    }
+
+    /// Returns `true` if `pc` lies within the code range of
+    /// `beagle.core/__reset__`. The range is cached after first lookup.
+    /// Used by capture-continuation and return-from-shift to identify
+    /// the enclosing prompt frame during FP-chain walks.
+    pub fn is_pc_in_reset_function(&mut self, pc: usize) -> bool {
+        let (start, end) = self.reset_code_range;
+        if end > start {
+            return pc >= start && pc < end;
+        }
+        // Not cached yet — look it up and remember.
+        let Some(f) = self.get_function_by_name("beagle.core/__reset__") else {
+            return false;
+        };
+        let fstart: usize = f.pointer.into();
+        let fend = fstart + f.size;
+        self.reset_code_range = (fstart, fend);
+        pc >= fstart && pc < fend
     }
 
     pub fn get_function_by_name_mut(&mut self, name: &str) -> Option<&mut Function> {

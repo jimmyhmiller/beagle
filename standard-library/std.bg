@@ -295,6 +295,17 @@ fn format-rust-map-entries(map, keys-vec, idx, len, acc) {
 // this makes that idea simple
 fn __call_fn(f) { f() }
 
+// The reset/shift delimited-continuation boundary. `reset { body }`
+// compiles to `__reset__(body_thunk)`. Its sole purpose is to leave a
+// recognizable frame on the stack: capture_continuation and
+// return_from_shift walk the FP chain looking for a frame whose PC
+// lies inside this function's code range, and that frame IS the
+// prompt. All prompt metadata (return SP/FP/return-address) is read
+// from this frame at walk time — nothing is snapshotted in a side
+// table. Keep the body identical in shape to __call_fn but distinct
+// so the two compile to separate addresses.
+fn __reset__(thunk) { thunk() }
+
 // Thread struct - holds the closure to be executed and serves as a GC root
 // for running threads. The Thread object keeps the closure alive while the
 // thread is running.
