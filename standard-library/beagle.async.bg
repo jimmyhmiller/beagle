@@ -2467,13 +2467,19 @@ fn scheduler-loop(handler) {
 // This function is called by the runtime to provide the ambient async handler
 // for main(). It takes the main function pointer and optional args.
 fn __main__(main_fn, args) {
-    let handler = ImplicitAsyncHandler {}
-    handle effect/Handler(Async) with handler {
-        if args == null {
-            main_fn()
-        } else {
-            main_fn(args)
-        }
+    // REFACTOR A: the original body wrapped main_fn in a
+    //   `handle effect/Handler(Async) with ImplicitAsyncHandler { ... }`
+    // block so async effects were ambient. That block compiles to
+    // push-prompt/pop-prompt, which routes through the (now-deleted) v1
+    // prompt machinery. Until Refactor B rebuilds handle/perform on top
+    // of reset/shift, the wrapper calls main_fn directly without any
+    // async handler installed. User code that `perform`s async effects
+    // will hit the unimplemented stub and abort — the test suite already
+    // treats those tests as broken for the duration of Refactor A.
+    if args == null {
+        main_fn()
+    } else {
+        main_fn(args)
     }
 }
 
@@ -2481,14 +2487,9 @@ fn __main__(main_fn, args) {
 fn __run_thread_start() {
     let thread-obj = primitive/__get-my-thread-obj();
     let f = thread-obj.closure;
-    let handler = ImplicitAsyncHandler {}
-    try {
-        handle effect/Handler(Async) with handler {
-            f()
-        }
-    } catch (e) {
-        println("Uncaught exception in thread:")
-        println(e)
-        null
-    }
+    // REFACTOR A: same treatment as __main__ above. The original wrapped
+    // the thunk in `handle effect/Handler(Async) { ... }` inside a
+    // try/catch. For now, skip the handle block and let any uncaught
+    // exception panic the thread.
+    f()
 }

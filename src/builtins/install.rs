@@ -404,7 +404,10 @@ impl Runtime {
             4,
         )?;
 
-        // invoke-continuation takes (stack_pointer, frame_pointer, cont_ptr, value)
+        // Refactor A stubs — kept registered so stdlib compile-time lookups
+        // for `beagle.builtin/invoke-continuation` and
+        // `beagle.builtin/resume-tail` continue to resolve. Any runtime
+        // call aborts with a clear error.
         self.add_builtin_function_with_fp(
             "beagle.builtin/invoke-continuation",
             invoke_continuation_runtime as *const u8,
@@ -412,7 +415,6 @@ impl Runtime {
             true,
             4,
         )?;
-
         self.add_builtin_function_with_fp(
             "beagle.builtin/resume-tail",
             resume_tail_runtime as *const u8,

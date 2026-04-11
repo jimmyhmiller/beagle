@@ -168,25 +168,6 @@ pub fn resolve_effect_handler_method(
     (handler, fn_ptr)
 }
 
-pub unsafe fn call_beagle_fn_ptr3(
-    runtime: &Runtime,
-    fn_ptr: usize,
-    arg0: usize,
-    arg1: usize,
-    arg2: usize,
-) -> usize {
-    let saved_ctx = save_current_gc_context();
-    let apply_call = runtime
-        .get_function_by_name("beagle.builtin/apply_call_3")
-        .unwrap();
-    let apply_call = runtime.get_pointer(apply_call).unwrap();
-    let apply_call: fn(usize, usize, usize, usize) -> usize =
-        unsafe { std::mem::transmute(apply_call) };
-    let result = apply_call(fn_ptr, arg0, arg1, arg2);
-    restore_gc_context(saved_ctx);
-    result
-}
-
 /// Get the enum name for a value (by examining its struct_id/type_id)
 /// Returns a string pointer to the enum name, or null if not an enum variant
 pub extern "C" fn get_enum_type_builtin(
@@ -275,201 +256,27 @@ pub extern "C" fn call_handler_builtin(
     result
 }
 
+/// REFACTOR A stub. `perform-effect` is the builtin called by the IR
+/// Ast::Perform emits. The old implementation went through the v1 prompt
+/// machinery (push-prompt → capture-continuation → call handler). The
+/// new reset/shift path doesn't use prompt handlers, so this stub just
+/// aborts with a clear error. Refactor B will re-implement perform as
+/// sugar for shift + handler-registry lookup.
 pub unsafe extern "C" fn perform_effect_runtime_with_saved_regs(
     stack_pointer: usize,
-    frame_pointer: usize,
-    enum_type_ptr: usize,
-    op_value: usize,
-    resume_address: usize,
-    result_local_offset_raw: usize,
+    _frame_pointer: usize,
+    _enum_type_ptr: usize,
+    _op_value: usize,
+    _resume_address: usize,
+    _result_local_offset_raw: usize,
     _saved_regs_ptr: *const usize,
 ) -> usize {
-    // saved_regs_ptr is no longer used — callee-saved register values are
-    // stored in root slots by the codegen save loop and restored at the
-    // resume point via ReloadRootSlots.
     unsafe {
-        perform_effect_runtime_inner(
+        throw_runtime_error(
             stack_pointer,
-            frame_pointer,
-            enum_type_ptr,
-            op_value,
-            resume_address,
-            result_local_offset_raw,
-        )
+            "RuntimeError",
+            "perform is temporarily disabled (Refactor A in progress)".to_string(),
+        );
     }
 }
 
-pub unsafe fn perform_effect_runtime_inner(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    enum_type_ptr: usize,
-    op_value: usize,
-    resume_address: usize,
-    result_local_offset_raw: usize,
-) -> usize {
-    save_gc_context!(stack_pointer, frame_pointer);
-    let result_local_offset = result_local_offset_raw as isize;
-
-    if std::env::var("BEAGLE_DEBUG_PERFORM_ENV").is_ok() {
-        let slot0_addr = frame_pointer.wrapping_sub(24);
-        let slot0 = unsafe { *(slot0_addr as *const usize) };
-        eprintln!(
-            "[perform-env] fp={:#x} slot0@{:#x}={:#x} kind={:?}",
-            frame_pointer,
-            slot0_addr,
-            slot0,
-            BuiltInTypes::get_kind(slot0)
-        );
-        if let Some(heap_obj) = HeapObject::try_from_tagged(slot0) {
-            let mut fields = Vec::new();
-            for i in 0..6usize {
-                fields.push(format!("{:#x}", heap_obj.get_field(i)));
-            }
-            eprintln!("[perform-env-fields] {}", fields.join(" "));
-        }
-    }
-
-    let (op_root, enum_root) = {
-        let runtime = get_runtime().get_mut();
-        let op_root = if BuiltInTypes::is_heap_pointer(op_value) {
-            Some(runtime.register_temporary_root(op_value))
-        } else {
-            None
-        };
-        let enum_root = if BuiltInTypes::is_heap_pointer(enum_type_ptr) {
-            Some(runtime.register_temporary_root(enum_type_ptr))
-        } else {
-            None
-        };
-        (op_root, enum_root)
-    };
-
-    let cont_ptr = unsafe {
-        capture_continuation_runtime_inner(
-            stack_pointer,
-            frame_pointer,
-            resume_address,
-            result_local_offset,
-        )
-    };
-
-    let runtime = get_runtime().get_mut();
-    let cont_root = runtime.register_temporary_root(cont_ptr);
-    if let Some(cont) = ContinuationObject::from_tagged(cont_ptr) {
-        crate::runtime::per_thread_data().clear_pending_captured_segment(cont.segment_handle_id());
-    }
-
-    // After capture, the original stack_pointer points into the detached segment.
-    // Use the prompt's stack pointer for all subsequent allocations so that GC
-    // sees valid (main-stack) pointers.
-    let cont_obj = ContinuationObject::from_tagged(cont_ptr).unwrap_or_else(|| {
-        panic!(
-            "perform_effect_runtime got invalid continuation pointer {:#x}",
-            cont_ptr
-        )
-    });
-    let safe_sp = cont_obj.prompt_stack_pointer();
-
-    let trampoline_fn = runtime
-        .get_function_by_name("beagle.builtin/continuation-trampoline")
-        .expect("continuation-trampoline builtin not found");
-    let tagged_trampoline =
-        BuiltInTypes::Function.tag(usize::from(trampoline_fn.pointer) as isize) as usize;
-
-    let resume_closure = match runtime.make_closure(safe_sp, tagged_trampoline, &[cont_ptr]) {
-        Ok(closure) => closure,
-        Err(_) => unsafe {
-            throw_runtime_error(
-                safe_sp,
-                "AllocationError",
-                "Failed to allocate continuation closure".to_string(),
-            );
-        },
-    };
-    let resume_root = runtime.register_temporary_root(resume_closure);
-
-    let cont_ptr = runtime.peek_temporary_root(cont_root);
-    let op_value = op_root
-        .map(|root| runtime.peek_temporary_root(root))
-        .unwrap_or(op_value);
-    let enum_type_ptr = enum_root
-        .map(|root| runtime.peek_temporary_root(root))
-        .unwrap_or(enum_type_ptr);
-    let resume_closure = runtime.peek_temporary_root(resume_root);
-
-    let continuation = ContinuationObject::from_tagged(cont_ptr).unwrap_or_else(|| {
-        panic!(
-            "perform_effect_runtime got invalid continuation pointer {:#x}",
-            cont_ptr
-        )
-    });
-    let prompt_stack_pointer = continuation.prompt_stack_pointer();
-
-    if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
-        let thread_id = std::thread::current().id();
-        let resume_fn = runtime
-            .get_function_containing_pointer(resume_address as *const u8)
-            .map(|(function, offset)| format!("{}+{:#x}", function.name, offset))
-            .unwrap_or_else(|| "unknown".to_string());
-        eprintln!(
-            "[perform_effect][{:?}] cont={:#x} prompt_sp={:#x} prompt_fp={:#x} resume={:#x} ({}) op={:#x}",
-            thread_id,
-            cont_ptr,
-            prompt_stack_pointer,
-            continuation.prompt_frame_pointer(),
-            resume_address,
-            resume_fn,
-            op_value
-        );
-    }
-
-    let (handler, fn_ptr_tagged) = resolve_effect_handler_method(runtime, safe_sp, enum_type_ptr);
-    let fn_ptr = BuiltInTypes::untag(fn_ptr_tagged);
-
-    if std::env::var("BEAGLE_DEBUG_HANDLER_FIELDS").is_ok()
-        && let Some(handler_obj) = HeapObject::try_from_tagged(handler)
-    {
-        let fields = handler_obj
-            .get_fields()
-            .iter()
-            .take(4)
-            .map(|value| format!("{:#x}", value))
-            .collect::<Vec<_>>()
-            .join(" ");
-        eprintln!(
-            "[perform_handler_fields] handler={:#x} fields={}",
-            handler, fields
-        );
-    }
-
-    if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
-        eprintln!(
-            "[perform_effect] handler={:#x} fn_tagged={:#x} fn_raw={:#x}",
-            handler, fn_ptr_tagged, fn_ptr
-        );
-    }
-
-    {
-        let ptd = crate::runtime::per_thread_data();
-        ptd.safe_perform_context = Some(crate::runtime::SafePerformContext {
-            handler,
-            op_value,
-            resume_closure,
-            cont_ptr,
-            fn_ptr,
-            prompt_handler: continuation.prompt_handler(),
-        });
-    }
-
-    let runtime = get_runtime().get_mut();
-    runtime.unregister_temporary_root(cont_root);
-    if let Some(root) = op_root {
-        runtime.unregister_temporary_root(root);
-    }
-    if let Some(root) = enum_root {
-        runtime.unregister_temporary_root(root);
-    }
-    runtime.unregister_temporary_root(resume_root);
-
-    unsafe { jump_to_safe_perform_stack() }
-}
