@@ -337,11 +337,6 @@ pub struct GenerationalGC {
 }
 
 impl GenerationalGC {
-    fn collect_live_continuation_segment_handles(&mut self) -> std::collections::HashSet<usize> {
-        // Captured segments are now heap-allocated — GC manages their lifetime.
-        std::collections::HashSet::new()
-    }
-
     fn scan_continuation_segment<F>(&self, object: &HeapObject, mut callback: F)
     where
         F: FnMut(usize, usize),
@@ -494,98 +489,6 @@ impl GenerationalGC {
         for ptd_ptr in registry.iter() {
             let ptd = unsafe { &mut *ptd_ptr.0 };
 
-            // Scan heap-allocated pending segments
-            for (seg_tagged, _gc_frame_offset, seg_size, _original_data_base) in
-                ptd.pending_heap_segments.iter_mut()
-            {
-                if BuiltInTypes::is_heap_pointer(*seg_tagged) && *seg_size > 0 {
-                    let seg_obj = HeapObject::from_tagged(*seg_tagged);
-                    let data_base = seg_obj.untagged() + seg_obj.header_size();
-                    let scan_size = *seg_size & !0x7;
-                    for word_offset in (0..scan_size).step_by(8) {
-                        let slot_addr = data_base + word_offset;
-                        let slot_value = unsafe { *(slot_addr as *const usize) };
-                        let untagged = BuiltInTypes::untag(slot_value);
-                        if self.young.contains(untagged as *const u8) {
-                            unsafe {
-                                *(slot_addr as *mut usize) = self.copy(slot_value);
-                            }
-                        }
-                    }
-                }
-            }
-            // Also scan old-style pending segments
-            for handle_id in ptd.pending_captured_segment_handles.iter().copied() {
-                if let Some((segment, gc_frame_top)) = ptd.captured_segments.get(&handle_id) {
-                    let mut slots = Vec::new();
-                    StackWalker::walk_segment_gc_roots(
-                        *gc_frame_top,
-                        segment.base,
-                        segment.top,
-                        |slot_addr, slot_value| slots.push((slot_addr, slot_value)),
-                    );
-                    for (slot_addr, slot_value) in slots {
-                        let untagged = BuiltInTypes::untag(slot_value);
-                        if self.young.contains(untagged as *const u8) {
-                            unsafe {
-                                *(slot_addr as *mut usize) = self.copy(slot_value);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // callee_saved_regs removed — values are in root slots in the frame
-            let _ = &ptd.invocation_return_points;
-
-            for frame in ptd.suspended_frames.values_mut() {
-                for slot in frame.locals.iter_mut() {
-                    if BuiltInTypes::is_heap_pointer(*slot) {
-                        let untagged = BuiltInTypes::untag(*slot);
-                        if self.young.contains(untagged as *const u8) {
-                            *slot = self.copy(*slot);
-                        }
-                    }
-                }
-            }
-
-            if let Some(ctx) = ptd.safe_return_context.as_mut() {
-                if BuiltInTypes::is_heap_pointer(ctx.value) {
-                    let untagged = BuiltInTypes::untag(ctx.value);
-                    if self.young.contains(untagged as *const u8) {
-                        ctx.value = self.copy(ctx.value);
-                    }
-                }
-                // callee_saved_regs removed — values are in root slots
-            }
-
-            if let Some(ctx) = ptd.safe_perform_context.as_mut() {
-                if BuiltInTypes::is_heap_pointer(ctx.handler) {
-                    let untagged = BuiltInTypes::untag(ctx.handler);
-                    if self.young.contains(untagged as *const u8) {
-                        ctx.handler = self.copy(ctx.handler);
-                    }
-                }
-                if BuiltInTypes::is_heap_pointer(ctx.op_value) {
-                    let untagged = BuiltInTypes::untag(ctx.op_value);
-                    if self.young.contains(untagged as *const u8) {
-                        ctx.op_value = self.copy(ctx.op_value);
-                    }
-                }
-                if BuiltInTypes::is_heap_pointer(ctx.resume_closure) {
-                    let untagged = BuiltInTypes::untag(ctx.resume_closure);
-                    if self.young.contains(untagged as *const u8) {
-                        ctx.resume_closure = self.copy(ctx.resume_closure);
-                    }
-                }
-                if BuiltInTypes::is_heap_pointer(ctx.cont_ptr) {
-                    let untagged = BuiltInTypes::untag(ctx.cont_ptr);
-                    if self.young.contains(untagged as *const u8) {
-                        ctx.cont_ptr = self.copy(ctx.cont_ptr);
-                    }
-                }
-            }
-
             for saved_ptr in ptd.saved_continuation_ptrs.iter_mut() {
                 if *saved_ptr != 0 && BuiltInTypes::is_heap_pointer(*saved_ptr) {
                     let untagged = BuiltInTypes::untag(*saved_ptr);
@@ -594,7 +497,6 @@ impl GenerationalGC {
                     }
                 }
             }
-
         }
     }
 
@@ -1397,8 +1299,6 @@ impl GenerationalGC {
                 self.old.free_bytes()
             );
         }
-        let live_handles = self.collect_live_continuation_segment_handles();
-        crate::runtime::recycle_unreachable_captured_segments(&live_handles);
         usdt_probes::fire_gc_full_end(self.gc_count);
     }
 }

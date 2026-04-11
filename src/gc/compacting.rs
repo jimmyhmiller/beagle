@@ -269,20 +269,6 @@ impl CompactingHeap {
         full_size <= remaining_bytes && full_size.is_multiple_of(8)
     }
 
-    fn collect_live_continuation_segment_handles(
-        &self,
-        space: &Space,
-    ) -> std::collections::HashSet<usize> {
-        let mut live_handles = std::collections::HashSet::new();
-        for object in space.object_iter_from_position(0) {
-            if object.is_zero_size() {
-                continue;
-            }
-            // Captured segments are now heap-allocated — no handle IDs to collect.
-        }
-        live_handles
-    }
-
     fn scan_continuation_segment<F>(&mut self, object: &HeapObject, mut callback: F)
     where
         F: FnMut(usize, usize),
@@ -501,84 +487,11 @@ impl CompactingHeap {
         for ptd_ptr in registry.iter() {
             let ptd = unsafe { &mut *ptd_ptr.0 };
 
-            // Scan heap-allocated pending segments
-            for (seg_tagged, _gc_frame_offset, seg_size, _original_data_base) in
-                ptd.pending_heap_segments.iter_mut()
-            {
-                if BuiltInTypes::is_heap_pointer(*seg_tagged) && *seg_size > 0 {
-                    let seg_obj = HeapObject::from_tagged(*seg_tagged);
-                    let data_base = seg_obj.untagged() + seg_obj.header_size();
-                    let scan_size = *seg_size & !0x7;
-                    for word_offset in (0..scan_size).step_by(8) {
-                        let slot_addr = data_base + word_offset;
-                        let slot_value = unsafe { *(slot_addr as *const usize) };
-                        if !BuiltInTypes::is_heap_pointer(slot_value) {
-                            continue;
-                        }
-                        let new_value = self.copy_using_cheneys_algorithm(slot_value);
-                        unsafe {
-                            *(slot_addr as *mut usize) = new_value;
-                        }
-                    }
-                }
-            }
-            // Also scan old-style pending segments
-            for handle_id in ptd.pending_captured_segment_handles.iter().copied() {
-                if let Some((segment, gc_frame_top)) = ptd.captured_segments.get(&handle_id) {
-                    let mut slots = Vec::new();
-                    StackWalker::walk_segment_gc_roots(
-                        *gc_frame_top,
-                        segment.base,
-                        segment.top,
-                        |slot_addr, slot_value| slots.push((slot_addr, slot_value)),
-                    );
-                    for (slot_addr, slot_value) in slots {
-                        let new_value = self.copy_using_cheneys_algorithm(slot_value);
-                        unsafe {
-                            *(slot_addr as *mut usize) = new_value;
-                        }
-                    }
-                }
-            }
-
-            // callee_saved_regs removed — values are in root slots in the frame
-            let _ = &ptd.invocation_return_points;
-
-            for frame in ptd.suspended_frames.values_mut() {
-                for slot in frame.locals.iter_mut() {
-                    if BuiltInTypes::is_heap_pointer(*slot) {
-                        *slot = self.copy_using_cheneys_algorithm(*slot);
-                    }
-                }
-            }
-
-            if let Some(ctx) = ptd.safe_return_context.as_mut() {
-                if BuiltInTypes::is_heap_pointer(ctx.value) {
-                    ctx.value = self.copy_using_cheneys_algorithm(ctx.value);
-                }
-            }
-
-            if let Some(ctx) = ptd.safe_perform_context.as_mut() {
-                if BuiltInTypes::is_heap_pointer(ctx.handler) {
-                    ctx.handler = self.copy_using_cheneys_algorithm(ctx.handler);
-                }
-                if BuiltInTypes::is_heap_pointer(ctx.op_value) {
-                    ctx.op_value = self.copy_using_cheneys_algorithm(ctx.op_value);
-                }
-                if BuiltInTypes::is_heap_pointer(ctx.resume_closure) {
-                    ctx.resume_closure = self.copy_using_cheneys_algorithm(ctx.resume_closure);
-                }
-                if BuiltInTypes::is_heap_pointer(ctx.cont_ptr) {
-                    ctx.cont_ptr = self.copy_using_cheneys_algorithm(ctx.cont_ptr);
-                }
-            }
-
             for saved_ptr in ptd.saved_continuation_ptrs.iter_mut() {
                 if *saved_ptr != 0 && BuiltInTypes::is_heap_pointer(*saved_ptr) {
                     *saved_ptr = self.copy_using_cheneys_algorithm(*saved_ptr);
                 }
             }
-
         }
     }
 }
@@ -672,9 +585,6 @@ impl Allocator for CompactingHeap {
         }
 
         mem::swap(&mut self.from_space, &mut self.to_space);
-
-        let live_handles = self.collect_live_continuation_segment_handles(&self.from_space);
-        crate::runtime::recycle_unreachable_captured_segments(&live_handles);
 
         self.to_space.clear();
     }

@@ -70,13 +70,6 @@ pub fn gc_chain_anchor_for_invocation(beagle_fp: usize) -> usize {
     }
 }
 
-pub fn frame_pointer_in_active_segment(frame_pointer: usize) -> bool {
-    let ptd = crate::runtime::per_thread_data();
-    ptd.active_segments
-        .iter()
-        .any(|active| frame_pointer >= active.segment.base && frame_pointer < active.segment.top)
-}
-
 pub fn segment_frame_pointer_is_valid(
     frame_pointer: usize,
     segment_base: usize,

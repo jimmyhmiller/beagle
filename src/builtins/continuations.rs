@@ -1,65 +1,5 @@
 use super::*;
 use crate::save_gc_context;
-use crate::trace;
-
-pub fn current_saved_continuation_ptr(fallback: usize) -> usize {
-    crate::runtime::per_thread_data()
-        .saved_continuation_ptrs
-        .last()
-        .copied()
-        .unwrap_or(fallback)
-}
-
-pub fn debug_cont_state(label: &str, prompt_id: usize) {
-    if std::env::var("BEAGLE_DEBUG_CONT_STATE").is_err() {
-        return;
-    }
-    let ptd = crate::runtime::per_thread_data();
-    eprintln!(
-        "[cont-state] {} prompt_id={} prompts={} active_segments={} rps={} suspended={} saved_conts={}",
-        label,
-        prompt_id,
-        ptd.prompt_handlers.len(),
-        ptd.active_segments.len(),
-        ptd.invocation_return_points.len(),
-        ptd.suspended_frames.len(),
-        ptd.saved_continuation_ptrs.len()
-    );
-}
-
-pub fn debug_captured_continuation_refs(cont_ptr: usize) {
-    if std::env::var("BEAGLE_DEBUG_CONT_REFS").is_err() {
-        return;
-    }
-    let Some(cont) = ContinuationObject::from_tagged(cont_ptr) else {
-        return;
-    };
-    let mut refs = Vec::new();
-    if let Some((segment_base, segment_top, gc_frame_top)) = cont.segment_gc_frame_info() {
-        if gc_frame_top >= segment_base && gc_frame_top < segment_top {
-            crate::gc::stack_walker::StackWalker::walk_segment_gc_roots(
-                gc_frame_top,
-                segment_base,
-                segment_top,
-                |slot_addr, slot_value| {
-                    if let Some(obj) = HeapObject::try_from_tagged(slot_value)
-                        && ContinuationObject::from_heap_object(obj).is_some()
-                    {
-                        refs.push((slot_addr, slot_value));
-                    }
-                },
-            );
-        }
-    }
-    if !refs.is_empty() {
-        eprintln!(
-            "[cont-refs] cont={:#x} prompt_id={} refs={:?}",
-            cont_ptr,
-            cont.prompt_id(),
-            refs
-        );
-    }
-}
 
 pub fn decode_arm_mov_imm3(words: &[u32], reg: u8) -> Option<usize> {
     if words.len() < 3 {
@@ -525,33 +465,18 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     unsafe { return_from_shift_runtime_inner(stack_pointer, frame_pointer, value, cont_ptr, None) }
 }
 
-/// Return from shift body to the enclosing reset, specifically for handler returns.
-/// This is called after `call-handler` in perform. It sets the is_handler_return flag
-/// so that return_from_shift_runtime skips popping InvocationReturnPoints.
-/// This prevents nested handlers from incorrectly consuming outer handler return points.
+/// REFACTOR A stub. Was called from perform's post-handler-return path
+/// to route through the v1 return_from_shift with a flag saying "the
+/// handler just returned". Kept as a thin wrapper over the reset/shift
+/// return path for now so its install.rs registration stays valid.
 pub unsafe extern "C" fn return_from_shift_handler_runtime(
     stack_pointer: usize,
     frame_pointer: usize,
     value: usize,
     cont_ptr: usize,
 ) -> ! {
-    if std::env::var("BEAGLE_DEBUG_PERFORM").is_ok() {
-        eprintln!(
-            "[return_from_shift_handler] value={:#x} cont_ptr={:#x}",
-            value, cont_ptr
-        );
-    }
-    // SAFETY: We are in an unsafe function and caller guarantees valid stack/frame pointers
-    // Set flag in a scoped block so the &mut borrow is dropped before calling
-    // return_from_shift_runtime (which also accesses per-thread data).
-    unsafe {
-        {
-            crate::runtime::per_thread_data().is_handler_return = true;
-        }
-        return_from_shift_runtime_inner(stack_pointer, frame_pointer, value, cont_ptr, None)
-    }
+    unsafe { return_from_shift_runtime_inner(stack_pointer, frame_pointer, value, cont_ptr, None) }
 }
-
 
 // ============================================================================
 
@@ -748,4 +673,3 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         0,
     );
 }
-

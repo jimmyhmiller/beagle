@@ -279,4 +279,3 @@ pub unsafe extern "C" fn perform_effect_runtime_with_saved_regs(
         );
     }
 }
-

@@ -101,15 +101,6 @@ pub unsafe extern "C" fn throw_exception(
         }
     };
 
-    // A handler can throw while executing on a native perform stack. That is a
-    // non-local exit from `continue_perform_on_safe_stack`, so its normal cleanup
-    // path will never run. Pop the current perform stack before we jump away.
-    if crate::runtime::per_thread_data().current_on_native_perform_stack(stack_pointer)
-        || crate::runtime::per_thread_data().current_on_native_perform_stack(frame_pointer)
-    {
-        crate::runtime::per_thread_data().pop_native_perform_stack();
-    }
-
     // Pop handlers until we find one
     if let Some(handler) = {
         let runtime = get_runtime().get_mut();
@@ -149,10 +140,6 @@ pub unsafe extern "C" fn throw_exception(
             let resume_ptr =
                 (handler.frame_pointer as isize).wrapping_add(handler.resume_local) as *mut usize;
             unsafe { *resume_ptr = cont_ptr };
-            if let Some(cont_obj) = ContinuationObject::from_tagged(cont_ptr) {
-                crate::runtime::per_thread_data()
-                    .clear_pending_captured_segment(cont_obj.segment_handle_id());
-            }
 
             // Unwind the GC frame chain to the handler's level.
             // Frames deeper than the handler are being abandoned (SP/FP are

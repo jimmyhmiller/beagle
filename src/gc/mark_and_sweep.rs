@@ -327,13 +327,6 @@ fn log_suspicious_mark(pending: &PendingMark) {
 
 // TODO: I got an issue with my freelist
 impl MarkAndSweep {
-    fn collect_live_continuation_segment_handles(&mut self) -> std::collections::HashSet<usize> {
-        // Captured segments are now heap-allocated opaque bytes objects referenced
-        // directly from ContinuationObjects. GC manages their lifetime automatically.
-        // No segment handle IDs to collect.
-        std::collections::HashSet::new()
-    }
-
     fn push_continuation_segment_children(
         &self,
         object: &HeapObject,
@@ -490,73 +483,9 @@ impl MarkAndSweep {
             let registry = runtime.per_thread_registry.lock().unwrap();
             for ptd_ptr in registry.iter() {
                 let ptd = unsafe { &mut *ptd_ptr.0 };
-                // Scan heap-allocated pending segment objects that haven't been
-                // attached to a ContinuationObject yet. These contain captured stack
-                // frames whose interior heap pointers must be traced.
-                for (seg_tagged, _gc_frame_offset, seg_size, _original_data_base) in
-                    ptd.pending_heap_segments.iter_mut()
-                {
-                    if BuiltInTypes::is_heap_pointer(*seg_tagged) && *seg_size > 0 {
-                        let seg_obj = HeapObject::from_tagged(*seg_tagged);
-                        let data_base = seg_obj.untagged() + seg_obj.header_size();
-                        let scan_size = *seg_size & !0x7;
-                        for word_offset in (0..scan_size).step_by(8) {
-                            let slot_addr = data_base + word_offset;
-                            let pointer = unsafe { *(slot_addr as *const usize) };
-                            if HeapObject::try_from_tagged(pointer).is_some() {
-                                push_root(
-                                    &mut to_mark,
-                                    pointer,
-                                    slot_addr,
-                                    "pending-heap-segment-root",
-                                );
-                            }
-                        }
-                    }
-                }
-                // Also scan old-style pending segments if any remain
-                for handle_id in ptd.pending_captured_segment_handles.iter().copied() {
-                    if let Some((segment, gc_frame_top)) = ptd.captured_segments.get(&handle_id) {
-                        StackWalker::walk_segment_gc_roots(
-                            *gc_frame_top,
-                            segment.base,
-                            segment.top,
-                            |slot_addr, pointer| {
-                                push_root(
-                                    &mut to_mark,
-                                    pointer,
-                                    slot_addr,
-                                    "pending-captured-segment-root",
-                                );
-                            },
-                        );
-                    }
-                }
-                // callee_saved_regs removed — values are in root slots in the frame
-                let _ = &ptd.invocation_return_points;
-                for frame in ptd.suspended_frames.values() {
-                    for slot in frame.locals.iter().copied() {
-                        push_root(&mut to_mark, slot, 0, "suspended-frame-local");
-                    }
-                }
-                if let Some(ctx) = ptd.safe_return_context.as_ref() {
-                    push_root(&mut to_mark, ctx.value, 0, "safe-return-value");
-                }
-                if let Some(ctx) = ptd.safe_perform_context.as_ref() {
-                    push_root(&mut to_mark, ctx.handler, 0, "safe-perform-handler");
-                    push_root(&mut to_mark, ctx.op_value, 0, "safe-perform-op");
-                    push_root(
-                        &mut to_mark,
-                        ctx.resume_closure,
-                        0,
-                        "safe-perform-resume-closure",
-                    );
-                    push_root(&mut to_mark, ctx.cont_ptr, 0, "safe-perform-cont");
-                }
                 for saved_ptr in ptd.saved_continuation_ptrs.iter().copied() {
                     push_root(&mut to_mark, saved_ptr, 0, "saved-continuation");
                 }
-
             }
         }
 
@@ -950,8 +879,6 @@ impl Allocator for MarkAndSweep {
         self.sweep();
 
         self.migrate_outdated_structs(extra_roots);
-        let live_handles = self.collect_live_continuation_segment_handles();
-        crate::runtime::recycle_unreachable_captured_segments(&live_handles);
         if self.options.print_stats {
             println!("Mark and sweep took {:?}", start.elapsed());
         }

@@ -2636,15 +2636,6 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     runtime.wait_for_other_threads();
 
-    // Clean up the main thread's per-thread continuation state after all threads have been joined.
-    // Child threads clean up their own data in their exit path.
-    {
-        let ptd = crate::runtime::per_thread_data();
-        ptd.invocation_return_points.clear();
-        ptd.prompt_handlers.clear();
-        ptd.return_from_shift_via_pop_prompt = false;
-    }
-
     runtime.event_loops.shutdown_all();
 
     Ok(())
