@@ -2013,29 +2013,68 @@ pub unsafe fn invoke_continuation_runtime_with_caller_context(
 ///
 /// Note: This is called as a regular closure body, so we receive (closure_ptr, value)
 /// and need to get SP/FP ourselves.
+/// Invoke a captured continuation.
+///
+/// Called as the body of a cont-closure: `k(v)` where `k` is the closure
+/// returned by shift. The closure's single free variable is the
+/// ContinuationObject; `value` is the value being plugged into the shift
+/// point's result slot.
+///
+/// The design is:
+/// 1. Compute a destination address `dst` on this trampoline's own stack
+///    such that the outermost captured frame's FP slot lands exactly at
+///    trampoline's own FP. The trampoline's prologue already wrote the
+///    invoker's FP at [trampoline_fp + 0] and the invoker's LR at
+///    [trampoline_fp + 8]. By overlaying the bottom frame on those slots,
+///    the resumed body's eventual "return past bottom" unwinds directly
+///    into the invoker — no return stubs, no prompt pushes, no side
+///    tables.
+/// 2. Copy the captured bytes (minus the bottom 16) from the heap segment
+///    into [dst, dst + copy_size).
+/// 3. Walk the copy and relocate saved-FP links from heap-addresses to
+///    stack-addresses by a constant delta.
+/// 4. Rebuild the GC prev chain in the copy so GC can walk it as normal
+///    stack frames.
+/// 5. Write `value` into the resume point's result slot.
+/// 6. Use `return-jump` to set SP/FP and branch to resume_address.
+///
+/// Multi-shot is automatic: the heap segment's bytes are never mutated,
+/// so each invocation copies fresh bytes to a fresh destination.
+///
+/// Safety: All writes to `dst` happen while Rust is mid-function. The
+/// `dst` region overlaps Rust's own local area but Rust has already
+/// packed every value it needs into local variables (which the compiler
+/// keeps in registers for the remaining straight-line code). Between the
+/// first dst write and the final `return_jump` call, no helper function
+/// is invoked — so no frame gets pushed below Rust's SP into a region
+/// that might overlap dst. Once `return_jump` runs, SP is set to `dst`
+/// and control transfers to the resumed body; the old Rust frame is
+/// abandoned.
 #[allow(unused_variables)]
 pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usize) -> ! {
     // Extract the continuation from the closure's free variables.
     // Closure layout: header(8) + fn_ptr(8) + num_free(8) + num_locals(8) + free_var[0]...
-    // cont_ptr is the first free variable at offset 32.
     let untagged_closure = BuiltInTypes::untag(closure_ptr);
     let cont_ptr = unsafe { *((untagged_closure + 32) as *const usize) };
     let cont = ContinuationObject::from_tagged(cont_ptr)
         .expect("continuation_trampoline: closure free var is not a ContinuationObject");
 
-    // Normalize segment — handles GC moves by re-relocating the in-segment
-    // saved-FP chain to the current heap data base before we read it.
+    // Normalize segment — this handles GC moves by re-relocating the
+    // in-segment saved-FP chain against the current heap data base.
     let (seg_base, _seg_top, _innermost_fp_heap) = cont
         .segment_frame_info()
         .expect("continuation_trampoline: continuation has no segment data");
     let seg_size = cont.segment_size();
     let innermost_offset = cont.segment_frame_pointer_offset();
+    // segment_gc_frame_offset is repurposed to store the outermost offset.
+    let outermost_offset = cont.segment_gc_frame_offset();
     let resume_address = cont.resume_address();
     let result_local_offset = cont.result_local();
 
-    // Get our own frame pointer. `read-fp` is a tiny Beagle-side JIT
-    // trampoline that returns the caller's x29, which is exactly this
-    // function's FP on entry (before any inline operations).
+    // Read the trampoline's own FP via `read-fp` — a 2-instruction
+    // Beagle-side JIT trampoline that returns x29. This function call
+    // pushes a frame below trampoline's SP; that frame is popped before
+    // we return here, so it doesn't touch any memory we care about.
     let trampoline_fp = {
         let runtime = get_runtime().get();
         let fn_entry = runtime
@@ -2046,50 +2085,114 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         read_fp()
     };
 
-    // Bytes to copy = seg_size - 16. The final 16 bytes are the outermost
-    // captured frame's saved FP and saved LR slots, which we deliberately
-    // skip: we lay the outermost frame's FP directly on top of the
-    // trampoline's own FP, so the trampoline's already-saved caller FP/LR
-    // (at [trampoline_fp, trampoline_fp+16)) serve as the outermost
-    // frame's saved FP/LR. When the resumed body eventually returns past
-    // its own bottom, the natural ldp/ret unwinds control to the invoker
-    // without any additional state tracking.
-    //
-    // If the capture is a single-frame/empty corner case where seg_size
-    // is 16 or less, copy_size is 0 — the asm trampoline's copy loop
-    // handles that by short-circuiting.
-    let copy_size = seg_size.saturating_sub(16);
-
-    // Hand off to the asm trampoline. It does: memcpy, FP-chain relocate,
-    // result slot write, SP/FP switch, and branch to resume_address.
-    // Does not return.
-    let jump_fn = {
+    // Read return-jump's pointer here, before we start writing dst, so
+    // that the final call doesn't need any function lookups.
+    let return_jump_ptr: *const u8 = {
         let runtime = get_runtime().get();
-        runtime
-            .get_function_by_name("beagle.builtin/invoke-cont-jump")
-            .expect("invoke-cont-jump trampoline not found")
-            .pointer
+        let fn_entry = runtime
+            .get_function_by_name("beagle.builtin/return-jump")
+            .expect("return-jump trampoline not found");
+        fn_entry.pointer.into()
     };
-    let ptr: *const u8 = jump_fn.into();
-    let invoke_jump: extern "C" fn(
-        usize, // X0: src_base
-        usize, // X1: copy_size
-        usize, // X2: innermost_offset
-        usize, // X3: seg_total_size (range check)
-        usize, // X4: resume_address
-        isize, // X5: result_local_offset
-        usize, // X6: value
-        usize, // X7: trampoline_fp
-    ) -> ! = unsafe { std::mem::transmute(ptr) };
-    invoke_jump(
-        seg_base,
-        copy_size,
-        innermost_offset,
-        seg_size,
+
+    // Destination placement: outermost_fp_in_dst must equal trampoline_fp.
+    //   outermost_fp_in_dst = dst + outermost_offset
+    //   => dst = trampoline_fp - outermost_offset
+    //
+    // copy_size = outermost_offset. We do NOT copy the bottom 16 bytes
+    // (the outermost frame's saved FP+LR pair). Those slots at
+    // [trampoline_fp, trampoline_fp+16) already hold the invoker's FP
+    // and LR (written by the trampoline's own prologue), which is exactly
+    // what the outermost frame's saved FP/LR need to be.
+    let dst = trampoline_fp - outermost_offset;
+    let copy_size = outermost_offset;
+
+    // ------------------------------------------------------------------
+    // From here until the final `return_jump` call, NO function calls
+    // may happen. All writes go to `dst` (which may overlap Rust's own
+    // frame); a function call would push a frame below trampoline's SP,
+    // into a region of `dst` we're actively writing.
+    // ------------------------------------------------------------------
+
+    // 1. Copy bytes: [seg_base, seg_base + copy_size) → [dst, dst + copy_size).
+    let mut i = 0usize;
+    while i < copy_size {
+        let src_word = unsafe { *((seg_base + i) as *const usize) };
+        unsafe { *((dst + i) as *mut usize) = src_word };
+        i += 8;
+    }
+
+    // 2. Relocate saved-FP chain in dst. Walk from innermost upward via
+    //    saved_fp, adjusting each by delta until a saved_fp falls outside
+    //    the source range.
+    let delta = dst.wrapping_sub(seg_base);
+    let mut fp = dst + innermost_offset;
+    loop {
+        let saved_slot = fp as *mut usize;
+        let saved = unsafe { *saved_slot };
+        if saved < seg_base || saved >= seg_base + seg_size {
+            break;
+        }
+        let relocated = saved.wrapping_add(delta);
+        unsafe { *saved_slot = relocated };
+        fp = relocated;
+    }
+
+    // 3. Rebuild GC prev chain in dst. For each frame header (at [fp-8]),
+    //    write to [header-8] (the GC prev slot) the address of the parent
+    //    frame's header, or 0 if the parent is outside the copy range
+    //    (i.e., this is the outermost frame, which logically chains into
+    //    the invoker — GC will pick that up naturally via GC_FRAME_TOP
+    //    once we update it below).
+    //
+    //    Range check uses the header address (fp - 8), not fp, because the
+    //    outermost frame's fp equals dst + copy_size and is therefore not
+    //    strictly less than dst + copy_size. Its header at dst + copy_size
+    //    - 8 IS within range.
+    let copy_end = dst + copy_size;
+    let mut fp = dst + innermost_offset;
+    loop {
+        let header_addr = fp.wrapping_sub(8);
+        if header_addr < dst || header_addr >= copy_end {
+            break;
+        }
+        let saved_fp = unsafe { *(fp as *const usize) };
+        let parent_header = saved_fp.wrapping_sub(8);
+        let parent_in_range = parent_header >= dst && parent_header < copy_end;
+        let prev_val = if parent_in_range { parent_header } else { 0 };
+        unsafe { *((header_addr - 8) as *mut usize) = prev_val };
+        if !parent_in_range {
+            break;
+        }
+        fp = saved_fp;
+    }
+
+    // 4. Write value to the resume point's result slot.
+    let innermost_fp_in_dst = dst + innermost_offset;
+    if result_local_offset != 0 {
+        let result_ptr =
+            (innermost_fp_in_dst as isize).wrapping_add(result_local_offset) as *mut usize;
+        unsafe { *result_ptr = value };
+    }
+
+    // 5. Update GC_FRAME_TOP to the innermost frame's header in dst.
+    //    This is a simple thread-local cell write — no function call.
+    //    We cannot call set_gc_frame_top because that's a Rust function.
+    //    The cell is accessed via a macro; we replicate its write here.
+    GC_FRAME_TOP.with(|cell| cell.set(innermost_fp_in_dst - 8));
+
+    // 6. Final jump via return-jump. Signature:
+    //    return_jump(new_sp, new_fp, new_lr, jump_target, callee_saved_ptr, value)
+    //    It sets sp/fp/lr/x0 and branches. noreturn.
+    let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
+        unsafe { std::mem::transmute(return_jump_ptr) };
+    return_jump(
+        dst,
+        innermost_fp_in_dst,
+        0,
         resume_address,
-        result_local_offset,
-        value,
-        trampoline_fp,
+        std::ptr::null(),
+        0,
     );
 }
 
