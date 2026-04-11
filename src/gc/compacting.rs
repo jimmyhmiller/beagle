@@ -5,7 +5,7 @@ use libc::mprotect;
 use super::get_page_size;
 
 use super::{AllocateAction, Allocator, AllocatorOptions, stack_walker::StackWalker};
-use crate::runtime::ContinuationObject;
+use crate::builtins::reset_shift::ContinuationObject;
 use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
 const DEFAULT_PAGE_COUNT: usize = 1024;

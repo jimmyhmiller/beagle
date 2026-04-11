@@ -16,7 +16,7 @@ use crate::{
     },
     gc::STACK_SIZE,
     get_runtime,
-    runtime::{ContinuationObject, DispatchTable, FFIInfo, FFIType, RawPtr, Runtime},
+    runtime::{DispatchTable, FFIInfo, FFIType, RawPtr, Runtime},
     types::{BuiltInTypes, Header, HeapObject},
 };
 
@@ -80,6 +80,7 @@ mod networking;
 mod objects;
 mod reflect;
 pub mod regex;
+pub mod reset_shift;
 mod strings;
 mod threads;
 
@@ -111,6 +112,7 @@ pub use networking::*;
 pub use objects::*;
 pub use reflect::*;
 pub use regex::*;
+pub use reset_shift::*;
 pub use strings::*;
 pub use threads::*;
 

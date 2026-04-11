@@ -4,7 +4,7 @@ use libc::mprotect;
 
 use super::get_page_size;
 
-use crate::runtime::ContinuationObject;
+use crate::builtins::reset_shift::ContinuationObject;
 use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
 use super::{AllocateAction, Allocator, AllocatorOptions, stack_walker::StackWalker};

@@ -12,7 +12,7 @@ use super::{
     stack_walker::StackWalker,
 };
 use crate::collections::TYPE_ID_FRAME;
-use crate::runtime::ContinuationObject;
+use crate::builtins::reset_shift::ContinuationObject;
 
 /// Represents a reference to a GC root that needs updating after collection.
 /// Points to a mutable slot holding the root value (stack slots, GlobalObjectBlock entries).
@@ -1306,7 +1306,7 @@ impl GenerationalGC {
 #[cfg(all(test, feature = "generational"))]
 mod tests {
     use super::*;
-    use crate::runtime::ContinuationObject;
+    use crate::builtins::reset_shift::ContinuationObject;
     use crate::types::HeapObject;
     use std::sync::{Mutex, OnceLock};
 
