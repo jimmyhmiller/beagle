@@ -368,35 +368,6 @@ impl Runtime {
             5, // handler_address, result_local, link_register, stack_pointer, frame_pointer
         )?;
 
-        // Chez-style prompt push (v2). Same signature for IR compatibility,
-        // but does not allocate a separate execution segment. Not wired up
-        // to the default handle compilation yet.
-        self.add_builtin_function(
-            "beagle.builtin/push-prompt-v2",
-            push_prompt_runtime_v2 as *const u8,
-            false,
-            5,
-        )?;
-
-        // Chez-style prompt pop (v2). Pops the prompt handler and returns
-        // the caller's SP unchanged.
-        self.add_builtin_function(
-            "beagle.builtin/pop-prompt-v2",
-            pop_prompt_runtime_v2 as *const u8,
-            false,
-            3,
-        )?;
-
-        // Chez-style handle completion dispatcher. Called after body returns
-        // to check for pending perform state and dispatch to the handler.
-        self.add_builtin_function_with_fp(
-            "beagle.builtin/handle-completed",
-            handle_completed_runtime as *const u8,
-            true,
-            true,
-            3, // stack_pointer, frame_pointer, body_result
-        )?;
-
         self.add_builtin_function(
             "beagle.builtin/pop-prompt",
             pop_prompt_runtime as *const u8,
@@ -457,17 +428,6 @@ impl Runtime {
         self.add_builtin_function(
             "beagle.builtin/continuation-trampoline",
             continuation_trampoline as *const u8,
-            false,
-            2,
-        )?;
-
-        // Chez-style resume trampoline. Invoked as a closure body by the
-        // handler when it calls resume(v). Copies the captured body frames
-        // back onto the stack above the handle site and jumps to the
-        // resume point.
-        self.add_builtin_function(
-            "beagle.builtin/continuation-trampoline-v2",
-            continuation_trampoline_v2 as *const u8,
             false,
             2,
         )?;
@@ -2004,17 +1964,6 @@ impl Runtime {
         self.add_builtin_function_with_fp(
             "beagle.builtin/perform-effect",
             perform_effect_runtime_with_saved_regs as *const u8,
-            true,
-            true,
-            7, // stack_pointer, frame_pointer, enum_type_ptr, op_value, resume_address, result_local_offset, saved_regs_ptr
-        )?;
-
-        // Chez-style perform. Captures body frames between perform site and
-        // the handle wrapper's frame, stores operation state in thread-local
-        // pending_perform slots, and longjmps back to the handle call site.
-        self.add_builtin_function_with_fp(
-            "beagle.builtin/perform-effect-v2",
-            perform_effect_runtime_v2 as *const u8,
             true,
             true,
             7, // stack_pointer, frame_pointer, enum_type_ptr, op_value, resume_address, result_local_offset, saved_regs_ptr

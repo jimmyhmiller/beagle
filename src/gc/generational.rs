@@ -595,30 +595,6 @@ impl GenerationalGC {
                 }
             }
 
-            // Pending perform state for Chez-style handle dispatch.
-            if ptd.pending_perform_op != 0 && BuiltInTypes::is_heap_pointer(ptd.pending_perform_op)
-            {
-                let untagged = BuiltInTypes::untag(ptd.pending_perform_op);
-                if self.young.contains(untagged as *const u8) {
-                    ptd.pending_perform_op = self.copy(ptd.pending_perform_op);
-                }
-            }
-            if ptd.pending_perform_cont != 0
-                && BuiltInTypes::is_heap_pointer(ptd.pending_perform_cont)
-            {
-                let untagged = BuiltInTypes::untag(ptd.pending_perform_cont);
-                if self.young.contains(untagged as *const u8) {
-                    ptd.pending_perform_cont = self.copy(ptd.pending_perform_cont);
-                }
-            }
-            if ptd.pending_perform_enum_type != 0
-                && BuiltInTypes::is_heap_pointer(ptd.pending_perform_enum_type)
-            {
-                let untagged = BuiltInTypes::untag(ptd.pending_perform_enum_type);
-                if self.young.contains(untagged as *const u8) {
-                    ptd.pending_perform_enum_type = self.copy(ptd.pending_perform_enum_type);
-                }
-            }
         }
     }
 

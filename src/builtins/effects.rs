@@ -275,38 +275,6 @@ pub extern "C" fn call_handler_builtin(
     result
 }
 
-/// Chez-style handle completion dispatcher.
-///
-/// Called from the v2 handle wrapper's IR immediately after the body closure
-/// returns. If the body longjmped back via perform_effect_runtime_v2, the
-/// pending_perform state will be set; in that case we look up the handler
-/// and call its `handle` method. Otherwise we just return the body_result.
-#[allow(dead_code)]
-pub unsafe extern "C" fn handle_completed_runtime(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    body_result: usize,
-) -> usize {
-    save_gc_context!(stack_pointer, frame_pointer);
-
-    let (op, cont, enum_type_ptr) = {
-        let ptd = crate::runtime::per_thread_data();
-        match ptd.take_pending_perform() {
-            Some(t) => t,
-            None => return body_result,
-        }
-    };
-
-    let runtime = get_runtime().get_mut();
-    let (handler, fn_ptr_tagged) =
-        resolve_effect_handler_method(runtime, stack_pointer, enum_type_ptr);
-    let fn_ptr = BuiltInTypes::untag(fn_ptr_tagged);
-
-    // Call handler.handle(self, op, cont) as a regular Beagle function call.
-    let func: extern "C" fn(usize, usize, usize) -> usize = unsafe { std::mem::transmute(fn_ptr) };
-    func(handler, op, cont)
-}
-
 pub unsafe extern "C" fn perform_effect_runtime_with_saved_regs(
     stack_pointer: usize,
     frame_pointer: usize,

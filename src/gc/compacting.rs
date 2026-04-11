@@ -579,23 +579,6 @@ impl CompactingHeap {
                 }
             }
 
-            // Pending perform state for Chez-style handle dispatch.
-            if ptd.pending_perform_op != 0 && BuiltInTypes::is_heap_pointer(ptd.pending_perform_op)
-            {
-                ptd.pending_perform_op = self.copy_using_cheneys_algorithm(ptd.pending_perform_op);
-            }
-            if ptd.pending_perform_cont != 0
-                && BuiltInTypes::is_heap_pointer(ptd.pending_perform_cont)
-            {
-                ptd.pending_perform_cont =
-                    self.copy_using_cheneys_algorithm(ptd.pending_perform_cont);
-            }
-            if ptd.pending_perform_enum_type != 0
-                && BuiltInTypes::is_heap_pointer(ptd.pending_perform_enum_type)
-            {
-                ptd.pending_perform_enum_type =
-                    self.copy_using_cheneys_algorithm(ptd.pending_perform_enum_type);
-            }
         }
     }
 }
