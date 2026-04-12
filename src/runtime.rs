@@ -7,7 +7,6 @@ use std::{
     error::Error,
     ffi::{CString, c_void},
     io::Write,
-    slice::{self},
     sync::{
         Arc, Condvar, Mutex, TryLockError,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -30,9 +29,9 @@ use crate::{
 
 use crate::collections::{
     GcHandle, HandleScope, PersistentMap, PersistentVec, TYPE_ID_ATOM, TYPE_ID_CONS_STRING,
-    TYPE_ID_CONTINUATION, TYPE_ID_FRAME, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD,
-    TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET,
-    TYPE_ID_PERSISTENT_VEC, TYPE_ID_RAW_ARRAY, TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
+    TYPE_ID_CONTINUATION, TYPE_ID_FUNCTION_OBJECT, TYPE_ID_KEYWORD, TYPE_ID_MULTI_ARITY_FUNCTION,
+    TYPE_ID_PERSISTENT_MAP, TYPE_ID_PERSISTENT_SET, TYPE_ID_PERSISTENT_VEC, TYPE_ID_RAW_ARRAY,
+    TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
 };
 
 use std::cell::{Cell, RefCell};
@@ -3750,8 +3749,6 @@ pub struct ExceptionHandler {
     pub resume_local: isize,
 }
 
-
-
 /// Send+Sync wrapper for *mut PerThreadData so it can be stored in Mutex<Vec<...>>.
 /// SAFETY: PerThreadData is only accessed by its owning thread during execution,
 /// and by GC while all threads are paused.
@@ -4839,21 +4836,6 @@ impl Runtime {
         }
 
         Ok(obj_ptr)
-    }
-
-    unsafe fn buffer_between<T>(start: *const T, end: *const T) -> &'static [T] {
-        unsafe {
-            let len = end.offset_from(start);
-            slice::from_raw_parts(start, len as usize)
-        }
-    }
-
-    fn find_function_for_pc(&self, pc: usize) -> Option<&Function> {
-        self.functions.iter().find(|f| {
-            let start = f.pointer.into();
-            let end = start + f.size;
-            pc >= start && pc < end
-        })
     }
 
     // Exception handling methods

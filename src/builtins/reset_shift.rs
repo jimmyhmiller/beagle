@@ -277,10 +277,6 @@ pub fn rebuild_segment_gc_prev_links_from_caller_chain(
 // a separate opaque-bytes heap object pointed to by `FIELD_SEGMENT_PTR`.
 //
 // Many of the `FIELD_PROMPT_*` / `FIELD_EXC_*` slots are holdovers
-// from v1 and are unused by the new reset/shift path. They're kept as
-// zero-filled placeholders so that the on-disk layout stays at 18
-// fields (Refactor B will likely compact them).
-
 /// Captured continuation: a snapshot of the stack between a shift
 /// point and its enclosing reset. Stored as a heap object with
 /// `type_id = TYPE_ID_CONTINUATION`.
@@ -291,46 +287,28 @@ pub struct ContinuationObject {
 impl ContinuationObject {
     const FIELD_RESUME_ADDRESS: usize = 0;
     const FIELD_RESULT_LOCAL: usize = 1;
-    /// Unused in Refactor A. Reserved for future use (or removal).
-    const FIELD_HANDLER_ADDRESS: usize = 2;
-    const FIELD_PROMPT_SP: usize = 3;
-    const FIELD_PROMPT_FP: usize = 4;
-    const FIELD_PROMPT_LR: usize = 5;
-    const FIELD_PROMPT_RESULT_LOCAL: usize = 6;
-    const FIELD_PROMPT_ID: usize = 7;
-    const FIELD_EXC_HANDLER_ADDRESS: usize = 8;
-    const FIELD_EXC_RESULT_LOCAL: usize = 9;
-    const FIELD_EXC_RESUME_LOCAL: usize = 10;
-    const FIELD_EXC_HANDLER_ID: usize = 11;
-    const FIELD_EXC_HAS_HANDLER: usize = 12;
-    const FIELD_SEGMENT_PTR: usize = 13;
+    const FIELD_SEGMENT_PTR: usize = 2;
     /// Offset from the segment base to the **innermost** captured
     /// frame's FP. This is the "resume FP" — the FP the resumed body
     /// starts executing with — and also the entry point for the
     /// saved-FP-chain relocation walk.
-    const FIELD_SEGMENT_FRAME_POINTER_OFFSET: usize = 14;
+    const FIELD_SEGMENT_FRAME_POINTER_OFFSET: usize = 3;
     /// Offset from the segment base to the **outermost** captured
     /// frame's FP. This is where the bottom of the captured region
     /// lands in the destination stack during invocation; the
     /// invocation trampoline uses it to place the copy so the
     /// outermost frame's saved FP/LR slots overlay the trampoline's
     /// own saved caller FP/LR.
-    ///
-    /// (Historically this slot was `segment_gc_frame_offset` and held
-    /// the offset of the topmost GC-prev header. The new invocation
-    /// path rebuilds the GC prev chain from the FP chain on every
-    /// invoke and has no need for that offset, so the slot was
-    /// repurposed.)
-    const FIELD_SEGMENT_GC_FRAME_OFFSET: usize = 15;
-    const FIELD_SEGMENT_SIZE: usize = 16;
+    const FIELD_SEGMENT_OUTERMOST_FP_OFFSET: usize = 4;
+    const FIELD_SEGMENT_SIZE: usize = 5;
     /// The data base address at capture time. Used by compacting GC
     /// to compute the relocation delta when the segment heap object
     /// moves.
-    const FIELD_SEGMENT_ORIGINAL_DATA_BASE: usize = 17;
+    const FIELD_SEGMENT_ORIGINAL_DATA_BASE: usize = 6;
 
     /// Total number of fields; used when allocating a fresh
     /// continuation object.
-    pub const NUM_FIELDS: usize = 18;
+    pub const NUM_FIELDS: usize = 7;
 
     pub fn from_tagged(tagged: usize) -> Option<Self> {
         let heap_obj = HeapObject::try_from_tagged(tagged)?;
@@ -372,7 +350,10 @@ impl ContinuationObject {
 
     /// Returns the offset of the outermost frame pointer within the captured segment data.
     pub fn segment_gc_frame_offset(&self) -> usize {
-        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SEGMENT_GC_FRAME_OFFSET))
+        BuiltInTypes::untag(
+            self.heap_obj
+                .get_field(Self::FIELD_SEGMENT_OUTERMOST_FP_OFFSET),
+        )
     }
 
     /// Returns the size of the captured segment data in bytes.
@@ -389,7 +370,7 @@ impl ContinuationObject {
 
     pub fn set_segment_gc_frame_offset(&self, offset: usize) {
         self.heap_obj.write_field(
-            Self::FIELD_SEGMENT_GC_FRAME_OFFSET as i32,
+            Self::FIELD_SEGMENT_OUTERMOST_FP_OFFSET as i32,
             BuiltInTypes::Int.tag(offset as isize) as usize,
         );
     }
@@ -486,33 +467,10 @@ impl ContinuationObject {
         Some((data_base, data_base + size, data_base + gc_offset))
     }
 
-    /// REFACTOR A compat shim. Called by the resumable exception
-    /// path in `src/builtins/exceptions.rs` to stash handler info in
-    /// a continuation object. That path is reachable only from
-    /// `try/catch (e, resume)` code, which is itself disabled during
-    /// Refactor A (the `push-prompt` stub throws before this runs).
-    /// Kept as a no-op so the call site still type-checks.
-    /// TODO(refactor-b): delete this method and the exception site
-    /// that calls it when resumable try/catch is rebuilt on
-    /// reset/shift.
-    pub fn set_exc_handler_info(
-        &mut self,
-        _handler_address: usize,
-        _result_local: isize,
-        _resume_local: isize,
-        _handler_id: usize,
-    ) {
-    }
-
-    /// Initialize a freshly-allocated continuation heap object with
-    /// just the fields the new reset/shift path cares about. Segment
-    /// metadata is set to zero and expected to be filled in by the
-    /// caller after the backing segment object is allocated.
-    pub fn initialize(
-        heap_obj: &mut HeapObject,
-        resume_address: usize,
-        result_local: isize,
-    ) {
+    /// Initialize a freshly-allocated continuation heap object.
+    /// Segment metadata is set to zero and expected to be filled in
+    /// by the caller after the backing segment object is allocated.
+    pub fn initialize(heap_obj: &mut HeapObject, resume_address: usize, result_local: isize) {
         heap_obj.write_type_id(TYPE_ID_CONTINUATION as usize);
         heap_obj.write_field(
             Self::FIELD_RESUME_ADDRESS as i32,
@@ -522,24 +480,6 @@ impl ContinuationObject {
             Self::FIELD_RESULT_LOCAL as i32,
             BuiltInTypes::Int.tag(result_local) as usize,
         );
-        // Dead fields from the v1 layout. Populated with 0 to keep
-        // the 18-slot on-disk layout stable. TODO(refactor-b):
-        // collapse to a smaller struct.
-        for i in [
-            Self::FIELD_HANDLER_ADDRESS,
-            Self::FIELD_PROMPT_SP,
-            Self::FIELD_PROMPT_FP,
-            Self::FIELD_PROMPT_LR,
-            Self::FIELD_PROMPT_RESULT_LOCAL,
-            Self::FIELD_PROMPT_ID,
-            Self::FIELD_EXC_HANDLER_ADDRESS,
-            Self::FIELD_EXC_RESULT_LOCAL,
-            Self::FIELD_EXC_RESUME_LOCAL,
-            Self::FIELD_EXC_HANDLER_ID,
-            Self::FIELD_EXC_HAS_HANDLER,
-        ] {
-            heap_obj.write_field(i as i32, BuiltInTypes::Int.tag(0) as usize);
-        }
         heap_obj.write_field(
             Self::FIELD_SEGMENT_PTR as i32,
             BuiltInTypes::null_value() as usize,
@@ -549,7 +489,7 @@ impl ContinuationObject {
             BuiltInTypes::Int.tag(0) as usize,
         );
         heap_obj.write_field(
-            Self::FIELD_SEGMENT_GC_FRAME_OFFSET as i32,
+            Self::FIELD_SEGMENT_OUTERMOST_FP_OFFSET as i32,
             BuiltInTypes::Int.tag(0) as usize,
         );
         heap_obj.write_field(

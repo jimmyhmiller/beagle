@@ -1,22 +1,4 @@
 use super::*;
-use crate::save_gc_context;
-
-pub fn decode_arm_mov_imm3(words: &[u32], reg: u8) -> Option<usize> {
-    if words.len() < 3 {
-        return None;
-    }
-    let mut value = 0usize;
-    for &word in words.iter().take(3) {
-        let rd = (word & 0x1f) as u8;
-        if rd != reg {
-            return None;
-        }
-        let imm16 = ((word >> 5) & 0xffff) as usize;
-        let hw = ((word >> 21) & 0x3) as usize;
-        value |= imm16 << (hw * 16);
-    }
-    Some(value)
-}
 
 #[inline]
 pub unsafe fn allocate_string_or_throw(

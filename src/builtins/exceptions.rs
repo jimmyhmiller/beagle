@@ -118,19 +118,6 @@ pub unsafe extern "C" fn throw_exception(
                 )
             };
 
-            // Store exception handler info in the continuation so it can be
-            // re-pushed when the continuation is invoked (for multi-throw support)
-            {
-                let mut cont_obj = ContinuationObject::from_tagged(cont_ptr)
-                    .expect("continuation pointer invalid after capture");
-                cont_obj.set_exc_handler_info(
-                    handler.handler_address,
-                    handler.result_local,
-                    handler.resume_local,
-                    handler.handler_id,
-                );
-            }
-
             // Write exception to handler's result_local (exception binding)
             let exception_ptr =
                 (handler.frame_pointer as isize).wrapping_add(handler.result_local) as *mut usize;
