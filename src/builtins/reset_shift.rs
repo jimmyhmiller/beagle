@@ -300,15 +300,14 @@ impl ContinuationObject {
     /// outermost frame's saved FP/LR slots overlay the trampoline's
     /// own saved caller FP/LR.
     const FIELD_SEGMENT_OUTERMOST_FP_OFFSET: usize = 4;
-    const FIELD_SEGMENT_SIZE: usize = 5;
     /// The data base address at capture time. Used by compacting GC
     /// to compute the relocation delta when the segment heap object
     /// moves.
-    const FIELD_SEGMENT_ORIGINAL_DATA_BASE: usize = 6;
+    const FIELD_SEGMENT_ORIGINAL_DATA_BASE: usize = 5;
 
     /// Total number of fields; used when allocating a fresh
     /// continuation object.
-    pub const NUM_FIELDS: usize = 7;
+    pub const NUM_FIELDS: usize = 6;
 
     pub fn from_tagged(tagged: usize) -> Option<Self> {
         let heap_obj = HeapObject::try_from_tagged(tagged)?;
@@ -357,8 +356,16 @@ impl ContinuationObject {
     }
 
     /// Returns the size of the captured segment data in bytes.
+    /// Derived from the segment heap object's header — no stored field needed.
     pub fn segment_size(&self) -> usize {
-        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_SEGMENT_SIZE))
+        let seg_tagged = self.segment_ptr();
+        if seg_tagged == 0
+            || seg_tagged == BuiltInTypes::null_value() as usize
+            || !BuiltInTypes::is_heap_pointer(seg_tagged)
+        {
+            return 0;
+        }
+        HeapObject::from_tagged(seg_tagged).fields_size()
     }
 
     pub fn set_segment_frame_pointer_offset(&self, offset: usize) {
@@ -372,13 +379,6 @@ impl ContinuationObject {
         self.heap_obj.write_field(
             Self::FIELD_SEGMENT_OUTERMOST_FP_OFFSET as i32,
             BuiltInTypes::Int.tag(offset as isize) as usize,
-        );
-    }
-
-    pub fn set_segment_size(&self, size: usize) {
-        self.heap_obj.write_field(
-            Self::FIELD_SEGMENT_SIZE as i32,
-            BuiltInTypes::Int.tag(size as isize) as usize,
         );
     }
 
@@ -490,10 +490,6 @@ impl ContinuationObject {
         );
         heap_obj.write_field(
             Self::FIELD_SEGMENT_OUTERMOST_FP_OFFSET as i32,
-            BuiltInTypes::Int.tag(0) as usize,
-        );
-        heap_obj.write_field(
-            Self::FIELD_SEGMENT_SIZE as i32,
             BuiltInTypes::Int.tag(0) as usize,
         );
         heap_obj.write_field(
@@ -715,7 +711,6 @@ pub unsafe fn capture_continuation_runtime_inner(
     cont.set_segment_ptr_with_barrier(runtime, segment_heap_ptr);
     cont.set_segment_frame_pointer_offset(innermost_fp_offset);
     cont.set_segment_gc_frame_offset(outermost_fp_offset);
-    cont.set_segment_size(stack_size);
     if segment_heap_ptr != BuiltInTypes::null_value() as usize {
         cont.set_segment_original_data_base(segment_data_base_at_capture);
     }
