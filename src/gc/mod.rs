@@ -97,6 +97,11 @@ pub trait Allocator {
 
     fn get_allocation_options(&self) -> AllocatorOptions;
 
+    /// Check whether the allocator can satisfy an allocation of `words`
+    /// without triggering garbage collection. Used by `ensure_space_for`
+    /// to pre-trigger GC so that subsequent allocations are GC-free.
+    fn can_allocate(&self, words: usize, kind: BuiltInTypes) -> bool;
+
     /// Write barrier for generational GC.
     ///
     /// Called after writing a pointer value into a heap object's field.

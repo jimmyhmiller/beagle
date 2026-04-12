@@ -11,8 +11,8 @@ use super::{
     AllocateAction, Allocator, AllocatorOptions, mark_and_sweep::MarkAndSweep,
     stack_walker::StackWalker,
 };
-use crate::collections::TYPE_ID_FRAME;
 use crate::builtins::reset_shift::ContinuationObject;
+use crate::collections::TYPE_ID_FRAME;
 
 /// Represents a reference to a GC root that needs updating after collection.
 /// Points to a mutable slot holding the root value (stack slots, GlobalObjectBlock entries).
@@ -480,26 +480,6 @@ impl GenerationalGC {
         slots
     }
 
-    fn update_continuation_segments(&mut self) {
-        let runtime = crate::get_runtime().get_mut();
-
-        // GC runs while all threads are paused at safepoints, so it's safe to
-        // iterate the registry and dereference each thread's per-thread data.
-        let registry = runtime.per_thread_registry.lock().unwrap();
-        for ptd_ptr in registry.iter() {
-            let ptd = unsafe { &mut *ptd_ptr.0 };
-
-            for saved_ptr in ptd.saved_continuation_ptrs.iter_mut() {
-                if *saved_ptr != 0 && BuiltInTypes::is_heap_pointer(*saved_ptr) {
-                    let untagged = BuiltInTypes::untag(*saved_ptr);
-                    if self.young.contains(untagged as *const u8) {
-                        *saved_ptr = self.copy(*saved_ptr);
-                    }
-                }
-            }
-        }
-    }
-
     fn should_collect_old_before_minor(&self) -> bool {
         let promotion_budget = self.young.allocation_offset();
         promotion_budget != 0 && self.old.free_bytes() < promotion_budget
@@ -587,6 +567,14 @@ impl Allocator for GenerationalGC {
 
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.options
+    }
+
+    fn can_allocate(&self, words: usize, _kind: BuiltInTypes) -> bool {
+        if self.too_large_for_young(words) {
+            // Conservative: large objects go to old gen, can't cheaply check free list
+            return false;
+        }
+        self.young.can_allocate(Word::from_word(words))
     }
 
     /// Write barrier: record old-to-young pointers.
@@ -807,9 +795,6 @@ impl GenerationalGC {
         }
 
         self.process_all_roots(stack_roots);
-
-        // Update suspended caller-frame roots
-        self.update_continuation_segments();
 
         // Process old gen objects found on stack - update their young gen references.
         // This scans one level deep for old gen objects directly referenced from stack.
@@ -1176,55 +1161,55 @@ impl GenerationalGC {
                 String::new()
             };
             for (field_index, field) in object.get_fields_mut().iter_mut().enumerate() {
-                if let Some(heap_obj) = HeapObject::try_from_tagged(*field) {
-                    if self.young.contains(heap_obj.get_pointer()) {
-                        if !self.young.contains_allocated(heap_obj.get_pointer()) {
-                            let fields = initial_fields
-                                .iter()
-                                .enumerate()
-                                .map(|(i, value)| format!("{}:{:#x}", i, value))
-                                .collect::<Vec<_>>()
-                                .join(" ");
-                            panic!(
-                                "Stale young gen pointer {:#x} found while scanning copied object type {} at {:#x} field {} (field_count={}, young alloc_offset={}){} fields=[{}]",
-                                *field,
+                if let Some(heap_obj) = HeapObject::try_from_tagged(*field)
+                    && self.young.contains(heap_obj.get_pointer())
+                {
+                    if !self.young.contains_allocated(heap_obj.get_pointer()) {
+                        let fields = initial_fields
+                            .iter()
+                            .enumerate()
+                            .map(|(i, value)| format!("{}:{:#x}", i, value))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        panic!(
+                            "Stale young gen pointer {:#x} found while scanning copied object type {} at {:#x} field {} (field_count={}, young alloc_offset={}){} fields=[{}]",
+                            *field,
+                            container_type_id,
+                            container_untagged,
+                            field_index,
+                            initial_fields.len(),
+                            self.young.allocation_offset(),
+                            container_struct_info,
+                            fields,
+                        );
+                    }
+                    if std::env::var("BEAGLE_DEBUG_PROMOTION").is_ok() {
+                        let pointer = heap_obj.untagged() as *const usize;
+                        let raw_header = unsafe { *pointer };
+                        let header = Header::from_usize(raw_header);
+                        let large_size_words = if header.large {
+                            Some(unsafe { *pointer.add(1) })
+                        } else {
+                            None
+                        };
+                        if large_size_words.is_some_and(|words| words > (1024 * 1024)) {
+                            eprintln!(
+                                "[promotion-field] container_type={} container={:#x} field_index={} field={:#x} raw_header={:#x} type_id={} inline_size={} large_size_words={:?} opaque={}",
                                 container_type_id,
                                 container_untagged,
                                 field_index,
-                                initial_fields.len(),
-                                self.young.allocation_offset(),
-                                container_struct_info,
-                                fields,
+                                *field,
+                                raw_header,
+                                header.type_id,
+                                header.size,
+                                large_size_words,
+                                header.opaque
                             );
                         }
-                        if std::env::var("BEAGLE_DEBUG_PROMOTION").is_ok() {
-                            let pointer = heap_obj.untagged() as *const usize;
-                            let raw_header = unsafe { *pointer };
-                            let header = Header::from_usize(raw_header);
-                            let large_size_words = if header.large {
-                                Some(unsafe { *pointer.add(1) })
-                            } else {
-                                None
-                            };
-                            if large_size_words.is_some_and(|words| words > (1024 * 1024)) {
-                                eprintln!(
-                                    "[promotion-field] container_type={} container={:#x} field_index={} field={:#x} raw_header={:#x} type_id={} inline_size={} large_size_words={:?} opaque={}",
-                                    container_type_id,
-                                    container_untagged,
-                                    field_index,
-                                    *field,
-                                    raw_header,
-                                    header.type_id,
-                                    header.size,
-                                    large_size_words,
-                                    header.opaque
-                                );
-                            }
-                        }
-                        #[cfg(feature = "debug-gc")]
-                        eprintln!("[GC DEBUG]   copying young-gen field {:#x}", *field);
-                        *field = self.copy(*field);
                     }
+                    #[cfg(feature = "debug-gc")]
+                    eprintln!("[GC DEBUG]   copying young-gen field {:#x}", *field);
+                    *field = self.copy(*field);
                 }
             }
             let segment_slots = self.collect_continuation_segment_slots(&object);

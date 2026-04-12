@@ -281,12 +281,7 @@ impl CompactingHeap {
             return;
         };
         if gc_frame_top >= segment_base && gc_frame_top < segment_top {
-            StackWalker::walk_segment_gc_roots(
-                gc_frame_top,
-                segment_base,
-                segment_top,
-                |slot_addr, slot_value| callback(slot_addr, slot_value),
-            );
+            StackWalker::walk_segment_gc_roots(gc_frame_top, segment_base, segment_top, callback);
         }
     }
 
@@ -477,23 +472,6 @@ impl CompactingHeap {
             }
         }
     }
-
-    fn gc_continuations(&mut self) {
-        let runtime = crate::get_runtime().get_mut();
-
-        // GC runs while all threads are paused at safepoints, so it's safe to
-        // iterate the registry and dereference each thread's per-thread data.
-        let registry = runtime.per_thread_registry.lock().unwrap();
-        for ptd_ptr in registry.iter() {
-            let ptd = unsafe { &mut *ptd_ptr.0 };
-
-            for saved_ptr in ptd.saved_continuation_ptrs.iter_mut() {
-                if *saved_ptr != 0 && BuiltInTypes::is_heap_pointer(*saved_ptr) {
-                    *saved_ptr = self.copy_using_cheneys_algorithm(*saved_ptr);
-                }
-            }
-        }
-    }
 }
 
 impl Allocator for CompactingHeap {
@@ -568,12 +546,7 @@ impl Allocator for CompactingHeap {
             }
         }
 
-        // Capture offset BEFORE continuation processing so that copy_remaining
-        // will transitively process any objects newly copied by gc_continuations.
         let start_offset = self.to_space.allocation_offset;
-
-        // Process suspended caller-frame roots
-        self.gc_continuations();
 
         unsafe { self.copy_remaining(start_offset) };
 
@@ -613,5 +586,9 @@ impl Allocator for CompactingHeap {
 
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.options
+    }
+
+    fn can_allocate(&self, words: usize, _kind: BuiltInTypes) -> bool {
+        self.from_space.allocation_offset + words * 8 < self.from_space.byte_count()
     }
 }

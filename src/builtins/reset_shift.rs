@@ -632,12 +632,15 @@ pub unsafe fn capture_continuation_runtime_inner(
 
     let runtime = crate::get_runtime().get_mut();
 
-    // Allocate the continuation heap object.
-    let cont_ptr = match runtime.allocate(
-        ContinuationObject::NUM_FIELDS + 3, // +3 word header slack, matches historical allocation
-        stack_pointer,
-        BuiltInTypes::HeapObject,
-    ) {
+    let cont_words = ContinuationObject::NUM_FIELDS + 3; // +3 word header slack
+    let segment_words = stack_size.div_ceil(8);
+
+    // Pre-trigger GC so both allocations below are GC-free.
+    // This eliminates the need for temporary rooting between them.
+    runtime.ensure_space_for(cont_words + segment_words + 6, stack_pointer);
+
+    // Allocate the continuation heap object (no GC possible).
+    let cont_ptr = match runtime.allocate_no_gc(cont_words, BuiltInTypes::HeapObject) {
         Ok(ptr) => ptr,
         Err(_) => unsafe {
             crate::builtins::throw_runtime_error(
@@ -651,16 +654,10 @@ pub unsafe fn capture_continuation_runtime_inner(
     let mut cont_obj = HeapObject::from_tagged(cont_ptr);
     ContinuationObject::initialize(&mut cont_obj, resume_address, result_local_offset);
 
-    // Root the continuation across the segment allocation so GC
-    // running during the segment allocate doesn't collect it.
-    crate::runtime::per_thread_data()
-        .saved_continuation_ptrs
-        .push(cont_ptr);
-
-    let segment_words = (stack_size + 7) / 8;
+    // Allocate the segment (no GC possible — ensure_space_for guaranteed capacity).
     let mut segment_data_base_at_capture = 0usize;
     let segment_heap_ptr = if segment_words > 0 {
-        match runtime.allocate(segment_words, stack_pointer, BuiltInTypes::HeapObject) {
+        match runtime.allocate_no_gc(segment_words, BuiltInTypes::HeapObject) {
             Ok(ptr) => {
                 let seg_obj = HeapObject::from_tagged(ptr);
                 let header_ptr = seg_obj.untagged() as *mut usize;
@@ -674,9 +671,7 @@ pub unsafe fn capture_continuation_runtime_inner(
                 segment_data_base_at_capture = data_ptr;
 
                 // Copy the live frames [stack_pointer, capture_top)
-                // into the heap object. The live frames remain in
-                // place on the main stack; this is a snapshot for
-                // later resume.
+                // into the heap object.
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         stack_pointer as *const u8,
@@ -715,13 +710,7 @@ pub unsafe fn capture_continuation_runtime_inner(
         BuiltInTypes::null_value() as usize
     };
 
-    // Re-read the cont pointer in case GC moved it during segment allocation.
-    let cont_ptr = crate::runtime::per_thread_data()
-        .saved_continuation_ptrs
-        .last()
-        .copied()
-        .unwrap_or(cont_ptr);
-
+    // Wire the segment into the continuation object.
     let mut cont = ContinuationObject::from_tagged(cont_ptr).unwrap();
     cont.set_segment_ptr_with_barrier(runtime, segment_heap_ptr);
     cont.set_segment_frame_pointer_offset(innermost_fp_offset);
@@ -730,17 +719,6 @@ pub unsafe fn capture_continuation_runtime_inner(
     if segment_heap_ptr != BuiltInTypes::null_value() as usize {
         cont.set_segment_original_data_base(segment_data_base_at_capture);
     }
-
-    let cont_ptr = crate::runtime::per_thread_data()
-        .saved_continuation_ptrs
-        .last()
-        .copied()
-        .unwrap_or(cont_ptr);
-
-    // Drop the temporary root.
-    let _ = crate::runtime::per_thread_data()
-        .saved_continuation_ptrs
-        .pop();
 
     cont_ptr
 }

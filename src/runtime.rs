@@ -105,12 +105,10 @@ impl GlobalObjectBlock {
         let next = heap_obj.get_field(0);
         if next == GLOBAL_BLOCK_FREE_SLOT || next == 0 {
             None
-        } else if let Some(next_obj) = HeapObject::try_from_tagged(next) {
-            Some(GlobalObjectBlock {
+        } else {
+            HeapObject::try_from_tagged(next).map(|next_obj| GlobalObjectBlock {
                 ptr: next_obj.tagged_pointer(),
             })
-        } else {
-            None
         }
     }
 
@@ -3119,115 +3117,6 @@ pub(crate) fn cached_thread_global_ptr() -> *mut ThreadGlobal {
 // Effect Handler Stack (Thread-Local)
 // ============================================================================
 
-/// An entry in the handler stack.
-/// Each entry maps a protocol key (e.g., "Handler<Async>") to a handler instance.
-#[derive(Clone, Debug)]
-pub struct HandlerEntry {
-    /// Protocol key including type args, e.g., "Handler<Async>" or "Handler<Log>"
-    pub protocol_key: String,
-    /// Slot in the GlobalObjectBlock that stores the handler pointer.
-    /// GC updates this slot when the handler object moves.
-    pub root_slot: usize,
-}
-
-/// Thread-local handler stack for effect handlers.
-/// Handlers are scoped - inner handlers shadow outer ones for the same protocol key.
-#[derive(Default)]
-pub struct HandlerStack {
-    entries: Vec<HandlerEntry>,
-}
-
-impl HandlerStack {
-    pub fn new() -> Self {
-        HandlerStack {
-            entries: Vec::new(),
-        }
-    }
-
-    /// Push a handler onto the stack
-    pub fn push(&mut self, protocol_key: String, root_slot: usize) {
-        self.entries.push(HandlerEntry {
-            protocol_key,
-            root_slot,
-        });
-    }
-
-    /// Pop the most recent handler with the given protocol key
-    pub fn pop(&mut self, protocol_key: &str) -> Option<HandlerEntry> {
-        // Find the last entry with matching protocol key
-        if let Some(idx) = self
-            .entries
-            .iter()
-            .rposition(|e| e.protocol_key == protocol_key)
-        {
-            Some(self.entries.remove(idx))
-        } else {
-            None
-        }
-    }
-
-    /// Find the most recent handler for the given protocol key
-    pub fn find(&self, protocol_key: &str) -> Option<&HandlerEntry> {
-        self.entries
-            .iter()
-            .rfind(|e| e.protocol_key == protocol_key)
-    }
-
-    /// Clear all handlers (used on reset)
-    pub fn clear(&mut self) {
-        self.entries.clear();
-    }
-}
-
-thread_local! {
-    /// Per-thread handler stack for effect handlers
-    pub static HANDLER_STACK: RefCell<HandlerStack> = RefCell::new(HandlerStack::new());
-}
-
-/// Push a handler onto the current thread's handler stack
-pub fn push_handler(protocol_key: String, handler_instance: usize) {
-    // Register the handler as a handle root so GC can update it when moved.
-    // This also keeps the handler alive even though the stack entry lives in Rust memory.
-    let runtime = crate::get_runtime().get_mut();
-    let root_slot = runtime.register_temporary_root(handler_instance);
-    assert!(root_slot != 0, "Failed to register handler as GC root");
-
-    HANDLER_STACK.with(|stack| stack.borrow_mut().push(protocol_key, root_slot));
-}
-
-/// Pop a handler from the current thread's handler stack
-pub fn pop_handler(protocol_key: &str) -> Option<usize> {
-    let runtime = crate::get_runtime().get_mut();
-    HANDLER_STACK.with(|stack| {
-        stack.borrow_mut().pop(protocol_key).map(|entry| {
-            let value = runtime.get_handle_root(entry.root_slot);
-            runtime.remove_handle_root(entry.root_slot);
-            value
-        })
-    })
-}
-
-/// Find a handler in the current thread's handler stack
-pub fn find_handler(protocol_key: &str) -> Option<usize> {
-    HANDLER_STACK.with(|stack| {
-        stack
-            .borrow()
-            .find(protocol_key)
-            .map(|e| crate::get_runtime().get().get_handle_root(e.root_slot))
-    })
-}
-
-/// Clear the handler stack (called on reset)
-pub fn clear_handler_stack() {
-    let runtime = crate::get_runtime().get_mut();
-    HANDLER_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        for entry in stack.entries.drain(..) {
-            runtime.remove_handle_root(entry.root_slot);
-        }
-    });
-}
-
 // Dynamic variable bindings are now implemented via continuation marks.
 // See install_continuation_mark/uninstall_continuation_mark in builtins.rs.
 // Mark entries are stored as heap objects in frame-local slots, automatically
@@ -3494,6 +3383,10 @@ impl Allocator for Memory {
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.heap.get_allocation_options()
     }
+
+    fn can_allocate(&self, words: usize, kind: BuiltInTypes) -> bool {
+        self.heap.can_allocate(words, kind)
+    }
 }
 
 pub enum EnumVariant {
@@ -3749,30 +3642,23 @@ pub struct ExceptionHandler {
     pub resume_local: isize,
 }
 
-/// Send+Sync wrapper for *mut PerThreadData so it can be stored in Mutex<Vec<...>>.
-/// SAFETY: PerThreadData is only accessed by its owning thread during execution,
-/// and by GC while all threads are paused.
-#[derive(Clone, Copy)]
-pub struct PerThreadDataPtr(pub *mut PerThreadData);
-unsafe impl Send for PerThreadDataPtr {}
-unsafe impl Sync for PerThreadDataPtr {}
-
 /// Per-thread state stored in thread-local storage. Each thread owns its own
 /// instance, eliminating data races without needing locks on the hot path.
-/// A registry of raw pointers on Runtime allows GC to scan all threads' data.
 pub struct PerThreadData {
     pub exception_handlers: Vec<ExceptionHandler>,
-    /// Temporary roots for ContinuationObjects that are mid-construction during
-    /// capture/allocation. This is not runtime control-flow state.
-    pub saved_continuation_ptrs: Vec<usize>,
     pub thread_exception_handler_fn: Option<usize>,
+}
+
+impl Default for PerThreadData {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PerThreadData {
     pub fn new() -> Self {
         Self {
             exception_handlers: Vec::new(),
-            saved_continuation_ptrs: Vec::new(),
             thread_exception_handler_fn: None,
         }
     }
@@ -3783,8 +3669,7 @@ thread_local! {
         const { std::cell::Cell::new(std::ptr::null_mut()) };
 }
 
-/// Initialize per-thread data for the current thread. Returns the raw pointer
-/// for registration with the Runtime's per_thread_registry.
+/// Initialize per-thread data for the current thread.
 pub fn init_per_thread_data() -> *mut PerThreadData {
     let ptr = Box::into_raw(Box::new(PerThreadData::new()));
     THREAD_DATA_PTR.with(|cell| cell.set(ptr));
@@ -3865,16 +3750,8 @@ pub struct Runtime {
     /// Key = "protocol_name/method_name"
     /// Boxed to keep pointers stable when HashMap reallocates
     dispatch_tables: HashMap<String, Box<DispatchTable>>,
-    stacks_for_continuation_swapping: Vec<ContinuationStack>,
-    // All per-thread state is behind a Mutex to prevent data races when
-    // multiple threads access the Runtime concurrently via SyncUnsafeCell.
-    /// Registry of raw pointers to each thread's PerThreadData.
-    /// Used by GC to scan all threads' continuation state while threads are paused.
-    pub per_thread_registry: Mutex<Vec<PerThreadDataPtr>>,
     // Counter for generating unique prompt IDs to distinguish sequential handlers
     pub prompt_id_counter: AtomicUsize,
-    // Counter for generating unique detached segment IDs for captured continuations
-    pub captured_segment_id_counter: AtomicUsize,
     // Global default uncaught exception handler (Beagle function pointer)
     pub default_exception_handler_fn: Option<usize>,
     // Namespace ID for keyword GC roots
@@ -3930,17 +3807,6 @@ pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {
     stack
 }
 
-type ContinuationStackBuffer = [usize; 512];
-
-fn new_continuation_stack_buffer() -> ContinuationStackBuffer {
-    [0; 512]
-}
-
-struct ContinuationStack {
-    is_used: AtomicBool,
-    stack: ContinuationStackBuffer,
-}
-
 impl Runtime {
     pub fn new(
         command_line_arguments: CommandLineArguments,
@@ -3953,7 +3819,7 @@ impl Runtime {
             .expect("Failed to reserve address space for jump table");
         let jump_table_base_ptr = jump_table_reserved.as_ptr() as usize;
 
-        Self {
+        let runtime = Self {
             printer,
             command_line_arguments: command_line_arguments.clone(),
             memory: Memory {
@@ -3998,17 +3864,7 @@ impl Runtime {
             protocol_info: HashMap::new(),
             dispatch_tables: HashMap::new(),
             diagnostic_store: Arc::new(Mutex::new(crate::compiler::DiagnosticStore::new())),
-            stacks_for_continuation_swapping: vec![ContinuationStack {
-                is_used: AtomicBool::new(false),
-                stack: [0; 512],
-            }],
-            per_thread_registry: {
-                // Initialize main thread's per-thread data
-                let ptr = init_per_thread_data();
-                Mutex::new(vec![PerThreadDataPtr(ptr)])
-            },
             prompt_id_counter: AtomicUsize::new(1),
-            captured_segment_id_counter: AtomicUsize::new(1),
             default_exception_handler_fn: None,
             keyword_namespace: 0, // Will be set when first keyword is allocated
             pending_heap_bindings: Mutex::new(Vec::new()),
@@ -4018,7 +3874,10 @@ impl Runtime {
             event_loops: EventLoopRegistry::new(),
             callbacks: Vec::new(),
             function_struct_id: 0, // Will be set by register_function_struct()
-        }
+        };
+        // Initialize main thread's per-thread data (exception handlers, etc.)
+        init_per_thread_data();
+        runtime
     }
 
     /// Register the built-in Function struct (beagle.core/Function).
@@ -4603,6 +4462,59 @@ impl Runtime {
         self.keyword_heap_ptrs[index] = Some(ptr);
 
         Ok(ptr)
+    }
+
+    /// Pre-trigger GC if needed so that `total_words` of allocation
+    /// can succeed without a GC cycle. After this returns, the caller
+    /// must use `allocate_no_gc` for the actual allocations.
+    pub fn ensure_space_for(&mut self, total_words: usize, stack_pointer: usize) {
+        let frame_pointer = crate::builtins::get_saved_frame_pointer();
+        let options = self.memory.heap.get_allocation_options();
+
+        if options.gc_always {
+            self.run_gc(stack_pointer, frame_pointer);
+            return;
+        }
+
+        if !self
+            .memory
+            .heap
+            .can_allocate(total_words, BuiltInTypes::HeapObject)
+        {
+            self.run_gc(stack_pointer, frame_pointer);
+            if !self
+                .memory
+                .heap
+                .can_allocate(total_words, BuiltInTypes::HeapObject)
+            {
+                self.memory.heap.grow();
+            }
+        }
+    }
+
+    /// Allocate without triggering GC. Must be called after
+    /// `ensure_space_for` has guaranteed sufficient capacity.
+    /// Panics if the allocator signals GC is needed.
+    pub fn allocate_no_gc(
+        &mut self,
+        words: usize,
+        kind: BuiltInTypes,
+    ) -> Result<usize, Box<dyn Error>> {
+        let result = self.memory.heap.try_allocate(words, kind);
+        match result {
+            Ok(AllocateAction::Allocated(value)) => {
+                assert!(value.is_aligned());
+                let value = kind.tag(value as isize);
+                Ok(value as usize)
+            }
+            Ok(AllocateAction::Gc) => {
+                panic!(
+                    "allocate_no_gc: GC needed for {} words — ensure_space_for was not called or underestimated",
+                    words
+                );
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub fn allocate(
@@ -8439,34 +8351,5 @@ impl Runtime {
 
     pub fn get_command_line_args(&self) -> &CommandLineArguments {
         &self.command_line_arguments
-    }
-
-    pub fn get_stack_for_continuiation_swapping(&mut self) -> (*const u8, usize) {
-        for (i, stack) in self.stacks_for_continuation_swapping.iter().enumerate() {
-            if stack
-                .is_used
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-            {
-                return (
-                    unsafe {
-                        stack.stack.as_ptr().offset(stack.stack.len() as isize - 64) as *const u8
-                    },
-                    i,
-                );
-            }
-        }
-        self.stacks_for_continuation_swapping
-            .push(ContinuationStack {
-                is_used: AtomicBool::new(true),
-                stack: new_continuation_stack_buffer(),
-            });
-        self.get_stack_for_continuiation_swapping()
-    }
-
-    pub fn release_stack_for_continuation_swapping(&mut self, index: usize) {
-        if let Some(stack) = self.stacks_for_continuation_swapping.get(index) {
-            stack.is_used.store(false, Ordering::SeqCst);
-        }
     }
 }

@@ -102,4 +102,8 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         // No lock needed - card marking is atomic and only read during GC (which holds the lock)
         self.alloc.mark_card_unconditional(object_ptr);
     }
+
+    fn can_allocate(&self, words: usize, kind: BuiltInTypes) -> bool {
+        self.alloc.can_allocate(words, kind)
+    }
 }

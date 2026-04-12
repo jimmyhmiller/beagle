@@ -133,13 +133,9 @@ pub extern "C" fn get_and_unregister_temp_root(temporary_root_id: usize) -> usiz
 /// 4. Run Beagle code (first instruction is __pause, handles any pending GC)
 /// 5. On cleanup: acquire gc_lock, decrement count, remove thread root, release
 pub extern "C" fn run_thread(_unused: usize) -> usize {
-    // Initialize per-thread data for this child thread and register with the runtime
-    let ptd_ptr = crate::runtime::init_per_thread_data();
+    // Initialize per-thread data for this child thread
+    let _ptd_ptr = crate::runtime::init_per_thread_data();
     let runtime = get_runtime().get_mut();
-    {
-        let mut registry = runtime.per_thread_registry.lock().unwrap();
-        registry.push(crate::runtime::PerThreadDataPtr(ptd_ptr));
-    }
     let my_thread_id = thread::current().id();
 
     // === STARTUP ===
@@ -246,11 +242,7 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
                     .lock()
                     .unwrap()
                     .remove(&my_thread_id);
-                // Unregister per-thread data from the registry and clean it up
-                {
-                    let mut registry = runtime.per_thread_registry.lock().unwrap();
-                    registry.retain(|p| p.0 != ptd_ptr);
-                }
+                // Clean up per-thread data
                 crate::runtime::cleanup_per_thread_data();
 
                 // Fire USDT probes for thread unregistration and exit

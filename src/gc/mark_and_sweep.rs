@@ -212,7 +212,7 @@ impl FreeList {
             let r = &mut self.ranges[i];
             if r.can_hold(size) {
                 let addr = r.offset;
-                if addr % 8 != 0 {
+                if !addr.is_multiple_of(8) {
                     panic!(
                         "GC internal error: free list entry at {:#x} is not 8-byte aligned",
                         addr
@@ -475,19 +475,6 @@ impl MarkAndSweep {
         StackWalker::walk_stack_roots(gc_frame_top, |slot_addr, pointer| {
             push_root(&mut to_mark, pointer, slot_addr, "stack-root");
         });
-
-        // GC runs while all threads are paused at safepoints, so it's safe to
-        // iterate the registry and dereference each thread's per-thread data.
-        {
-            let runtime = crate::get_runtime().get();
-            let registry = runtime.per_thread_registry.lock().unwrap();
-            for ptd_ptr in registry.iter() {
-                let ptd = unsafe { &mut *ptd_ptr.0 };
-                for saved_ptr in ptd.saved_continuation_ptrs.iter().copied() {
-                    push_root(&mut to_mark, saved_ptr, 0, "saved-continuation");
-                }
-            }
-        }
 
         while let Some(pending) = to_mark.pop() {
             log_suspicious_mark(&pending);
@@ -896,6 +883,12 @@ impl Allocator for MarkAndSweep {
 
     fn get_allocation_options(&self) -> AllocatorOptions {
         self.options
+    }
+
+    fn can_allocate(&self, _words: usize, _kind: BuiltInTypes) -> bool {
+        // Mark-and-sweep uses a free list; conservatively return false
+        // to force a GC pre-pass. This is safe — just slightly eager.
+        false
     }
 }
 
