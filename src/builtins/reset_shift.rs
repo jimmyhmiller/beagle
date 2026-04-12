@@ -293,21 +293,14 @@ impl ContinuationObject {
     /// starts executing with — and also the entry point for the
     /// saved-FP-chain relocation walk.
     const FIELD_SEGMENT_FRAME_POINTER_OFFSET: usize = 3;
-    /// Offset from the segment base to the **outermost** captured
-    /// frame's FP. This is where the bottom of the captured region
-    /// lands in the destination stack during invocation; the
-    /// invocation trampoline uses it to place the copy so the
-    /// outermost frame's saved FP/LR slots overlay the trampoline's
-    /// own saved caller FP/LR.
-    const FIELD_SEGMENT_OUTERMOST_FP_OFFSET: usize = 4;
     /// The data base address at capture time. Used by compacting GC
     /// to compute the relocation delta when the segment heap object
     /// moves.
-    const FIELD_SEGMENT_ORIGINAL_DATA_BASE: usize = 5;
+    const FIELD_SEGMENT_ORIGINAL_DATA_BASE: usize = 4;
 
     /// Total number of fields; used when allocating a fresh
     /// continuation object.
-    pub const NUM_FIELDS: usize = 6;
+    pub const NUM_FIELDS: usize = 5;
 
     pub fn from_tagged(tagged: usize) -> Option<Self> {
         let heap_obj = HeapObject::try_from_tagged(tagged)?;
@@ -348,11 +341,36 @@ impl ContinuationObject {
     }
 
     /// Returns the offset of the outermost frame pointer within the captured segment data.
+    /// Derived by walking the saved-FP chain from innermost to outermost.
     pub fn segment_gc_frame_offset(&self) -> usize {
-        BuiltInTypes::untag(
-            self.heap_obj
-                .get_field(Self::FIELD_SEGMENT_OUTERMOST_FP_OFFSET),
-        )
+        let size = self.segment_size();
+        let fp_offset = self.segment_frame_pointer_offset();
+        if size == 0 || fp_offset >= size {
+            return usize::MAX;
+        }
+        let seg_tagged = self.segment_ptr();
+        if seg_tagged == 0
+            || seg_tagged == BuiltInTypes::null_value() as usize
+            || !BuiltInTypes::is_heap_pointer(seg_tagged)
+        {
+            return usize::MAX;
+        }
+        let seg_obj = HeapObject::from_tagged(seg_tagged);
+        let data_base = seg_obj.untagged() + seg_obj.header_size();
+
+        // Walk the saved-FP chain: each frame's [fp+0] holds its caller's FP.
+        // The outermost frame is the last one whose saved-FP is still in range.
+        let mut outermost = fp_offset;
+        let mut fp = data_base + fp_offset;
+        loop {
+            let saved_fp = unsafe { *(fp as *const usize) };
+            if saved_fp < data_base || saved_fp >= data_base + size {
+                break;
+            }
+            outermost = saved_fp - data_base;
+            fp = saved_fp;
+        }
+        outermost
     }
 
     /// Returns the size of the captured segment data in bytes.
@@ -371,13 +389,6 @@ impl ContinuationObject {
     pub fn set_segment_frame_pointer_offset(&self, offset: usize) {
         self.heap_obj.write_field(
             Self::FIELD_SEGMENT_FRAME_POINTER_OFFSET as i32,
-            BuiltInTypes::Int.tag(offset as isize) as usize,
-        );
-    }
-
-    pub fn set_segment_gc_frame_offset(&self, offset: usize) {
-        self.heap_obj.write_field(
-            Self::FIELD_SEGMENT_OUTERMOST_FP_OFFSET as i32,
             BuiltInTypes::Int.tag(offset as isize) as usize,
         );
     }
@@ -486,10 +497,6 @@ impl ContinuationObject {
         );
         heap_obj.write_field(
             Self::FIELD_SEGMENT_FRAME_POINTER_OFFSET as i32,
-            BuiltInTypes::Int.tag(0) as usize,
-        );
-        heap_obj.write_field(
-            Self::FIELD_SEGMENT_OUTERMOST_FP_OFFSET as i32,
             BuiltInTypes::Int.tag(0) as usize,
         );
         heap_obj.write_field(
@@ -624,7 +631,6 @@ pub unsafe fn capture_continuation_runtime_inner(
     // slots — making normal body return flow back to the invoker
     // automatic with no slot patching.
     let innermost_fp_offset = frame_pointer - stack_pointer;
-    let outermost_fp_offset = outermost_body_fp - stack_pointer;
 
     let runtime = crate::get_runtime().get_mut();
 
@@ -710,7 +716,6 @@ pub unsafe fn capture_continuation_runtime_inner(
     let mut cont = ContinuationObject::from_tagged(cont_ptr).unwrap();
     cont.set_segment_ptr_with_barrier(runtime, segment_heap_ptr);
     cont.set_segment_frame_pointer_offset(innermost_fp_offset);
-    cont.set_segment_gc_frame_offset(outermost_fp_offset);
     if segment_heap_ptr != BuiltInTypes::null_value() as usize {
         cont.set_segment_original_data_base(segment_data_base_at_capture);
     }
