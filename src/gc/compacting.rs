@@ -283,6 +283,8 @@ impl CompactingHeap {
         if gc_frame_top >= segment_base && gc_frame_top < segment_top {
             StackWalker::walk_segment_gc_roots(gc_frame_top, segment_base, segment_top, callback);
         }
+        // Restore relative offsets after GC scanning
+        cont.make_fp_links_relative_again();
     }
 
     fn collect_continuation_segment_slots(&mut self, object: &HeapObject) -> Vec<(usize, usize)> {

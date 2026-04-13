@@ -357,6 +357,8 @@ impl MarkAndSweep {
                 &mut push_slot,
             );
         }
+        // Restore relative offsets after GC scanning
+        cont.make_fp_links_relative_again();
     }
 
     /// Check if a pointer is within this allocator's space

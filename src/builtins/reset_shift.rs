@@ -123,147 +123,75 @@ pub fn is_pc_in_reset_function(pc: usize) -> bool {
 //
 // A captured continuation's bytes are stored in a heap object whose
 // payload is a verbatim snapshot of the original stack region. The
-// saved-FP links inside those bytes are absolute addresses, so when
-// the bytes are copied (from stack to heap at capture time, from heap
-// to stack at invoke time, or from old heap location to new heap
-// location by a compacting GC), every saved-FP that fell within the
-// old range needs to be shifted by `new_base - old_base`.
+// saved-FP links inside those bytes are converted to **segment-relative
+// offsets** at capture time. This makes the segment position-independent:
+// compacting GC can move the heap object without invalidating any
+// internal pointers. At invoke time, the offsets are converted back to
+// absolute stack addresses.
 //
-// `relocate_segment_caller_fp_links` walks the caller-FP chain starting
-// at the innermost frame and rewrites each in-range saved-FP by the
-// delta. It stops when the next fp to follow is outside the range,
-// which is how it detects the "top" of the captured region.
-//
-// `relocate_segment_gc_prev_links` is the GC-prev-chain analog for
-// cases where there's no valid FP chain entry point (e.g. the
-// innermost frame was stored directly by a GC chain traversal rather
-// than by the normal FP link scheme).
-//
-// `rebuild_segment_gc_prev_links_from_caller_chain` is the inverse:
-// given an FP chain in the segment, write each frame's GC-prev slot
-// (at `[header - 8]`) to point to its parent frame's header. Used
-// both at capture (to initialize the GC prev chain in the copy) and
-// at invoke (to rebuild it in the destination stack copy).
+// GC-prev links (at `[fp - 16]`) are NOT stored in the segment — they
+// are rebuilt from the FP chain at invoke time and whenever GC needs
+// to scan the segment's roots.
 
-pub fn relocate_segment_caller_fp_links(
+/// Convert saved-FP links from stack-absolute to segment-relative offsets.
+/// Called at capture time after copying stack bytes into the segment.
+fn make_segment_fp_links_relative(
     data_base: usize,
     size: usize,
     fp_offset: usize,
-    original_base: usize,
-) -> usize {
-    if size == 0 || original_base == 0 {
-        return original_base;
+    original_stack_base: usize,
+) {
+    if size == 0 || fp_offset >= size {
+        return;
     }
-    if original_base == data_base {
-        return data_base;
-    }
-
-    let delta = data_base as isize - original_base as isize;
-
-    if fp_offset < size {
-        let mut fp = data_base + fp_offset;
-        while fp >= data_base && fp < data_base + size && fp != 0 {
-            let caller_fp_slot = fp as *mut usize;
-            let caller_fp = unsafe { *caller_fp_slot };
-            let next_fp = if caller_fp >= original_base && caller_fp < original_base + size {
-                let relocated = (caller_fp as isize + delta) as usize;
-                unsafe {
-                    *caller_fp_slot = relocated;
-                }
-                relocated
-            } else {
-                caller_fp
-            };
-
-            if next_fp == 0 || next_fp < data_base || next_fp >= data_base + size {
-                break;
-            }
-            fp = next_fp;
-        }
-    }
-
-    data_base
-}
-
-pub fn relocate_segment_gc_prev_links(
-    data_base: usize,
-    size: usize,
-    gc_frame_offset: usize,
-    original_base: usize,
-) -> usize {
-    if size == 0 || gc_frame_offset >= size || original_base == 0 {
-        return original_base;
-    }
-    if original_base == data_base {
-        return data_base;
-    }
-
-    let delta = data_base as isize - original_base as isize;
-    let mut header_addr = data_base + gc_frame_offset;
-    while header_addr >= data_base && header_addr < data_base + size && header_addr != 0 {
-        let header = Header::from_usize(unsafe { *(header_addr as *const usize) });
-        if header.type_id != TYPE_ID_FRAME {
-            return original_base;
-        }
-
-        let prev_slot = (header_addr - 8) as *mut usize;
-        let prev_val = unsafe { *prev_slot };
-        let next_header = if prev_val >= original_base && prev_val < original_base + size {
-            let relocated = (prev_val as isize + delta) as usize;
-            unsafe {
-                *prev_slot = relocated;
-            }
-            relocated
+    let mut fp = data_base + fp_offset;
+    while fp >= data_base && fp < data_base + size {
+        let saved_slot = fp as *mut usize;
+        let saved_fp = unsafe { *saved_slot };
+        // saved_fp is an absolute stack address; convert to relative offset
+        if saved_fp >= original_stack_base && saved_fp < original_stack_base + size {
+            let relative = saved_fp - original_stack_base;
+            unsafe { *saved_slot = relative };
+            fp = data_base + relative;
         } else {
-            prev_val
-        };
-
-        if next_header == 0 || next_header < data_base || next_header >= data_base + size {
             break;
         }
-        header_addr = next_header;
     }
-
-    data_base
 }
 
-pub fn rebuild_segment_gc_prev_links_from_caller_chain(
-    data_base: usize,
-    size: usize,
+/// Rebuild the GC-prev chain in a region of frames whose saved-FP links
+/// are absolute addresses. Writes each frame's `[fp - 16]` slot to
+/// point to its parent frame's header, or `outer_prev` for the outermost.
+pub fn rebuild_gc_prev_links(
+    base: usize,
+    top: usize,
     fp_offset: usize,
     outer_prev: usize,
 ) -> Option<usize> {
-    if size == 0 || fp_offset >= size {
+    if fp_offset >= top - base {
         return None;
     }
-
-    let segment_top = data_base + size;
-    let mut fp = data_base + fp_offset;
+    let mut fp = base + fp_offset;
     let gc_frame_top = fp.checked_sub(8)?;
 
-    while fp >= data_base + 8 && fp < segment_top {
+    while fp >= base + 8 && fp < top {
         let header_addr = fp - 8;
         let header = Header::from_usize(unsafe { *(header_addr as *const usize) });
         if header.type_id != TYPE_ID_FRAME {
             return None;
         }
-
         let caller_fp = unsafe { *(fp as *const usize) };
-        let prev_value = if caller_fp >= data_base + 8 && caller_fp < segment_top {
+        let prev_value = if caller_fp >= base + 8 && caller_fp < top {
             caller_fp - 8
         } else {
             outer_prev
         };
-        unsafe {
-            *((fp - 16) as *mut usize) = prev_value;
-        }
-
-        if caller_fp < data_base + 8 || caller_fp >= segment_top {
+        unsafe { *((fp - 16) as *mut usize) = prev_value };
+        if caller_fp < base + 8 || caller_fp >= top {
             break;
         }
         fp = caller_fp;
     }
-
     Some(gc_frame_top)
 }
 
@@ -272,11 +200,12 @@ pub fn rebuild_segment_gc_prev_links_from_caller_chain(
 // ============================================================================
 //
 // A captured continuation is a heap object with `type_id =
-// TYPE_ID_CONTINUATION` and the field layout defined below. The
-// object itself holds metadata; the actual saved stack bytes live in
-// a separate opaque-bytes heap object pointed to by `FIELD_SEGMENT_PTR`.
-//
-// Many of the `FIELD_PROMPT_*` / `FIELD_EXC_*` slots are holdovers
+// TYPE_ID_CONTINUATION` and 4 fields: resume_address, result_local,
+// segment_ptr, and frame_pointer_offset. The actual saved stack bytes
+// live in a separate opaque-bytes heap object pointed to by segment_ptr.
+// Saved-FP links inside the segment use segment-relative offsets, making
+// the segment position-independent (no relocation needed after GC moves).
+
 /// Captured continuation: a snapshot of the stack between a shift
 /// point and its enclosing reset. Stored as a heap object with
 /// `type_id = TYPE_ID_CONTINUATION`.
@@ -293,14 +222,10 @@ impl ContinuationObject {
     /// starts executing with — and also the entry point for the
     /// saved-FP-chain relocation walk.
     const FIELD_SEGMENT_FRAME_POINTER_OFFSET: usize = 3;
-    /// The data base address at capture time. Used by compacting GC
-    /// to compute the relocation delta when the segment heap object
-    /// moves.
-    const FIELD_SEGMENT_ORIGINAL_DATA_BASE: usize = 4;
 
     /// Total number of fields; used when allocating a fresh
     /// continuation object.
-    pub const NUM_FIELDS: usize = 5;
+    pub const NUM_FIELDS: usize = 4;
 
     pub fn from_tagged(tagged: usize) -> Option<Self> {
         let heap_obj = HeapObject::try_from_tagged(tagged)?;
@@ -341,8 +266,8 @@ impl ContinuationObject {
     }
 
     /// Returns the offset of the outermost frame pointer within the captured segment data.
-    /// Derived by walking the saved-FP chain from innermost to outermost.
-    pub fn segment_gc_frame_offset(&self) -> usize {
+    /// Derived by walking the saved-FP chain (stored as relative offsets) from innermost outward.
+    pub fn segment_outermost_fp_offset(&self) -> usize {
         let size = self.segment_size();
         let fp_offset = self.segment_frame_pointer_offset();
         if size == 0 || fp_offset >= size {
@@ -358,17 +283,16 @@ impl ContinuationObject {
         let seg_obj = HeapObject::from_tagged(seg_tagged);
         let data_base = seg_obj.untagged() + seg_obj.header_size();
 
-        // Walk the saved-FP chain: each frame's [fp+0] holds its caller's FP.
-        // The outermost frame is the last one whose saved-FP is still in range.
+        // Walk the saved-FP chain: each [fp+0] holds a segment-relative offset.
         let mut outermost = fp_offset;
-        let mut fp = data_base + fp_offset;
+        let mut fp_addr = data_base + fp_offset;
         loop {
-            let saved_fp = unsafe { *(fp as *const usize) };
-            if saved_fp < data_base || saved_fp >= data_base + size {
+            let relative_offset = unsafe { *(fp_addr as *const usize) };
+            if relative_offset >= size {
                 break;
             }
-            outermost = saved_fp - data_base;
-            fp = saved_fp;
+            outermost = relative_offset;
+            fp_addr = data_base + relative_offset;
         }
         outermost
     }
@@ -393,34 +317,12 @@ impl ContinuationObject {
         );
     }
 
-    /// Returns the data base address at the time the segment was captured.
-    pub fn segment_original_data_base(&self) -> usize {
-        BuiltInTypes::untag(
-            self.heap_obj
-                .get_field(Self::FIELD_SEGMENT_ORIGINAL_DATA_BASE),
-        )
-    }
-
-    /// Sets the original data base address for compacting GC relocation detection.
-    pub fn set_segment_original_data_base(&mut self, data_base: usize) {
-        self.heap_obj.write_field(
-            Self::FIELD_SEGMENT_ORIGINAL_DATA_BASE as i32,
-            BuiltInTypes::Int.tag(data_base as isize) as usize,
-        );
-    }
-
     pub fn set_segment_ptr_with_barrier(&mut self, runtime: &mut Runtime, segment_ptr: usize) {
         runtime.set_field_with_barrier(self.tagged_ptr(), Self::FIELD_SEGMENT_PTR, segment_ptr);
     }
 
-    /// Internally, the captured segment's saved-FP links are absolute
-    /// pointers that were valid when the bytes were last copied. If a
-    /// compacting GC has moved the heap object since then, those
-    /// pointers are stale. This method detects that case (by
-    /// comparing `FIELD_SEGMENT_ORIGINAL_DATA_BASE` against the
-    /// current data base) and rewrites the chain in place, updating
-    /// the recorded base so subsequent calls are no-ops.
-    fn normalized_segment_base(&self) -> Option<(usize, usize)> {
+    /// Returns (data_base, size) for the segment, or None if no segment.
+    fn segment_base_and_size(&self) -> Option<(usize, usize)> {
         let seg_tagged = self.segment_ptr();
         if seg_tagged == 0
             || seg_tagged == BuiltInTypes::null_value() as usize
@@ -430,38 +332,18 @@ impl ContinuationObject {
         }
         let seg_obj = HeapObject::from_tagged(seg_tagged);
         let data_base = seg_obj.untagged() + seg_obj.header_size();
-        let size = self.segment_size();
-        let original_base = self.segment_original_data_base();
+        let size = seg_obj.fields_size();
         if size == 0 {
             return None;
         }
-
-        let fp_offset = self.segment_frame_pointer_offset();
-        let gc_offset = self.segment_gc_frame_offset();
-        let caller_moved = fp_offset < size
-            && relocate_segment_caller_fp_links(data_base, size, fp_offset, original_base)
-                != original_base;
-        if fp_offset < size {
-            let _ = rebuild_segment_gc_prev_links_from_caller_chain(data_base, size, fp_offset, 0);
-        } else if gc_offset < size {
-            let _ = relocate_segment_gc_prev_links(data_base, size, gc_offset, original_base);
-        }
-        if caller_moved {
-            self.heap_obj.write_field(
-                Self::FIELD_SEGMENT_ORIGINAL_DATA_BASE as i32,
-                BuiltInTypes::Int.tag(data_base as isize) as usize,
-            );
-        }
-
         Some((data_base, size))
     }
 
     /// Returns (segment_data_base, segment_data_top, innermost_fp) for
-    /// this continuation's captured segment, after normalizing for any
-    /// GC move that may have happened since capture. Returns None if
-    /// the continuation has no captured segment.
+    /// this continuation's captured segment. The FP chain in the segment
+    /// uses relative offsets, so no normalization is needed after GC moves.
     pub fn segment_frame_info(&self) -> Option<(usize, usize, usize)> {
-        let (data_base, size) = self.normalized_segment_base()?;
+        let (data_base, size) = self.segment_base_and_size()?;
         let fp_offset = self.segment_frame_pointer_offset();
         if fp_offset >= size {
             return None;
@@ -469,13 +351,60 @@ impl ContinuationObject {
         Some((data_base, data_base + size, data_base + fp_offset))
     }
 
+    /// Returns (segment_data_base, segment_data_top, outermost_gc_frame_header)
+    /// for GC scanning of the segment's roots. Rebuilds absolute FP and
+    /// GC-prev chains in place so that `StackWalker::walk_segment_gc_roots`
+    /// can traverse them, then converts back to relative offsets afterward.
     pub fn segment_gc_frame_info(&self) -> Option<(usize, usize, usize)> {
-        let (data_base, size) = self.normalized_segment_base()?;
-        let gc_offset = self.segment_gc_frame_offset();
-        if gc_offset >= size {
+        let (data_base, size) = self.segment_base_and_size()?;
+        let fp_offset = self.segment_frame_pointer_offset();
+        let outermost_offset = self.segment_outermost_fp_offset();
+        if fp_offset >= size || outermost_offset >= size {
             return None;
         }
-        Some((data_base, data_base + size, data_base + gc_offset))
+
+        // Temporarily convert relative offsets → absolute for GC scanning
+        let mut fp_addr = data_base + fp_offset;
+        loop {
+            let slot = fp_addr as *mut usize;
+            let relative = unsafe { *slot };
+            if relative >= size {
+                break;
+            }
+            unsafe { *slot = data_base + relative };
+            fp_addr = data_base + relative;
+        }
+
+        // Rebuild GC prev chain with absolute addresses
+        let gc_frame_top = rebuild_gc_prev_links(data_base, data_base + size, fp_offset, 0);
+
+        // Return the outermost frame's header address for GC root scanning
+        let outermost_fp = data_base + outermost_offset;
+        let gc_top = gc_frame_top.unwrap_or(outermost_fp.wrapping_sub(8));
+        Some((data_base, data_base + size, gc_top))
+    }
+
+    /// Convert absolute FP links back to relative offsets. Called after
+    /// GC scanning is done to restore the position-independent representation.
+    pub fn make_fp_links_relative_again(&self) {
+        let Some((data_base, size)) = self.segment_base_and_size() else {
+            return;
+        };
+        let fp_offset = self.segment_frame_pointer_offset();
+        if fp_offset >= size {
+            return;
+        }
+        let mut fp_addr = data_base + fp_offset;
+        loop {
+            let slot = fp_addr as *mut usize;
+            let abs_fp = unsafe { *slot };
+            if abs_fp < data_base || abs_fp >= data_base + size {
+                break;
+            }
+            let relative = abs_fp - data_base;
+            unsafe { *slot = relative };
+            fp_addr = data_base + relative;
+        }
     }
 
     /// Initialize a freshly-allocated continuation heap object.
@@ -497,10 +426,6 @@ impl ContinuationObject {
         );
         heap_obj.write_field(
             Self::FIELD_SEGMENT_FRAME_POINTER_OFFSET as i32,
-            BuiltInTypes::Int.tag(0) as usize,
-        );
-        heap_obj.write_field(
-            Self::FIELD_SEGMENT_ORIGINAL_DATA_BASE as i32,
             BuiltInTypes::Int.tag(0) as usize,
         );
     }
@@ -657,7 +582,6 @@ pub unsafe fn capture_continuation_runtime_inner(
     ContinuationObject::initialize(&mut cont_obj, resume_address, result_local_offset);
 
     // Allocate the segment (no GC possible — ensure_space_for guaranteed capacity).
-    let mut segment_data_base_at_capture = 0usize;
     let segment_heap_ptr = if segment_words > 0 {
         match runtime.allocate_no_gc(segment_words, BuiltInTypes::HeapObject) {
             Ok(ptr) => {
@@ -670,7 +594,6 @@ pub unsafe fn capture_continuation_runtime_inner(
                 }
 
                 let data_ptr = seg_obj.untagged() + seg_obj.header_size();
-                segment_data_base_at_capture = data_ptr;
 
                 // Copy the live frames [stack_pointer, capture_top)
                 // into the heap object.
@@ -682,20 +605,14 @@ pub unsafe fn capture_continuation_runtime_inner(
                     );
                 }
 
-                // Relocate saved-FP links inside the copied bytes
-                // from their original stack addresses to the heap
-                // object addresses.
-                relocate_segment_caller_fp_links(
+                // Convert saved-FP links from stack-absolute to
+                // segment-relative offsets. This makes the segment
+                // position-independent — GC can move it freely.
+                make_segment_fp_links_relative(
                     data_ptr,
                     stack_size,
                     innermost_fp_offset,
                     stack_pointer,
-                );
-                let _ = rebuild_segment_gc_prev_links_from_caller_chain(
-                    data_ptr,
-                    stack_size,
-                    innermost_fp_offset,
-                    0,
                 );
 
                 ptr
@@ -716,9 +633,6 @@ pub unsafe fn capture_continuation_runtime_inner(
     let mut cont = ContinuationObject::from_tagged(cont_ptr).unwrap();
     cont.set_segment_ptr_with_barrier(runtime, segment_heap_ptr);
     cont.set_segment_frame_pointer_offset(innermost_fp_offset);
-    if segment_heap_ptr != BuiltInTypes::null_value() as usize {
-        cont.set_segment_original_data_base(segment_data_base_at_capture);
-    }
 
     cont_ptr
 }
@@ -845,7 +759,7 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         .expect("continuation_trampoline: continuation has no segment data");
     let seg_size = cont.segment_size();
     let innermost_offset = cont.segment_frame_pointer_offset();
-    let outermost_offset = cont.segment_gc_frame_offset();
+    let outermost_offset = cont.segment_outermost_fp_offset();
     let resume_address = cont.resume_address();
     let result_local_offset = cont.result_local();
 
@@ -901,20 +815,18 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         i += 8;
     }
 
-    // 2. Relocate saved-FP chain in dst. Walk from innermost upward
-    //    via saved_fp, adjusting each by delta until a saved_fp falls
-    //    outside the source range.
-    let delta = dst.wrapping_sub(seg_base);
+    // 2. Convert saved-FP chain in dst from segment-relative offsets
+    //    to stack-absolute addresses.
     let mut fp = dst + innermost_offset;
     loop {
         let saved_slot = fp as *mut usize;
-        let saved = unsafe { *saved_slot };
-        if saved < seg_base || saved >= seg_base + seg_size {
+        let relative = unsafe { *saved_slot };
+        if relative >= seg_size {
             break;
         }
-        let relocated = saved.wrapping_add(delta);
-        unsafe { *saved_slot = relocated };
-        fp = relocated;
+        let absolute = dst + relative;
+        unsafe { *saved_slot = absolute };
+        fp = absolute;
     }
 
     // 3. Rebuild GC prev chain in dst. For each frame header (at
