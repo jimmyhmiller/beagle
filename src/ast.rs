@@ -4469,10 +4469,24 @@ impl AstCompiler<'_> {
                 let key_str = self.string_constant(protocol_key.clone());
                 let key_reg = self.ir.assign_new(key_str);
 
-                // Call push_handler builtin
+                // Allocate a fresh prompt tag for this handle's scope and
+                // store it in a local so the pop path can reference the
+                // same value. `push-handler` and the tagged-shift
+                // builtins key into this tag to associate a `perform`
+                // with its enclosing `handle`. Kept in a local across
+                // the body so subsequent reads (e.g., by a tag-aware
+                // pop) survive register-clobbering calls.
+                let tag_value =
+                    self.call_builtin("beagle.builtin/fresh-tag", vec![])?;
+                let unique_tag_name = format!("__handle_tag_{}__", token_range.start);
+                let _tag_local = self.find_or_insert_local(&unique_tag_name);
+                let tag_reg = self.ir.assign_new(tag_value);
+                self.ir.store_local(_tag_local, tag_reg.into());
+
+                // Call push_handler builtin (tag-aware: 3 args)
                 let _ = self.call_builtin(
                     "beagle.builtin/push-handler",
-                    vec![key_reg.into(), handler_reg.into()],
+                    vec![key_reg.into(), handler_reg.into(), tag_reg.into()],
                 );
 
                 let use_chez_handle = std::env::var("BEAGLE_CHEZ_HANDLE").is_ok();

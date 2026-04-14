@@ -1962,7 +1962,7 @@ impl Runtime {
             "beagle.builtin/push-handler",
             push_handler_builtin as *const u8,
             false,
-            2, // protocol_key_str, handler_instance
+            3, // protocol_key_str, handler_instance, tag
         )?;
 
         self.add_builtin_function(
@@ -1979,6 +1979,23 @@ impl Runtime {
             true,  // needs stack_pointer
             false, // doesn't need frame_pointer
             2,     // stack_pointer, protocol_key_str
+        )?;
+
+        // find-handler-tag: returns the prompt tag for the nearest matching handler.
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/find-handler-tag",
+            find_handler_tag_builtin as *const u8,
+            true,
+            false,
+            2, // stack_pointer, protocol_key_str
+        )?;
+
+        // fresh-tag: returns a fresh prompt tag as a tagged integer.
+        self.add_builtin_function(
+            "beagle.builtin/fresh-tag",
+            fresh_tag_builtin as *const u8,
+            false,
+            0,
         )?;
 
         // get-enum-type needs stack_pointer and frame_pointer for GC-safe string allocation

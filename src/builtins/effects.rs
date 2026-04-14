@@ -20,18 +20,23 @@ use crate::save_gc_context;
 /// `protocol_key_ptr` is a tagged Beagle string like
 /// `"beagle.effect/Handler<MyEffect>"`. `handler_instance` is the
 /// tagged heap pointer to the struct implementing the handler protocol.
+/// `tag` is the tagged-integer prompt tag associated with this handle's
+/// prompt boundary (see `push_prompt_tag`). `perform` uses this to
+/// find the matching prompt-tag record when capturing the continuation.
 pub extern "C" fn push_handler_builtin(
     protocol_key_ptr: usize,
     handler_instance: usize,
+    tag: usize,
 ) -> usize {
     let runtime = crate::get_runtime().get();
     let protocol_key = runtime.get_string_literal(protocol_key_ptr);
+    let tag_val = BuiltInTypes::untag(tag) as u64;
     let ptd = crate::runtime::per_thread_data();
     ptd.effect_handlers
         .push(crate::runtime::HandlerRegistryEntry {
             protocol_key,
             handler_instance,
-            tag: 0, // Populated in Step E3 when tag-aware reset lands.
+            tag: tag_val,
         });
     BuiltInTypes::null_value() as usize
 }
@@ -69,6 +74,37 @@ pub extern "C" fn find_handler_builtin(stack_pointer: usize, protocol_key_ptr: u
         .find(|e| e.protocol_key == protocol_key)
         .map(|e| e.handler_instance)
         .unwrap_or_else(|| BuiltInTypes::null_value() as usize)
+}
+
+/// Find the tag for the nearest handler matching `protocol_key_ptr`.
+/// Returns the tag as a tagged integer, or null if no handler is
+/// installed. Callers pair this with `find_handler_builtin` when they
+/// need both the handler instance and the prompt tag.
+pub extern "C" fn find_handler_tag_builtin(
+    stack_pointer: usize,
+    protocol_key_ptr: usize,
+) -> usize {
+    let runtime = crate::get_runtime().get();
+    let protocol_key = runtime.get_string(stack_pointer, protocol_key_ptr);
+    let ptd = crate::runtime::per_thread_data();
+    ptd.effect_handlers
+        .iter()
+        .rev()
+        .find(|e| e.protocol_key == protocol_key)
+        .map(|e| BuiltInTypes::Int.tag(e.tag as isize) as usize)
+        .unwrap_or_else(|| BuiltInTypes::null_value() as usize)
+}
+
+/// Return a freshly allocated prompt tag as a tagged integer.
+/// `Ast::Handle` uses this at runtime to generate a distinct tag for
+/// each handle scope.
+pub extern "C" fn fresh_tag_builtin() -> usize {
+    use std::sync::atomic::Ordering;
+    let runtime = crate::get_runtime().get();
+    let raw = runtime
+        .prompt_id_counter
+        .fetch_add(1, Ordering::SeqCst);
+    BuiltInTypes::Int.tag(raw as isize) as usize
 }
 
 /// Return the enum name (as a Beagle string) for a tagged enum-variant
