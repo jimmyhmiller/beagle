@@ -1727,26 +1727,17 @@ impl AstCompiler<'_> {
                     let handler_id_reg = self.ir.assign_new(handler_id_value);
                     self.ir.store_local(handler_id_local, handler_id_reg.into());
 
-                    // Push prompt handler (for continuation capture delimiter)
-                    let push_prompt_fn = self
-                        .compiler
-                        .find_function("beagle.builtin/push-prompt")
-                        .expect("push-prompt builtin not found");
-                    let push_prompt_fn_ptr = usize::from(push_prompt_fn.pointer);
-                    let pop_prompt_fn = self
-                        .compiler
-                        .find_function("beagle.builtin/pop-prompt")
-                        .expect("pop-prompt builtin not found");
-                    let pop_prompt_fn_ptr = usize::from(pop_prompt_fn.pointer);
+                    // prompt_handler_label is no longer the target of a
+                    // push_prompt call — it remains as a dead label to keep
+                    // the surrounding code structure intact. (It was
+                    // previously the `after_prompt` target of the stubbed
+                    // push-prompt/pop-prompt pair.)
+                    let _ = prompt_handler_label;
+                    let _ = captured_local;
 
-                    self.ir.push_prompt_handler(
-                        prompt_handler_label,
-                        Value::Local(captured_local),
-                        push_prompt_fn_ptr,
-                    );
-
-                    // Outline the try body into a thunk so resumable exception
-                    // capture always has a prompt-owned frame boundary.
+                    // Outline the try body into a thunk. The thunk gives
+                    // the captured continuation its own native frame to
+                    // live in (so its locals are part of the segment).
                     let try_thunk_fn = Ast::Function {
                         name: None,
                         args: vec![],
@@ -1757,10 +1748,25 @@ impl AstCompiler<'_> {
                     };
                     self.not_tail_position();
                     let try_thunk = self.call_compile(&try_thunk_fn)?;
-                    self.not_tail_position();
-                    let try_result = self.compile_closure_call_from_value(try_thunk, vec![]);
+                    let try_thunk_reg = self.ir.assign_new(try_thunk);
 
-                    // Normal path: pop exception handler by id, pop prompt, skip catch
+                    // Wrap the thunk call in `__reset__` so that the
+                    // throw-site's `capture_continuation_runtime` finds
+                    // a prompt boundary. Without this wrapper, the FP
+                    // walker has no `__reset__` frame to stop at and
+                    // panics with "shift without an enclosing reset".
+                    //
+                    // This is the load-bearing line of Refactor B:
+                    // resumable exceptions are literally shift/reset
+                    // with the throw site acting as `shift` and the
+                    // catch body as the shift body.
+                    self.not_tail_position();
+                    let try_result = self.call_builtin(
+                        "beagle.core/__reset__",
+                        vec![try_thunk_reg.into()],
+                    )?;
+
+                    // Normal path: pop exception handler by id, skip catch
                     self.ir.assign(result_reg, try_result);
                     let pop_by_id_fn = self
                         .compiler
@@ -1770,8 +1776,6 @@ impl AstCompiler<'_> {
                     let handler_id_val = self.ir.load_local(handler_id_local);
                     self.ir
                         .pop_exception_handler_by_id(handler_id_val, pop_by_id_fn_ptr);
-                    self.ir
-                        .pop_prompt_handler(result_reg.into(), pop_prompt_fn_ptr);
                     self.ir.jump(after_catch);
 
                     // Catch block
@@ -1830,10 +1834,81 @@ impl AstCompiler<'_> {
                     let resume_closure_reg = self.ir.assign_new(resume_closure);
                     self.ir
                         .store_local(resume_local, resume_closure_reg.into());
+
+                    // Deep-handler wrap: the user-visible `resume` closure
+                    // is `fn(v) { reset { raw_k(v) } }`, not the raw
+                    // trampoline closure directly. The outer `reset`
+                    // installs a `__reset__` frame around the resumed
+                    // body so that a second throw inside it has a prompt
+                    // boundary for `capture_continuation` to find.
+                    // Without this wrap, the first throw works but any
+                    // subsequent throw in the resumed body panics with
+                    // "shift without an enclosing reset".
+                    //
+                    // The raw closure stays bound as `__resume_raw__` in
+                    // the environment so the synthesized Ast::Function
+                    // can capture it as a free variable during compile.
+                    let raw_name =
+                        format!("__resume_raw_{}__", catch_label.index);
                     self.insert_variable(
-                        resume_name.clone(),
+                        raw_name.clone(),
                         VariableLocation::Local(resume_local),
                     );
+
+                    let v_name =
+                        format!("__resume_v_{}__", catch_label.index);
+
+                    let wrapper_ast = Ast::Function {
+                        name: None,
+                        args: vec![Pattern::Identifier {
+                            name: v_name.clone(),
+                            token_range,
+                        }],
+                        rest_param: None,
+                        body: vec![Ast::Reset {
+                            body: vec![Ast::CallExpr {
+                                callee: Box::new(Ast::Identifier(
+                                    raw_name.clone(),
+                                    token_range.start,
+                                )),
+                                args: vec![Ast::Identifier(
+                                    v_name.clone(),
+                                    token_range.start,
+                                )],
+                                token_range,
+                            }],
+                            token_range,
+                        }],
+                        token_range,
+                        docstring: None,
+                    };
+
+                    self.not_tail_position();
+                    let wrapped = self.call_compile(&wrapper_ast)?;
+                    let wrapped_reg = self.ir.assign_new(wrapped);
+
+                    let wrapped_resume_name =
+                        format!("__wrapped_resume_{}__", catch_label.index);
+                    let wrapped_resume_local =
+                        self.find_or_insert_local(&wrapped_resume_name);
+                    self.ir.store_local(
+                        wrapped_resume_local,
+                        wrapped_reg.into(),
+                    );
+
+                    self.insert_variable(
+                        resume_name.clone(),
+                        VariableLocation::Local(wrapped_resume_local),
+                    );
+
+                    // Clean up the temporary raw binding (the local
+                    // still holds the raw closure, but the name is no
+                    // longer reachable from user code).
+                    {
+                        let current_env =
+                            self.environment_stack.last_mut().unwrap();
+                        current_env.variables.remove(&raw_name);
+                    }
 
                     // Compile catch body
                     let mut catch_result = Value::Null;
@@ -1842,6 +1917,29 @@ impl AstCompiler<'_> {
                         catch_result = self.call_compile(ast)?;
                     }
                     self.ir.assign(result_reg, catch_result);
+
+                    // Pop the resumable handler now that the catch body
+                    // has completed. The handler was kept on the stack
+                    // across throws (deep-handler semantics) so that
+                    // successive throws in the resumed body could find
+                    // it; now that control is leaving the try/catch
+                    // expression, it must be removed.
+                    let pop_by_id_fn_catch = self
+                        .compiler
+                        .find_function(
+                            "beagle.builtin/pop-exception-handler-by-id",
+                        )
+                        .expect(
+                            "pop-exception-handler-by-id builtin not found",
+                        );
+                    let pop_by_id_fn_catch_ptr =
+                        usize::from(pop_by_id_fn_catch.pointer);
+                    let handler_id_val_catch =
+                        self.ir.load_local(handler_id_local);
+                    self.ir.pop_exception_handler_by_id(
+                        handler_id_val_catch,
+                        pop_by_id_fn_catch_ptr,
+                    );
                     self.ir.jump(after_catch);
 
                     // Prompt handler label (for continuation return path)

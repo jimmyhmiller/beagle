@@ -70,10 +70,10 @@ pub unsafe extern "C" fn pop_exception_handler_by_id_runtime(handler_id: usize) 
     let expected_id = BuiltInTypes::untag_isize(handler_id as isize) as usize;
     let _runtime = get_runtime().get_mut();
     let ptd = crate::runtime::per_thread_data();
-    if let Some(top) = ptd.exception_handlers.last() {
-        if top.handler_id == expected_id {
-            ptd.exception_handlers.pop();
-        }
+    if let Some(top) = ptd.exception_handlers.last()
+        && top.handler_id == expected_id
+    {
+        ptd.exception_handlers.pop();
     }
     BuiltInTypes::null_value() as usize
 }
@@ -101,11 +101,27 @@ pub unsafe extern "C" fn throw_exception(
         }
     };
 
-    // Pop handlers until we find one
-    if let Some(handler) = {
-        let runtime = get_runtime().get_mut();
-        runtime.pop_exception_handler()
-    } {
+    // Look up the top handler. For RESUMABLE handlers we clone without
+    // popping so that a subsequent throw inside the resumed body still
+    // finds a handler (deep-handler semantics). For non-resumable
+    // handlers we pop as before — abortive catch only fires once and
+    // control never comes back inside the try body.
+    //
+    // The resumable handler is popped by `pop_exception_handler_by_id`
+    // on the normal-completion path of the try, or by the catch-body's
+    // `after_catch` cleanup when the catch finishes executing.
+    let handler_opt: Option<crate::runtime::ExceptionHandler> = {
+        let ptd = crate::runtime::per_thread_data();
+        match ptd.exception_handlers.last() {
+            Some(top) if top.is_resumable => Some(top.clone()),
+            _ => {
+                let runtime = get_runtime().get_mut();
+                runtime.pop_exception_handler()
+            }
+        }
+    };
+
+    if let Some(handler) = handler_opt {
         if handler.is_resumable {
             // Resumable path: capture continuation like shift does, then jump to catch
             // capture_continuation_runtime pops the topmost prompt handler

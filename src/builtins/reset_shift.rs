@@ -875,6 +875,14 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     // 6. Final jump via return-jump. Signature:
     //    return_jump(new_sp, new_fp, new_lr, jump_target, callee_saved_ptr, value)
     //    It sets sp/fp/lr/x0 and branches. noreturn.
+    //
+    // Pass `value` as the last arg so X0 is set on resume. Some resume
+    // sites expect the value in X0 rather than in a stack slot — in
+    // particular, runtime-triggered throws (throw_runtime_error) set
+    // result_local_offset=0 and resume at the instruction after a
+    // builtin call, where the builtin's return value convention puts
+    // the result in X0. User-level throws write to a stack slot
+    // (handled in step 4 above); for them, X0 is irrelevant.
     let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
         unsafe { std::mem::transmute(return_jump_ptr) };
     return_jump(
@@ -883,6 +891,6 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         0,
         resume_address,
         std::ptr::null(),
-        0,
+        value,
     );
 }
