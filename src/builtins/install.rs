@@ -393,6 +393,15 @@ impl Runtime {
             1, // tag
         )?;
 
+        // Register return-from-shift-tagged for effect handlers.
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/return-from-shift-tagged",
+            return_from_shift_tagged_runtime as *const u8,
+            true,
+            true,
+            4,
+        )?;
+
         // Tag-aware capture: (sp, fp, resume_address, result_local_offset, tag)
         self.add_builtin_function_with_fp(
             "beagle.builtin/capture-continuation-tagged",
@@ -401,15 +410,6 @@ impl Runtime {
             true,
             5,
         )?;
-
-        // NOTE (Step E4): return-from-shift-tagged registration is
-        // deferred to Step E6. Registering its function pointer here
-        // reliably causes a SIGSEGV in the threaded
-        // repl_main_resume_test — appears to be a latent interaction
-        // with jump-table layout or ThreadStart initialization. The
-        // function body is written (see reset_shift.rs); Step E6 will
-        // register it as part of wiring perform_effect and will
-        // investigate the interaction concretely at that point.
 
         // capture-continuation takes
         // (stack_pointer, frame_pointer, resume_address, result_local_offset, saved_regs_ptr)

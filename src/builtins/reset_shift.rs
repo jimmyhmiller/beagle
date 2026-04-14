@@ -942,6 +942,19 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         fn_entry.pointer.into()
     };
 
+    // Cache the raw pointer to the GC_FRAME_TOP cell's backing storage
+    // before we enter the no-call critical section. `LocalKey::with`
+    // is normally inlined to a direct TLS access on macOS arm64, but
+    // the inliner's decisions are not guaranteed — when another Rust
+    // call site uses `GC_FRAME_TOP.with` (e.g., effect-handler
+    // builtins), the trampoline's own `.with` can be emitted as an
+    // out-of-line call. That call pushes a frame below SP, straight
+    // into the `dst` region we're actively writing, and corrupts the
+    // just-copied continuation bytes. Resolving the cell's raw pointer
+    // here, while ordinary function calls are still safe, removes all
+    // `LocalKey::with` invocations from the critical section below.
+    let gc_frame_top_slot: *mut usize = GC_FRAME_TOP.with(|cell| cell.as_ptr());
+
     // Destination placement: outermost_fp_in_dst must equal trampoline_fp.
     //   outermost_fp_in_dst = dst + outermost_offset
     //   => dst = trampoline_fp - outermost_offset
@@ -1021,10 +1034,10 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     }
 
     // 5. Update GC_FRAME_TOP to the innermost frame's header in dst.
-    //    This is a simple thread-local cell write — no function
-    //    call. (We can't call set_gc_frame_top because that's a Rust
-    //    function.)
-    GC_FRAME_TOP.with(|cell| cell.set(innermost_fp_in_dst - 8));
+    //    Using the cell pointer cached at the top of the function —
+    //    this is a plain store and emits NO call, even when the
+    //    compiler declines to inline `LocalKey::with` here.
+    unsafe { *gc_frame_top_slot = innermost_fp_in_dst - 8 };
 
     // 6. Final jump via return-jump. Signature:
     //    return_jump(new_sp, new_fp, new_lr, jump_target, callee_saved_ptr, value)
