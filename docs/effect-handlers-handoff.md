@@ -2,7 +2,18 @@
 
 **Purpose:** Complete the effect-handler implementation on top of the prompt-tag infrastructure already in place. This doc is self-contained — read it, read the code it points to, and you should be able to pick up without prior context.
 
-**Last updated:** 2026-04-14
+**Last updated:** 2026-04-14 (SIGSEGV resolved; E8 plumbing landed)
+
+## Current state snapshot (2026-04-14 PM)
+
+- Commit `0c01350` — SIGSEGV fix (TLS hazard in `continuation_trampoline`).
+- Commit `20600c8` — fresh-tag + find-handler-tag builtins, push-handler bumped to 3 args, `Ast::Handle` threads a fresh tag into a handler-scoped local.
+- Baseline: 265/323, 0 regressions.
+
+**What's still needed (in rough order):**
+1. Wire `push-prompt-tag(tag, sp, fp, after-handle-label)` at handle entry and `pop-prompt-tag(tag)` at handle exit. The current `Ast::Handle` still uses the untagged reset/shift prompt via `push_prompt_handler` IR op.
+2. Implement `perform_effect_runtime` (Step E6): use `find-handler-tag` + `capture-continuation-tagged` + `return-from-shift-tagged`, and dispatch `handler.handle(op, resume)` — the open question is whether to do that in Rust (protocol dispatch) or at the Beagle level (preferred per doc; emit IR that does the method call).
+3. Deep-handler wrapping for the resume closure (E7 / E6.4).
 
 ---
 
