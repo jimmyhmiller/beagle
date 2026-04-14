@@ -637,6 +637,120 @@ pub unsafe fn capture_continuation_runtime_inner(
     cont_ptr
 }
 
+/// Tag-aware capture variant used by effect-handler `perform`.
+/// Looks up a matching prompt-tag record on the per-thread side stack;
+/// the record's `stack_pointer` is the capture boundary. Pops records
+/// stacked above the match (nested resets whose frames are inside the
+/// captured segment and are about to be abandoned). Leaves the matched
+/// record for `return_from_shift_tagged` to consume.
+///
+/// Tracking the popped nested-tag records so they can be re-pushed on
+/// invoke is the work of Step E5.
+///
+/// Body intentionally duplicates `capture_continuation_runtime_inner`
+/// rather than sharing via a helper. Factoring the body out into a
+/// helper changes Rust's call-stack shape enough that
+/// `save_gc_context!`'s `get_current_rust_frame_pointer` reads the
+/// wrong saved LR on some paths, causing intermittent SIGSEGVs in
+/// threaded-resume scenarios. Short-term duplication trades tidiness
+/// for reliability.
+pub unsafe extern "C" fn capture_continuation_tagged_runtime(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    resume_address: usize,
+    result_local_offset: isize,
+    tag: usize,
+) -> usize {
+    crate::save_gc_context!(stack_pointer, frame_pointer);
+    assert!(
+        tag != 0,
+        "capture_continuation_tagged: tag must be non-zero"
+    );
+
+    let capture_top = {
+        let runtime = crate::get_runtime().get();
+        let (idx, record) = runtime.find_prompt_tag(tag as u64).unwrap_or_else(|| {
+            panic!(
+                "capture_continuation_tagged: no prompt-tag record with \
+                 tag={} on the prompt-tag stack. This is a compiler bug — \
+                 perform must be inside a matching handle.",
+                tag
+            )
+        });
+        // Pop records above the matched one (nested resets whose frames
+        // are inside the captured segment). Leave the matched record;
+        // return_from_shift_tagged pops it when the shift body returns.
+        runtime.truncate_prompt_tags(idx + 1);
+        record.stack_pointer
+    };
+
+    let stack_size = capture_top.saturating_sub(stack_pointer);
+    let innermost_fp_offset = frame_pointer - stack_pointer;
+
+    let runtime = crate::get_runtime().get_mut();
+    let cont_words = ContinuationObject::NUM_FIELDS + 3;
+    let segment_words = stack_size.div_ceil(8);
+    runtime.ensure_space_for(cont_words + segment_words + 6, stack_pointer);
+
+    let cont_ptr = match runtime.allocate_no_gc(cont_words, BuiltInTypes::HeapObject) {
+        Ok(ptr) => ptr,
+        Err(_) => unsafe {
+            crate::builtins::throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                "Failed to allocate continuation object - out of memory".to_string(),
+            );
+        },
+    };
+
+    let mut cont_obj = HeapObject::from_tagged(cont_ptr);
+    ContinuationObject::initialize(&mut cont_obj, resume_address, result_local_offset);
+
+    let segment_heap_ptr = if segment_words > 0 {
+        match runtime.allocate_no_gc(segment_words, BuiltInTypes::HeapObject) {
+            Ok(ptr) => {
+                let seg_obj = HeapObject::from_tagged(ptr);
+                let header_ptr = seg_obj.untagged() as *mut usize;
+                let mut header_val = unsafe { *header_ptr };
+                header_val |= 0x2;
+                unsafe {
+                    *header_ptr = header_val;
+                }
+                let data_ptr = seg_obj.untagged() + seg_obj.header_size();
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        stack_pointer as *const u8,
+                        data_ptr as *mut u8,
+                        stack_size,
+                    );
+                }
+                make_segment_fp_links_relative(
+                    data_ptr,
+                    stack_size,
+                    innermost_fp_offset,
+                    stack_pointer,
+                );
+                ptr
+            }
+            Err(_) => unsafe {
+                crate::builtins::throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate captured segment - out of memory".to_string(),
+                );
+            },
+        }
+    } else {
+        BuiltInTypes::null_value() as usize
+    };
+
+    let mut cont = ContinuationObject::from_tagged(cont_ptr).unwrap();
+    cont.set_segment_ptr_with_barrier(runtime, segment_heap_ptr);
+    cont.set_segment_frame_pointer_offset(innermost_fp_offset);
+
+    cont_ptr
+}
+
 // ============================================================================
 // §6. Return from shift
 // ============================================================================
@@ -651,6 +765,46 @@ pub unsafe extern "C" fn return_from_shift_runtime(
     _cont_ptr: usize,
 ) -> ! {
     unsafe { return_from_shift_runtime_inner(stack_pointer, frame_pointer, value) }
+}
+
+/// Tag-aware return_from_shift. Called by the shift-body completion
+/// path for effect-handler perform. Pops the matching prompt-tag
+/// record and longjmps to its saved SP/FP/LR with `value` in X0.
+pub unsafe extern "C" fn return_from_shift_tagged_runtime(
+    _stack_pointer: usize,
+    _frame_pointer: usize,
+    value: usize,
+    tag: usize,
+) -> ! {
+    let runtime = crate::get_runtime().get();
+    let record = runtime.pop_prompt_tag(tag as u64);
+
+    // Truncate GC frame chain: longjmp abandons every frame between
+    // here and the handle's enclosing function (whose FP is
+    // record.frame_pointer).
+    let handler_header = record.frame_pointer.wrapping_sub(8);
+    {
+        let mut hdr = GC_FRAME_TOP.with(|cell| cell.get());
+        while hdr != 0 && hdr < handler_header {
+            hdr = unsafe { *((hdr.wrapping_sub(8)) as *const usize) };
+        }
+        GC_FRAME_TOP.with(|cell| cell.set(hdr));
+    }
+
+    let return_jump_fn = runtime
+        .get_function_by_name("beagle.builtin/return-jump")
+        .expect("return-jump function not found");
+    let ptr: *const u8 = return_jump_fn.pointer.into();
+    let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
+        unsafe { std::mem::transmute(ptr) };
+    return_jump(
+        record.stack_pointer,
+        record.frame_pointer,
+        0,
+        record.link_register,
+        std::ptr::null(),
+        value,
+    );
 }
 
 pub unsafe fn return_from_shift_runtime_inner(

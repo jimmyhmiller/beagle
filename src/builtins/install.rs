@@ -393,6 +393,15 @@ impl Runtime {
             1, // tag
         )?;
 
+        // Tag-aware capture: (sp, fp, resume_address, result_local_offset, tag)
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/capture-continuation-tagged",
+            capture_continuation_tagged_runtime as *const u8,
+            true,
+            true,
+            5,
+        )?;
+
         // capture-continuation takes
         // (stack_pointer, frame_pointer, resume_address, result_local_offset, saved_regs_ptr)
         self.add_builtin_function_with_fp(
