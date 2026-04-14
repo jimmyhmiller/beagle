@@ -375,6 +375,24 @@ impl Runtime {
             0,
         )?;
 
+        // Tag-aware prompt push/pop for effect handlers. These mirror
+        // push-prompt/pop-prompt above but store records on the
+        // prompt-tag side-stack keyed by a fresh u64 tag. Used by the
+        // lowering of `handle { ... } with h` (Step E6+).
+        self.add_builtin_function(
+            "beagle.builtin/push-prompt-tag",
+            push_prompt_tag_runtime as *const u8,
+            false,
+            4, // tag, stack_pointer, frame_pointer, link_register
+        )?;
+
+        self.add_builtin_function(
+            "beagle.builtin/pop-prompt-tag",
+            pop_prompt_tag_runtime as *const u8,
+            false,
+            1, // tag
+        )?;
+
         // capture-continuation takes
         // (stack_pointer, frame_pointer, resume_address, result_local_offset, saved_regs_ptr)
         self.add_builtin_function_with_fp(

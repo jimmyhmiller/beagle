@@ -3642,11 +3642,48 @@ pub struct ExceptionHandler {
     pub resume_local: isize,
 }
 
+/// Entry on the per-thread effect-handler registry. Installed by
+/// `handle { ... } with h` (via `push_handler_builtin`), looked up by
+/// `perform op` (via `find_handler_builtin`). The registry is dynamically
+/// scoped: each entry represents a currently-active handler frame.
+#[derive(Debug, Clone)]
+pub struct HandlerRegistryEntry {
+    pub protocol_key: String,
+    pub handler_instance: usize,
+    /// Prompt tag identifying the reset frame this handler was installed
+    /// inside. Zero means "no tag assigned yet" — filled in once the
+    /// tag-aware reset machinery (Step E3) lands. Used by `perform` to
+    /// shift up to the matching handle.
+    pub tag: u64,
+}
+
+/// A prompt-tag record marking a specific `reset` frame in the prompt-tag
+/// side stack. `reset(tag) { body }` pushes one on entry, pops on exit.
+/// `shift(tag, k)` uses these records to locate the matching reset and
+/// determine `capture_top`; `return_from_shift` uses them to locate the
+/// longjmp target. Default reset/shift (no explicit tag) bypasses this
+/// stack entirely and keeps using the FP-walker on `__reset__`.
+#[derive(Debug, Clone)]
+pub struct PromptTagRecord {
+    pub tag: u64,
+    pub stack_pointer: usize,
+    pub frame_pointer: usize,
+    pub link_register: usize,
+}
+
 /// Per-thread state stored in thread-local storage. Each thread owns its own
 /// instance, eliminating data races without needing locks on the hot path.
 pub struct PerThreadData {
     pub exception_handlers: Vec<ExceptionHandler>,
     pub thread_exception_handler_fn: Option<usize>,
+    /// Stack of currently-active effect handlers. Searched top-down by
+    /// `find_handler_builtin` during `perform`.
+    pub effect_handlers: Vec<HandlerRegistryEntry>,
+    /// Stack of currently-active prompt-tagged reset frames. Used by
+    /// tag-aware `shift`/`perform` to locate their capture boundary.
+    /// Empty for programs that only use plain reset/shift (those use
+    /// the FP-walker path and ignore this stack).
+    pub prompt_tags: Vec<PromptTagRecord>,
 }
 
 impl Default for PerThreadData {
@@ -3660,6 +3697,8 @@ impl PerThreadData {
         Self {
             exception_handlers: Vec::new(),
             thread_exception_handler_fn: None,
+            effect_handlers: Vec::new(),
+            prompt_tags: Vec::new(),
         }
     }
 }
@@ -4774,6 +4813,64 @@ impl Runtime {
     pub fn update_exception_handlers_after_gc(&mut self) {
         // No-op: Exception handlers and keywords are now stored in heap-based PersistentMap
         // which is automatically updated by GC during tracing
+    }
+
+    /// Push a prompt-tag record onto the per-thread side stack. Called
+    /// by the tag-aware `__reset__` trampoline (Step E3). Returns the
+    /// tag unchanged for caller convenience.
+    pub fn push_prompt_tag(
+        &self,
+        tag: u64,
+        stack_pointer: usize,
+        frame_pointer: usize,
+        link_register: usize,
+    ) -> u64 {
+        per_thread_data().prompt_tags.push(PromptTagRecord {
+            tag,
+            stack_pointer,
+            frame_pointer,
+            link_register,
+        });
+        tag
+    }
+
+    /// Pop the top prompt-tag record, asserting its tag matches.
+    /// Catches reset/pop misalignment.
+    pub fn pop_prompt_tag(&self, expected_tag: u64) -> PromptTagRecord {
+        let ptd = per_thread_data();
+        let top = ptd.prompt_tags.pop().unwrap_or_else(|| {
+            panic!(
+                "pop_prompt_tag(expected={}) on empty prompt-tag stack",
+                expected_tag
+            )
+        });
+        assert_eq!(
+            top.tag, expected_tag,
+            "pop_prompt_tag mismatch: expected {}, got {}",
+            expected_tag, top.tag
+        );
+        top
+    }
+
+    /// Find the topmost prompt-tag record matching `tag`. Used by
+    /// tag-aware shift to locate its capture boundary. Returns the
+    /// index into `prompt_tags` (so the caller can pop-to-that-index),
+    /// along with a clone of the record.
+    pub fn find_prompt_tag(&self, tag: u64) -> Option<(usize, PromptTagRecord)> {
+        let ptd = per_thread_data();
+        ptd.prompt_tags
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, e)| e.tag == tag)
+            .map(|(i, e)| (i, e.clone()))
+    }
+
+    /// Truncate the prompt-tag stack to `len` entries. Used by
+    /// `capture_continuation` and `return_from_shift` to drop records
+    /// corresponding to frames that are being abandoned by the longjmp.
+    pub fn truncate_prompt_tags(&self, len: usize) {
+        per_thread_data().prompt_tags.truncate(len);
     }
 
     pub fn create_exception(

@@ -63,6 +63,43 @@ pub unsafe extern "C" fn pop_prompt_runtime(
     }
 }
 
+/// Push a prompt-tag record onto the per-thread side stack. Used by
+/// the tag-aware reset path for effect handlers (Step E6+): each
+/// `handle { ... } with h` generates a fresh u64 tag and pushes a
+/// record capturing SP/FP/LR so a later `shift(tag)` knows where to
+/// longjmp. Not called by plain reset/shift (which use the FP walker).
+///
+/// Arguments:
+///   `tag` — u64 prompt tag, passed as usize.
+///   `stack_pointer` — SP at push time (caller's SP before the reset).
+///   `frame_pointer` — FP at push time.
+///   `link_register` — address to longjmp to on shift-return.
+///
+/// Returns SP unchanged (the Beagle IR caller doesn't mutate it).
+pub unsafe extern "C" fn push_prompt_tag_runtime(
+    tag: usize,
+    stack_pointer: usize,
+    frame_pointer: usize,
+    link_register: usize,
+) -> usize {
+    let runtime = crate::get_runtime().get();
+    runtime.push_prompt_tag(
+        tag as u64,
+        stack_pointer,
+        frame_pointer,
+        link_register,
+    );
+    stack_pointer
+}
+
+/// Pop the top prompt-tag record, asserting the tag matches. Called at
+/// the end of a tagged-reset body on the normal-completion path.
+pub unsafe extern "C" fn pop_prompt_tag_runtime(tag: usize) -> usize {
+    let runtime = crate::get_runtime().get();
+    runtime.pop_prompt_tag(tag as u64);
+    BuiltInTypes::null_value() as usize
+}
+
 /// REFACTOR A stub. `resume-tail` was a tail-position continuation
 /// invoker used by the async implicit-handler runtime. Referenced by
 /// stdlib at compile time; any runtime call aborts.
