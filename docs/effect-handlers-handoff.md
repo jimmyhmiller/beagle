@@ -66,14 +66,29 @@ Both registered in `src/builtins/install.rs` (~line 378-396):
 
 ### E4: Tag-aware capture + return (commit `0622cda`, `src/builtins/reset_shift.rs`)
 
-- `capture_continuation_tagged_runtime` (line ~517) — **registered and tested.** Looks up matching prompt-tag record, uses its SP as capture_top, pops records above the match.
-- `return_from_shift_tagged_runtime` (line ~770) — **written but NOT registered** due to a latent SIGSEGV. See "The SIGSEGV Issue" below.
+- `capture_continuation_tagged_runtime` (line ~517) — **registered and tested.**
+- `return_from_shift_tagged_runtime` (line ~770) — **registered** (commit `0c01350`).
 
-Registered as `beagle.builtin/capture-continuation-tagged` (5 args: sp, fp, resume_addr, result_local, tag).
+Registered as `beagle.builtin/capture-continuation-tagged` (5 args) and
+`beagle.builtin/return-from-shift-tagged` (4 args).
 
 ---
 
-## The SIGSEGV Issue (must solve first)
+## The SIGSEGV Issue (RESOLVED in commit `0c01350`)
+
+**Root cause.** `continuation_trampoline` ran `GC_FRAME_TOP.with(|cell| cell.set(...))`
+*inside* the no-call critical section (after copying segment bytes over a `dst`
+that overlaps its own stack frame). `LocalKey::with` normally inlines to a
+direct TLS access on arm64-darwin, but when another Rust caller of
+`GC_FRAME_TOP.with` exists (e.g., `return_from_shift_tagged_runtime`), the
+inliner may emit it as an out-of-line call — which pushes a frame below SP
+straight into `dst`, corrupting the just-copied continuation bytes.
+
+**Fix.** Cache the cell's raw backing pointer (`cell.as_ptr()`) *before* the
+critical section and use a plain store to update `GC_FRAME_TOP`. No
+`LocalKey::with` call in the critical section regardless of inliner choices.
+
+## Legacy notes (for reference)
 
 **Symptom:** Adding `beagle.builtin/return-from-shift-tagged` to the builtin registry (via `add_builtin_function_with_fp` in `install.rs`) causes `resources/repl_main_resume_test.bg` to SIGSEGV reliably. The test runs threads and exercises the resumable-exception machinery; it doesn't call `return-from-shift-tagged` at all.
 
