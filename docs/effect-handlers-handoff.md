@@ -1,70 +1,67 @@
-# Effect Handlers — Implementation Handoff
+# Effect Handlers — Honest Handoff
 
-**Purpose:** Complete the effect-handler implementation on top of the prompt-tag infrastructure already in place. This doc is self-contained — read it, read the code it points to, and you should be able to pick up without prior context.
+**Last updated:** 2026-04-14
 
-**Last updated:** 2026-04-14 (SIGSEGV resolved; E8 plumbing + Handle rewired)
-
-## Current state snapshot (2026-04-14 PM)
-
-- Commit `0c01350` — SIGSEGV fix (TLS hazard in `continuation_trampoline`).
-- Commit `20600c8` — fresh-tag + find-handler-tag builtins, push-handler bumped to 3 args, `Ast::Handle` threads a fresh tag into a handler-scoped local.
-- Commit `b8a7bfd` — `Ast::Handle` now compiles through `beagle.core/__reset__` instead of the stubbed push-prompt. Handle-without-perform works (previously threw "Refactor A" error).
-- Baseline: 265/323, 0 regressions.
-
-**What's still needed (in rough order):**
-
-1. **Implement `perform_effect` itself (Step E6).** `Ast::Perform` still compiles to the stubbed `beagle.builtin/perform-effect` IR op. The trampoline/capture/return infrastructure is all in place — the missing piece is the handler-dispatch call.
-
-   **Landmines discovered in-session — read before attempting:**
-   - `handle` is a Beagle keyword. A Beagle-level helper that writes `handler.handle(op, resume)` does *not* parse as a protocol call — it parses as a field access ("Field 'handle' does not exist on Handler"). Writing `handle(handler, op, resume)` tries to start a `handle` block.
-   - Qualified calls like `beagle.effect/handle(h, op, resume)` don't parse either (the parser doesn't treat the dotted prefix as a namespace-qualified call in this context).
-   - **Conclusion:** a stdlib `dispatch-handler` helper is not viable. Two workable paths:
-     - *(a)* Rust-side dispatch inside `perform_effect_runtime_with_saved_regs`: look up the protocol dispatch table for `beagle.effect/Handler<EnumType>` via `runtime.get_dispatch_table_ptr(...)`, find the handler's struct_id from its header, index into `DispatchTable.struct_dispatch`, and call the resulting function pointer via the save-volatile-registers trampolines (`call_fn_3`-style). No parser involvement.
-     - *(b)* Rename the protocol method. Change `fn handle(...)` in `beagle.effect` to something like `fn handle-op(...)` so a Beagle-side helper can call `handler.handle-op(op, resume)`. Breaks every user handler and every stdlib handler that implements `Handler`.
-
-     Path (a) is the cleaner one. Budget for: understanding how `beagle.effect/Handler<EnumType>` gets registered (see `add_protocol_info` in `src/runtime.rs`, called from `extend` compilation) and when the dispatch table is populated.
-
-   - `beagle.builtin/panic` (called from `Ast::Perform`'s error paths for null enum_type and null handler) is **not actually registered**. This is a latent bug that masks the null-enum-type case: a `perform` on a non-enum falls through into `string-concat` and produces "TypeError: Expected string, got Null" instead of "perform requires an enum value". Worth fixing separately — either register the primitive or switch to `beagle.primitive/panic`.
-
-   - `get_enum_type_builtin` returning null for a valid-looking variant (`MyEffect.GetValue` produced a heap pointer whose `struct_id` wasn't in `runtime.variant_to_enum`) indicates enum-variant registration isn't wired for the chez-demo case. Needs investigation before perform can succeed end-to-end.
-
-2. **Tag-aware perform boundary (Step E6 + E8 continued).** Once perform_effect works untagged, swap to `capture-continuation-tagged` + `return-from-shift-tagged` using the tag stashed in `__handle_tag_<n>__` by `Ast::Handle`. The `find-handler-tag` builtin is already in place.
-
-3. **Deep-handler wrapping for resume** (E7 / E6.4) — wrap the resume closure so a re-perform inside the resumed body installs the same handler. Template: `Ast::Try`'s resumable-exception resume closure construction in commit `d6019cf`.
+**Read this before writing any code.** The previous handoff overstated how close the implementation was. The scaffolding is real, but the foundation it sits on is a poor match for how the rest of the compiler dispatches protocols. A cleanup step almost certainly needs to precede Step E6.
 
 ---
 
-## Background (read first)
+## TL;DR
 
-- `docs/exceptions-effects-plan.md` — the overall design doc. Read this first.
-- Resumable exceptions now work via reset+shift (commit `d6019cf`). That's the template pattern for effect handlers — each step below mirrors something that was done for exceptions.
-- Test baseline: **265/323 passing, 58 failing.** Don't regress this. Effect-handler tests are mostly in the 58 failing — they're the target.
+- Reset/shift primitives work. Exceptions ride on them. Handle-without-perform works.
+- `perform` does not work end-to-end and has probably never worked in this branch.
+- The effect-handler registry uses **runtime string-keyed dispatch** — every `perform` allocates two strings, concatenates them into a key like `"beagle.effect/Handler<MyEffect>"`, and linear-scans a `Vec<HandlerRegistryEntry>` comparing strings. The rest of the compiler dispatches protocols via integer type-id lookups into `DispatchTable`. Effect handlers have a parallel, slower, weirder path that exists nowhere else.
+- Recommendation: replace the string-keyed registry with an enum-type-id-keyed registry *before* implementing `perform_effect_runtime`. See "The work" below.
+- Baseline: **265/323 tests passing, 58 failing.** Don't regress this. Most of the 58 exercise `perform`.
 
 ---
 
-## What's already in place (Steps E1–E4)
+## What actually works
 
-### E1: Handler registry runtime (commit `e6b9505`, `src/builtins/effects.rs`)
+| Piece | Status | File |
+| --- | --- | --- |
+| `reset { ... }` / `shift(k) { ... }` | Works | `src/builtins/reset_shift.rs` |
+| Resumable `try/catch` (rides on reset+shift) | Works | `src/ast.rs` (Ast::Try) |
+| `__reset__` as a prompt frame | Works | stdlib + `RESET_CODE_RANGE` |
+| `continuation_trampoline` (resume path) | Works, fragile — see SIGSEGV notes | `src/builtins/reset_shift.rs:901` |
+| `handle { body }` without `perform` | Works | `Ast::Handle` now compiles through `__reset__` |
+| `capture-continuation-tagged` builtin | Registered, not exercised yet | `src/builtins/reset_shift.rs:~517` |
+| `return-from-shift-tagged` builtin | Registered (as of SIGSEGV fix) | `src/builtins/reset_shift.rs:~770` |
+| `push-prompt-tag` / `pop-prompt-tag` | Registered, not called from AST | `src/builtins/continuations.rs:~80` |
+| `fresh-tag`, `find-handler-tag` | Registered | `src/builtins/effects.rs` |
+| `push-handler` with tag (3 args) | Registered, tag threaded through `Ast::Handle` | `src/builtins/effects.rs` |
+
+## What does not work
+
+- `perform op`. Compiles to the stubbed `beagle.builtin/perform-effect`. Even reaching that stub fails first on string-concat because of the setup pipeline described below.
+- `beagle.builtin/panic`, called from `Ast::Perform`'s error paths (null enum-type, null handler). **Not registered anywhere.** Latent.
+- `get-enum-type` returns `None` for freshly-declared enum variants in simple test cases (`variant_to_enum[struct_id]` lookup misses). Needs investigation — might just be registration ordering.
+
+---
+
+## The pieces, in plain language
+
+### Reset/shift
+
+- **`__reset__(thunk)`** is a Beagle stdlib function whose entire body is `thunk()`. Its only purpose is to leave a *recognizable frame* on the stack. `RESET_CODE_RANGE` (a `OnceLock`) caches its compiled code's byte range. `is_pc_in_reset_function(pc)` asks "does this PC lie in `__reset__`'s code?"
+- **`capture_continuation(sp, fp, resume_addr, result_local)`** — walks the FP chain upward looking for the frame whose *child's* saved LR points into `__reset__`'s code range. That's the prompt. Copies the stack bytes from `sp` up to (but not including) `__reset__`'s frame into a heap segment. Rewrites saved-FP slots inside the copy to **segment-relative offsets** so GC can relocate the segment. Returns a `ContinuationObject` pointer.
+- **`return_from_shift(sp, fp, value, _cont)`** — same walk, then longjmps to simulate `__reset__` returning normally to its caller, with `value` as the return register.
+- **`continuation_trampoline(closure, value)`** — the body of a continuation closure. Copies segment bytes back onto the stack (at `trampoline_fp - outermost_offset`), rewrites FP offsets back to absolute, rebuilds the GC prev chain, writes `value` into the resume point's result slot, updates `GC_FRAME_TOP`, then `return-jump`s to the resume address.
+  - **Critical invariant:** between the first byte-copy and the final `return-jump`, NO function calls may be emitted — any call would push a frame below SP into the `dst` region we're writing, corrupting the just-copied frames. This is why the trampoline caches `GC_FRAME_TOP.with(|c| c.as_ptr())` *before* the copy: a plain store in the critical section emits no call regardless of inliner decisions. Violating this was the SIGSEGV resolved in commit `0c01350`.
+
+### Handler registry (string-keyed)
 
 ```rust
 pub struct HandlerRegistryEntry {
-    pub protocol_key: String,
+    pub protocol_key: String,        // "beagle.effect/Handler<MyEffect>"
     pub handler_instance: usize,
-    pub tag: u64,     // currently always 0 — Step E8 populates this
+    pub tag: u64,
 }
 ```
 
-Implemented and working:
-- `push_handler_builtin(protocol_key_ptr, handler_instance)` — appends to `ptd.effect_handlers`.
-- `pop_handler_builtin(protocol_key_ptr)` — removes topmost matching entry.
-- `find_handler_builtin(sp, protocol_key_ptr)` — returns tagged handler or null.
-- `get_enum_type_builtin(sp, fp, value)` — returns enum name as Beagle string.
+Stored on `PerThreadData.effect_handlers`. `push-handler` and `pop-handler` are the interface. `find-handler` is a linear `.iter().rev().find(|e| e.protocol_key == key)`.
 
-Still stubbed:
-- `call_handler_builtin` — Step E6 implements this.
-- `perform_effect_runtime_with_saved_regs` — Step E6 replaces this.
-
-### E2: Prompt-tag side stack (commit `e6b9505`, `src/runtime.rs:3660-3688`)
+### Prompt-tag side stack
 
 ```rust
 pub struct PromptTagRecord {
@@ -75,315 +72,159 @@ pub struct PromptTagRecord {
 }
 ```
 
-In `PerThreadData.prompt_tags: Vec<PromptTagRecord>`.
-
-Runtime methods (`src/runtime.rs` around line 4790):
-- `push_prompt_tag(tag, sp, fp, lr) -> u64`
-- `pop_prompt_tag(expected_tag) -> PromptTagRecord`
-- `find_prompt_tag(tag) -> Option<(index, PromptTagRecord)>`
-- `truncate_prompt_tags(len)`
-
-### E3: Tag builtins (commit `e6b9505`, `src/builtins/continuations.rs`)
-
-- `push_prompt_tag_runtime(tag, sp, fp, lr)` — builtin wrapper around `Runtime::push_prompt_tag`.
-- `pop_prompt_tag_runtime(tag)` — builtin wrapper around `Runtime::pop_prompt_tag`.
-
-Both registered in `src/builtins/install.rs` (~line 378-396):
-- `beagle.builtin/push-prompt-tag` (4 args: tag, sp, fp, lr)
-- `beagle.builtin/pop-prompt-tag` (1 arg: tag)
-
-### E4: Tag-aware capture + return (commit `0622cda`, `src/builtins/reset_shift.rs`)
-
-- `capture_continuation_tagged_runtime` (line ~517) — **registered and tested.**
-- `return_from_shift_tagged_runtime` (line ~770) — **registered** (commit `0c01350`).
-
-Registered as `beagle.builtin/capture-continuation-tagged` (5 args) and
-`beagle.builtin/return-from-shift-tagged` (4 args).
+Stored on `PerThreadData.prompt_tags`. The "tagged" capture/return variants use this instead of FP-walking for `__reset__` — they match by `tag` rather than code range.
 
 ---
 
-## The SIGSEGV Issue (RESOLVED in commit `0c01350`)
+## How a `handle`/`perform` is supposed to flow
 
-**Root cause.** `continuation_trampoline` ran `GC_FRAME_TOP.with(|cell| cell.set(...))`
-*inside* the no-call critical section (after copying segment bytes over a `dst`
-that overlaps its own stack frame). `LocalKey::with` normally inlines to a
-direct TLS access on arm64-darwin, but when another Rust caller of
-`GC_FRAME_TOP.with` exists (e.g., `return_from_shift_tagged_runtime`), the
-inliner may emit it as an out-of-line call — which pushes a frame below SP
-straight into `dst`, corrupting the just-copied continuation bytes.
-
-**Fix.** Cache the cell's raw backing pointer (`cell.as_ptr()`) *before* the
-critical section and use a plain store to update `GC_FRAME_TOP`. No
-`LocalKey::with` call in the critical section regardless of inliner choices.
-
-## Legacy notes (for reference)
-
-**Symptom:** Adding `beagle.builtin/return-from-shift-tagged` to the builtin registry (via `add_builtin_function_with_fp` in `install.rs`) causes `resources/repl_main_resume_test.bg` to SIGSEGV reliably. The test runs threads and exercises the resumable-exception machinery; it doesn't call `return-from-shift-tagged` at all.
-
-**Reproduces with:**
-- The actual `return_from_shift_tagged_runtime` function pointer
-- The known-good `return_from_shift_runtime` function pointer (under the new name)
-- Both `needs_frame_pointer=true` and `needs_frame_pointer=false`
-- Argument counts 3 and 4
-- With and without `#[no_mangle]` / `#[inline(never)]`
-
-**What worked:**
-- Registering `capture-continuation-tagged` alone → test passes.
-- Adding `return-from-shift-tagged` after it → test fails.
-
-**Hypothesis:** Jump-table page allocation. `add_jump_table_entry` grows the jump table by adding pages (`src/runtime.rs:~7897`). The 4th additional registration might cross a page boundary that triggers a realloc/remap, and something cached before that remap (maybe `RESET_CODE_RANGE` or a stack-walk address check) becomes stale.
-
-**Diagnostic suggestions:**
-1. Compare `self.jump_table_pages.len()` before/after the registration. Does it grow by 1?
-2. Check if `RESET_CODE_RANGE` (`src/builtins/reset_shift.rs:~80`) is initialized before or after `install_all`. If before, and `__reset__`'s code is moved by later registrations, the cached range is stale.
-3. Run under lldb: `cargo build --release` then `lldb target/release/beag -- test resources/repl_main_resume_test.bg` and inspect the SIGSEGV site.
-4. Try reordering: register `return-from-shift-tagged` BEFORE the other tagged builtins. If the test still fails → it's about the ADDITIONAL-builtin count, not the specific function.
-5. Try adding a dummy `no-op` builtin before `return-from-shift-tagged` to see if it's purely position-sensitive.
-
-**Must be resolved before E6.** E6 calls this function at runtime; an unregistered function can't be called via the Beagle calling convention.
-
----
-
-## Step E5: Nested-tag tracking (optional, may defer)
-
-**Only needed for nested handlers of DIFFERENT effects.** If `handle<A> { handle<B> { perform A.foo } }` works (A reached past the nested B), E5 is done-enough. If shifted continuations that contain nested resets don't restore correctly on invoke, E5 is needed.
-
-**Design:** Extend `ContinuationObject` with one more field:
-
-```rust
-const FIELD_NESTED_TAGS_PTR: usize = 4;  // new
-pub const NUM_FIELDS: usize = 5;          // was 4
-```
-
-Points to a heap-allocated array of 3-tuples: `(tag, segment_relative_fp_offset, link_register)`. One entry per nested-tag record that was popped during capture.
-
-**In `capture_continuation_tagged_runtime`** (`reset_shift.rs:~517`), change:
-```rust
-runtime.truncate_prompt_tags(idx + 1);  // pops matched + above
-```
-to:
-```rust
-// Collect records above the match before truncating.
-let nested: Vec<(u64, usize, usize)> = ptd.prompt_tags[idx+1..]
-    .iter()
-    .map(|r| (r.tag, r.frame_pointer - stack_pointer, r.link_register))
-    .collect();
-runtime.truncate_prompt_tags(idx + 1);  // same as before
-// Store `nested` in ContinuationObject. Allocate heap array, fill, write ptr.
-```
-
-**In `continuation_trampoline`** (`reset_shift.rs:~786`), after splicing:
-```rust
-// Re-push each nested-tag record with SP/FP adjusted for dst.
-for (tag, fp_offset, lr) in cont.nested_tags() {
-    let fp_abs = dst + fp_offset;
-    let sp_abs = ???; // need to also store SP offset, not just FP
-    runtime.push_prompt_tag(tag, sp_abs, fp_abs, lr);
+```beagle
+handle beagle.effect/Handler(MyEffect) with h {
+    perform MyEffect.Foo { x: 42 }
 }
 ```
 
-Also pop these on normal body completion (when the spliced frames return into the trampoline). This is handled by the overlay mechanism that already returns to the trampoline — just pop in the trampoline's return path.
+**At Handle:**
+1. Evaluate `h`.
+2. `tag = fresh-tag()` (atomic counter).
+3. `push-handler("beagle.effect/Handler<MyEffect>", h, tag)`.
+4. `result = __reset__(body_thunk)`.
+5. `pop-handler(key)`.
+6. Return `result`.
 
-**Acceptance test:** Write a `.bg` test with two nested `handle` blocks of different effect types, where the inner handle doesn't handle the outer's effect. `perform A.foo` from inside the inner handle must reach the outer handle correctly.
+**At Perform:**
+1. Evaluate the op value (a `MyEffect.Foo { x: 42 }` struct instance).
+2. `enum_type = get-enum-type(op)` — reads the struct header's type_id, looks up `runtime.variant_to_enum[type_id]` to get `"MyEffect"`, **allocates a Beagle string** for it.
+3. `partial = string-concat("beagle.effect/Handler<", enum_type)` — allocates.
+4. `protocol_key = string-concat(partial, ">")` — allocates.
+5. `handler = find-handler(protocol_key)` — linear scan, string-compare each entry.
+6. Capture continuation, wrap in trampoline closure to get `resume`.
+7. Call `handler.handle(op, resume)` — needs to go through protocol dispatch.
+8. Longjmp back to after the handle with the handler's result.
+
+Step 7 is what `perform_effect_runtime_with_saved_regs` in `src/builtins/effects.rs` is supposed to do. It's currently a stub.
 
 ---
 
-## Step E6: Implement perform_effect (THE BIG STEP)
+## What's genuinely a hack (and not how the rest of the compiler works)
 
-This is where effect handlers become real. Four sub-pieces, do them in order:
+1. **String-keyed handler registry with runtime concat.** No other protocol in the compiler works this way. Ordinary protocol calls dispatch via `DispatchTable` (`src/runtime.rs:3563`) keyed by integer type_id — a dense `Vec<usize>` indexed by struct_id. Two pointer loads, one indirect call. Effect handlers allocate two strings and linear-scan a Vec of Strings at every `perform`.
+2. **Runtime protocol-key building.** The key is deterministic from the enum type. It could be interned once, or better, avoided entirely by keying on the enum's type_id.
+3. **`__reset__`-by-code-range.** The prompt is identified by walking FP and asking "does the saved LR lie in `__reset__`'s byte range?" Works, but `RESET_CODE_RANGE` is a cached singleton. Any future relocation/recompile of `__reset__` silently breaks it.
+4. **Two parallel prompt mechanisms.** The FP-walker identifies prompts by code range; the prompt-tag side stack identifies them by tag. The tagged variants are written but not primary. Every bit of code has to reason about both worlds during the migration.
+5. **Trampoline no-call critical section.** Correctness depends on an optimizer-level property the compiler doesn't know about. A single `thread_local!` call-site added elsewhere in the binary can change LLVM's inline decision and break it. (This is the SIGSEGV we already fixed — but the structural fragility remains.)
+6. **`handle` is a Beagle keyword.** And the Handler protocol's method is also named `handle`. So `handler.handle(op, resume)` parses as a field access (which errors on "Field 'handle' does not exist"), and `handle(handler, op, resume)` starts a handle block. Writing a Beagle-side dispatch helper is not viable without renaming either the keyword or the method.
+7. **`beagle.builtin/panic` is referenced but not registered.** The null checks in `Ast::Perform` call a function that doesn't exist. Probably masked by the fact that the null paths haven't been exercised.
 
-### E6.1: Tag propagation through the registry
+## What's reasonable-but-complex (don't touch unless you're changing the design)
 
-Modify `HandlerRegistryEntry.tag` to actually get populated:
-- Change `push_handler_builtin` signature to take a tag parameter (3 args: `protocol_key_ptr, handler_instance, tag`).
-- Update registration in `install.rs` (~line 1926) to take 3 args.
-- Update `Ast::Handle` compilation in `ast.rs:4424` to generate a fresh tag and pass it.
+- Heap-allocated continuation segments with segment-relative FP offsets — the right shape for GC-safe multi-shot continuations.
+- `save_volatile_registers_{0,1,2,3}` trampolines for Rust→Beagle reentry — normal JIT plumbing.
+- Tags distinguishing nested handlers of different effects — standard for algebraic effects (Racket, Multicore OCaml do the same).
 
-Fresh tag generation — reuse `runtime.prompt_id_counter` (already exists, atomic):
-```rust
-let tag = runtime.prompt_id_counter.fetch_add(1, Ordering::SeqCst) as u64;
-```
-This needs to happen at compile time or be threaded through at runtime. Simplest: add a `fresh_tag` builtin that returns a fresh u64. `Ast::Handle` calls it, stashes the tag in a local, threads it through push_handler, push_prompt_tag, and the body.
+---
 
-### E6.2: find-handler returns both handler AND tag
+## The work
 
-Either:
-- **(a)** Add a second builtin `beagle.builtin/find-handler-tag(protocol_key) -> tag` — scans the registry, returns the tag of the matching entry.
-- **(b)** Change `find_handler_builtin` to return a 2-word heap object or a pair.
+### Strong recommendation: clean up the registry first (pre-E6)
 
-Option (a) is simpler. Implement it in `src/builtins/effects.rs` next to `find_handler_builtin`. Register in `install.rs`.
-
-### E6.3: perform_effect does tagged shift
-
-Rewrite the body of `perform_effect_runtime_with_saved_regs` (`src/builtins/effects.rs:~165`):
+Replace the string-keyed registry with type-id-keyed:
 
 ```rust
-pub unsafe extern "C" fn perform_effect_runtime_with_saved_regs(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    enum_type_ptr: usize,
-    op_value: usize,
-    resume_address: usize,
-    result_local_offset_raw: usize,
-    _saved_regs_ptr: *const usize,
-) -> usize {
-    // Find the handler and its tag.
-    let runtime = get_runtime().get();
-    let protocol_key = compute_protocol_key(enum_type_ptr);  // "Handler<{enum_type_name}>"
-    let (handler, tag) = ptd.effect_handlers.iter()
-        .rev()
-        .find(|e| e.protocol_key == protocol_key)
-        .map(|e| (e.handler_instance, e.tag))
-        .expect("no handler");
-
-    // Capture with tagged variant.
-    let cont_ptr = capture_continuation_tagged_runtime(
-        stack_pointer, frame_pointer,
-        resume_address, result_local_offset,
-        tag as usize,
-    );
-
-    // Wrap cont_ptr in a closure, call handler.handle(op_value, resume_closure).
-    let resume_closure = wrap_in_trampoline_closure(cont_ptr);
-    let result = call_handler_protocol_dispatch(handler, enum_type, op_value, resume_closure);
-
-    // Longjmp with result.
-    return_from_shift_tagged_runtime(
-        stack_pointer, frame_pointer, result, tag as usize,
-    );
+pub struct HandlerRegistryEntry {
+    pub enum_type_id: usize,        // the enum's canonical type_id
+    pub handler_instance: usize,
+    pub tag: u64,
 }
 ```
 
-**call_handler_protocol_dispatch** is the hard part — you need to look up the handler struct's `handle` method by protocol dispatch. Look at how `Ast::CallExpr` compiles protocol method calls in `src/ast.rs`, or check if there's an existing builtin for protocol dispatch (search `dispatch`). If nothing exists, you'll need to build protocol dispatch in Rust, which involves reading the struct's type id, looking up the protocol implementation table, finding the method offset, and calling it.
+- `push-handler(enum_type_id_int, handler, tag)` — compile-time: `Ast::Handle` looks up the enum type by name and passes its type_id. No strings.
+- `find-handler(enum_type_id_int)` — integer compare.
+- `get-enum-type(op)` returns the type_id as a tagged int, not a string.
+- Null-enum case: returns a sentinel (e.g., 0), checked with an integer comparison in IR. No `panic` builtin needed.
+- Delete the `get-enum-type` string allocation and both `string-concat` calls from `Ast::Perform`.
 
-**Alternative: do the dispatch at the Beagle level.** Instead of a single `perform_effect` builtin, lower `Ast::Perform` to a sequence of Beagle/IR operations:
+While here, also investigate why `variant_to_enum[struct_id]` was missing in my test case — that bug will bite the type-id approach too.
+
+### Then Step E6: perform_effect itself
+
+With the registry cleaned up:
+
+- `Ast::Perform` compiles to (pseudocode):
+  ```
+  enum_id = get-enum-type(op)
+  if enum_id == 0: panic "perform requires an enum value"
+  handler = find-handler(enum_id)
+  if handler == null: panic "no handler for ..."
+  tag = find-handler-tag(enum_id)
+  raw_k = capture-continuation-tagged(..., tag, after_perform, result_local)
+  resume_closure = make-closure(continuation_trampoline, [raw_k])
+  result = dispatch_handle(handler, op, resume_closure)    // see below
+  return-from-shift-tagged(result, tag)
+  after_perform:
+    result_local holds the resumed value
+  ```
+- `dispatch_handle` is the hard bit. Two viable paths:
+  - **Rust-side dispatch.** Implement `perform_effect_runtime_with_saved_regs` in `src/builtins/effects.rs`. Look up the Handler protocol's DispatchTable via `runtime.get_dispatch_table_ptr("beagle.effect/Handler<...>", "handle")` (integer key once you've done the cleanup), index by handler's struct_id, and call via `call_fn_3` (see `src/builtins/apply.rs:1320`). Then the builtin does the whole capture→dispatch→return sequence and the AST lowering is trivial.
+  - **Beagle-level dispatch.** Emit IR that calls the protocol dispatcher function directly by pointer — each `extend S with Handler(E)` compiles a function at `"beagle.effect/handle"` that's the inline-cached dispatcher. Bypass the parser entirely: grab its compiled address at `Ast::Perform` compile time and emit a direct call.
+
+The Rust-side path is probably cleaner and avoids dealing with the `handle`-keyword mess.
+
+### Step E7 / E6.4: Deep-handler wrapping for resume
+
+When `perform_effect` builds the resume closure, wrap it so a re-perform inside the resumed body installs the same handler again:
+
 ```
-tag = find-handler-tag(protocol_key)
-handler = find-handler(protocol_key)
-raw_k = capture-continuation-tagged(..., tag)
-resume_closure = make_closure(trampoline, 1, [raw_k])
-result = handler.handle(op_value, resume_closure)   // normal method call via IR
-return-from-shift-tagged(result, tag)              // noreturn
-after_shift_label:
-...
-```
-
-This sidesteps `call_handler_builtin` entirely. Cleaner. Model it on `Ast::Shift`'s compilation (`ast.rs:~4047`).
-
-### E6.4: Deep-handler wrapping (same as Step E7)
-
-When perform_effect creates the resume closure, wrap it the same way Ast::Try does for resumable exceptions:
-
-```
-resume_closure(v) = fn(v') {
+resume(v) = fn(v') {
     reset {
-        push_handler(key, handler, new_tag)
+        push_handler(enum_id, handler, new_tag)
         push_prompt_tag(new_tag, ...)
         raw_k(v')
     }
 }
 ```
 
-This re-installs the handler so a second `perform Op` inside the resumed body dispatches correctly. Without it, the first `perform` works but subsequent performs in the resumed body fail.
-
-See commit `d6019cf` in `src/ast.rs:~1790` (the resumable-try resume-closure construction) for the pattern — build an `Ast::Function` with the wrapping body, compile via `call_compile`.
+Without this, `perform` works the first time but subsequent `perform`s inside a resumed body dispatch to the wrong (or no) handler. Template: the resume-closure construction in `Ast::Try` (commit `d6019cf`) does this for resumable exceptions.
 
 ---
 
-## Step E7: Deep-handler wrapping for resume
+## Files you'll touch
 
-Subsumed into Step E6.4 above. The deep-handler wrapping for effect handlers is the same shape as the one for resumable exceptions. Just apply the same `Ast::Function { body: [Ast::Reset { body: [Ast::CallExpr { ... }] }] }` pattern used in `Ast::Try`.
-
-**Acceptance tests:** `handler_choice_multishot_test.bg`, `handler_amb_test.bg`, `handler_deep_call_test.bg`.
-
----
-
-## Step E8: Wire Ast::Handle with tags
-
-`Ast::Handle` (`src/ast.rs:~4424`) currently does:
-
-```
-push_handler(key, handler_instance)
-reset { body }
-pop_handler(key)
-```
-
-Change to:
-
-```
-tag = fresh_tag()   // new builtin, or use prompt_id_counter directly
-push_handler(key, handler_instance, tag)   // now 3 args
-push_prompt_tag(tag, sp, fp, after_handle_label)
-<body>
-pop_prompt_tag(tag)
-pop_handler(key)
-after_handle_label:
-```
-
-Note: the `reset { body }` wrap currently in `Ast::Handle` may need to be removed or kept depending on whether you use tag-only boundary or dual (reset + tag). Recommend: remove the reset wrapper for handle, use the prompt-tag as the sole boundary. The tagged capture doesn't need a `__reset__` frame.
-
-**But** note that for the shift body (inside `perform_effect`), there may still be a need for a reset boundary for any nested shifts/perform inside the handler body itself. Test carefully.
-
-**Acceptance:** All remaining effect-handler tests pass. Target: 310+/323.
-
----
-
-## Files to read (in order)
-
-1. `docs/exceptions-effects-plan.md` — overall design.
-2. `src/runtime.rs:3645-3710` — `HandlerRegistryEntry`, `PromptTagRecord`, `PerThreadData`.
-3. `src/runtime.rs:~4790` — registry helper methods.
-4. `src/builtins/effects.rs` — handler registry builtins (stubs for call_handler / perform_effect).
-5. `src/builtins/continuations.rs:~80-110` — push_prompt_tag / pop_prompt_tag.
-6. `src/builtins/reset_shift.rs:~517` — `capture_continuation_tagged_runtime`.
-7. `src/builtins/reset_shift.rs:~770` — `return_from_shift_tagged_runtime`.
-8. `src/builtins/install.rs:~363-420` — builtin registrations (also where SIGSEGV triggers).
-9. `src/ast.rs:~1645-1926` — `Ast::Try` resumable compilation (template for handler wrapping).
-10. `src/ast.rs:~4282-4485` — `Ast::Perform` and `Ast::Handle` (the targets).
-11. `src/builtins/reset_shift.rs:~786` — `continuation_trampoline` (for E5 nested-tag re-push).
+1. `src/runtime.rs:~3645-3710` — `HandlerRegistryEntry`, `PromptTagRecord`, `PerThreadData`. Change `protocol_key: String` → `enum_type_id: usize`.
+2. `src/builtins/effects.rs` — all four handler-registry builtins and the stubbed `perform_effect_runtime_with_saved_regs`. The cleanup + Step E6 land here.
+3. `src/builtins/install.rs:~1960` — builtin registrations (adjust arities).
+4. `src/ast.rs:~4282` — `Ast::Perform` compilation. Rewrite to use the cleaned-up registry + capture/dispatch/return sequence.
+5. `src/ast.rs:~4424` — `Ast::Handle`. Already mostly right; `push-handler` args change.
+6. `src/builtins/reset_shift.rs:~517` and `~770` — the tagged capture/return functions. Already registered. Probably no changes needed.
+7. `src/runtime.rs:8223` — `get_enum_name_for_variant` / `variant_to_enum`. Investigate the registration gap.
 
 ## Commands
 
 ```bash
-# Build
 cargo build --release
-
-# Full suite
-cargo run --release -- test resources/
-
-# Single test
+cargo run --release -- test resources/                   # full suite
 cargo run --release -- test resources/chez_handle_demo.bg
-
-# Debug run (not via test harness, shows output)
-cargo run --release -- resources/chez_handle_demo.bg
-
-# Effect-handler test files to target in order of simplicity
-# (inspect each to understand what shape of handler it expects):
-resources/chez_handle_demo.bg
-resources/custom_handler_test.bg
-resources/handler_exception_test.bg
-resources/handler_choice_multishot_test.bg
-resources/handler_amb_test.bg
-resources/handler_deep_call_test.bg
-resources/async_implicit_handle_test.bg
-resources/async_implicit_ops_test.bg
+cargo run --release -- resources/chez_handle_demo.bg     # direct (no test harness)
 ```
 
 ## Test suite discipline
 
-- Each step must leave **≥265 tests passing, 0 new regressions**.
-- If you regress a test, revert that step immediately and investigate.
-- Use `git stash` to compare baseline: `git stash && cargo run --release -- test resources/ | tail -3 && git stash pop`.
+- Baseline is **265/323**. Any step that regresses this is wrong — revert and rethink.
+- The 58 failing tests are mostly `perform`-users. They're the target.
+- Pick a single test to chase end-to-end first — `chez_handle_demo.bg` is the simplest (three cases: no perform, perform returning a value, perform resuming).
+
+## Relevant commits
+
+- `e6b9505` — handler registry + prompt-tag side stack scaffolding.
+- `0622cda` — tagged capture/return written.
+- `d6019cf` — resumable exceptions via reset+shift (pattern to follow for E7).
+- `0c01350` — SIGSEGV fix in the trampoline (TLS hazard). Read this before touching the trampoline.
+- `20600c8` — `fresh-tag` / `find-handler-tag` builtins + Handle threads tag.
+- `b8a7bfd` — Handle compiles through `__reset__` instead of stubbed push-prompt.
 
 ## Don't do these
 
-- Don't modify reset/shift primitives (`capture_continuation_runtime_inner`, `return_from_shift_runtime_inner`, `continuation_trampoline`) — they work correctly and are load-bearing.
+- Don't modify the reset/shift inner primitives (`capture_continuation_runtime_inner`, `return_from_shift_runtime_inner`, `continuation_trampoline`) — they work and are load-bearing. The trampoline especially is fragile; read the critical-section comments.
 - Don't remove `__reset__` from `std.bg` — resumable exceptions depend on it.
-- Don't inline `Ast::Reset` — the body-thunk outlining is required (frames need their own locals area). See the "Why the Earlier Plan Was Wrong" section in `exceptions-effects-plan.md`.
-- Don't use `#[no_mangle]` on the tagged runtime functions — caused a different SIGSEGV in testing.
-
-## If you get stuck
-
-- The SIGSEGV is the most likely blocker. If it can't be resolved in ~2 hours, consider alternative approaches: register the function somewhere other than immediately after capture-continuation-tagged; or inline return_from_shift_tagged's logic into perform_effect_runtime to avoid the separate registration entirely.
-- Protocol dispatch for `handler.handle()` is the second biggest unknown. If call_handler_builtin feels impossible to write, do the "dispatch at Beagle level" alternative in E6.3 — compile `Ast::Perform` to emit the method call via normal IR, not via a builtin.
-- Effect-handler tests can have surprising semantic expectations. If a test's expected output looks weird, read the test carefully and make sure the deep/shallow semantics match what the test expects.
+- Don't add fallbacks or "temporary" stubs that return `-1` or silently succeed. Stubs must throw a clear error (`panic!` or `throw_runtime_error`).
+- Don't carry the string-keyed registry forward "for now." Replacing it later is harder once more code depends on its shape.
