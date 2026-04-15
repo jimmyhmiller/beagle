@@ -4587,35 +4587,28 @@ impl AstCompiler<'_> {
                     return Ok(result_reg.into());
                 }
 
-                // Get prompt builtins
-                let push_prompt_fn = self
-                    .compiler
-                    .find_function("beagle.builtin/push-prompt")
-                    .expect("push-prompt builtin not found");
-                let push_prompt_fn_ptr = usize::from(push_prompt_fn.pointer);
-
-                let pop_prompt_fn = self
-                    .compiler
-                    .find_function("beagle.builtin/pop-prompt")
-                    .expect("pop-prompt builtin not found");
-                let pop_prompt_fn_ptr = usize::from(pop_prompt_fn.pointer);
-
-                // Push prompt handler
-                self.ir.push_prompt_handler(
-                    handle_prompt_handler,
-                    Value::Local(captured_local),
-                    push_prompt_fn_ptr,
-                );
-
-                // Execute the handle body through the outlined thunk so prompt
-                // entry has a distinct frame boundary.
+                // Run the body inside `beagle.core/__reset__`, which
+                // leaves a prompt-identifying frame on the stack. The
+                // tagged-shift path in `perform_effect` will longjmp
+                // through this frame using `return_from_shift_tagged`
+                // (tag match) or, for untagged `shift` inside the body,
+                // the FP-walking `return_from_shift` variant.
+                //
+                // This mirrors `Ast::Reset`'s compilation — all handle
+                // scopes now live inside a `__reset__` frame, and the
+                // tag on the HandlerRegistryEntry is what distinguishes
+                // perform from a plain shift.
+                let _ = handle_prompt_handler; // label retained for future tagged-jump wiring
                 self.not_tail_position();
-                let body_result = self.compile_closure_call_from_value(body_thunk, vec![]);
+                let body_thunk_reg = self.ir.assign_new(body_thunk);
+                let body_result = self.call_builtin(
+                    "beagle.core/__reset__",
+                    vec![body_thunk_reg.into()],
+                )?;
 
                 // Keep the handle result in a local across builtin calls that may clobber registers.
                 self.ir.store_local(captured_local, body_result);
                 self.ir.assign(result_reg, body_result);
-                self.ir.pop_prompt_handler(result_reg.into(), pop_prompt_fn_ptr);
 
                 // Pop the effect handler
                 let key_str2 = self.string_constant(protocol_key.clone());
@@ -4623,21 +4616,6 @@ impl AstCompiler<'_> {
                 let _ = self.call_builtin("beagle.builtin/pop-handler", vec![key_reg2.into()]);
                 let final_value = self.ir.load_local(captured_local);
                 self.ir.assign(result_reg, final_value);
-
-                self.ir.jump(after_handle);
-
-                // Prompt handler block
-                self.ir.write_label(handle_prompt_handler);
-                let captured_value = self.ir.load_local(captured_local);
-                self.ir.assign(result_reg, captured_value);
-
-                // Also pop the effect handler on this path
-                // Use the same protocol_key we computed earlier (with normalized protocol name)
-                let key_str3 = self.string_constant(protocol_key.clone());
-                let key_reg3 = self.ir.assign_new(key_str3);
-                let _ = self.call_builtin("beagle.builtin/pop-handler", vec![key_reg3.into()]);
-                let final_captured_value = self.ir.load_local(captured_local);
-                self.ir.assign(result_reg, final_captured_value);
 
                 self.ir.write_label(after_handle);
                 Ok(result_reg.into())
