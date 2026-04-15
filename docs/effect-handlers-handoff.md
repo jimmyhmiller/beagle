@@ -2,18 +2,35 @@
 
 **Purpose:** Complete the effect-handler implementation on top of the prompt-tag infrastructure already in place. This doc is self-contained — read it, read the code it points to, and you should be able to pick up without prior context.
 
-**Last updated:** 2026-04-14 (SIGSEGV resolved; E8 plumbing landed)
+**Last updated:** 2026-04-14 (SIGSEGV resolved; E8 plumbing + Handle rewired)
 
 ## Current state snapshot (2026-04-14 PM)
 
 - Commit `0c01350` — SIGSEGV fix (TLS hazard in `continuation_trampoline`).
 - Commit `20600c8` — fresh-tag + find-handler-tag builtins, push-handler bumped to 3 args, `Ast::Handle` threads a fresh tag into a handler-scoped local.
+- Commit `b8a7bfd` — `Ast::Handle` now compiles through `beagle.core/__reset__` instead of the stubbed push-prompt. Handle-without-perform works (previously threw "Refactor A" error).
 - Baseline: 265/323, 0 regressions.
 
 **What's still needed (in rough order):**
-1. Wire `push-prompt-tag(tag, sp, fp, after-handle-label)` at handle entry and `pop-prompt-tag(tag)` at handle exit. The current `Ast::Handle` still uses the untagged reset/shift prompt via `push_prompt_handler` IR op.
-2. Implement `perform_effect_runtime` (Step E6): use `find-handler-tag` + `capture-continuation-tagged` + `return-from-shift-tagged`, and dispatch `handler.handle(op, resume)` — the open question is whether to do that in Rust (protocol dispatch) or at the Beagle level (preferred per doc; emit IR that does the method call).
-3. Deep-handler wrapping for the resume closure (E7 / E6.4).
+
+1. **Implement `perform_effect` itself (Step E6).** `Ast::Perform` still compiles to the stubbed `beagle.builtin/perform-effect` IR op. The trampoline/capture/return infrastructure is all in place — the missing piece is the handler-dispatch call.
+
+   **Landmines discovered in-session — read before attempting:**
+   - `handle` is a Beagle keyword. A Beagle-level helper that writes `handler.handle(op, resume)` does *not* parse as a protocol call — it parses as a field access ("Field 'handle' does not exist on Handler"). Writing `handle(handler, op, resume)` tries to start a `handle` block.
+   - Qualified calls like `beagle.effect/handle(h, op, resume)` don't parse either (the parser doesn't treat the dotted prefix as a namespace-qualified call in this context).
+   - **Conclusion:** a stdlib `dispatch-handler` helper is not viable. Two workable paths:
+     - *(a)* Rust-side dispatch inside `perform_effect_runtime_with_saved_regs`: look up the protocol dispatch table for `beagle.effect/Handler<EnumType>` via `runtime.get_dispatch_table_ptr(...)`, find the handler's struct_id from its header, index into `DispatchTable.struct_dispatch`, and call the resulting function pointer via the save-volatile-registers trampolines (`call_fn_3`-style). No parser involvement.
+     - *(b)* Rename the protocol method. Change `fn handle(...)` in `beagle.effect` to something like `fn handle-op(...)` so a Beagle-side helper can call `handler.handle-op(op, resume)`. Breaks every user handler and every stdlib handler that implements `Handler`.
+
+     Path (a) is the cleaner one. Budget for: understanding how `beagle.effect/Handler<EnumType>` gets registered (see `add_protocol_info` in `src/runtime.rs`, called from `extend` compilation) and when the dispatch table is populated.
+
+   - `beagle.builtin/panic` (called from `Ast::Perform`'s error paths for null enum_type and null handler) is **not actually registered**. This is a latent bug that masks the null-enum-type case: a `perform` on a non-enum falls through into `string-concat` and produces "TypeError: Expected string, got Null" instead of "perform requires an enum value". Worth fixing separately — either register the primitive or switch to `beagle.primitive/panic`.
+
+   - `get_enum_type_builtin` returning null for a valid-looking variant (`MyEffect.GetValue` produced a heap pointer whose `struct_id` wasn't in `runtime.variant_to_enum`) indicates enum-variant registration isn't wired for the chez-demo case. Needs investigation before perform can succeed end-to-end.
+
+2. **Tag-aware perform boundary (Step E6 + E8 continued).** Once perform_effect works untagged, swap to `capture-continuation-tagged` + `return-from-shift-tagged` using the tag stashed in `__handle_tag_<n>__` by `Ast::Handle`. The `find-handler-tag` builtin is already in place.
+
+3. **Deep-handler wrapping for resume** (E7 / E6.4) — wrap the resume closure so a re-perform inside the resumed body installs the same handler. Template: `Ast::Try`'s resumable-exception resume closure construction in commit `d6019cf`.
 
 ---
 
