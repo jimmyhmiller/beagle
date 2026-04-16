@@ -449,7 +449,7 @@ impl ContinuationObject {
 unsafe fn find_enclosing_reset_frame(from_fp: usize) -> Option<(usize, usize)> {
     let mut fp = from_fp;
     // Defensive iteration cap — no realistic stack has this many frames.
-    for _ in 0..100_000 {
+    for _i in 0..100_000 {
         if fp == 0 {
             return None;
         }
@@ -837,6 +837,21 @@ pub unsafe fn return_from_shift_runtime_inner(
     let new_ra = unsafe { *((reset_fp + 8) as *const usize) };
     let new_sp = reset_fp + 16;
 
+    // Truncate the GC prev chain: longjmp abandons every frame between
+    // here and __reset__'s caller (whose FP is new_fp). Without this,
+    // GC_FRAME_TOP continues to point into stack memory that will be
+    // reused by later calls — the next GC walk would iterate a stale
+    // chain and trip over a prev pointer that's since been overwritten
+    // with arbitrary data. Mirrors `return_from_shift_tagged_runtime`.
+    let caller_header = new_fp.wrapping_sub(8);
+    {
+        let mut hdr = GC_FRAME_TOP.with(|cell| cell.get());
+        while hdr != 0 && hdr < caller_header {
+            hdr = unsafe { *((hdr.wrapping_sub(8)) as *const usize) };
+        }
+        GC_FRAME_TOP.with(|cell| cell.set(hdr));
+    }
+
     // ARM64: use the return-jump JIT trampoline. It takes
     // (new_sp, new_fp, new_lr, jump_target, callee_saved_ptr, value).
     // `value` is written into X0 before the branch, making it the
@@ -911,7 +926,9 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     let (seg_base, _seg_top, _innermost_fp_heap) = cont
         .segment_frame_info()
         .expect("continuation_trampoline: continuation has no segment data");
+
     let seg_size = cont.segment_size();
+
     let innermost_offset = cont.segment_frame_pointer_offset();
     let outermost_offset = cont.segment_outermost_fp_offset();
     let resume_address = cont.resume_address();

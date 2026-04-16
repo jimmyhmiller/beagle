@@ -4291,19 +4291,26 @@ impl AstCompiler<'_> {
                 // 6. Use shift to capture continuation
                 // 7. Call handler.handle(op_value, resume_continuation) via call-handler builtin
 
-                // Step 1: Evaluate the op value
+                // Step 1: Evaluate the op value. Pin in a local
+                // immediately so GC can update it across the many
+                // allocations (capture-continuation, make-closure, etc.)
+                // that follow before we pass it to the dispatcher.
                 self.not_tail_position();
                 let op_value = self.call_compile(&value)?;
                 let op_reg = self.ir.assign_new(op_value);
+                let op_local_name = format!("__perform_op_{}__", token_range.start);
+                let op_local = self.find_or_insert_local(&op_local_name);
+                self.ir.store_local(op_local, op_reg.into());
 
-                // Step 2: Get enum type using get-enum-type builtin
+                // Step 2: Get enum type_id (tagged int) via get-enum-type builtin.
+                // Returns null if op_value isn't a heap-allocated enum variant.
                 let enum_type_value = self.call_builtin(
                     "beagle.builtin/get-enum-type",
                     vec![op_reg.into()],
                 )?;
                 let enum_type_reg = self.ir.assign_new(enum_type_value);
 
-                // Step 2.5: Check if enum type is null (not an enum variant)
+                // Step 2.5: Check if enum type is null (not an enum variant).
                 let enum_type_error_label = self.ir.label("perform_enum_type_error");
                 let enum_type_ok_label = self.ir.label("perform_enum_type_ok");
                 self.ir.jump_if(
@@ -4314,45 +4321,31 @@ impl AstCompiler<'_> {
                 );
                 self.ir.jump(enum_type_ok_label);
 
-                // Error path: not an enum variant
+                // Error path: not an enum variant. Throw a runtime error.
+                // (Uses throw-error; message is generic because throw-error takes no args.
+                // These null paths are a frontend-accepted-but-ill-typed escape hatch.)
                 self.ir.write_label(enum_type_error_label);
-                let error_msg = self.string_constant("perform requires an enum value".to_string());
-                let error_msg_reg = self.ir.assign_new(error_msg);
-                let _ = self.call_builtin("beagle.builtin/panic", vec![error_msg_reg.into()]);
+                let _ = self.call_builtin("beagle.builtin/throw-error", vec![]);
 
-                // Continue path: enum type is valid
+                // Continue path: enum type is valid.
                 self.ir.write_label(enum_type_ok_label);
 
-                // Step 3: Construct protocol key "beagle.effect/Handler<{enum_type}>"
-                // The protocol key must match what extend and handle use - fully qualified
-                // Handler is always from beagle.effect (it's the core effect handler protocol)
-                let handler_prefix = self.string_constant("beagle.effect/Handler<".to_string());
-                let handler_prefix_reg = self.ir.assign_new(handler_prefix);
-                let handler_suffix = self.string_constant(">".to_string());
-                let handler_suffix_reg = self.ir.assign_new(handler_suffix);
-
-                // Concat: "Handler<" + enum_type
-                let partial_key = self.call_builtin("beagle.core/string-concat", vec![
-                    handler_prefix_reg.into(),
-                    enum_type_reg.into(),
-                ])?;
-                let partial_key_reg = self.ir.assign_new(partial_key);
-
-                // Concat: partial_key + ">"
-                let protocol_key = self.call_builtin("beagle.core/string-concat", vec![
-                    partial_key_reg.into(),
-                    handler_suffix_reg.into(),
-                ])?;
-                let protocol_key_reg = self.ir.assign_new(protocol_key);
-
-                // Step 4: Find handler using find-handler builtin
+                // Step 3: Find handler by enum type_id (integer compare, no strings).
+                // Pin handler in a local IMMEDIATELY because every
+                // subsequent allocation (capture, make-closure) triggers
+                // GC which can move the handler struct. Registers aren't
+                // scanned by GC; only stack locals are.
                 let handler_value = self.call_builtin(
                     "beagle.builtin/find-handler",
-                    vec![protocol_key_reg.into()],
+                    vec![enum_type_reg.into()],
                 )?;
                 let handler_reg = self.ir.assign_new(handler_value);
+                let handler_local_name =
+                    format!("__perform_handler_early_{}__", token_range.start);
+                let handler_early_local = self.find_or_insert_local(&handler_local_name);
+                self.ir.store_local(handler_early_local, handler_reg.into());
 
-                // Step 5: Check if handler is null
+                // Step 4: Check if handler is null.
                 let handler_error_label = self.ir.label("perform_no_handler_error");
                 let handler_ok_label = self.ir.label("perform_handler_ok");
                 self.ir.jump_if(
@@ -4363,59 +4356,250 @@ impl AstCompiler<'_> {
                 );
                 self.ir.jump(handler_ok_label);
 
-                // Error path: no handler installed
+                // Error path: no handler installed.
                 self.ir.write_label(handler_error_label);
-                // Create a more informative error message
-                let no_handler_prefix = self.string_constant("No handler installed for ".to_string());
-                let no_handler_prefix_reg = self.ir.assign_new(no_handler_prefix);
-                let error_msg = self.call_builtin("beagle.core/string-concat", vec![
-                    no_handler_prefix_reg.into(),
-                    protocol_key_reg.into(),
-                ])?;
-                let error_msg_reg = self.ir.assign_new(error_msg);
-                let _ = self.call_builtin("beagle.builtin/panic", vec![error_msg_reg.into()]);
+                let _ = self.call_builtin("beagle.builtin/throw-error", vec![]);
 
-                // Step 6: Handler found, use shift to capture continuation
+                // Step 5: Handler found. Capture continuation, build resume
+                // closure, dispatch to handler.handle, longjmp back. Same
+                // shape as Ast::Shift's continuation plumbing.
                 self.ir.write_label(handler_ok_label);
 
-                // Create labels for after shift (normal path) - this is where continuation resumes
-                let after_shift = self.ir.label("perform_after_shift");
-
-                // Create a result register for the resumed value
+                let after_perform = self.ir.label("perform_after_resume");
                 let result_reg = self.ir.assign_new(Value::Null);
 
-                // Allocate locals for continuation closure and raw continuation pointer
+                // Two locals: `cont_local` is where the RESUMED value will
+                // be written by continuation_trampoline when resume(v) is
+                // called. `cont_ptr_local` holds the raw ContinuationObject
+                // pointer (free var of the resume trampoline closure).
                 let unique_cont_name = format!("__perform_cont_{}__", token_range.start);
                 let cont_local = self.find_or_insert_local(&unique_cont_name);
+                let unique_cont_ptr_name = format!("__perform_cont_ptr_{}__", token_range.start);
+                let cont_ptr_local = self.find_or_insert_local(&unique_cont_ptr_name);
                 let null_reg = self.ir.assign_new(Value::Null);
                 self.ir.store_local(cont_local, null_reg.into());
 
-                let perform_builtin_name = if std::env::var("BEAGLE_CHEZ_HANDLE").is_ok() {
-                    "beagle.builtin/perform-effect-v2"
-                } else {
-                    "beagle.builtin/perform-effect"
-                };
-                let perform_fn = self
+                // Capture continuation (non-tagged; FP walker locates __reset__).
+                let capture_fn = self
                     .compiler
-                    .find_function(perform_builtin_name)
-                    .expect("perform-effect builtin not found");
-                let perform_fn_ptr = usize::from(perform_fn.pointer);
+                    .find_function("beagle.builtin/capture-continuation")
+                    .expect("capture-continuation builtin not found");
+                let capture_fn_ptr = usize::from(capture_fn.pointer);
+                let raw_cont =
+                    self.ir
+                        .capture_continuation(after_perform, cont_local, capture_fn_ptr);
+                let raw_cont_reg = self.ir.assign_new(raw_cont);
+                self.ir.store_local(cont_ptr_local, raw_cont_reg.into());
 
-                self.ir.perform_effect(
-                    handler_reg.into(),
-                    enum_type_reg.into(),
-                    op_reg.into(),
-                    after_shift,
-                    cont_local,
-                    perform_fn_ptr,
+                // Build resume closure: make_closure(trampoline, 1, [raw_cont_ptr]).
+                let trampoline_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/continuation-trampoline")
+                    .expect("continuation-trampoline builtin not found");
+                let trampoline_ptr = usize::from(trampoline_fn.pointer);
+
+                let free_var_ptr = self.ir.get_current_stack_position();
+                let cont_ptr_for_closure = self.ir.load_local(cont_ptr_local);
+                self.ir.push_to_eval_stack(cont_ptr_for_closure);
+
+                let make_closure_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/make-closure")
+                    .expect("make-closure builtin not found");
+                let make_closure_ptr =
+                    self.compiler.get_function_pointer(make_closure_fn).unwrap();
+                let make_closure_reg = self.ir.assign_new(make_closure_ptr);
+
+                let tagged_trampoline =
+                    BuiltInTypes::Function.tag(trampoline_ptr as isize) as usize;
+                let trampoline_reg = self.ir.assign_new(Value::RawValue(tagged_trampoline));
+                let num_free_reg = self.ir.assign_new(Value::TaggedConstant(1));
+
+                let sp_for_closure = self.ir.get_stack_pointer_imm(0);
+                let fp_for_closure = self.ir.get_frame_pointer();
+
+                let resume_closure = self.ir.call(
+                    make_closure_reg.into(),
+                    vec![
+                        sp_for_closure,
+                        fp_for_closure,
+                        trampoline_reg.into(),
+                        num_free_reg.into(),
+                        free_var_ptr,
+                    ],
+                );
+                let raw_resume_reg = self.ir.assign_new(resume_closure);
+
+                // Deep-handler wrap: the user-visible resume closure is
+                //   fn(v) {
+                //       push-handler(enum_id, handler, fresh-tag())
+                //       let r = __reset__(fn() { raw_resume(v) })
+                //       pop-handler(enum_id)
+                //       r
+                //   }
+                // so that a second `perform` inside the resumed body has
+                // a prompt boundary and a matching handler entry. Without
+                // this, the first perform works but any subsequent perform
+                // in the resumed body fails with "shift without an
+                // enclosing reset" or "no handler installed".
+                //
+                // The raw trampoline closure, the handler instance, and
+                // the enum type_id are all bound as local-name variables
+                // so the synthesized Ast::Function captures them as free
+                // variables at compile time.
+                let token_start = token_range.start;
+                let raw_resume_name =
+                    format!("__perform_raw_resume_{}__", token_start);
+                let captured_handler_name =
+                    format!("__perform_handler_{}__", token_start);
+                let captured_enum_id_name =
+                    format!("__perform_enum_id_{}__", token_start);
+                let v_name = format!("__perform_v_{}__", token_start);
+                let r_name = format!("__perform_r_{}__", token_start);
+
+                let raw_resume_local = self.find_or_insert_local(&raw_resume_name);
+                self.ir.store_local(raw_resume_local, raw_resume_reg.into());
+                self.insert_variable(
+                    raw_resume_name.clone(),
+                    VariableLocation::Local(raw_resume_local),
                 );
 
-                // After shift label - this is where we land when continuation (resume) is invoked
-                self.ir.write_label(after_shift);
-                // Record a GC safepoint at the resume point so the continuation segment walker
-                // can find stack map data for the innermost frame when scanning/updating pointers.
+                let captured_handler_local =
+                    self.find_or_insert_local(&captured_handler_name);
+                // Reload handler from its early-pinned local — handler_reg
+                // may be stale after the capture/make-closure allocations.
+                let handler_current = self.ir.load_local(handler_early_local);
+                let handler_current_reg = self.ir.assign_new(handler_current);
+                self.ir
+                    .store_local(captured_handler_local, handler_current_reg.into());
+                self.insert_variable(
+                    captured_handler_name.clone(),
+                    VariableLocation::Local(captured_handler_local),
+                );
+
+                let captured_enum_id_local =
+                    self.find_or_insert_local(&captured_enum_id_name);
+                self.ir
+                    .store_local(captured_enum_id_local, enum_type_reg.into());
+                self.insert_variable(
+                    captured_enum_id_name.clone(),
+                    VariableLocation::Local(captured_enum_id_local),
+                );
+
+                let wrapper_ast = Ast::Function {
+                    name: None,
+                    args: vec![Pattern::Identifier {
+                        name: v_name.clone(),
+                        token_range,
+                    }],
+                    rest_param: None,
+                    body: vec![
+                        Ast::Call {
+                            name: "beagle.builtin/push-handler".to_string(),
+                            args: vec![
+                                Ast::Identifier(captured_enum_id_name.clone(), token_start),
+                                Ast::Identifier(captured_handler_name.clone(), token_start),
+                                Ast::Call {
+                                    name: "beagle.builtin/fresh-tag".to_string(),
+                                    args: vec![],
+                                    token_range,
+                                },
+                            ],
+                            token_range,
+                        },
+                        Ast::Let {
+                            pattern: Pattern::Identifier {
+                                name: r_name.clone(),
+                                token_range,
+                            },
+                            value: Box::new(Ast::Call {
+                                name: "beagle.core/__reset__".to_string(),
+                                args: vec![Ast::Function {
+                                    name: None,
+                                    args: vec![],
+                                    rest_param: None,
+                                    body: vec![Ast::CallExpr {
+                                        callee: Box::new(Ast::Identifier(
+                                            raw_resume_name.clone(),
+                                            token_start,
+                                        )),
+                                        args: vec![Ast::Identifier(
+                                            v_name.clone(),
+                                            token_start,
+                                        )],
+                                        token_range,
+                                    }],
+                                    token_range,
+                                    docstring: None,
+                                }],
+                                token_range,
+                            }),
+                            token_range,
+                        },
+                        Ast::Call {
+                            name: "beagle.builtin/pop-handler".to_string(),
+                            args: vec![Ast::Identifier(
+                                captured_enum_id_name.clone(),
+                                token_start,
+                            )],
+                            token_range,
+                        },
+                        Ast::Identifier(r_name.clone(), token_start),
+                    ],
+                    token_range,
+                    docstring: None,
+                };
+
+                self.not_tail_position();
+                let wrapped_resume = self.call_compile(&wrapper_ast)?;
+                let wrapped_resume_reg = self.ir.assign_new(wrapped_resume);
+
+                // Remove the temporary bindings — they've been captured
+                // by the wrapper closure, but shouldn't be visible to user
+                // code after this point.
+                {
+                    let current_env = self.environment_stack.last_mut().unwrap();
+                    current_env.variables.remove(&raw_resume_name);
+                    current_env.variables.remove(&captured_handler_name);
+                    current_env.variables.remove(&captured_enum_id_name);
+                }
+
+                // Dispatch + return-from-shift via Rust builtin. Does not
+                // return normally — either continuation_trampoline (inside
+                // the wrapper) teleports back to `after_perform`, or the
+                // builtin longjmps past __reset__ with the handler's result.
+                //
+                // IMPORTANT: reload handler, op, and enum_id from their
+                // stack-local slots. Between find-handler and here, several
+                // allocations ran (capture-continuation, make-closure ×2)
+                // each of which can trigger GC under gc-always. GC updates
+                // stack slots but NOT virtual registers — if a heap pointer
+                // was in a callee-saved register and GC moved the object,
+                // the register holds a stale pointer. Reloading from the
+                // local (which GC DID update) ensures we pass the current
+                // address to the dispatcher.
+                let handler_fresh = self.ir.load_local(handler_early_local);
+                let handler_for_dispatch = self.ir.assign_new(handler_fresh);
+                let enum_fresh = self.ir.load_local(captured_enum_id_local);
+                let enum_for_dispatch = self.ir.assign_new(enum_fresh);
+                // op was stored in op_local at the top (before any GC-
+                // triggering allocations). Reload the current value.
+                let op_fresh = self.ir.load_local(op_local);
+                let op_for_dispatch = self.ir.assign_new(op_fresh);
+                let _ = self.call_builtin(
+                    "beagle.builtin/perform-dispatch-and-return",
+                    vec![
+                        handler_for_dispatch.into(),
+                        op_for_dispatch.into(),
+                        wrapped_resume_reg.into(),
+                        enum_for_dispatch.into(),
+                    ],
+                );
+
+                // Resume-point label. continuation_trampoline writes the
+                // resumed value into `cont_local` and jumps here.
+                self.ir.write_label(after_perform);
                 self.ir.record_gc_safepoint();
-                // The resumed value is in the continuation local
                 let resumed_value = self.ir.load_local(cont_local);
                 self.ir.assign(result_reg, resumed_value);
 
@@ -4438,12 +4622,14 @@ impl AstCompiler<'_> {
                 // 5. Call pop_handler(protocol_key)
                 // 6. Return result
 
-                // Construct the protocol key string with fully qualified names
-                // Resolve the protocol name through the namespace system
+                // Resolve the enum type argument to its struct_id (type_id).
+                // `handle Handler(MyEffect) with h` -> key on MyEffect's id.
+                // Kept around for error messages/diagnostics.
                 let (protocol_ns, protocol_name) = self.get_namespace_name_and_name(&protocol).unwrap_or_else(|_| {
                     (self.compiler.current_namespace_name(), protocol.clone())
                 });
                 let qualified_protocol = format!("{}/{}", protocol_ns, protocol_name);
+                let _ = qualified_protocol;
 
                 let qualified_type_args: Vec<String> = protocol_type_args
                     .iter()
@@ -4454,20 +4640,30 @@ impl AstCompiler<'_> {
                         format!("{}/{}", ns, name)
                     })
                     .collect();
-                let protocol_key = if qualified_type_args.is_empty() {
-                    qualified_protocol.clone()
-                } else {
-                    format!("{}<{}>", qualified_protocol, qualified_type_args.join(","))
-                };
+
+                let enum_name = qualified_type_args.first().ok_or_else(|| {
+                    CompileError::InternalError {
+                        message: "handle block requires a single enum type argument".to_string(),
+                    }
+                })?;
+                let enum_type_id = self
+                    .compiler
+                    .get_struct(enum_name)
+                    .map(|(id, _)| id)
+                    .ok_or_else(|| CompileError::InternalError {
+                        message: format!(
+                            "handle block: enum type {} is not defined (must be declared before use)",
+                            enum_name
+                        ),
+                    })?;
 
                 // Evaluate handler instance
                 self.not_tail_position();
                 let handler_value = self.call_compile(&handler_instance)?;
                 let handler_reg = self.ir.assign_new(handler_value);
 
-                // Create protocol key string constant
-                let key_str = self.string_constant(protocol_key.clone());
-                let key_reg = self.ir.assign_new(key_str);
+                // Key is the enum's struct_id as a tagged integer constant.
+                let key_reg = self.ir.assign_new(Value::TaggedConstant(enum_type_id as isize));
 
                 // Allocate a fresh prompt tag for this handle's scope and
                 // store it in a local so the pop path can reference the
@@ -4576,8 +4772,7 @@ impl AstCompiler<'_> {
                         .pop_prompt_handler(result_reg.into(), pop_prompt_v2_ptr);
 
                     // Pop the effect handler
-                    let key_str2 = self.string_constant(protocol_key.clone());
-                    let key_reg2 = self.ir.assign_new(key_str2);
+                    let key_reg2 = self.ir.assign_new(Value::TaggedConstant(enum_type_id as isize));
                     let _ =
                         self.call_builtin("beagle.builtin/pop-handler", vec![key_reg2.into()]);
                     let final_value = self.ir.load_local(captured_local);
@@ -4611,8 +4806,7 @@ impl AstCompiler<'_> {
                 self.ir.assign(result_reg, body_result);
 
                 // Pop the effect handler
-                let key_str2 = self.string_constant(protocol_key.clone());
-                let key_reg2 = self.ir.assign_new(key_str2);
+                let key_reg2 = self.ir.assign_new(Value::TaggedConstant(enum_type_id as isize));
                 let _ = self.call_builtin("beagle.builtin/pop-handler", vec![key_reg2.into()]);
                 let final_value = self.ir.load_local(captured_local);
                 self.ir.assign(result_reg, final_value);

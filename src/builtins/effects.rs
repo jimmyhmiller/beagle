@@ -6,137 +6,121 @@ use crate::save_gc_context;
 //
 // The per-thread effect-handler registry: a Vec<HandlerRegistryEntry>
 // owned by `PerThreadData` (see src/runtime.rs). `handle { ... } with h`
-// pushes; `perform op` looks up top-down by protocol key; exit pops.
+// pushes; `perform op` looks up top-down by enum type_id; exit pops.
 //
-// This file implements the registry and enum-type inspection. The
-// continuation-capturing side of `perform` — `perform_effect` and
-// `call_handler` — remains stubbed; those come in Step E6 once
-// prompt tags are wired in.
+// The registry is keyed by the enum's struct_id (the pseudo-struct
+// registered alongside the enum definition). No string allocation, no
+// linear string compare — integer compare, matching the rest of the
+// compiler's protocol dispatch strategy.
 // ============================================================================
 
 /// Push a handler onto the thread-local effect-handler stack.
 /// Called by `Ast::Handle` compilation at handle entry.
 ///
-/// `protocol_key_ptr` is a tagged Beagle string like
-/// `"beagle.effect/Handler<MyEffect>"`. `handler_instance` is the
-/// tagged heap pointer to the struct implementing the handler protocol.
-/// `tag` is the tagged-integer prompt tag associated with this handle's
-/// prompt boundary (see `push_prompt_tag`). `perform` uses this to
-/// find the matching prompt-tag record when capturing the continuation.
+/// `enum_type_id_tagged` is a tagged integer (the enum's struct_id).
+/// `handler_instance` is the tagged heap pointer to the struct
+/// implementing the handler protocol. `tag` is the tagged-integer prompt
+/// tag associated with this handle's prompt boundary.
 pub extern "C" fn push_handler_builtin(
-    protocol_key_ptr: usize,
+    enum_type_id_tagged: usize,
     handler_instance: usize,
     tag: usize,
 ) -> usize {
-    let runtime = crate::get_runtime().get();
-    let protocol_key = runtime.get_string_literal(protocol_key_ptr);
+    let enum_type_id = BuiltInTypes::untag(enum_type_id_tagged);
     let tag_val = BuiltInTypes::untag(tag) as u64;
+    // Pin the handler in a GC root slot so it survives any GC that fires
+    // while the handler is installed. The slot id is stored in the
+    // registry; find/pop retrieve/release it.
+    let runtime = crate::get_runtime().get_mut();
+    let handler_root_id = runtime.register_temporary_root(handler_instance);
     let ptd = crate::runtime::per_thread_data();
     ptd.effect_handlers
         .push(crate::runtime::HandlerRegistryEntry {
-            protocol_key,
-            handler_instance,
+            enum_type_id,
+            handler_root_id,
             tag: tag_val,
         });
     BuiltInTypes::null_value() as usize
 }
 
-/// Pop the most-recently-pushed handler for `protocol_key_ptr`.
+/// Pop the most-recently-pushed handler for `enum_type_id_tagged`.
 /// Called by `Ast::Handle` compilation at handle exit.
-///
-/// Searches top-down — this handles nested handles of the same effect
-/// correctly (the innermost one gets popped first).
-pub extern "C" fn pop_handler_builtin(protocol_key_ptr: usize) -> usize {
-    let runtime = crate::get_runtime().get();
-    let protocol_key = runtime.get_string_literal(protocol_key_ptr);
+pub extern "C" fn pop_handler_builtin(enum_type_id_tagged: usize) -> usize {
+    let enum_type_id = BuiltInTypes::untag(enum_type_id_tagged);
     let ptd = crate::runtime::per_thread_data();
     if let Some(pos) = ptd
         .effect_handlers
         .iter()
-        .rposition(|e| e.protocol_key == protocol_key)
+        .rposition(|e| e.enum_type_id == enum_type_id)
     {
-        ptd.effect_handlers.remove(pos);
+        let entry = ptd.effect_handlers.remove(pos);
+        let runtime = crate::get_runtime().get_mut();
+        runtime.unregister_temporary_root(entry.handler_root_id);
     }
     BuiltInTypes::null_value() as usize
 }
 
-/// Find the nearest handler matching `protocol_key_ptr`, top-down.
-/// Called by `perform op` compilation before shifting. Returns the
-/// tagged `handler_instance` pointer, or null if no handler is
-/// installed (caller handles the null case with an error message).
-pub extern "C" fn find_handler_builtin(stack_pointer: usize, protocol_key_ptr: usize) -> usize {
-    let runtime = crate::get_runtime().get();
-    let protocol_key = runtime.get_string(stack_pointer, protocol_key_ptr);
+/// Find the nearest handler matching `enum_type_id_tagged`, top-down.
+/// Returns the tagged `handler_instance` pointer, or null if no handler
+/// is installed.
+pub extern "C" fn find_handler_builtin(enum_type_id_tagged: usize) -> usize {
+    let enum_type_id = BuiltInTypes::untag(enum_type_id_tagged);
     let ptd = crate::runtime::per_thread_data();
-    ptd.effect_handlers
+    let root_id = match ptd
+        .effect_handlers
         .iter()
         .rev()
-        .find(|e| e.protocol_key == protocol_key)
-        .map(|e| e.handler_instance)
-        .unwrap_or_else(|| BuiltInTypes::null_value() as usize)
+        .find(|e| e.enum_type_id == enum_type_id)
+        .map(|e| e.handler_root_id)
+    {
+        Some(id) => id,
+        None => return BuiltInTypes::null_value() as usize,
+    };
+    // Read the current (possibly GC-moved) handler pointer from its root slot.
+    crate::get_runtime().get().peek_temporary_root(root_id)
 }
 
-/// Find the tag for the nearest handler matching `protocol_key_ptr`.
+/// Find the tag for the nearest handler matching `enum_type_id_tagged`.
 /// Returns the tag as a tagged integer, or null if no handler is
-/// installed. Callers pair this with `find_handler_builtin` when they
-/// need both the handler instance and the prompt tag.
-pub extern "C" fn find_handler_tag_builtin(
-    stack_pointer: usize,
-    protocol_key_ptr: usize,
-) -> usize {
-    let runtime = crate::get_runtime().get();
-    let protocol_key = runtime.get_string(stack_pointer, protocol_key_ptr);
+/// installed.
+pub extern "C" fn find_handler_tag_builtin(enum_type_id_tagged: usize) -> usize {
+    let enum_type_id = BuiltInTypes::untag(enum_type_id_tagged);
     let ptd = crate::runtime::per_thread_data();
     ptd.effect_handlers
         .iter()
         .rev()
-        .find(|e| e.protocol_key == protocol_key)
+        .find(|e| e.enum_type_id == enum_type_id)
         .map(|e| BuiltInTypes::Int.tag(e.tag as isize) as usize)
         .unwrap_or_else(|| BuiltInTypes::null_value() as usize)
 }
 
 /// Return a freshly allocated prompt tag as a tagged integer.
-/// `Ast::Handle` uses this at runtime to generate a distinct tag for
-/// each handle scope.
 pub extern "C" fn fresh_tag_builtin() -> usize {
     use std::sync::atomic::Ordering;
     let runtime = crate::get_runtime().get();
-    let raw = runtime
-        .prompt_id_counter
-        .fetch_add(1, Ordering::SeqCst);
+    let raw = runtime.prompt_id_counter.fetch_add(1, Ordering::SeqCst);
     BuiltInTypes::Int.tag(raw as isize) as usize
 }
 
-/// Return the enum name (as a Beagle string) for a tagged enum-variant
-/// value. `perform op` uses this to construct the protocol key at
-/// runtime. Returns null if `value` is not a heap-allocated enum
-/// variant — the AST-layer caller checks for null and raises
+/// Return the enum's struct_id (as a tagged integer) for a tagged
+/// enum-variant value. Returns null if `value` is not a heap-allocated
+/// enum variant — the AST-layer caller checks for null and raises
 /// "perform requires an enum value".
-pub extern "C" fn get_enum_type_builtin(
-    stack_pointer: usize,
-    _frame_pointer: usize,
-    value: usize,
-) -> usize {
+pub extern "C" fn get_enum_type_builtin(value: usize) -> usize {
     if !BuiltInTypes::is_heap_pointer(value) {
         return BuiltInTypes::null_value() as usize;
     }
     let heap_obj = HeapObject::from_tagged(value);
-    let header = heap_obj.get_header();
-    let struct_id: usize = header.type_id.into();
+    // Custom structs (enum variants are structs) have header.type_id == 0;
+    // the real struct_id lives in header.type_data. Use get_struct_id.
+    if heap_obj.get_type_id() != 0 {
+        return BuiltInTypes::null_value() as usize;
+    }
+    let variant_struct_id = heap_obj.get_struct_id();
 
-    let enum_name_opt = {
-        let runtime = crate::get_runtime().get();
-        runtime.get_enum_name_for_variant(struct_id).cloned()
-    };
-
-    match enum_name_opt {
-        Some(enum_name) => {
-            let runtime = crate::get_runtime().get_mut();
-            match runtime.allocate_string(stack_pointer, enum_name) {
-                Ok(ptr) => ptr.into(),
-                Err(_) => BuiltInTypes::null_value() as usize,
-            }
-        }
+    let runtime = crate::get_runtime().get();
+    match runtime.get_enum_id_for_variant(variant_struct_id) {
+        Some(enum_id) => BuiltInTypes::Int.tag(enum_id as isize) as usize,
         None => BuiltInTypes::null_value() as usize,
     }
 }
@@ -146,7 +130,7 @@ pub extern "C" fn call_handler_builtin(
     stack_pointer: usize,
     _frame_pointer: usize,
     _handler: usize,
-    _enum_type_ptr: usize,
+    _enum_type_id: usize,
     _op_value: usize,
     _resume: usize,
 ) -> usize {
@@ -160,21 +144,66 @@ pub extern "C" fn call_handler_builtin(
     }
 }
 
-/// Stub: perform an effect operation
-pub unsafe extern "C" fn perform_effect_runtime_with_saved_regs(
+/// Dispatch `handler.handle(op_value, resume_closure)` via the Handler
+/// protocol's dispatch table, then longjmp back past the enclosing
+/// `__reset__` with the handler's return value.
+///
+/// The IR-level compilation of `perform op` has already done the work
+/// of capturing the continuation and wrapping it in a trampoline
+/// closure. This builtin only performs the dispatch + return-from-shift.
+///
+/// Does not return. Either:
+///   - the handler calls `resume(v)`, and `continuation_trampoline`
+///     teleports back to the resume point (overwriting our frame); or
+///   - the handler returns a value, and we longjmp back past
+///     `__reset__` via `return_from_shift_runtime_inner`.
+pub unsafe extern "C" fn perform_dispatch_and_return_runtime(
     stack_pointer: usize,
-    _frame_pointer: usize,
-    _enum_type_ptr: usize,
-    _op_value: usize,
-    _resume_address: usize,
-    _result_local_offset_raw: usize,
-    _saved_regs_ptr: *const usize,
-) -> usize {
+    frame_pointer: usize,
+    handler: usize,
+    op_value: usize,
+    resume_closure: usize,
+    _enum_type_id_tagged: usize,
+) -> ! {
+    save_gc_context!(stack_pointer, frame_pointer);
+
+    let runtime = crate::get_runtime().get();
+
+    // Call through the protocol dispatcher function `beagle.effect/handle`,
+    // which handles inline-cache dispatch and struct-id → method lookup.
+    // Same calling convention as user calls to `handle(h, op, resume)`.
+    let handle_fn_entry = runtime
+        .get_function_by_name("beagle.effect/handle")
+        .unwrap_or_else(|| unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "RuntimeError",
+                "beagle.effect/handle dispatcher not compiled — was any Handler extension registered?"
+                    .to_string(),
+            );
+        });
+    let handle_fn_ptr = runtime
+        .get_pointer(handle_fn_entry)
+        .expect("handle dispatcher has no code pointer");
+
+    let save_vr_fn_entry = runtime
+        .get_function_by_name("beagle.builtin/save_volatile_registers3")
+        .expect("save_volatile_registers3 trampoline not registered");
+    let save_vr_ptr = runtime
+        .get_pointer(save_vr_fn_entry)
+        .expect("save_volatile_registers3 pointer not available");
+    let save_vr: extern "C" fn(usize, usize, usize, usize) -> usize =
+        unsafe { std::mem::transmute(save_vr_ptr) };
+
+    let result = save_vr(handler, op_value, resume_closure, handle_fn_ptr as usize);
+
+    // Handler returned without calling resume. Longjmp past the enclosing
+    // __reset__ with `result` as its return value.
     unsafe {
-        throw_runtime_error(
+        crate::builtins::reset_shift::return_from_shift_runtime_inner(
             stack_pointer,
-            "RuntimeError",
-            "perform is temporarily disabled (Refactor A in progress)".to_string(),
-        );
+            frame_pointer,
+            result,
+        )
     }
 }

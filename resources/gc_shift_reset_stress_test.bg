@@ -1,0 +1,83 @@
+namespace gc_shift_reset_stress_test
+// gc-always
+
+// More thorough GC stress tests for shift/reset: nested resets,
+// multishot, heap pointers that survive multiple GCs across captures.
+
+struct Box { value }
+struct Pair { left, right }
+
+fn test_nested_reset() {
+    // Outer reset containing an inner reset.
+    let result = reset {
+        let outer = Box { value: 10 }
+        let inner_result = reset {
+            shift(fn(k) {
+                k(k(k(5)))  // invoke inner continuation 3 times
+            })
+        }
+        outer.value + inner_result
+    }
+    println(result)
+}
+
+fn test_multishot_with_heap() {
+    // Multishot continuation, each resume allocates.
+    let result = reset {
+        let base = Box { value: 1 }
+        shift(fn(k) {
+            let a = k(10)
+            let b = k(20)
+            let c = k(30)
+            a + b + c
+        }) + base.value
+    }
+    println(result)
+}
+
+fn test_deep_heap_chain() {
+    // A linked list built inside the resumed body.
+    let result = reset {
+        let head = Box { value: 1 }
+        let tail = shift(fn(k) {
+            let other = Box { value: 99 }
+            k(other)
+        })
+        Pair { left: head, right: tail }.right.value
+    }
+    println(result)
+}
+
+fn test_shift_in_loop_body() {
+    // Build up a sum via repeated shift captures.
+    let mut total = 0
+    let mut i = 0
+    loop {
+        if i >= 3 {
+            break(null)
+        }
+        let increment = reset {
+            shift(fn(k) {
+                k(Box { value: 7 })
+            }).value
+        }
+        total = total + increment
+        i = i + 1
+    }
+    println(total)
+}
+
+fn main() {
+    test_nested_reset()
+    test_multishot_with_heap()
+    test_deep_heap_chain()
+    test_shift_in_loop_body()
+    println("all passed")
+}
+
+// @beagle.core.snapshot
+// 15
+// 63
+// 99
+// 21
+// all passed

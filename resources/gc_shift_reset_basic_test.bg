@@ -1,0 +1,74 @@
+namespace gc_shift_reset_basic_test
+// gc-always
+
+// Stress test: GC fires on every allocation during shift/reset.
+// Tests both the "shift body returns" path and the "invoke k" path.
+
+struct Box { value }
+
+fn test_shift_returns() {
+    // shift body returns without invoking k
+    let result = reset {
+        let a = Box { value: 100 }
+        let b = Box { value: 200 }
+        a.value + shift(fn(k) {
+            let c = Box { value: 42 }
+            c.value
+        }) + b.value
+    }
+    println(result)
+}
+
+fn test_invoke_k() {
+    // shift body invokes k with a value
+    let result = reset {
+        let a = Box { value: 10 }
+        a.value + shift(fn(k) {
+            let b = Box { value: 5 }
+            k(b.value)
+        })
+    }
+    println(result)
+}
+
+fn test_invoke_k_with_heap_value() {
+    // invoke k where the resumed body allocates
+    let result = reset {
+        let before = Box { value: 1 }
+        let shifted = shift(fn(k) {
+            let arg = Box { value: 99 }
+            k(arg)
+        })
+        let after = Box { value: shifted.value + before.value }
+        after.value
+    }
+    println(result)
+}
+
+fn test_multishot() {
+    // invoke k multiple times
+    let result = reset {
+        1 + shift(fn(k) {
+            let a = k(10)
+            let b = k(20)
+            let c = Box { value: a + b }
+            c.value
+        })
+    }
+    println(result)
+}
+
+fn main() {
+    test_shift_returns()
+    test_invoke_k()
+    test_invoke_k_with_heap_value()
+    test_multishot()
+    println("all passed")
+}
+
+// @beagle.core.snapshot
+// 42
+// 15
+// 100
+// 32
+// all passed

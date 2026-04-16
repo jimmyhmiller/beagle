@@ -1957,37 +1957,34 @@ impl Runtime {
         self.install_rust_collection_builtins()?;
         self.install_regex_builtins()?;
 
-        // Effect handler builtins
+        // Effect handler builtins — all keyed by enum struct_id (tagged int)
         self.add_builtin_function(
             "beagle.builtin/push-handler",
             push_handler_builtin as *const u8,
             false,
-            3, // protocol_key_str, handler_instance, tag
+            3, // enum_type_id, handler_instance, tag
         )?;
 
         self.add_builtin_function(
             "beagle.builtin/pop-handler",
             pop_handler_builtin as *const u8,
             false,
-            1, // protocol_key_str
+            1, // enum_type_id
         )?;
 
-        // find-handler needs stack_pointer for get_string error handling
-        self.add_builtin_function_with_fp(
+        self.add_builtin_function(
             "beagle.builtin/find-handler",
             find_handler_builtin as *const u8,
-            true,  // needs stack_pointer
-            false, // doesn't need frame_pointer
-            2,     // stack_pointer, protocol_key_str
+            false,
+            1, // enum_type_id
         )?;
 
         // find-handler-tag: returns the prompt tag for the nearest matching handler.
-        self.add_builtin_function_with_fp(
+        self.add_builtin_function(
             "beagle.builtin/find-handler-tag",
             find_handler_tag_builtin as *const u8,
-            true,
             false,
-            2, // stack_pointer, protocol_key_str
+            1, // enum_type_id
         )?;
 
         // fresh-tag: returns a fresh prompt tag as a tagged integer.
@@ -1998,13 +1995,12 @@ impl Runtime {
             0,
         )?;
 
-        // get-enum-type needs stack_pointer and frame_pointer for GC-safe string allocation
-        self.add_builtin_function_with_fp(
+        // get-enum-type: no allocation any more, so no sp/fp needed.
+        self.add_builtin_function(
             "beagle.builtin/get-enum-type",
             get_enum_type_builtin as *const u8,
-            true,
-            true,
-            3, // stack_pointer, frame_pointer, value
+            false,
+            1, // value
         )?;
 
         // call-handler calls handler.handle(op, resume) using protocol dispatch
@@ -2016,12 +2012,17 @@ impl Runtime {
             6, // stack_pointer, frame_pointer, handler, enum_type_ptr, op_value, resume
         )?;
 
+        // perform-dispatch-and-return: called by Ast::Perform after the IR
+        // has already built the resume_closure. Does Handler protocol dispatch
+        // then longjmps past the enclosing __reset__ with the handler's result.
+        // Diverges (never returns); declared with a usize return so the
+        // builtin table accepts it, but control transfers via longjmp.
         self.add_builtin_function_with_fp(
-            "beagle.builtin/perform-effect",
-            perform_effect_runtime_with_saved_regs as *const u8,
+            "beagle.builtin/perform-dispatch-and-return",
+            perform_dispatch_and_return_runtime as *const u8,
             true,
             true,
-            7, // stack_pointer, frame_pointer, enum_type_ptr, op_value, resume_address, result_local_offset, saved_regs_ptr
+            6, // sp, fp, handler, op_value, resume_closure, enum_type_id
         )?;
 
         // ====================================================================

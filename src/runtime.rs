@@ -3646,14 +3646,22 @@ pub struct ExceptionHandler {
 /// `handle { ... } with h` (via `push_handler_builtin`), looked up by
 /// `perform op` (via `find_handler_builtin`). The registry is dynamically
 /// scoped: each entry represents a currently-active handler frame.
+///
+/// Keyed by the enum's struct_id — the same type_id that appears in the
+/// heap header of enum variants. `perform` reads the variant's type_id,
+/// maps variant→enum via `variant_to_enum_id`, and integer-compares to
+/// find the nearest matching handler.
 #[derive(Debug, Clone)]
 pub struct HandlerRegistryEntry {
-    pub protocol_key: String,
-    pub handler_instance: usize,
+    pub enum_type_id: usize,
+    /// GC handle-root slot id holding the handler instance pointer.
+    /// The registry can't store the raw pointer because GC can move
+    /// the handler struct between push and find; the root slot is
+    /// updated by GC, so `peek_temporary_root(id)` always returns
+    /// the current (post-GC) pointer.
+    pub handler_root_id: usize,
     /// Prompt tag identifying the reset frame this handler was installed
-    /// inside. Zero means "no tag assigned yet" — filled in once the
-    /// tag-aware reset machinery (Step E3) lands. Used by `perform` to
-    /// shift up to the matching handle.
+    /// inside. Used by `perform` to shift up to the matching handle.
     pub tag: u64,
 }
 
@@ -8222,6 +8230,18 @@ impl Runtime {
     /// Returns None if this isn't an enum variant
     pub fn get_enum_name_for_variant(&self, struct_id: usize) -> Option<&String> {
         self.variant_to_enum.get(&struct_id)
+    }
+
+    /// Get the enum's own struct_id (the pseudo-struct registered alongside
+    /// the enum definition) for a given variant struct_id. Returns None if
+    /// the input isn't a registered enum variant.
+    ///
+    /// Used by effect-handler dispatch: `perform` reads the heap header's
+    /// type_id (a variant id) and needs the parent enum's id so it can
+    /// match against `HandlerRegistryEntry.enum_type_id`.
+    pub fn get_enum_id_for_variant(&self, struct_id: usize) -> Option<usize> {
+        let enum_name = self.variant_to_enum.get(&struct_id)?;
+        self.structs.get(enum_name).map(|(id, _)| id)
     }
 
     pub fn get_namespace_from_alias(&self, alias: &str) -> Option<String> {

@@ -83,12 +83,7 @@ pub unsafe extern "C" fn push_prompt_tag_runtime(
     link_register: usize,
 ) -> usize {
     let runtime = crate::get_runtime().get();
-    runtime.push_prompt_tag(
-        tag as u64,
-        stack_pointer,
-        frame_pointer,
-        link_register,
-    );
+    runtime.push_prompt_tag(tag as u64, stack_pointer, frame_pointer, link_register);
     stack_pointer
 }
 
@@ -100,22 +95,36 @@ pub unsafe extern "C" fn pop_prompt_tag_runtime(tag: usize) -> usize {
     BuiltInTypes::null_value() as usize
 }
 
-/// REFACTOR A stub. `resume-tail` was a tail-position continuation
-/// invoker used by the async implicit-handler runtime. Referenced by
-/// stdlib at compile time; any runtime call aborts.
+/// Tail-call a resume closure with the given value. Exposed to stdlib
+/// as `builtin/resume-tail(resume, value)` so async handlers can mark
+/// the tail-position invocation explicitly.
+///
+/// The closure is typically a `continuation_trampoline` wrapper, in
+/// which case the call teleports and never returns. For non-trampoline
+/// closures (e.g. the deep-handler-wrapped resume), it returns the
+/// closure's result.
 pub unsafe extern "C" fn resume_tail_runtime(
-    stack_pointer: usize,
+    _stack_pointer: usize,
     _frame_pointer: usize,
-    _resume_closure: usize,
-    _value: usize,
-) -> ! {
-    unsafe {
-        throw_runtime_error(
-            stack_pointer,
-            "RuntimeError",
-            "resume-tail is temporarily disabled (Refactor A in progress)".to_string(),
-        );
-    }
+    resume_closure: usize,
+    value: usize,
+) -> usize {
+    // Extract the closure's body fn pointer (layout: header, fn_ptr, ...).
+    // Closure layout: header(8) + fn_ptr_tagged(8) + num_free(8) + num_locals(8) + free_var[0]...
+    // Function-tagged pointers use shift-left-by-3 encoding, so untag
+    // via >> 3 (BuiltInTypes::untag), not a low-bit mask.
+    let untagged_closure = BuiltInTypes::untag(resume_closure);
+    let fn_ptr_tagged = unsafe { *((untagged_closure + 8) as *const usize) };
+    let raw_fn_ptr = BuiltInTypes::untag(fn_ptr_tagged) as *const u8;
+
+    // Call the closure body directly. For continuation_trampoline,
+    // this teleports and does not return via this frame — the resumed
+    // body's outermost frame points at our caller's frame via the
+    // Beagle ABI. For regular closures (e.g. deep-handler-wrapped),
+    // the call returns normally with the closure's result.
+    let closure_body: extern "C" fn(usize, usize) -> usize =
+        unsafe { std::mem::transmute(raw_fn_ptr) };
+    closure_body(resume_closure, value)
 }
 
 /// REFACTOR A stub. `invoke-continuation` was the direct

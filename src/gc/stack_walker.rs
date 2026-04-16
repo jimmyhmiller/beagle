@@ -145,51 +145,44 @@ impl StackWalker {
 
             // prev_value is a raw address (not tagged), pointing to previous frame's header
             // A value of 0 means end of chain
-            if prev_value != 0 {
-                if !prev_value.is_multiple_of(8) {
-                    let frame_pointer = header_addr + 8;
-                    let return_addr = unsafe { *((frame_pointer + 8) as *const usize) };
-                    let saved_fp = unsafe { *(frame_pointer as *const usize) };
-                    let slot_preview = (0..6usize)
-                        .map(|i| {
-                            let slot_addr = header_addr - 16 - (i * 8);
-                            let slot_value = unsafe { *(slot_addr as *const usize) };
-                            format!("{:#x}:{:#x}", slot_addr, slot_value)
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    if let Some((function, offset)) = crate::get_runtime()
-                        .get()
-                        .get_function_containing_pointer(return_addr as *const u8)
-                    {
-                        eprintln!(
-                            "[gc-prev-corrupt] frame_header={:#x} fp={:#x} ret={:#x} fn={}+{:#x} saved_fp={:#x} prev={:#x} slots={}",
-                            header_addr,
-                            frame_pointer,
-                            return_addr,
-                            function.name,
-                            offset,
-                            saved_fp,
-                            prev_value,
-                            slot_preview
-                        );
-                    } else {
-                        eprintln!(
-                            "[gc-prev-corrupt] frame_header={:#x} fp={:#x} ret={:#x} saved_fp={:#x} prev={:#x} slots={}",
-                            header_addr,
-                            frame_pointer,
-                            return_addr,
-                            saved_fp,
-                            prev_value,
-                            slot_preview
-                        );
-                    }
-                    crate::builtins::dump_gc_chain_trace();
-                    panic!(
-                        "BUG: misaligned GC prev pointer {:#x} from frame header {:#x}",
-                        prev_value, header_addr
+            if prev_value != 0 && !prev_value.is_multiple_of(8) {
+                let frame_pointer = header_addr + 8;
+                let return_addr = unsafe { *((frame_pointer + 8) as *const usize) };
+                let saved_fp = unsafe { *(frame_pointer as *const usize) };
+                let slot_preview = (0..6usize)
+                    .map(|i| {
+                        let slot_addr = header_addr - 16 - (i * 8);
+                        let slot_value = unsafe { *(slot_addr as *const usize) };
+                        format!("{:#x}:{:#x}", slot_addr, slot_value)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if let Some((function, offset)) = crate::get_runtime()
+                    .get()
+                    .get_function_containing_pointer(return_addr as *const u8)
+                {
+                    eprintln!(
+                        "[gc-prev-corrupt] frame_header={:#x} fp={:#x} ret={:#x} fn={}+{:#x} saved_fp={:#x} prev={:#x} slots={}",
+                        header_addr,
+                        frame_pointer,
+                        return_addr,
+                        function.name,
+                        offset,
+                        saved_fp,
+                        prev_value,
+                        slot_preview
+                    );
+                } else {
+                    eprintln!(
+                        "[gc-prev-corrupt] frame_header={:#x} fp={:#x} ret={:#x} saved_fp={:#x} prev={:#x} slots={}",
+                        header_addr, frame_pointer, return_addr, saved_fp, prev_value, slot_preview
                     );
                 }
+                crate::builtins::dump_gc_chain_trace();
+                panic!(
+                    "BUG: misaligned GC prev pointer {:#x} from frame header {:#x}",
+                    prev_value, header_addr
+                );
             }
             header_addr = prev_value;
         }
