@@ -393,23 +393,6 @@ fn print_stack(_stack_pointer: usize) {
 pub unsafe extern "C" fn gc(stack_pointer: usize, frame_pointer: usize) -> usize {
     // Save the GC context including the return address
     save_gc_context!(stack_pointer, frame_pointer);
-    if std::env::var("BEAGLE_DEBUG_GC_TOP_FILE").is_ok() {
-        let gc_top = get_gc_frame_top();
-        let header_addr = frame_pointer.saturating_sub(8);
-        let line = format!(
-            "[builtin-gc] fp={:#x} header={:#x} gc_top={:#x}",
-            frame_pointer, header_addr, gc_top
-        );
-        if let Ok(path) = std::env::var("BEAGLE_DEBUG_GC_TOP_FILE")
-            && let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-        {
-            use std::io::Write;
-            let _ = writeln!(file, "{}", line);
-        }
-    }
     #[cfg(feature = "debug-gc")]
     {
         eprintln!(

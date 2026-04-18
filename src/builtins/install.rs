@@ -360,25 +360,10 @@ impl Runtime {
             1, // handler_id
         )?;
 
-        // Delimited continuation builtins
-        self.add_builtin_function(
-            "beagle.builtin/push-prompt",
-            push_prompt_runtime as *const u8,
-            false,
-            5, // handler_address, result_local, link_register, stack_pointer, frame_pointer
-        )?;
-
-        self.add_builtin_function(
-            "beagle.builtin/pop-prompt",
-            pop_prompt_runtime as *const u8,
-            false,
-            0,
-        )?;
-
-        // Tag-aware prompt push/pop for effect handlers. These mirror
-        // push-prompt/pop-prompt above but store records on the
-        // prompt-tag side-stack keyed by a fresh u64 tag. Used by the
-        // lowering of `handle { ... } with h` (Step E6+).
+        // Delimited continuation builtins.
+        // Tag-aware prompt push/pop for effect handlers: store records
+        // on the prompt-tag side-stack keyed by a fresh u64 tag. Used
+        // by the lowering of `handle { ... } with h`.
         self.add_builtin_function(
             "beagle.builtin/push-prompt-tag",
             push_prompt_tag_runtime as *const u8,
@@ -430,27 +415,8 @@ impl Runtime {
             4,
         )?;
 
-        // return-from-shift-handler is for handler returns (after call-handler in perform)
-        // It sets is_handler_return flag so return_from_shift skips InvocationReturnPoints
-        self.add_builtin_function_with_fp(
-            "beagle.builtin/return-from-shift-handler",
-            return_from_shift_handler_runtime as *const u8,
-            true,
-            true,
-            4,
-        )?;
-
-        // Refactor A stubs — kept registered so stdlib compile-time lookups
-        // for `beagle.builtin/invoke-continuation` and
-        // `beagle.builtin/resume-tail` continue to resolve. Any runtime
-        // call aborts with a clear error.
-        self.add_builtin_function_with_fp(
-            "beagle.builtin/invoke-continuation",
-            invoke_continuation_runtime as *const u8,
-            true,
-            true,
-            4,
-        )?;
+        // resume-tail: stdlib effect helper that invokes a resume
+        // closure in tail position.
         self.add_builtin_function_with_fp(
             "beagle.builtin/resume-tail",
             resume_tail_runtime as *const u8,
@@ -2001,15 +1967,6 @@ impl Runtime {
             get_enum_type_builtin as *const u8,
             false,
             1, // value
-        )?;
-
-        // call-handler calls handler.handle(op, resume) using protocol dispatch
-        self.add_builtin_function_with_fp(
-            "beagle.builtin/call-handler",
-            call_handler_builtin as *const u8,
-            true,
-            true,
-            6, // stack_pointer, frame_pointer, handler, enum_type_ptr, op_value, resume
         )?;
 
         // perform-dispatch-and-return: called by Ast::Perform after the IR

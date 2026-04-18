@@ -77,8 +77,7 @@ impl AstCompiler<'_> {
                 // Note: We mark the card even if CAS fails - this is safe (just extra work)
                 let write_barrier_fn =
                     Value::RawValue((write_barrier as usize) << BuiltInTypes::tag_size());
-                self.ir
-                    .call_builtin(write_barrier_fn, vec![untagged, new]);
+                self.ir.call_builtin(write_barrier_fn, vec![untagged, new]);
 
                 // TODO: I should do a conditional move here instead of a jump
                 let label = self.ir.label("compare_and_swap");
@@ -408,9 +407,12 @@ impl AstCompiler<'_> {
         self.ir
             .write_field_dynamic(untagged_object, property_offset, Value::Register(value));
 
-        let write_barrier_fn = Value::RawValue((write_barrier as usize) << BuiltInTypes::tag_size());
-        self.ir
-            .call_builtin(write_barrier_fn, vec![untagged_object, Value::Register(value)]);
+        let write_barrier_fn =
+            Value::RawValue((write_barrier as usize) << BuiltInTypes::tag_size());
+        self.ir.call_builtin(
+            write_barrier_fn,
+            vec![untagged_object, Value::Register(value)],
+        );
 
         self.ir.jump(exit_property_access);
 

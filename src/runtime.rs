@@ -3862,42 +3862,6 @@ pub fn create_stack_with_protected_page_after(stack_size: usize) -> MmapMut {
 }
 
 impl Runtime {
-    fn log_continuation_closure_field3(&self, phase: &str, value: usize) {
-        if BuiltInTypes::get_kind(value) != BuiltInTypes::Closure {
-            return;
-        }
-        let closure_obj = HeapObject::from_tagged(value);
-        let fn_ptr = BuiltInTypes::untag(closure_obj.get_field(0)) as *const u8;
-        let is_continuation_trampoline = self
-            .get_function_by_pointer(fn_ptr)
-            .map(|f| f.name == "beagle.builtin/continuation-trampoline")
-            .unwrap_or(false);
-        if is_continuation_trampoline {
-            let field3 = closure_obj.get_field(3);
-            let raw_header = unsafe { *(closure_obj.untagged() as *const usize) };
-            let header = crate::types::Header::from_usize(raw_header);
-            let cont_info = crate::builtins::reset_shift::ContinuationObject::from_tagged(field3)
-                .map(|cont| {
-                    let segment_ptr = cont.segment_ptr();
-                    let segment_range = cont
-                        .segment_frame_info()
-                        .map(|(base, top, _)| format!("{:#x}..{:#x}", base, top))
-                        .unwrap_or_else(|| "<none>".to_string());
-                    format!(" cont_segment_ptr={:#x} cont_segment_range={}", segment_ptr, segment_range)
-                })
-                .unwrap_or_default();
-            eprintln!(
-                "[make-closure-freevar] phase={} closure={:#x} header={:#x} size={} field3={:#x}{}",
-                phase,
-                value,
-                raw_header,
-                header.size,
-                field3,
-                cont_info
-            );
-        }
-    }
-
     pub fn new(
         command_line_arguments: CommandLineArguments,
         allocator: Alloc,
@@ -5655,10 +5619,6 @@ impl Runtime {
         function: usize,
         free_variables: &[usize],
     ) -> Result<usize, Box<dyn Error>> {
-        for &value in free_variables {
-            self.log_continuation_closure_field3("before-root", value);
-        }
-
         let rooted_free_vars: Vec<(usize, usize)> = free_variables
             .iter()
             .copied()
@@ -5672,47 +5632,8 @@ impl Runtime {
             })
             .collect();
 
-        for (_, root) in &rooted_free_vars {
-            let value = self.peek_temporary_root(*root);
-            self.log_continuation_closure_field3("after-root", value);
-        }
-
         let len = 8 + 8 + 8 + free_variables.len() * 8;
-        let has_continuation_closure_free_var = rooted_free_vars.iter().any(|(_, root)| {
-            let value = self.peek_temporary_root(*root);
-            if BuiltInTypes::get_kind(value) != BuiltInTypes::Closure {
-                return false;
-            }
-            let closure_obj = HeapObject::from_tagged(value);
-            let fn_ptr = BuiltInTypes::untag(closure_obj.get_field(0)) as *const u8;
-            self.get_function_by_pointer(fn_ptr)
-                .map(|f| f.name == "beagle.builtin/continuation-trampoline")
-                .unwrap_or(false)
-        });
-        let options = self.memory.heap.get_allocation_options();
-        let heap_pointer = if has_continuation_closure_free_var && options.gc_always {
-            let frame_pointer = crate::builtins::get_saved_frame_pointer();
-            self.run_gc(stack_pointer, frame_pointer);
-            for (_, root) in &rooted_free_vars {
-                let value = self.peek_temporary_root(*root);
-                self.log_continuation_closure_field3("after-manual-gc", value);
-            }
-            match self.memory.heap.try_allocate(len / 8, BuiltInTypes::Closure)? {
-                AllocateAction::Allocated(value) => {
-                    assert!(value.is_aligned());
-                    BuiltInTypes::Closure.tag(value as isize) as usize
-                }
-                AllocateAction::Gc => {
-                    panic!("make_closure debug path: unexpected GC after manual gc");
-                }
-            }
-        } else {
-            self.allocate(len / 8, stack_pointer, BuiltInTypes::Closure)?
-        };
-        for (_, root) in &rooted_free_vars {
-            let value = self.peek_temporary_root(*root);
-            self.log_continuation_closure_field3("after-allocate", value);
-        }
+        let heap_pointer = self.allocate(len / 8, stack_pointer, BuiltInTypes::Closure)?;
         let heap_object = HeapObject::from_tagged(heap_pointer);
         let num_free = free_variables.len();
         let function_definition =

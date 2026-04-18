@@ -61,10 +61,8 @@
 //! - `Ast::Reset` / `Ast::Shift` IR compilation — see `src/ast.rs`.
 //! - `__reset__`'s Beagle source — see `standard-library/std.bg`.
 //! - The `return-jump` / `read-fp` JIT trampolines — see `src/main.rs`.
-//! - `handle` / `perform` / resumable `try/catch` — Refactor A
-//!   disabled these; Refactor B will rebuild them on top of
-//!   reset/shift. Their error-throwing stubs live in
-//!   `src/builtins/continuations.rs`.
+//! - `handle` / `perform` effect dispatch — see `src/builtins/effects.rs`,
+//!   which builds on the tagged prompt/shift primitives in this module.
 
 use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
@@ -194,16 +192,9 @@ fn make_segment_fp_links_relative(
         return;
     }
     let mut fp = data_base + fp_offset;
-    let mut step = 0usize;
     while fp >= data_base && fp < data_base + size {
         let saved_slot = fp as *mut usize;
         let saved_fp = unsafe { *saved_slot };
-        if step < 8 {
-            eprintln!(
-                "[cont-capture-fp] step={} data_base={:#x} size={} fp_offset={} fp={:#x} saved_fp={:#x} stack_base={:#x}",
-                step, data_base, size, fp_offset, fp, saved_fp, original_stack_base
-            );
-        }
         // saved_fp is an absolute stack address; convert to relative offset
         if saved_fp >= original_stack_base && saved_fp < original_stack_base + size {
             let relative = saved_fp - original_stack_base;
@@ -212,7 +203,6 @@ fn make_segment_fp_links_relative(
         } else {
             break;
         }
-        step += 1;
     }
 }
 
@@ -507,10 +497,7 @@ impl ContinuationObject {
             Self::FIELD_SEGMENT_FRAME_POINTER_OFFSET as i32,
             BuiltInTypes::Int.tag(0) as usize,
         );
-        heap_obj.write_field(
-            Self::FIELD_TAG as i32,
-            BuiltInTypes::Int.tag(0) as usize,
-        );
+        heap_obj.write_field(Self::FIELD_TAG as i32, BuiltInTypes::Int.tag(0) as usize);
     }
 }
 
@@ -670,10 +657,11 @@ pub unsafe fn capture_continuation_runtime_inner(
             Ok(ptr) => {
                 let seg_obj = HeapObject::from_tagged(ptr);
                 let header_ptr = seg_obj.untagged() as *mut usize;
-                let mut header_val = unsafe { *header_ptr };
-                header_val |= 0x2; // opaque bit — GC should not scan raw bytes as ptrs
+                // GC must not scan the copied stack bytes as heap
+                // pointers — the segment is walked by hand via the
+                // relocated FP chain, not as a struct of fields.
                 unsafe {
-                    *header_ptr = header_val;
+                    *header_ptr |= Header::OPAQUE_BIT_MASK;
                 }
 
                 let data_ptr = seg_obj.untagged() + seg_obj.header_size();
@@ -1050,17 +1038,6 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     let outermost_offset = cont.segment_outermost_fp_offset();
     let resume_address = cont.resume_address();
     let result_local_offset = cont.result_local();
-    eprintln!(
-        "[continuation-trampoline] closure={:#x} cont={:#x} segment_ptr={:#x} seg_size={} inner_off={} outer_off={} resume={:#x} result_local={}",
-        closure_ptr,
-        cont_ptr,
-        cont.segment_ptr(),
-        seg_size,
-        innermost_offset,
-        outermost_offset,
-        resume_address,
-        result_local_offset
-    );
 
     // Read the trampoline's own FP via `read-fp` — a 2-instruction
     // Beagle-side JIT trampoline that returns x29. This function call
@@ -1115,10 +1092,6 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     // exactly what the outermost frame's saved FP/LR need to be.
     let dst = trampoline_fp - outermost_offset;
     let copy_size = outermost_offset;
-    eprintln!(
-        "[continuation-trampoline-dst] trampoline_fp={:#x} dst={:#x} copy_size={} outer_off={}",
-        trampoline_fp, dst, copy_size, outermost_offset
-    );
 
     // Snapshot the trampoline's invoker FP/LR (= the values our prologue
     // wrote into [trampoline_fp + 0/8]) before they get overlaid as the

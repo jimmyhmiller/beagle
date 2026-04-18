@@ -22,47 +22,6 @@ pub unsafe fn allocate_string_or_throw(
 // Delimited Continuation Builtins
 // ============================================================================
 
-/// Push a prompt handler for delimited continuations.
-/// Similar to push_exception_handler but for continuation capture.
-/// REFACTOR A stub. `push-prompt` was the v1 prompt entry point used by
-/// `handle`, `perform`, and `try/catch` with resumable exceptions. It is
-/// no longer wired to anything — the new reset/shift machinery doesn't
-/// use it. Kept as a named entry point so Ast::Handle / Ast::Perform /
-/// Ast::TryResumable compile-time builtin lookups still succeed; any
-/// program that actually reaches this code path aborts with a clear
-/// error. Delete alongside Refactor B when those AST nodes are rebuilt.
-pub unsafe extern "C" fn push_prompt_runtime(
-    _handler_address: usize,
-    _result_local: isize,
-    _link_register: usize,
-    stack_pointer: usize,
-    _frame_pointer: usize,
-) -> usize {
-    unsafe {
-        throw_runtime_error(
-            stack_pointer,
-            "RuntimeError",
-            "handle/perform/resumable-try is temporarily disabled (Refactor A in progress)"
-                .to_string(),
-        );
-    }
-}
-
-/// REFACTOR A stub. Pairs with `push_prompt_runtime`. See its docstring.
-pub unsafe extern "C" fn pop_prompt_runtime(
-    stack_pointer: usize,
-    _frame_pointer: usize,
-    _result_value: usize,
-) -> usize {
-    unsafe {
-        throw_runtime_error(
-            stack_pointer,
-            "RuntimeError",
-            "pop-prompt is temporarily disabled (Refactor A in progress)".to_string(),
-        );
-    }
-}
-
 /// Push a prompt-tag record onto the per-thread side stack. Used by
 /// the tag-aware reset path for effect handlers (Step E6+): each
 /// `handle { ... } with h` generates a fresh u64 tag and pushes a
@@ -145,9 +104,20 @@ pub unsafe extern "C" fn resume_tail_runtime(
     closure_body(resume_closure, value)
 }
 
-/// REFACTOR A stub. `invoke-continuation` was the direct
-/// (non-closure-wrapped) continuation invoker. Referenced by stdlib
-/// at compile time; any runtime call aborts.
+/// Entry point called from the x86-64 continuation trampoline generated
+/// in `main.rs::compile_continuation_trampolines`. The arm64 backend
+/// uses the pure-Rust `continuation_trampoline` in `reset_shift.rs`
+/// instead and never reaches this function.
+///
+/// The generated x86-64 trampoline was written against the v1 reset/
+/// shift machinery that captured callee-saved registers into a
+/// `saved_regs` array; the new machinery doesn't need them. Until the
+/// x86-64 trampoline is rewritten against the new design, calling
+/// `k(value)` on x86-64 aborts here with a clear error.
+#[cfg(any(
+    feature = "backend-x86-64",
+    all(target_arch = "x86_64", not(feature = "backend-arm64"))
+))]
 pub unsafe extern "C" fn invoke_continuation_runtime(
     stack_pointer: usize,
     _frame_pointer: usize,
@@ -158,27 +128,7 @@ pub unsafe extern "C" fn invoke_continuation_runtime(
         throw_runtime_error(
             stack_pointer,
             "RuntimeError",
-            "invoke-continuation is temporarily disabled (Refactor A in progress)".to_string(),
+            "continuation invocation is not implemented on the x86-64 backend".to_string(),
         );
-    }
-}
-
-/// REFACTOR A stub. Was called after `handle` dispatch to route a
-/// handler's return value through the v1 return-from-shift path.
-/// Kept as a thin wrapper over the new reset/shift return path so
-/// the install.rs registration stays valid — not actually reachable
-/// from live code after Refactor A.
-pub unsafe extern "C" fn return_from_shift_handler_runtime(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    value: usize,
-    _cont_ptr: usize,
-) -> ! {
-    unsafe {
-        crate::builtins::reset_shift::return_from_shift_runtime_inner(
-            stack_pointer,
-            frame_pointer,
-            value,
-        )
     }
 }

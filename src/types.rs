@@ -191,7 +191,10 @@ impl Header {
     const MARKED_BIT_POSITION: u32 = 0;
 
     /// Position of the opaque bit in the header.
-    const OPAQUE_BIT_POSITION: u32 = 1;
+    pub const OPAQUE_BIT_POSITION: u32 = 1;
+
+    /// Bit mask form of `OPAQUE_BIT_POSITION` for raw-header manipulation.
+    pub const OPAQUE_BIT_MASK: usize = 1 << Self::OPAQUE_BIT_POSITION;
 
     /// Position of the large object bit in the header.
     /// When set, the actual size is stored in the word after the header.

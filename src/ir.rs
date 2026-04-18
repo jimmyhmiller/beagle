@@ -1584,7 +1584,14 @@ impl Ir {
                 .iter()
                 .map(|(reg, slot)| {
                     let lifetime = linear_scan.lifetimes.get(reg).copied().unwrap_or((0, 0));
-                    (*slot, reg.index, reg.argument, reg.is_physical, lifetime.0, lifetime.1)
+                    (
+                        *slot,
+                        reg.index,
+                        reg.argument,
+                        reg.is_physical,
+                        lifetime.0,
+                        lifetime.1,
+                    )
                 })
                 .collect();
             entries.sort();
