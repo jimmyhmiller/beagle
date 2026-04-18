@@ -767,25 +767,6 @@ impl HeapObject {
         let untagged = self.untagged();
         let pointer = untagged as *mut usize;
         let pointer = unsafe { pointer.add(index as usize + self.header_size() / 8) };
-        if index == 3 && self.get_object_type() == Some(BuiltInTypes::Closure) {
-            let function_ptr = BuiltInTypes::untag(self.get_field(0)) as *const u8;
-            if crate::get_runtime()
-                .get()
-                .get_function_by_pointer(function_ptr)
-                .map(|f| f.name == "beagle.builtin/continuation-trampoline")
-                .unwrap_or(false)
-            {
-                let old_value = unsafe { *pointer };
-                if old_value != value {
-                    eprintln!(
-                        "[closure-write-field3] closure={:#x} old={:#x} new={:#x}",
-                        BuiltInTypes::Closure.tag(untagged as isize) as usize,
-                        old_value,
-                        value
-                    );
-                }
-            }
-        }
         unsafe { *pointer = value };
     }
 

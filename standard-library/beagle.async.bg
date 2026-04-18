@@ -2480,7 +2480,14 @@ fn __main__(main_fn, args) {
 fn __run_thread_start() {
     let thread-obj = primitive/__get-my-thread-obj();
     let f = thread-obj.closure;
-    handle effect/Handler(Async) with ImplicitAsyncHandler {} {
-        f()
+    let handler = ImplicitAsyncHandler {}
+    try {
+        handle effect/Handler(Async) with handler {
+            f()
+        }
+    } catch (e) {
+        println("Uncaught exception in thread:")
+        println(e)
+        null
     }
 }

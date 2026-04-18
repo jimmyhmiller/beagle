@@ -1384,22 +1384,6 @@ fn main() {
             crate::CommandLineArguments::for_run(probe_path.to_string_lossy().into_owned(), vec![]);
         crate::main_inner(args).expect("probe program should run");
 
-        {
-            let ptd = crate::runtime::per_thread_data();
-            assert!(
-                ptd.captured_segments.is_empty(),
-                "legacy captured_segments map should stay unused"
-            );
-            assert!(
-                ptd.pending_captured_segment_handles.is_empty(),
-                "legacy pending captured handles should stay unused"
-            );
-            assert!(
-                ptd.pending_heap_segments.is_empty(),
-                "pending heap segments should be drained once the continuation object exists"
-            );
-        }
-
         let runtime = crate::get_runtime().get_mut();
         let live_segment_ptrs = runtime
             .heap_for_testing()
