@@ -16,6 +16,7 @@ cfg_if::cfg_if! {
 }
 
 use crate::common::Label;
+use crate::pretty_print::PrettyPrint;
 use crate::register_allocation::linear_scan::LinearScan;
 use crate::types::BuiltInTypes;
 
@@ -192,9 +193,12 @@ pub enum Instruction {
     // Delimited continuation instructions
     PushPromptHandler(Label, Value, usize), // prompt_handler_label, result_local, builtin_fn_ptr
     PopPromptHandler(Value, usize),         // result_value, builtin_fn_ptr
+    PushPromptTag(Value, Label, Value, usize), // tag_value, abort_label, result_local (as Local), builtin_fn_ptr
     LoadLabelAddress(Value, Label), // dest, label - loads the address of a label into a register
     CaptureContinuation(Value, Label, usize, usize), // dest, resume_label, result_local_index, builtin_fn_ptr
     CaptureContinuationWithSaves(Value, Label, usize, usize, Vec<SavedValue>), // dest, resume_label, result_local_index, builtin_fn_ptr, saved live roots
+    CaptureContinuationTagged(Value, Label, usize, usize, Value), // dest, resume_label, result_local_index, builtin_fn_ptr, tag_value
+    CaptureContinuationTaggedWithSaves(Value, Label, usize, usize, Value, Vec<SavedValue>), // dest, resume_label, result_local_index, builtin_fn_ptr, tag_value, saved live roots
     PerformEffect(Value, Value, Value, Label, usize, usize), // handler, enum_type, op_value, resume_label, result_local_index, builtin_fn_ptr
     PerformEffectWithSaves(Value, Value, Value, Label, usize, usize, Vec<SavedValue>), // handler, enum_type, op_value, resume_label, result_local_index, builtin_fn_ptr, saved live roots
     ReturnFromShift(Value, Value, usize), // value, cont_ptr, builtin_fn_ptr - calls return_from_shift with current SP/FP
@@ -562,6 +566,9 @@ impl Instruction {
             Instruction::PopPromptHandler(result, _) => {
                 get_register!(result)
             }
+            Instruction::PushPromptTag(tag, _, local, _) => {
+                get_registers!(tag, local)
+            }
             Instruction::LoadLabelAddress(dest, _) => {
                 get_register!(dest)
             }
@@ -570,6 +577,18 @@ impl Instruction {
             }
             Instruction::CaptureContinuationWithSaves(dest, _, _, _, saves) => {
                 let mut result: Vec<VirtualRegister> = get_register!(dest);
+                for save in saves {
+                    if let Ok(register) = (&save.source).try_into() {
+                        result.push(register);
+                    }
+                }
+                result
+            }
+            Instruction::CaptureContinuationTagged(dest, _, _, _, tag) => {
+                get_registers!(dest, tag)
+            }
+            Instruction::CaptureContinuationTaggedWithSaves(dest, _, _, _, tag, saves) => {
+                let mut result: Vec<VirtualRegister> = get_registers!(dest, tag);
                 for save in saves {
                     if let Ok(register) = (&save.source).try_into() {
                         result.push(register);
@@ -761,6 +780,10 @@ impl Instruction {
             Instruction::PopPromptHandler(result, _) => {
                 replace_register!(result, old_register, new_register);
             }
+            Instruction::PushPromptTag(tag, _, value, _) => {
+                replace_register!(tag, old_register, new_register);
+                replace_register!(value, old_register, new_register);
+            }
             Instruction::LoadLabelAddress(dest, _) => {
                 replace_register!(dest, old_register, new_register);
             }
@@ -769,6 +792,21 @@ impl Instruction {
             }
             Instruction::CaptureContinuationWithSaves(dest, _, _, _, saves) => {
                 replace_register!(dest, old_register, new_register);
+                for save in saves {
+                    if let Value::Register(register) = save.source
+                        && register == old_register
+                    {
+                        save.source = new_register;
+                    }
+                }
+            }
+            Instruction::CaptureContinuationTagged(dest, _, _, _, tag) => {
+                replace_register!(dest, old_register, new_register);
+                replace_register!(tag, old_register, new_register);
+            }
+            Instruction::CaptureContinuationTaggedWithSaves(dest, _, _, _, tag, saves) => {
+                replace_register!(dest, old_register, new_register);
+                replace_register!(tag, old_register, new_register);
                 for save in saves {
                     if let Value::Register(register) = save.source
                         && register == old_register
@@ -821,6 +859,7 @@ impl MachineCodeRange {
 pub struct Ir {
     register_index: usize,
     pub instructions: Vec<Instruction>,
+    pub debug_name: Option<String>,
     labels: Vec<Label>,
     label_names: Vec<String>,
     label_locations: HashMap<usize, usize>,
@@ -856,6 +895,7 @@ impl Ir {
         let mut me = Self {
             register_index: 0,
             instructions: vec![],
+            debug_name: None,
             labels: vec![],
             label_names: vec![],
             label_locations: HashMap::new(),
@@ -1531,6 +1571,39 @@ impl Ir {
 
         let mut linear_scan = LinearScan::new(self.instructions.clone(), self.num_locals);
         linear_scan.allocate();
+        if std::env::var("BEAGLE_DEBUG_ROOT_SLOTS").is_ok() {
+            eprintln!(
+                "[root-slots] function={} pre_num_locals={} post_stack_slot={} instructions={}",
+                self.debug_name.as_deref().unwrap_or("<anonymous>"),
+                self.num_locals,
+                linear_scan.stack_slot,
+                linear_scan.instructions.len()
+            );
+            let mut entries: Vec<_> = linear_scan
+                .root_slots
+                .iter()
+                .map(|(reg, slot)| {
+                    let lifetime = linear_scan.lifetimes.get(reg).copied().unwrap_or((0, 0));
+                    (*slot, reg.index, reg.argument, reg.is_physical, lifetime.0, lifetime.1)
+                })
+                .collect();
+            entries.sort();
+            for (slot, reg_index, argument, is_physical, start, end) in entries {
+                eprintln!(
+                    "[root-slot] slot={} reg={} arg={:?} physical={} lifetime={}..{}",
+                    slot, reg_index, argument, is_physical, start, end
+                );
+            }
+        }
+        if std::env::var("BEAGLE_DEBUG_POST_ALLOC_IR").is_ok() {
+            eprintln!(
+                "[post-alloc-ir] function={}",
+                self.debug_name.as_deref().unwrap_or("<anonymous>")
+            );
+            for (index, instruction) in linear_scan.instructions.iter().enumerate() {
+                eprintln!("{:04}: {}", index, instruction.pretty_print());
+            }
+        }
 
         self.instructions = linear_scan.instructions.clone();
         self.num_locals = linear_scan.stack_slot;
@@ -1694,6 +1767,11 @@ impl Ir {
                 {
                     resume_label_saves.insert(*label, saves.clone());
                 }
+                Instruction::CaptureContinuationTaggedWithSaves(_, label, _, _, _, saves)
+                    if !saves.is_empty() =>
+                {
+                    resume_label_saves.insert(*label, saves.clone());
+                }
                 Instruction::PerformEffectWithSaves(_, _, _, label, _, _, saves)
                     if !saves.is_empty() =>
                 {
@@ -1712,10 +1790,13 @@ impl Ir {
                 // their root slots. The stack segment was restored with
                 // GC-updated values in the root slots.
                 if let Some(saves) = resume_label_saves.get(&self.labels[*label]) {
+                    let null_reg = self.value_to_register(&Value::Null, backend);
                     for save in saves.iter().rev() {
                         let save_reg = self.value_to_register(&save.source, backend);
                         backend.load_local(save_reg, save.local as i32);
+                        backend.store_local(null_reg, save.local as i32);
                     }
+                    backend.free_temporary_register(null_reg);
                 }
             }
             backend.clear_temporary_registers();
@@ -2219,10 +2300,13 @@ impl Ir {
                     self.store_spill(dest, dest_spill, backend);
 
                     // Restore saved registers from their root slots
+                    let null_reg = self.value_to_register(&Value::Null, backend);
                     for save in saves.iter().rev() {
                         let save_reg = self.value_to_register(&save.source, backend);
                         backend.load_local(save_reg, save.local as i32);
+                        backend.store_local(null_reg, save.local as i32);
                     }
+                    backend.free_temporary_register(null_reg);
                 }
                 Instruction::TailRecurse(dest, args) => {
                     let num_arg_regs = backend.num_arg_registers();
@@ -2323,9 +2407,19 @@ impl Ir {
 
                     // Save registers that are live across the call into frame locals
                     // so they are part of the GC-traced root set.
+                    let mut null_save_reg = None;
                     for save in saves.iter() {
-                        let save_reg = self.value_to_register(&save.source, backend);
+                        let save_reg = if matches!(save.source, Value::Null) {
+                            *null_save_reg.get_or_insert_with(|| {
+                                self.value_to_register(&Value::Null, backend)
+                            })
+                        } else {
+                            self.value_to_register(&save.source, backend)
+                        };
                         backend.store_local(save_reg, save.local as i32);
+                    }
+                    if let Some(reg) = null_save_reg {
+                        backend.free_temporary_register(reg);
                     }
 
                     // Set up arguments
@@ -2366,22 +2460,31 @@ impl Ir {
                     }
                     backend.free_temporary_register(call_target);
 
+                    let result_reg = backend.temporary_register();
+                    backend.mov_reg(result_reg, backend.ret_reg());
+
+                    // Restore saved registers from their tracked local slots.
+                    let null_reg = self.value_to_register(&Value::Null, backend);
+                    for save in saves.iter().rev() {
+                        if matches!(save.source, Value::Register(_)) {
+                            let save_reg = self.value_to_register(&save.source, backend);
+                            backend.load_local(save_reg, save.local as i32);
+                        }
+                        backend.store_local(null_reg, save.local as i32);
+                    }
+                    backend.free_temporary_register(null_reg);
+
                     let dest_spill = self.dest_spill(dest);
                     let dest_reg = match dest {
                         Value::Register(register) => backend.register_from_index(register.index),
                         Value::Spill(_, _) => backend.temporary_register(),
                         _ => panic!("Unexpected dest type for call: {:?}", dest),
                     };
-                    backend.mov_reg(dest_reg, backend.ret_reg());
+                    backend.mov_reg(dest_reg, result_reg);
                     self.store_spill(dest_reg, dest_spill, backend);
+                    backend.free_temporary_register(result_reg);
                     if matches!(dest, Value::Spill(_, _)) {
                         backend.free_temporary_register(dest_reg);
-                    }
-
-                    // Restore saved registers from their tracked local slots.
-                    for save in saves.iter().rev() {
-                        let save_reg = self.value_to_register(&save.source, backend);
-                        backend.load_local(save_reg, save.local as i32);
                     }
                 }
                 Instruction::Compare(dest, a, b, condition) => {
@@ -2791,6 +2894,43 @@ impl Ir {
                     // Restore the caller-visible stack pointer on prompt exit.
                     backend.mov_reg(backend.stack_pointer_reg(), backend.ret_reg());
                 }
+                Instruction::PushPromptTag(tag_value, abort_label, result_local, builtin_fn) => {
+                    // Call push_prompt_tag builtin with the record fields the
+                    // tagged return/capture flow reads on perform/longjmp.
+                    // Arguments: (tag, stack_pointer, frame_pointer, link_register,
+                    //             result_local_offset)
+
+                    // arg 0: tag (prompt id)
+                    let tag_reg = self.value_to_register(tag_value, backend);
+                    backend.mov_reg(backend.arg(0), tag_reg);
+
+                    // arg 1: stack_pointer (caller's SP — the SP that the
+                    // longjmp target expects to restore).
+                    backend.get_stack_pointer_imm(backend.arg(1), 0);
+
+                    // arg 2: frame_pointer (caller's FP — likewise the FP
+                    // that the longjmp target expects).
+                    backend.mov_reg(backend.arg(2), backend.frame_pointer());
+
+                    // arg 3: link_register (address of the abort-landing
+                    // label; return_from_shift_tagged jumps here with
+                    // X0 = handler's return value).
+                    let abort_backend_label = ir_label_to_lang_label.get(abort_label).unwrap();
+                    backend.load_label_address(backend.arg(3), *abort_backend_label);
+
+                    // arg 4: result_local byte offset (signed). 0 means
+                    // "no local write"; any other value is interpreted
+                    // relative to frame_pointer by return_from_shift_tagged.
+                    let local_index = result_local.as_local();
+                    let local_offset = backend.get_local_byte_offset(local_index);
+                    backend.mov_64(backend.arg(4), local_offset);
+
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
+                    backend.call_builtin(fn_ptr);
+                    // push-prompt-tag returns the caller's SP unchanged;
+                    // discard the result — the SP register already has
+                    // the live value.
+                }
                 Instruction::LoadLabelAddress(dest, label) => {
                     // Load the address of a label into a register
                     let dest_reg = self.value_to_register(dest, backend);
@@ -2905,10 +3045,108 @@ impl Ir {
                     // Restore saved registers from their root slots.
                     // On the initial capture path, GC may have moved objects
                     // during the builtin call — root slots were updated by GC.
+                    let null_reg = self.value_to_register(&Value::Null, backend);
                     for save in saves.iter().rev() {
                         let save_reg = self.value_to_register(&save.source, backend);
                         backend.load_local(save_reg, save.local as i32);
+                        backend.store_local(null_reg, save.local as i32);
                     }
+                    backend.free_temporary_register(null_reg);
+                }
+                Instruction::CaptureContinuationTagged(
+                    dest,
+                    resume_label,
+                    result_local_index,
+                    builtin_fn,
+                    tag_value,
+                ) => {
+                    // Tagged capture: passes a prompt tag instead of a
+                    // saved-regs pointer as the last arg. Runtime looks up
+                    // the matching prompt-tag record to determine
+                    // capture_top and tag-stack cleanup.
+                    backend.get_stack_pointer_imm(backend.arg(0), 0);
+                    backend.mov_reg(backend.arg(1), backend.frame_pointer());
+
+                    let resume_backend_label = ir_label_to_lang_label.get(resume_label).unwrap();
+                    backend.load_label_address(backend.arg(2), *resume_backend_label);
+
+                    let local_offset = backend.get_local_byte_offset(*result_local_index);
+                    backend.mov_64(backend.arg(3), local_offset);
+
+                    let tag_reg = self.value_to_register(tag_value, backend);
+                    backend.mov_reg(backend.arg(4), tag_reg);
+
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
+                    backend.call_builtin(fn_ptr);
+
+                    let dest_spill = self.dest_spill(dest);
+                    let dest_reg = match dest {
+                        Value::Register(register) => backend.register_from_index(register.index),
+                        Value::Spill(_, _) => backend.temporary_register(),
+                        _ => panic!(
+                            "Unexpected dest type for CaptureContinuationTagged: {:?}",
+                            dest
+                        ),
+                    };
+                    backend.mov_reg(dest_reg, backend.ret_reg());
+                    self.store_spill(dest_reg, dest_spill, backend);
+                    if matches!(dest, Value::Spill(_, _)) {
+                        backend.free_temporary_register(dest_reg);
+                    }
+                }
+                Instruction::CaptureContinuationTaggedWithSaves(
+                    dest,
+                    resume_label,
+                    result_local_index,
+                    builtin_fn,
+                    tag_value,
+                    saves,
+                ) => {
+                    // Save live registers to their GC root slots so the
+                    // captured segment (and any GC during the builtin)
+                    // see consistent values.
+                    for save in saves.iter() {
+                        let save_reg = self.value_to_register(&save.source, backend);
+                        backend.store_local(save_reg, save.local as i32);
+                    }
+
+                    backend.get_stack_pointer_imm(backend.arg(0), 0);
+                    backend.mov_reg(backend.arg(1), backend.frame_pointer());
+
+                    let resume_backend_label = ir_label_to_lang_label.get(resume_label).unwrap();
+                    backend.load_label_address(backend.arg(2), *resume_backend_label);
+
+                    let local_offset = backend.get_local_byte_offset(*result_local_index);
+                    backend.mov_64(backend.arg(3), local_offset);
+
+                    let tag_reg = self.value_to_register(tag_value, backend);
+                    backend.mov_reg(backend.arg(4), tag_reg);
+
+                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
+                    backend.call_builtin(fn_ptr);
+
+                    let dest_spill = self.dest_spill(dest);
+                    let dest_reg = match dest {
+                        Value::Register(register) => backend.register_from_index(register.index),
+                        Value::Spill(_, _) => backend.temporary_register(),
+                        _ => panic!(
+                            "Unexpected dest type for CaptureContinuationTaggedWithSaves: {:?}",
+                            dest
+                        ),
+                    };
+                    backend.mov_reg(dest_reg, backend.ret_reg());
+                    self.store_spill(dest_reg, dest_spill, backend);
+                    if matches!(dest, Value::Spill(_, _)) {
+                        backend.free_temporary_register(dest_reg);
+                    }
+
+                    let null_reg = self.value_to_register(&Value::Null, backend);
+                    for save in saves.iter().rev() {
+                        let save_reg = self.value_to_register(&save.source, backend);
+                        backend.load_local(save_reg, save.local as i32);
+                        backend.store_local(null_reg, save.local as i32);
+                    }
+                    backend.free_temporary_register(null_reg);
                 }
                 Instruction::PerformEffect(
                     handler,
@@ -3104,6 +3342,27 @@ impl Ir {
             .push(Instruction::PopPromptHandler(result_value, builtin_fn));
     }
 
+    /// Emit a tagged prompt-tag push. The abort label is the PC that
+    /// `return_from_shift_tagged` will longjmp to if a matching perform
+    /// unwinds this handle without calling resume. `result_local` is the
+    /// local slot that receives the handler's return value on that
+    /// longjmp — it also receives the body's normal return value on the
+    /// non-abort path, so the post-label code can read it uniformly.
+    pub fn push_prompt_tag(
+        &mut self,
+        tag_value: Value,
+        abort_label: Label,
+        result_local: Value,
+        builtin_fn: usize,
+    ) {
+        self.instructions.push(Instruction::PushPromptTag(
+            tag_value,
+            abort_label,
+            result_local,
+            builtin_fn,
+        ));
+    }
+
     pub fn load_label_address(&mut self, dest: VirtualRegister, label: Label) {
         self.instructions
             .push(Instruction::LoadLabelAddress(dest.into(), label));
@@ -3122,6 +3381,31 @@ impl Ir {
             result_local_index,
             builtin_fn,
         ));
+        dest.into()
+    }
+
+    /// Tag-aware variant of `capture_continuation`. The runtime uses the
+    /// tag to locate the matching prompt-tag record (pushed by the
+    /// enclosing `handle`) and captures bytes from the current SP up to
+    /// that record's `stack_pointer`. The linear-scan allocator rewrites
+    /// this to `CaptureContinuationTaggedWithSaves` so live registers
+    /// flush to their root slots before the builtin call.
+    pub fn capture_continuation_tagged(
+        &mut self,
+        resume_label: Label,
+        result_local_index: usize,
+        builtin_fn: usize,
+        tag_value: Value,
+    ) -> Value {
+        let dest = self.volatile_register();
+        self.instructions
+            .push(Instruction::CaptureContinuationTagged(
+                dest.into(),
+                resume_label,
+                result_local_index,
+                builtin_fn,
+                tag_value,
+            ));
         dest.into()
     }
 

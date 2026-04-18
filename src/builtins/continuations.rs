@@ -74,6 +74,10 @@ pub unsafe extern "C" fn pop_prompt_runtime(
 ///   `stack_pointer` — SP at push time (caller's SP before the reset).
 ///   `frame_pointer` — FP at push time.
 ///   `link_register` — address to longjmp to on shift-return.
+///   `result_local_offset` — signed byte offset from the caller's frame
+///     pointer to the local slot that should receive the shift/handler
+///     return value on longjmp. Passed as `usize` over the FFI and
+///     reinterpreted as `isize` inside.
 ///
 /// Returns SP unchanged (the Beagle IR caller doesn't mutate it).
 pub unsafe extern "C" fn push_prompt_tag_runtime(
@@ -81,17 +85,31 @@ pub unsafe extern "C" fn push_prompt_tag_runtime(
     stack_pointer: usize,
     frame_pointer: usize,
     link_register: usize,
+    result_local_offset: usize,
 ) -> usize {
+    // Beagle passes the tag as a tagged integer (`fresh-tag` returns
+    // `BuiltInTypes::Int.tag(raw)`). The prompt-tag stack keys on the
+    // underlying u64, so untag before storing.
+    let tag_raw = BuiltInTypes::untag(tag) as u64;
     let runtime = crate::get_runtime().get();
-    runtime.push_prompt_tag(tag as u64, stack_pointer, frame_pointer, link_register);
+    runtime.push_prompt_tag(
+        tag_raw,
+        stack_pointer,
+        frame_pointer,
+        link_register,
+        result_local_offset as isize,
+    );
     stack_pointer
 }
 
 /// Pop the top prompt-tag record, asserting the tag matches. Called at
 /// the end of a tagged-reset body on the normal-completion path.
 pub unsafe extern "C" fn pop_prompt_tag_runtime(tag: usize) -> usize {
+    // Mirror push_prompt_tag_runtime — untag the caller's tagged int
+    // before comparing against the stored u64 key.
+    let tag_raw = BuiltInTypes::untag(tag) as u64;
     let runtime = crate::get_runtime().get();
-    runtime.pop_prompt_tag(tag as u64);
+    runtime.pop_prompt_tag(tag_raw);
     BuiltInTypes::null_value() as usize
 }
 

@@ -798,6 +798,16 @@ impl LowLevelArm {
     const FRAME_HEADER_WORDS: i32 = 2;
 
     pub fn store_local(&mut self, value: Register, offset: i32) {
+        if let Ok(debug_offset) = std::env::var("DEBUG_SPILL_OFFSET")
+            && debug_offset.parse::<i32>().ok() == Some(offset)
+        {
+            eprintln!(
+                "[DEBUG_SPILL] store_local: offset={}, stack_offset={}, src={:?}",
+                offset,
+                -(offset + 1 + Self::FRAME_HEADER_WORDS),
+                value
+            );
+        }
         self.store_on_stack(value, -(offset + 1 + Self::FRAME_HEADER_WORDS));
     }
 
@@ -943,6 +953,16 @@ impl LowLevelArm {
     }
 
     pub fn load_local(&mut self, destination: Register, offset: i32) {
+        if let Ok(debug_offset) = std::env::var("DEBUG_SPILL_OFFSET")
+            && debug_offset.parse::<i32>().ok() == Some(offset)
+        {
+            eprintln!(
+                "[DEBUG_SPILL] load_local: offset={}, stack_offset={}, dest={:?}",
+                offset,
+                -(offset + 1 + Self::FRAME_HEADER_WORDS),
+                destination
+            );
+        }
         self.load_from_stack(destination, -(offset + 1 + Self::FRAME_HEADER_WORDS));
     }
 
@@ -1500,9 +1520,10 @@ impl LowLevelArm {
             // NOTE: STUR has a 9-bit signed immediate (-256 to 255), so for large stack
             // frames we need a different approach. We use X10 as a pointer that we decrement.
             let null_value = crate::types::BuiltInTypes::null_value() as i32;
-            // Only zero root slots (max_locals). Eval stack slots above them are
-            // not scanned by GC and don't need zeroing.
-            let slots_to_zero = self.max_locals;
+            // Zero all frame slots that compiled code can keep values in:
+            // named locals plus eval-stack temporaries. Some call paths were
+            // reloading heap pointers from eval-stack slots after GC.
+            let slots_to_zero = self.max_locals + self.max_stack_size;
 
             #[cfg(feature = "debug-gc")]
             eprintln!(
@@ -1513,10 +1534,10 @@ impl LowLevelArm {
             // Write frame header at [X29-8]. This is a heap-object-style header
             // that lets GC know how many traced slots this frame has.
             {
-                // Only scan root slots (max_locals). Eval stack slots are NOT
-                // included — they're not root slots and are protected by
-                // register_temporary_root in the runtime instead.
-                let num_slots = self.max_locals as usize;
+                // Scan the full Beagle frame payload: named locals plus
+                // eval-stack temporaries. Generated code can keep live heap
+                // values in either region across a call that triggers GC.
+                let num_slots = (self.max_locals + self.max_stack_size) as usize;
                 // Encode mark local index in lower 16 bits of type_data if present.
                 // Upper 16 bits = num_slots (for GC/captured frame).
                 // Lower 16 bits = mark local index (for get_dynamic_var frame walk).

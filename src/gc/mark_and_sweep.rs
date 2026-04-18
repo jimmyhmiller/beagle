@@ -1,4 +1,4 @@
-use std::{error::Error, ffi::c_void, io};
+use std::{error::Error, ffi::c_void, io, io::Write};
 
 use libc::mprotect;
 
@@ -8,6 +8,7 @@ use crate::builtins::reset_shift::ContinuationObject;
 use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
 use super::{AllocateAction, Allocator, AllocatorOptions, stack_walker::StackWalker};
+use crate::collections::{TYPE_ID_PERSISTENT_VEC, TYPE_ID_PERSISTENT_VEC_NODE};
 
 const DEFAULT_PAGE_COUNT: usize = 1024;
 // Aribtary number that should be changed when I have
@@ -325,20 +326,82 @@ fn log_suspicious_mark(pending: &PendingMark) {
     );
 }
 
+fn vec_gc_log_line(line: impl AsRef<str>) {
+    let Ok(path) = std::env::var("BEAGLE_DEBUG_VEC_GC_FILE") else {
+        return;
+    };
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let _ = writeln!(file, "{}", line.as_ref());
+}
+
 // TODO: I got an issue with my freelist
 impl MarkAndSweep {
+    fn log_bad_continuation_closures(&mut self, phase: &str) {
+        let mut bad_count = 0usize;
+        self.walk_objects_mut(|_, heap_obj| {
+            let object = HeapObject::from_untagged(heap_obj.untagged() as *const u8);
+            if object.get_type_id() != 0 {
+                return;
+            }
+            let function_tagged = object.get_field(0);
+            if BuiltInTypes::get_kind(function_tagged) != BuiltInTypes::Function {
+                return;
+            }
+            let function_ptr = BuiltInTypes::untag(function_tagged) as *const u8;
+            let is_continuation_trampoline = crate::get_runtime()
+                .get()
+                .get_function_by_pointer(function_ptr)
+                .map(|f| f.name == "beagle.builtin/continuation-trampoline")
+                .unwrap_or(false);
+            if !is_continuation_trampoline {
+                return;
+            }
+            let field3 = object.get_field(3);
+            if BuiltInTypes::get_kind(field3) != BuiltInTypes::HeapObject {
+                bad_count += 1;
+                eprintln!(
+                    "[ms-bad-closure] phase={} closure={:#x} field3={:#x} tag={:?}",
+                    phase,
+                    BuiltInTypes::Closure.tag(object.untagged() as isize) as usize,
+                    field3,
+                    BuiltInTypes::get_kind(field3)
+                );
+            }
+        });
+        if bad_count != 0 {
+            eprintln!(
+                "[ms-bad-closure-summary] phase={} count={}",
+                phase, bad_count
+            );
+        }
+    }
+
     fn push_continuation_segment_children(
         &self,
         object: &HeapObject,
         to_mark: &mut Vec<PendingMark>,
     ) {
         let object = HeapObject::from_untagged(object.untagged() as *const u8);
+        let cont_tagged = BuiltInTypes::HeapObject.tag(object.untagged() as isize) as usize;
         let Some(cont) = ContinuationObject::from_heap_object(object) else {
             return;
         };
         let Some((segment_base, segment_top, gc_frame_top)) = cont.segment_gc_frame_info() else {
             return;
         };
+        eprintln!(
+            "[ms-cont-segment] cont={:#x} segment={:#x}..{:#x} gc_top={:#x}",
+            cont_tagged,
+            segment_base,
+            segment_top,
+            gc_frame_top
+        );
         let mut push_slot = |slot_addr, pointer| {
             let untagged = BuiltInTypes::untag(pointer);
             if untagged != 0 && untagged.is_multiple_of(8) {
@@ -411,6 +474,21 @@ impl MarkAndSweep {
 
         let offset = self.free_list.allocate(size_bytes);
         if let Some(offset) = offset {
+            let start = self.space.start as usize;
+            let ptr_addr = start + offset;
+            let ptr_end = ptr_addr + size_bytes;
+            vec_gc_log_line(format!(
+                "[ms-alloc] kind={:?} offset={:#x} ptr={:#x}..{:#x} size_bytes={:#x}",
+                kind, offset, ptr_addr, ptr_end, size_bytes
+            ));
+            let watch_start = 0x7000060340usize;
+            let watch_end = watch_start + 0x40;
+            if ptr_addr < watch_end && ptr_end > watch_start {
+                eprintln!(
+                    "[ms-alloc-overlap] kind={:?} offset={:#x} size_bytes={:#x} ptr={:#x}..{:#x} watch={:#x}..{:#x}",
+                    kind, offset, size_bytes, ptr_addr, ptr_end, watch_start, watch_end
+                );
+            }
             self.space.update_highmark(offset);
             if let Some(data) = data {
                 // When data is provided, copy it directly without first writing
@@ -428,6 +506,14 @@ impl MarkAndSweep {
                 let pointer = unsafe { self.space.start.add(offset) };
                 assert!(self.space.contains(pointer));
                 self.space.copy_data_to_offset(offset, data);
+                let obj = HeapObject::from_untagged(pointer);
+                vec_gc_log_line(format!(
+                    "[ms-alloc-data] ptr={:#x} type_id={} header={:#x} full_size={:#x}",
+                    pointer as usize,
+                    obj.get_header().type_id,
+                    unsafe { *(pointer as *const usize) },
+                    obj.full_size()
+                ));
                 return Ok(AllocateAction::Allocated(pointer));
             }
             let pointer = self.space.write_object(offset, words);
@@ -453,9 +539,33 @@ impl MarkAndSweep {
             self.grow();
             return self.copy_data_to_offset(data);
         };
+        let start = self.space.start as usize;
+        let ptr_addr = start + offset;
+        let ptr_end = ptr_addr + data.len();
+        let watch_start = 0x7000060340usize;
+        let watch_end = watch_start + 0x40;
+        if ptr_addr < watch_end && ptr_end > watch_start {
+            eprintln!(
+                "[ms-copy-overlap] offset={:#x} len={:#x} ptr={:#x}..{:#x} watch={:#x}..{:#x}",
+                offset,
+                data.len(),
+                ptr_addr,
+                ptr_end,
+                watch_start,
+                watch_end
+            );
+        }
         self.space.update_highmark(offset);
         let pointer = self.space.copy_data_to_offset(offset, data) as *const u8;
         assert!(self.space.contains(pointer));
+        let obj = HeapObject::from_untagged(pointer);
+        vec_gc_log_line(format!(
+            "[ms-copy-alloc] ptr={:#x} type_id={} header={:#x} full_size={:#x}",
+            pointer as usize,
+            obj.get_header().type_id,
+            unsafe { *(pointer as *const usize) },
+            obj.full_size()
+        ));
         pointer
     }
 
@@ -480,13 +590,192 @@ impl MarkAndSweep {
 
         while let Some(pending) = to_mark.pop() {
             log_suspicious_mark(&pending);
+            let untagged = BuiltInTypes::untag(pending.object_ptr);
+            if untagged == 0 || !self.contains(untagged as *const u8) {
+                if pending.source_kind == "heap-child"
+                    && BuiltInTypes::is_heap_pointer(pending.source_addr)
+                {
+                    let source = HeapObject::from_tagged(pending.source_addr);
+                    let header = source.get_header();
+                    let preview = source
+                        .get_fields()
+                        .iter()
+                        .take(8)
+                        .map(|field| format!("{:#x}", field))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    eprintln!(
+                        "[ms-invalid-source] source={:#x} type={:?} type_id={} size={} header={:#x} fields={}",
+                        pending.source_addr,
+                        source.get_object_type(),
+                        header.type_id,
+                        header.size,
+                        unsafe { *(source.untagged() as *const usize) },
+                        preview
+                    );
+                }
+                eprintln!(
+                    "[ms-invalid-pending] object={:#x} untagged={:#x} source_kind={} source_addr={:#x}",
+                    pending.object_ptr,
+                    untagged,
+                    pending.source_kind,
+                    pending.source_addr
+                );
+                panic!("mark_from_chain queued pointer outside old space");
+            }
             let object = HeapObject::from_tagged(pending.object_ptr);
+            if object.get_object_type() == Some(BuiltInTypes::Closure)
+                && crate::get_runtime()
+                    .get()
+                    .get_function_by_pointer(BuiltInTypes::untag(object.get_field(0)) as *const u8)
+                    .map(|f| f.name == "beagle.builtin/continuation-trampoline")
+                    .unwrap_or(false)
+            {
+                eprintln!(
+                    "[ms-mark-closure] object={:#x} source_kind={} source_addr={:#x} header={:#x} size={}",
+                    pending.object_ptr,
+                    pending.source_kind,
+                    pending.source_addr,
+                    unsafe { *(object.untagged() as *const usize) },
+                    object.get_header().size
+                );
+                if pending.source_kind == "stack-root" {
+                    let mut header_addr = gc_frame_top;
+                    while header_addr != 0 {
+                        let header_value = unsafe { *(header_addr as *const usize) };
+                        let header = Header::from_usize(header_value);
+                        if header.type_id != crate::collections::TYPE_ID_FRAME {
+                            break;
+                        }
+                        let num_slots = header.size as usize;
+                        let low = header_addr.saturating_sub(24 + num_slots.saturating_sub(1) * 8);
+                        let high = header_addr.saturating_sub(24);
+                        if pending.source_addr >= low && pending.source_addr <= high {
+                            let fp = header_addr + 8;
+                            let ret = unsafe { *((fp + 8) as *const usize) };
+                            let fn_name = crate::get_runtime()
+                                .get()
+                                .get_function_containing_pointer(ret as *const u8)
+                                .map(|(function, offset)| format!("{}+{:#x}", function.name, offset))
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let slot_index = (high - pending.source_addr) / 8;
+                            eprintln!(
+                                "[ms-mark-closure-stack-owner] object={:#x} slot={:#x} header={:#x} fp={:#x} slot_index={} fn={}",
+                                pending.object_ptr,
+                                pending.source_addr,
+                                header_addr,
+                                fp,
+                                slot_index,
+                                fn_name
+                            );
+                            break;
+                        }
+                        let prev = unsafe { *((header_addr - 8) as *const usize) };
+                        if prev == 0 {
+                            break;
+                        }
+                        header_addr = prev;
+                    }
+                } else if pending.source_kind == "heap-child"
+                    && BuiltInTypes::is_heap_pointer(pending.source_addr)
+                {
+                    let parent = HeapObject::from_tagged(pending.source_addr);
+                    let parent_fn = if parent.get_object_type() == Some(BuiltInTypes::Closure) {
+                        crate::get_runtime()
+                            .get()
+                            .get_function_by_pointer(
+                                BuiltInTypes::untag(parent.get_field(0)) as *const u8,
+                            )
+                            .map(|f| f.name.clone())
+                    } else {
+                        None
+                    };
+                    let parent_fields = parent
+                        .get_fields()
+                        .iter()
+                        .take(8)
+                        .map(|field| format!("{:#x}", field))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    eprintln!(
+                        "[ms-mark-closure-parent] object={:#x} parent={:#x} parent_type={:?} parent_fn={:?} parent_header={:#x} parent_fields={}",
+                        pending.object_ptr,
+                        pending.source_addr,
+                        parent.get_object_type(),
+                        parent_fn,
+                        unsafe { *(parent.untagged() as *const usize) },
+                        parent_fields
+                    );
+                }
+            }
             if object.marked() {
                 continue;
             }
 
             object.mark();
-            for child in object.get_heap_references() {
+            if std::env::var("BEAGLE_DEBUG_VEC_GC").is_ok() {
+                let header = object.get_header();
+                if header.type_id == TYPE_ID_PERSISTENT_VEC {
+                    eprintln!(
+                        "[ms-mark-vec] object={:#x} count={:#x} shift={:#x} root={:#x} tail={:#x}",
+                        pending.object_ptr,
+                        object.get_field(0),
+                        object.get_field(1),
+                        object.get_field(2),
+                        object.get_field(3)
+                    );
+                } else if header.type_id == TYPE_ID_PERSISTENT_VEC_NODE {
+                    let fields = object
+                        .get_fields()
+                        .iter()
+                        .take(4)
+                        .map(|field| format!("{:#x}", field))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    eprintln!(
+                        "[ms-mark-vec-node] object={:#x} header={:#x} fields={}",
+                        pending.object_ptr,
+                        unsafe { *(object.untagged() as *const usize) },
+                        fields
+                    );
+                }
+            }
+            let header = object.get_header();
+            if header.type_id == TYPE_ID_PERSISTENT_VEC {
+                vec_gc_log_line(format!(
+                    "[ms-mark-vec] object={:#x} count={:#x} shift={:#x} root={:#x} tail={:#x}",
+                    pending.object_ptr,
+                    object.get_field(0),
+                    object.get_field(1),
+                    object.get_field(2),
+                    object.get_field(3)
+                ));
+            } else if header.type_id == TYPE_ID_PERSISTENT_VEC_NODE {
+                let fields = object.get_fields();
+                vec_gc_log_line(format!(
+                    "[ms-mark-vec-node] object={:#x} header={:#x} f0={:#x} f1={:#x} f2={:#x} f3={:#x}",
+                    pending.object_ptr,
+                    unsafe { *(object.untagged() as *const usize) },
+                    fields.first().copied().unwrap_or(0),
+                    fields.get(1).copied().unwrap_or(0),
+                    fields.get(2).copied().unwrap_or(0),
+                    fields.get(3).copied().unwrap_or(0)
+                ));
+            }
+            for (field_index, child) in object.get_heap_references().into_iter().enumerate() {
+                let child_untagged = BuiltInTypes::untag(child.tagged_pointer());
+                let watch_start = 0x7000060340usize;
+                let watch_end = watch_start + 0x40;
+                if child_untagged >= watch_start && child_untagged < watch_end {
+                    eprintln!(
+                        "[ms-watch-child] parent={:#x} parent_type={:?} field_index={} child={:#x} child_untagged={:#x}",
+                        pending.object_ptr,
+                        object.get_object_type(),
+                        field_index,
+                        child.tagged_pointer(),
+                        child_untagged
+                    );
+                }
                 to_mark.push(PendingMark {
                     object_ptr: child.tagged_pointer(),
                     source_addr: pending.object_ptr,
@@ -513,12 +802,94 @@ impl MarkAndSweep {
         }
         while let Some(pending) = to_mark.pop() {
             log_suspicious_mark(&pending);
+            let untagged = BuiltInTypes::untag(pending.object_ptr);
+            if untagged == 0 || !self.contains(untagged as *const u8) {
+                if pending.source_kind == "heap-child"
+                    && BuiltInTypes::is_heap_pointer(pending.source_addr)
+                {
+                    let source = HeapObject::from_tagged(pending.source_addr);
+                    let header = source.get_header();
+                    let preview = source
+                        .get_fields()
+                        .iter()
+                        .take(8)
+                        .map(|field| format!("{:#x}", field))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    eprintln!(
+                        "[ms-invalid-source] source={:#x} type={:?} type_id={} size={} header={:#x} fields={}",
+                        pending.source_addr,
+                        source.get_object_type(),
+                        header.type_id,
+                        header.size,
+                        unsafe { *(source.untagged() as *const usize) },
+                        preview
+                    );
+                }
+                eprintln!(
+                    "[ms-invalid-pending] object={:#x} untagged={:#x} source_kind={} source_addr={:#x}",
+                    pending.object_ptr,
+                    untagged,
+                    pending.source_kind,
+                    pending.source_addr
+                );
+                panic!("mark_extra_roots queued pointer outside old space");
+            }
             let object = HeapObject::from_tagged(pending.object_ptr);
             if object.marked() {
                 continue;
             }
 
             object.mark();
+            if std::env::var("BEAGLE_DEBUG_VEC_GC").is_ok() {
+                let header = object.get_header();
+                if header.type_id == TYPE_ID_PERSISTENT_VEC {
+                    eprintln!(
+                        "[ms-mark-extra-vec] object={:#x} count={:#x} shift={:#x} root={:#x} tail={:#x}",
+                        pending.object_ptr,
+                        object.get_field(0),
+                        object.get_field(1),
+                        object.get_field(2),
+                        object.get_field(3)
+                    );
+                } else if header.type_id == TYPE_ID_PERSISTENT_VEC_NODE {
+                    let fields = object
+                        .get_fields()
+                        .iter()
+                        .take(4)
+                        .map(|field| format!("{:#x}", field))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    eprintln!(
+                        "[ms-mark-extra-vec-node] object={:#x} header={:#x} fields={}",
+                        pending.object_ptr,
+                        unsafe { *(object.untagged() as *const usize) },
+                        fields
+                    );
+                }
+            }
+            let header = object.get_header();
+            if header.type_id == TYPE_ID_PERSISTENT_VEC {
+                vec_gc_log_line(format!(
+                    "[ms-mark-extra-vec] object={:#x} count={:#x} shift={:#x} root={:#x} tail={:#x}",
+                    pending.object_ptr,
+                    object.get_field(0),
+                    object.get_field(1),
+                    object.get_field(2),
+                    object.get_field(3)
+                ));
+            } else if header.type_id == TYPE_ID_PERSISTENT_VEC_NODE {
+                let fields = object.get_fields();
+                vec_gc_log_line(format!(
+                    "[ms-mark-extra-vec-node] object={:#x} header={:#x} f0={:#x} f1={:#x} f2={:#x} f3={:#x}",
+                    pending.object_ptr,
+                    unsafe { *(object.untagged() as *const usize) },
+                    fields.first().copied().unwrap_or(0),
+                    fields.get(1).copied().unwrap_or(0),
+                    fields.get(2).copied().unwrap_or(0),
+                    fields.get(3).copied().unwrap_or(0)
+                ));
+            }
             for child in object.get_heap_references() {
                 to_mark.push(PendingMark {
                     object_ptr: child.tagged_pointer(),
@@ -548,28 +919,99 @@ impl MarkAndSweep {
                 );
             }
 
+            let heap_object = HeapObject::from_untagged(unsafe { self.space.start.add(offset) });
+            if std::env::var("BEAGLE_DEBUG_VEC_GC").is_ok() {
+                let header = heap_object.get_header();
+                if header.type_id == TYPE_ID_PERSISTENT_VEC || header.type_id == TYPE_ID_PERSISTENT_VEC_NODE {
+                    eprintln!(
+                        "[ms-sweep-check] addr={:#x} header={:#x} type_id={} marked={} full_size={:#x}",
+                        self.space.start as usize + offset,
+                        unsafe { *(heap_object.untagged() as *const usize) },
+                        header.type_id,
+                        heap_object.marked(),
+                        heap_object.full_size()
+                    );
+                }
+            }
+            let header = heap_object.get_header();
+            if header.type_id == TYPE_ID_PERSISTENT_VEC || header.type_id == TYPE_ID_PERSISTENT_VEC_NODE {
+                vec_gc_log_line(format!(
+                    "[ms-sweep-check] addr={:#x} header={:#x} type_id={} marked={} full_size={:#x}",
+                    self.space.start as usize + offset,
+                    unsafe { *(heap_object.untagged() as *const usize) },
+                    header.type_id,
+                    heap_object.marked(),
+                    heap_object.full_size()
+                ));
+            }
             if let Some(entry) = old_ranges
                 .peek()
                 .copied()
                 .filter(|entry| entry.offset == offset)
             {
-                rebuilt_free_list.append_sorted_coalesced(entry);
-                offset = entry.end();
-                old_ranges.next();
-                continue;
+                // Old free-list state is supposed to describe only dead space, but if it
+                // ever goes stale we must not blindly preserve it over a newly marked live
+                // object. That leaves the object allocatable and causes later overlap.
+                if !heap_object.marked() {
+                    if header.type_id == TYPE_ID_PERSISTENT_VEC || header.type_id == TYPE_ID_PERSISTENT_VEC_NODE {
+                        vec_gc_log_line(format!(
+                            "[ms-sweep-keep-free-entry] addr={:#x} type_id={} entry={:#x}..{:#x}",
+                            self.space.start as usize + offset,
+                            header.type_id,
+                            self.space.start as usize + entry.offset,
+                            self.space.start as usize + entry.end()
+                        ));
+                    }
+                    rebuilt_free_list.append_sorted_coalesced(entry);
+                    offset = entry.end();
+                    old_ranges.next();
+                    continue;
+                }
             }
-
-            let heap_object = HeapObject::from_untagged(unsafe { self.space.start.add(offset) });
 
             let full_size = heap_object.full_size();
 
             if heap_object.marked() {
+                let obj_addr = self.space.start as usize + offset;
+                let obj_end = obj_addr + full_size;
+                let watch_start = 0x7000060340usize;
+                let watch_end = watch_start + 0x40;
+                if obj_addr < watch_end && obj_end > watch_start {
+                    eprintln!(
+                        "[ms-sweep-live-watch] obj={:#x}..{:#x} header={:#x} size={} type_id={}",
+                        obj_addr,
+                        obj_end,
+                        unsafe { *(heap_object.untagged() as *const usize) },
+                        heap_object.get_header().size,
+                        heap_object.get_header().type_id
+                    );
+                }
                 heap_object.unmark();
                 offset += full_size;
                 offset = (offset + 7) & !7;
                 continue;
             }
             let size = full_size;
+            let free_addr = self.space.start as usize + offset;
+            let free_end = free_addr + size;
+            if header.type_id == TYPE_ID_PERSISTENT_VEC || header.type_id == TYPE_ID_PERSISTENT_VEC_NODE {
+                vec_gc_log_line(format!(
+                    "[ms-sweep-free] addr={:#x}..{:#x} type_id={} header={:#x} size={:#x}",
+                    free_addr,
+                    free_end,
+                    header.type_id,
+                    unsafe { *(heap_object.untagged() as *const usize) },
+                    size
+                ));
+            }
+            let watch_start = 0x7000060340usize;
+            let watch_end = watch_start + 0x40;
+            if free_addr < watch_end && free_end > watch_start {
+                eprintln!(
+                    "[ms-sweep-free-watch] free={:#x}..{:#x} size={:#x}",
+                    free_addr, free_end, size
+                );
+            }
             rebuilt_free_list.append_sorted_coalesced(FreeListEntry { offset, size });
             offset += size;
             offset = (offset + 7) & !7;
@@ -765,17 +1207,41 @@ impl MarkAndSweep {
 
             let mut heap_object = HeapObject::from_untagged(ptr);
             let full_size = heap_object.full_size();
+            let is_cont_resume_closure =
+                heap_object.get_object_type() == Some(BuiltInTypes::Closure)
+                    && crate::get_runtime()
+                        .get()
+                        .get_function_by_pointer(
+                            BuiltInTypes::untag(heap_object.get_field(0)) as *const u8
+                        )
+                        .map(|f| f.name == "beagle.builtin/continuation-trampoline")
+                        .unwrap_or(false);
 
             if !heap_object.is_opaque_object() {
-                for field in heap_object.get_fields_mut().iter_mut() {
+                for (field_index, field) in heap_object.get_fields_mut().iter_mut().enumerate() {
                     if let Some(field_obj) = HeapObject::try_from_tagged(*field) {
                         let field_untagged = field_obj.untagged();
                         let field_tag = *field & 7;
                         if self.space.contains(field_untagged as *const u8) {
                             let field_header = unsafe { *(field_untagged as *const usize) };
                             if Header::is_forwarding_bit_set(field_header) {
+                                if is_cont_resume_closure && field_index == 3 {
+                                    eprintln!(
+                                        "[ms-update-before] closure={:#x} field3={:#x} tag={:#x}",
+                                        BuiltInTypes::Closure.tag(ptr as isize) as usize,
+                                        *field,
+                                        field_tag
+                                    );
+                                }
                                 let new_tagged = Header::clear_forwarding_bit(field_header);
                                 *field = (new_tagged & !7) | field_tag;
+                                if is_cont_resume_closure && field_index == 3 {
+                                    eprintln!(
+                                        "[ms-update-after] closure={:#x} field3={:#x}",
+                                        BuiltInTypes::Closure.tag(ptr as isize) as usize,
+                                        *field
+                                    );
+                                }
                             }
                         }
                     }
@@ -861,13 +1327,18 @@ impl Allocator for MarkAndSweep {
         for &gc_frame_top in gc_frame_tops {
             self.mark_from_chain(gc_frame_top);
         }
+        self.log_bad_continuation_closures("after-mark-from-chain");
 
         // Mark extra roots from shadow stacks
         self.mark_extra_roots(extra_roots);
+        self.log_bad_continuation_closures("after-mark-extra-roots");
 
+        self.log_bad_continuation_closures("before-sweep");
         self.sweep();
+        self.log_bad_continuation_closures("after-sweep");
 
         self.migrate_outdated_structs(extra_roots);
+        self.log_bad_continuation_closures("after-migrate");
         if self.options.print_stats {
             println!("Mark and sweep took {:?}", start.elapsed());
         }
@@ -887,10 +1358,22 @@ impl Allocator for MarkAndSweep {
         self.options
     }
 
-    fn can_allocate(&self, _words: usize, _kind: BuiltInTypes) -> bool {
-        // Mark-and-sweep uses a free list; conservatively return false
-        // to force a GC pre-pass. This is safe — just slightly eager.
-        false
+    fn can_allocate(&self, words: usize, _kind: BuiltInTypes) -> bool {
+        // Before GC: returning `false` is harmless — it just makes the
+        // runtime call `gc()` first, which is free if we really don't
+        // have space.
+        //
+        // After GC: returning `false` here tells the runtime to call
+        // `grow()`, which doubles the committed heap. If the free list
+        // actually has a block large enough to satisfy `words`, we must
+        // return `true` so the caller uses that block instead of
+        // growing. The old unconditional-`false` implementation grew
+        // the heap on every `ensure_space_for` even when GC had just
+        // reclaimed plenty of space — continuation-heavy workloads hit
+        // the OS commit ceiling well before the heap was actually full.
+        let header_size = if words > Header::MAX_INLINE_SIZE { 16 } else { 8 };
+        let needed = words * 8 + header_size;
+        self.free_list.ranges.iter().any(|r| r.size >= needed)
     }
 }
 

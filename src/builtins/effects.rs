@@ -169,6 +169,29 @@ pub unsafe extern "C" fn perform_dispatch_and_return_runtime(
 
     let runtime = crate::get_runtime().get();
 
+    if BuiltInTypes::get_kind(resume_closure) == BuiltInTypes::Closure {
+        let resume_obj = HeapObject::from_tagged(resume_closure);
+        for free_var in &resume_obj.get_fields()[3..] {
+            if BuiltInTypes::get_kind(*free_var) != BuiltInTypes::Closure {
+                continue;
+            }
+            let raw_resume_obj = HeapObject::from_tagged(*free_var);
+            let raw_fn_ptr = BuiltInTypes::untag(raw_resume_obj.get_field(0)) as *const u8;
+            let is_continuation_trampoline = runtime
+                .get_function_by_pointer(raw_fn_ptr)
+                .map(|f| f.name == "beagle.builtin/continuation-trampoline")
+                .unwrap_or(false);
+            if is_continuation_trampoline {
+                eprintln!(
+                    "[perform-dispatch-raw-resume] wrapped={:#x} raw={:#x} raw_field3={:#x}",
+                    resume_closure,
+                    *free_var,
+                    raw_resume_obj.get_field(3)
+                );
+            }
+        }
+    }
+
     // Call through the protocol dispatcher function `beagle.effect/handle`,
     // which handles inline-cache dispatch and struct-id → method lookup.
     // Same calling convention as user calls to `handle(h, op, resume)`.
@@ -204,6 +227,63 @@ pub unsafe extern "C" fn perform_dispatch_and_return_runtime(
             stack_pointer,
             frame_pointer,
             result,
+        )
+    }
+}
+
+/// Tag-aware variant of `perform_dispatch_and_return_runtime`. Same
+/// handler dispatch, but on normal handler return we longjmp through
+/// the matching prompt-tag record via `return_from_shift_tagged` rather
+/// than FP-walking for an enclosing `__reset__`. The tag comes from the
+/// handler's registry entry (looked up at `perform`-time and threaded
+/// through as an extra argument) so the tagged path doesn't need any
+/// changes to the prompt-lookup infrastructure on this side.
+pub unsafe extern "C" fn perform_dispatch_and_return_tagged_runtime(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    handler: usize,
+    op_value: usize,
+    resume_closure: usize,
+    tag_tagged: usize,
+) -> ! {
+    save_gc_context!(stack_pointer, frame_pointer);
+
+    let runtime = crate::get_runtime().get();
+
+    let handle_fn_entry = runtime
+        .get_function_by_name("beagle.effect/handle")
+        .unwrap_or_else(|| unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "RuntimeError",
+                "beagle.effect/handle dispatcher not compiled — was any Handler extension registered?"
+                    .to_string(),
+            );
+        });
+    let handle_fn_ptr = runtime
+        .get_pointer(handle_fn_entry)
+        .expect("handle dispatcher has no code pointer");
+
+    let save_vr_fn_entry = runtime
+        .get_function_by_name("beagle.builtin/save_volatile_registers3")
+        .expect("save_volatile_registers3 trampoline not registered");
+    let save_vr_ptr = runtime
+        .get_pointer(save_vr_fn_entry)
+        .expect("save_volatile_registers3 pointer not available");
+    let save_vr: extern "C" fn(usize, usize, usize, usize) -> usize =
+        unsafe { std::mem::transmute(save_vr_ptr) };
+
+    let result = save_vr(handler, op_value, resume_closure, handle_fn_ptr as usize);
+
+    // Handler returned without calling resume. Untag the prompt tag and
+    // longjmp through the matching prompt-tag record.
+    let tag = BuiltInTypes::untag(tag_tagged);
+    unsafe {
+        crate::builtins::reset_shift::return_from_shift_tagged_runtime(
+            stack_pointer,
+            frame_pointer,
+            result,
+            tag,
         )
     }
 }

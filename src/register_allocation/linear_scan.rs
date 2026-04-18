@@ -17,6 +17,7 @@ pub struct LinearScan {
     pub root_slots: HashMap<VirtualRegister, usize>,
     free_root_slots: Vec<usize>,
     next_root_slot: usize,
+    root_slot_base: usize,
 }
 
 fn physical(index: usize) -> VirtualRegister {
@@ -59,6 +60,7 @@ impl LinearScan {
             root_slots: HashMap::new(),
             free_root_slots: Vec::new(),
             next_root_slot: num_locals,
+            root_slot_base: num_locals,
         }
     }
 
@@ -290,12 +292,20 @@ impl LinearScan {
                 // if they are not spilled (meaning there isn't an entry in location)
                 // we want to add them to the list of saves
                 let mut saves = Vec::new();
+                let mut live_root_slots = std::collections::HashSet::new();
                 let live_ranges: Vec<(VirtualRegister, usize, usize)> = self
                     .lifetimes
                     .iter()
                     .map(|(register, (start, end))| (*register, *start, *end))
                     .collect();
                 for (original_register, start, end) in live_ranges {
+                    // Keep any root slot whose interval covers the call instruction
+                    // itself. Spilled args/function values may be read while setting
+                    // up the call even if they are dead immediately after it.
+                    if start <= i && end >= i {
+                        let root_slot = *self.root_slots.get(&original_register).unwrap();
+                        live_root_slots.insert(root_slot);
+                    }
                     // *end > i: register is used after the call (at instruction i+1 or later)
                     if start < i && end > i && !self.location.contains_key(&original_register) {
                         let register = self.allocated_registers.get(&original_register).unwrap();
@@ -312,6 +322,14 @@ impl LinearScan {
                         saves.push(SavedValue {
                             source: Value::Register(*register),
                             local: *self.root_slots.get(&original_register).unwrap(),
+                        });
+                    }
+                }
+                for dead_slot in self.root_slot_base..self.next_root_slot {
+                    if !live_root_slots.contains(&dead_slot) {
+                        saves.push(SavedValue {
+                            source: Value::Null,
+                            local: dead_slot,
                         });
                     }
                 }
@@ -345,6 +363,42 @@ impl LinearScan {
                     *label,
                     *local_index,
                     *builtin,
+                    saves,
+                );
+            } else if let Instruction::CaptureContinuationTagged(
+                dest,
+                label,
+                local_index,
+                builtin,
+                tag,
+            ) = &instruction
+            {
+                let mut saves = Vec::new();
+                let live_ranges: Vec<(VirtualRegister, usize, usize)> = self
+                    .lifetimes
+                    .iter()
+                    .map(|(register, (start, end))| (*register, *start, *end))
+                    .collect();
+                for (original_register, start, end) in live_ranges {
+                    if start < i && end > i && !self.location.contains_key(&original_register) {
+                        let register = self.allocated_registers.get(&original_register).unwrap();
+                        if let Value::Register(dest) = dest
+                            && dest == register
+                        {
+                            continue;
+                        }
+                        saves.push(SavedValue {
+                            source: Value::Register(*register),
+                            local: *self.root_slots.get(&original_register).unwrap(),
+                        });
+                    }
+                }
+                self.instructions[i] = Instruction::CaptureContinuationTaggedWithSaves(
+                    *dest,
+                    *label,
+                    *local_index,
+                    *builtin,
+                    *tag,
                     saves,
                 );
             } else if let Instruction::PerformEffect(

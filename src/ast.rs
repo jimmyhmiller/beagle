@@ -5,7 +5,7 @@ use std::{collections::HashMap, hash::Hash};
 use crate::{
     Data, Message,
     backend::{Backend, CodegenBackend},
-    builtins::{debugger, mark_card},
+    builtins::{debugger, write_barrier},
     common::Label,
     compiler::{CompileError, Compiler},
     ir::{self, Condition},
@@ -1240,11 +1240,38 @@ impl AstCompiler<'_> {
                     self.ir.write_label(skip_pause);
                 }
 
-                for ast in body[..body.len().saturating_sub(1)].iter() {
-                    self.call_compile(&Box::new(ast))?;
-                }
-                let last = body.last().unwrap_or(&Ast::Null(0));
-                let return_value = self.call_compile(&Box::new(last))?;
+                let is_reset_trampoline = name.as_deref() == Some("__reset__")
+                    && self.compiler.current_namespace_name() == "beagle.core"
+                    && body.len() == 1
+                    && matches!(
+                        &body[0],
+                        Ast::CallExpr {
+                            callee,
+                            args,
+                            ..
+                        } if args.is_empty()
+                            && matches!(&**callee, Ast::Identifier(id, _) if id == "thunk")
+                    );
+
+                let return_value = if is_reset_trampoline {
+                    let thunk_loc = self.get_variable("thunk").ok_or_else(|| {
+                        CompileError::InternalError {
+                            message: "__reset__ thunk local missing".to_string(),
+                        }
+                    })?;
+                    let thunk_val = self.resolve_variable(&thunk_loc)?;
+                    let closure_val = self.ir.assign_new(thunk_val);
+                    let untagged = self.ir.untag(closure_val.into());
+                    let function_pointer = self.ir.load_from_memory(untagged, 1);
+                    let function_pointer_reg = self.ir.assign_new(function_pointer);
+                    self.ir.call(function_pointer_reg.into(), vec![closure_val.into()])
+                } else {
+                    for ast in body[..body.len().saturating_sub(1)].iter() {
+                        self.call_compile(&Box::new(ast))?;
+                    }
+                    let last = body.last().unwrap_or(&Ast::Null(0));
+                    self.call_compile(&Box::new(last))?
+                };
                 self.ir.ret(return_value);
 
                 self.name = old_name;
@@ -1266,19 +1293,35 @@ impl AstCompiler<'_> {
                 let token_map = self.ir_range_to_token_range.pop().unwrap();
                 self.ir.ir_range_to_token_range = token_map.clone();
 
-                let continuation_gc_locals = self.ir.num_locals;
-                let mut backend = self.ir.compile(backend, error_fn_pointer);
-                let token_map = self.ir.ir_range_to_token_range.clone();
-
                 let full_function_name = name
                     .clone()
                     .map(|name| self.compiler.current_namespace_name() + "/" + &name);
+
+                let continuation_gc_locals = self.ir.num_locals;
+                let debug_name = if let Some(full_name) = full_function_name.clone() {
+                    full_name
+                } else {
+                    let source_line = self
+                        .current_token_info
+                        .first()
+                        .and_then(|(token_range, _)| {
+                            self.token_line_column_map
+                                .get(token_range.start)
+                                .map(|(line, _)| *line)
+                        })
+                        .unwrap_or(0);
+                    let source_loc = format!(" {}:{}", self.file_name, source_line);
+                    format!("<anonymous>{}", source_loc)
+                };
+                self.ir.debug_name = Some(debug_name);
+                let mut backend = self.ir.compile(backend, error_fn_pointer);
+                let token_map = self.ir.ir_range_to_token_range.clone();
 
                 if let Some(filter) = std::env::var("BEAGLE_DEBUG_IR_FILTER").ok()
                     && full_function_name
                         .as_deref()
                         .map(|function_name| function_name.contains(&filter))
-                        .unwrap_or(false)
+                        .unwrap_or(true)
                 {
                     eprintln!(
                         "[ir_dump] function={}",
@@ -1830,6 +1873,7 @@ impl AstCompiler<'_> {
                             free_var_ptr,
                         ],
                     );
+                    self.ir.pop_from_eval_stack();
 
                     let resume_closure_reg = self.ir.assign_new(resume_closure);
                     self.ir
@@ -3588,10 +3632,12 @@ impl AstCompiler<'_> {
                         Value::Register(value_reg),
                     );
 
-                    // Card marking for generational GC write barrier
-                    let mark_card_fn =
-                        Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
-                    self.ir.call_builtin(mark_card_fn, vec![untagged_object]);
+                    let write_barrier_fn =
+                        Value::RawValue((write_barrier as usize) << BuiltInTypes::tag_size());
+                    self.ir.call_builtin(
+                        write_barrier_fn,
+                        vec![untagged_object, Value::Register(value_reg)],
+                    );
 
                     self.ir.jump(exit_property_access);
 
@@ -3659,10 +3705,10 @@ impl AstCompiler<'_> {
                         let local = self.ir.load_local(local_index);
                         let local = self.ir.untag(local);
                         self.ir.write_field(local, 0, value.into());
-                        // Write barrier: the box may be in old gen, value may be in young gen
-                        let mark_card_fn =
-                            Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
-                        self.ir.call_builtin(mark_card_fn, vec![local]);
+                        let write_barrier_fn =
+                            Value::RawValue((write_barrier as usize) << BuiltInTypes::tag_size());
+                        self.ir
+                            .call_builtin(write_barrier_fn, vec![local, value.into()]);
                     }
                     VariableLocation::FreeVariable(_free_variable) => {
                         return Err(CompileError::InvalidAssignment {
@@ -3688,10 +3734,10 @@ impl AstCompiler<'_> {
                         let slot = self.ir.read_field(arg0, index.into());
                         let slot = self.ir.untag(slot);
                         self.ir.write_field(slot, 0, value.into());
-                        // Write barrier: the box may be in old gen, value may be in young gen
-                        let mark_card_fn =
-                            Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
-                        self.ir.call_builtin(mark_card_fn, vec![slot]);
+                        let write_barrier_fn =
+                            Value::RawValue((write_barrier as usize) << BuiltInTypes::tag_size());
+                        self.ir
+                            .call_builtin(write_barrier_fn, vec![slot, value.into()]);
                     }
                     VariableLocation::MutableFreeVariable(index) => {
                         let arg0_location = self
@@ -3707,10 +3753,10 @@ impl AstCompiler<'_> {
                         let arg0: VirtualRegister = self.ir.assign_new(arg0);
                         let arg0 = self.ir.untag(arg0.into());
                         self.ir.write_field(arg0, index + 3, value.into());
-                        // Write barrier: closure may be in old gen, value may be in young gen
-                        let mark_card_fn =
-                            Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
-                        self.ir.call_builtin(mark_card_fn, vec![arg0]);
+                        let write_barrier_fn =
+                            Value::RawValue((write_barrier as usize) << BuiltInTypes::tag_size());
+                        self.ir
+                            .call_builtin(write_barrier_fn, vec![arg0, value.into()]);
                     }
                     VariableLocation::Register(_virtual_register) => {
                         return Err(CompileError::InvalidAssignment {
@@ -4231,6 +4277,7 @@ impl AstCompiler<'_> {
                         free_var_ptr,
                     ],
                 );
+                self.ir.pop_from_eval_stack();
 
                 // Store the continuation closure in local and bind to param name
                 let cont_closure_reg = self.ir.assign_new(cont_closure);
@@ -4360,18 +4407,35 @@ impl AstCompiler<'_> {
                 self.ir.write_label(handler_error_label);
                 let _ = self.call_builtin("beagle.builtin/throw-error", vec![]);
 
-                // Step 5: Handler found. Capture continuation, build resume
-                // closure, dispatch to handler.handle, longjmp back. Same
-                // shape as Ast::Shift's continuation plumbing.
+                // Step 5: Handler found. Capture continuation via the
+                // tagged path (so the prompt boundary is the enclosing
+                // `handle`'s prompt-tag record, not an FP-walked
+                // __reset__ frame), build a raw trampoline resume
+                // closure (no synthesized push-handler/__reset__
+                // wrapper), then call the tagged perform dispatcher.
                 self.ir.write_label(handler_ok_label);
 
                 let after_perform = self.ir.label("perform_after_resume");
                 let result_reg = self.ir.assign_new(Value::Null);
 
-                // Two locals: `cont_local` is where the RESUMED value will
-                // be written by continuation_trampoline when resume(v) is
-                // called. `cont_ptr_local` holds the raw ContinuationObject
-                // pointer (free var of the resume trampoline closure).
+                // Look up the tag associated with the handler we just
+                // found. `find-handler-tag` returns a tagged integer
+                // matching the same registry entry as `find-handler`.
+                // Pinned in a local because subsequent allocations
+                // (capture-continuation-tagged, make-closure) may GC.
+                let tag_value = self.call_builtin(
+                    "beagle.builtin/find-handler-tag",
+                    vec![enum_type_reg.into()],
+                )?;
+                let tag_reg = self.ir.assign_new(tag_value);
+                let tag_local_name = format!("__perform_tag_{}__", token_range.start);
+                let tag_local = self.find_or_insert_local(&tag_local_name);
+                self.ir.store_local(tag_local, tag_reg.into());
+
+                // cont_local receives the RESUMED value via the
+                // trampoline's `result_local` slot write; cont_ptr_local
+                // holds the raw ContinuationObject pointer that becomes
+                // the resume closure's single free variable.
                 let unique_cont_name = format!("__perform_cont_{}__", token_range.start);
                 let cont_local = self.find_or_insert_local(&unique_cont_name);
                 let unique_cont_ptr_name = format!("__perform_cont_ptr_{}__", token_range.start);
@@ -4379,19 +4443,36 @@ impl AstCompiler<'_> {
                 let null_reg = self.ir.assign_new(Value::Null);
                 self.ir.store_local(cont_local, null_reg.into());
 
-                // Capture continuation (non-tagged; FP walker locates __reset__).
+                // Tagged capture: the runtime finds the matching
+                // prompt-tag record, captures up to its stack_pointer,
+                // and truncates tag-stack entries pushed above the
+                // match. The captured segment boundary is now the
+                // `handle`'s record, which is stable across nested
+                // performs because no one pops it during capture.
                 let capture_fn = self
                     .compiler
-                    .find_function("beagle.builtin/capture-continuation")
-                    .expect("capture-continuation builtin not found");
+                    .find_function("beagle.builtin/capture-continuation-tagged")
+                    .expect("capture-continuation-tagged builtin not found");
                 let capture_fn_ptr = usize::from(capture_fn.pointer);
-                let raw_cont =
-                    self.ir
-                        .capture_continuation(after_perform, cont_local, capture_fn_ptr);
+                let tag_for_capture = self.ir.load_local(tag_local);
+                let tag_for_capture_reg = self.ir.assign_new(tag_for_capture);
+                let raw_cont = self.ir.capture_continuation_tagged(
+                    after_perform,
+                    cont_local,
+                    capture_fn_ptr,
+                    tag_for_capture_reg.into(),
+                );
                 let raw_cont_reg = self.ir.assign_new(raw_cont);
                 self.ir.store_local(cont_ptr_local, raw_cont_reg.into());
 
-                // Build resume closure: make_closure(trampoline, 1, [raw_cont_ptr]).
+                // Build the resume closure: make_closure(trampoline, 1,
+                // [raw_cont_ptr]). No deep-handler wrapper — the tagged
+                // prompt-tag record already tells nested performs where
+                // to capture up to, and the handler registry entry is
+                // never popped while the handle body is live. When the
+                // handler calls this closure, the trampoline teleports
+                // the body bytes back and control resumes at
+                // `after_perform`.
                 let trampoline_fn = self
                     .compiler
                     .find_function("beagle.builtin/continuation-trampoline")
@@ -4428,178 +4509,47 @@ impl AstCompiler<'_> {
                         free_var_ptr,
                     ],
                 );
-                let raw_resume_reg = self.ir.assign_new(resume_closure);
+                self.ir.pop_from_eval_stack();
+                let resume_reg = self.ir.assign_new(resume_closure);
+                let resume_local_name = format!("__perform_resume_{}__", token_range.start);
+                let resume_local = self.find_or_insert_local(&resume_local_name);
+                self.ir.store_local(resume_local, resume_reg.into());
 
-                // Deep-handler wrap: the user-visible resume closure is
-                //   fn(v) {
-                //       push-handler(enum_id, handler, fresh-tag())
-                //       let r = __reset__(fn() { raw_resume(v) })
-                //       pop-handler(enum_id)
-                //       r
-                //   }
-                // so that a second `perform` inside the resumed body has
-                // a prompt boundary and a matching handler entry. Without
-                // this, the first perform works but any subsequent perform
-                // in the resumed body fails with "shift without an
-                // enclosing reset" or "no handler installed".
+                // Dispatch + tagged-return via Rust builtin. Does not
+                // return normally — either continuation_trampoline
+                // teleports back to `after_perform` (handler called
+                // resume), or the builtin uses return_from_shift_tagged
+                // to longjmp to the handle's abort-landing label with
+                // the handler's result (handler returned without
+                // resuming).
                 //
-                // The raw trampoline closure, the handler instance, and
-                // the enum type_id are all bound as local-name variables
-                // so the synthesized Ast::Function captures them as free
-                // variables at compile time.
-                let token_start = token_range.start;
-                let raw_resume_name =
-                    format!("__perform_raw_resume_{}__", token_start);
-                let captured_handler_name =
-                    format!("__perform_handler_{}__", token_start);
-                let captured_enum_id_name =
-                    format!("__perform_enum_id_{}__", token_start);
-                let v_name = format!("__perform_v_{}__", token_start);
-                let r_name = format!("__perform_r_{}__", token_start);
-
-                let raw_resume_local = self.find_or_insert_local(&raw_resume_name);
-                self.ir.store_local(raw_resume_local, raw_resume_reg.into());
-                self.insert_variable(
-                    raw_resume_name.clone(),
-                    VariableLocation::Local(raw_resume_local),
-                );
-
-                let captured_handler_local =
-                    self.find_or_insert_local(&captured_handler_name);
-                // Reload handler from its early-pinned local — handler_reg
-                // may be stale after the capture/make-closure allocations.
-                let handler_current = self.ir.load_local(handler_early_local);
-                let handler_current_reg = self.ir.assign_new(handler_current);
-                self.ir
-                    .store_local(captured_handler_local, handler_current_reg.into());
-                self.insert_variable(
-                    captured_handler_name.clone(),
-                    VariableLocation::Local(captured_handler_local),
-                );
-
-                let captured_enum_id_local =
-                    self.find_or_insert_local(&captured_enum_id_name);
-                self.ir
-                    .store_local(captured_enum_id_local, enum_type_reg.into());
-                self.insert_variable(
-                    captured_enum_id_name.clone(),
-                    VariableLocation::Local(captured_enum_id_local),
-                );
-
-                let wrapper_ast = Ast::Function {
-                    name: None,
-                    args: vec![Pattern::Identifier {
-                        name: v_name.clone(),
-                        token_range,
-                    }],
-                    rest_param: None,
-                    body: vec![
-                        Ast::Call {
-                            name: "beagle.builtin/push-handler".to_string(),
-                            args: vec![
-                                Ast::Identifier(captured_enum_id_name.clone(), token_start),
-                                Ast::Identifier(captured_handler_name.clone(), token_start),
-                                Ast::Call {
-                                    name: "beagle.builtin/fresh-tag".to_string(),
-                                    args: vec![],
-                                    token_range,
-                                },
-                            ],
-                            token_range,
-                        },
-                        Ast::Let {
-                            pattern: Pattern::Identifier {
-                                name: r_name.clone(),
-                                token_range,
-                            },
-                            value: Box::new(Ast::Call {
-                                name: "beagle.core/__reset__".to_string(),
-                                args: vec![Ast::Function {
-                                    name: None,
-                                    args: vec![],
-                                    rest_param: None,
-                                    body: vec![Ast::CallExpr {
-                                        callee: Box::new(Ast::Identifier(
-                                            raw_resume_name.clone(),
-                                            token_start,
-                                        )),
-                                        args: vec![Ast::Identifier(
-                                            v_name.clone(),
-                                            token_start,
-                                        )],
-                                        token_range,
-                                    }],
-                                    token_range,
-                                    docstring: None,
-                                }],
-                                token_range,
-                            }),
-                            token_range,
-                        },
-                        Ast::Call {
-                            name: "beagle.builtin/pop-handler".to_string(),
-                            args: vec![Ast::Identifier(
-                                captured_enum_id_name.clone(),
-                                token_start,
-                            )],
-                            token_range,
-                        },
-                        Ast::Identifier(r_name.clone(), token_start),
-                    ],
-                    token_range,
-                    docstring: None,
-                };
-
-                self.not_tail_position();
-                let wrapped_resume = self.call_compile(&wrapper_ast)?;
-                let wrapped_resume_reg = self.ir.assign_new(wrapped_resume);
-
-                // Remove the temporary bindings — they've been captured
-                // by the wrapper closure, but shouldn't be visible to user
-                // code after this point.
-                {
-                    let current_env = self.environment_stack.last_mut().unwrap();
-                    current_env.variables.remove(&raw_resume_name);
-                    current_env.variables.remove(&captured_handler_name);
-                    current_env.variables.remove(&captured_enum_id_name);
-                }
-
-                // Dispatch + return-from-shift via Rust builtin. Does not
-                // return normally — either continuation_trampoline (inside
-                // the wrapper) teleports back to `after_perform`, or the
-                // builtin longjmps past __reset__ with the handler's result.
-                //
-                // IMPORTANT: reload handler, op, and enum_id from their
-                // stack-local slots. Between find-handler and here, several
-                // allocations ran (capture-continuation, make-closure ×2)
-                // each of which can trigger GC under gc-always. GC updates
-                // stack slots but NOT virtual registers — if a heap pointer
-                // was in a callee-saved register and GC moved the object,
-                // the register holds a stale pointer. Reloading from the
-                // local (which GC DID update) ensures we pass the current
-                // address to the dispatcher.
+                // Reload from locals: capture-continuation-tagged and
+                // make-closure each may have triggered GC, which
+                // updates stack slots but not virtual registers.
                 let handler_fresh = self.ir.load_local(handler_early_local);
                 let handler_for_dispatch = self.ir.assign_new(handler_fresh);
-                let enum_fresh = self.ir.load_local(captured_enum_id_local);
-                let enum_for_dispatch = self.ir.assign_new(enum_fresh);
-                // op was stored in op_local at the top (before any GC-
-                // triggering allocations). Reload the current value.
                 let op_fresh = self.ir.load_local(op_local);
                 let op_for_dispatch = self.ir.assign_new(op_fresh);
+                let resume_fresh = self.ir.load_local(resume_local);
+                let resume_for_dispatch = self.ir.assign_new(resume_fresh);
+                let tag_fresh = self.ir.load_local(tag_local);
+                let tag_for_dispatch = self.ir.assign_new(tag_fresh);
                 let _ = self.call_builtin(
-                    "beagle.builtin/perform-dispatch-and-return",
+                    "beagle.builtin/perform-dispatch-and-return-tagged",
                     vec![
                         handler_for_dispatch.into(),
                         op_for_dispatch.into(),
-                        wrapped_resume_reg.into(),
-                        enum_for_dispatch.into(),
+                        resume_for_dispatch.into(),
+                        tag_for_dispatch.into(),
                     ],
                 );
 
-                // Resume-point label. continuation_trampoline writes the
-                // resumed value into `cont_local` and jumps here.
+                // Resume-point label. continuation_trampoline wrote the
+                // resumed value into `cont_local` before jumping here.
                 self.ir.write_label(after_perform);
                 self.ir.record_gc_safepoint();
+                let null_reg = self.ir.assign_new(Value::Null);
+                self.ir.store_local(resume_local, null_reg.into());
                 let resumed_value = self.ir.load_local(cont_local);
                 self.ir.assign(result_reg, resumed_value);
 
@@ -4782,18 +4732,45 @@ impl AstCompiler<'_> {
                     return Ok(result_reg.into());
                 }
 
-                // Run the body inside `beagle.core/__reset__`, which
-                // leaves a prompt-identifying frame on the stack. The
-                // tagged-shift path in `perform_effect` will longjmp
-                // through this frame using `return_from_shift_tagged`
-                // (tag match) or, for untagged `shift` inside the body,
-                // the FP-walking `return_from_shift` variant.
-                //
-                // This mirrors `Ast::Reset`'s compilation — all handle
-                // scopes now live inside a `__reset__` frame, and the
-                // tag on the HandlerRegistryEntry is what distinguishes
-                // perform from a plain shift.
-                let _ = handle_prompt_handler; // label retained for future tagged-jump wiring
+                // Run the body under a tagged prompt. A real prompt-tag
+                // record records SP/FP at handle entry plus the PC of an
+                // abort-landing label; `perform` later captures against
+                // that record via `capture-continuation-tagged` and
+                // `return_from_shift_tagged` longjmps to the landing
+                // label with the handler's result. The body still runs
+                // inside `beagle.core/__reset__` so that any untagged
+                // `shift` inside it has the FP-walker prompt boundary
+                // it expects — the tag and the FP marker coexist.
+                let _ = handle_prompt_handler;
+
+                // Locate the push-prompt-tag builtin once — used to wire
+                // the specialized PushPromptTag IR instruction below.
+                let push_prompt_tag_fn = self
+                    .compiler
+                    .find_function("beagle.builtin/push-prompt-tag")
+                    .expect("push-prompt-tag builtin not found");
+                let push_prompt_tag_ptr = usize::from(push_prompt_tag_fn.pointer);
+
+                // The abort-landing label receives the handler's result
+                // when a perform inside the body aborts the handle.
+                // after_abort is where both the normal and abort paths
+                // converge (after the tag has been consumed one way or
+                // another) and where pop-handler runs.
+                let abort_return = self.ir.label("handle_abort_return");
+                let after_abort = self.ir.label("handle_after_abort");
+
+                // Reload the tag from its local to hand to push-prompt-tag;
+                // any prior builtin call (push-handler, fresh-tag) could
+                // have clobbered a register-only copy.
+                let tag_for_push = self.ir.load_local(_tag_local);
+                let tag_for_push_reg = self.ir.assign_new(tag_for_push);
+                self.ir.push_prompt_tag(
+                    tag_for_push_reg.into(),
+                    abort_return,
+                    Value::Local(captured_local),
+                    push_prompt_tag_ptr,
+                );
+
                 self.not_tail_position();
                 let body_thunk_reg = self.ir.assign_new(body_thunk);
                 let body_result = self.call_builtin(
@@ -4801,9 +4778,28 @@ impl AstCompiler<'_> {
                     vec![body_thunk_reg.into()],
                 )?;
 
-                // Keep the handle result in a local across builtin calls that may clobber registers.
+                // Normal return path: __reset__ returned the body's
+                // value. Stash it in the same local that the abort path
+                // writes into via return_from_shift_tagged, then pop the
+                // prompt-tag record (abort path has already had it popped
+                // for it by the tagged-return builtin) and converge.
                 self.ir.store_local(captured_local, body_result);
-                self.ir.assign(result_reg, body_result);
+                let tag_for_pop = self.ir.load_local(_tag_local);
+                let tag_for_pop_reg = self.ir.assign_new(tag_for_pop);
+                let _ = self.call_builtin(
+                    "beagle.builtin/pop-prompt-tag",
+                    vec![tag_for_pop_reg.into()],
+                );
+                self.ir.jump(after_abort);
+
+                // Abort path: return_from_shift_tagged has already
+                // popped the tag and written the handler's return value
+                // into `captured_local`; execution lands here with X0
+                // holding the same value. No additional pop needed.
+                self.ir.write_label(abort_return);
+                self.ir.record_gc_safepoint();
+
+                self.ir.write_label(after_abort);
 
                 // Pop the effect handler
                 let key_reg2 = self.ir.assign_new(Value::TaggedConstant(enum_type_id as isize));
@@ -5201,6 +5197,11 @@ impl AstCompiler<'_> {
         }
 
         self.ir.write_label(exit_closure_call);
+        let null_reg = self.ir.assign_new(Value::Null);
+        self.ir.store_local(saved_func_local, null_reg.into());
+        for local in &saved_arg_locals {
+            self.ir.store_local(*local, null_reg.into());
+        }
         ret_register.into()
         // self.ir.breakpoint();
     }
@@ -5320,6 +5321,11 @@ impl AstCompiler<'_> {
         }
 
         self.ir.write_label(exit_closure_call);
+        let null_reg = self.ir.assign_new(Value::Null);
+        self.ir.store_local(saved_func_local, null_reg.into());
+        for local in &saved_arg_locals {
+            self.ir.store_local(*local, null_reg.into());
+        }
         ret_register.into()
     }
 

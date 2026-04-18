@@ -2,7 +2,7 @@ use std::ops::Deref;
 
 use crate::{
     ast::{Ast, AstCompiler},
-    builtins::mark_card,
+    builtins::write_barrier,
     compiler::CompileError,
     ir::{Condition, Value},
     types::{BuiltInTypes, Header},
@@ -55,9 +55,10 @@ impl AstCompiler<'_> {
                 // Card marking for generational GC write barrier
                 // The function pointer needs to be pre-shifted left because call_builtin
                 // shifts right to "untag" the function pointer
-                let mark_card_fn =
-                    Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
-                self.ir.call_builtin(mark_card_fn, vec![untagged]);
+                let write_barrier_fn =
+                    Value::RawValue((write_barrier as usize) << BuiltInTypes::tag_size());
+                self.ir
+                    .call_builtin(write_barrier_fn, vec![untagged, value]);
 
                 args[1]
             }
@@ -74,9 +75,10 @@ impl AstCompiler<'_> {
 
                 // Card marking for generational GC write barrier (on success)
                 // Note: We mark the card even if CAS fails - this is safe (just extra work)
-                let mark_card_fn =
-                    Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
-                self.ir.call_builtin(mark_card_fn, vec![untagged]);
+                let write_barrier_fn =
+                    Value::RawValue((write_barrier as usize) << BuiltInTypes::tag_size());
+                self.ir
+                    .call_builtin(write_barrier_fn, vec![untagged, new]);
 
                 // TODO: I should do a conditional move here instead of a jump
                 let label = self.ir.label("compare_and_swap");
@@ -155,9 +157,10 @@ impl AstCompiler<'_> {
                     .heap_store_with_reg_offset(untagged, value, offset_reg.into());
 
                 // Card marking for generational GC write barrier
-                let mark_card_fn =
-                    Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
-                self.ir.call_builtin(mark_card_fn, vec![untagged]);
+                let write_barrier_fn =
+                    Value::RawValue((write_barrier as usize) << BuiltInTypes::tag_size());
+                self.ir
+                    .call_builtin(write_barrier_fn, vec![untagged, value]);
 
                 Value::Null
             }
@@ -271,9 +274,10 @@ impl AstCompiler<'_> {
 
                 // Card marking for generational GC write barrier
                 let untagged = self.ir.untag(pointer);
-                let mark_card_fn =
-                    Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
-                self.ir.call_builtin(mark_card_fn, vec![untagged]);
+                let write_barrier_fn =
+                    Value::RawValue((write_barrier as usize) << BuiltInTypes::tag_size());
+                self.ir
+                    .call_builtin(write_barrier_fn, vec![untagged, value]);
 
                 Value::Null
             }
@@ -404,9 +408,9 @@ impl AstCompiler<'_> {
         self.ir
             .write_field_dynamic(untagged_object, property_offset, Value::Register(value));
 
-        // Card marking for generational GC write barrier
-        let mark_card_fn = Value::RawValue((mark_card as usize) << BuiltInTypes::tag_size());
-        self.ir.call_builtin(mark_card_fn, vec![untagged_object]);
+        let write_barrier_fn = Value::RawValue((write_barrier as usize) << BuiltInTypes::tag_size());
+        self.ir
+            .call_builtin(write_barrier_fn, vec![untagged_object, Value::Register(value)]);
 
         self.ir.jump(exit_property_access);
 

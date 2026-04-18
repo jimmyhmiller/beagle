@@ -383,7 +383,7 @@ impl Runtime {
             "beagle.builtin/push-prompt-tag",
             push_prompt_tag_runtime as *const u8,
             false,
-            4, // tag, stack_pointer, frame_pointer, link_register
+            5, // tag, stack_pointer, frame_pointer, link_register, result_local_offset
         )?;
 
         self.add_builtin_function(
@@ -2023,6 +2023,18 @@ impl Runtime {
             true,
             true,
             6, // sp, fp, handler, op_value, resume_closure, enum_type_id
+        )?;
+
+        // perform-dispatch-and-return-tagged: tagged-prompt variant. Same
+        // dispatch, but on handler return it longjmps via
+        // return_from_shift_tagged using the prompt tag instead of
+        // FP-walking for an enclosing __reset__.
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/perform-dispatch-and-return-tagged",
+            perform_dispatch_and_return_tagged_runtime as *const u8,
+            true,
+            true,
+            6, // sp, fp, handler, op_value, resume_closure, tag
         )?;
 
         // ====================================================================

@@ -624,7 +624,9 @@ impl LowLevelX86 {
     }
 
     pub fn load_local(&mut self, dest: X86Register, offset: i32) {
-        if std::env::var("DEBUG_SPILL").is_ok() && offset == 7 {
+        if let Ok(debug_offset) = std::env::var("DEBUG_SPILL_OFFSET")
+            && debug_offset.parse::<i32>().ok() == Some(offset)
+        {
             eprintln!(
                 "[DEBUG_SPILL] load_local: offset={}, RBP_offset={}, dest={:?}, function={:?}",
                 offset,
@@ -641,7 +643,9 @@ impl LowLevelX86 {
     }
 
     pub fn store_local(&mut self, src: X86Register, offset: i32) {
-        if std::env::var("DEBUG_SPILL").is_ok() && offset == 7 {
+        if let Ok(debug_offset) = std::env::var("DEBUG_SPILL_OFFSET")
+            && debug_offset.parse::<i32>().ok() == Some(offset)
+        {
             eprintln!(
                 "[DEBUG_SPILL] store_local: offset={}, RBP_offset={}, src={:?}, function={:?}",
                 offset,
@@ -1280,9 +1284,10 @@ impl LowLevelX86 {
 
             // Write frame header at [RBP-8]. This is a heap-object-style header
             // that lets GC know how many traced slots this frame has.
-            // Only root slots (max_locals) are traced. Eval stack slots are NOT
-            // included — they're protected by register_temporary_root instead.
-            let num_slots = self.max_locals as usize;
+            // Scan the full compiled-frame payload: named locals plus
+            // eval-stack temporaries. Generated code can keep live heap
+            // values in either region across a GC-triggering call.
+            let num_slots = (self.max_locals + self.max_stack_size) as usize;
             let frame_header = Header {
                 type_id: crate::collections::TYPE_ID_FRAME,
                 type_data: (num_slots as u32) << 16,
@@ -1348,9 +1353,9 @@ impl LowLevelX86 {
             inserted_instructions.push(X86Asm::Pop { reg: RSI });
             inserted_instructions.push(X86Asm::Pop { reg: RDI });
 
-            // Zero out root slots so GC never sees uninitialized garbage.
-            // Only max_locals needs zeroing — eval stack slots are not scanned.
-            let slots_to_zero = self.max_locals;
+            // Zero out every scanned frame slot so GC never sees uninitialized
+            // garbage in locals or eval-stack temporaries.
+            let slots_to_zero = self.max_locals + self.max_stack_size;
             if slots_to_zero > 0 {
                 let null_value = BuiltInTypes::null_value() as i32;
 

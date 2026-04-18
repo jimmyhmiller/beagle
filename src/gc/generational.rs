@@ -1,4 +1,4 @@
-use std::{error::Error, ffi::c_void, io};
+use std::{error::Error, ffi::c_void, io, io::Write};
 
 use libc::mprotect;
 
@@ -12,7 +12,7 @@ use super::{
     stack_walker::StackWalker,
 };
 use crate::builtins::reset_shift::ContinuationObject;
-use crate::collections::TYPE_ID_FRAME;
+use crate::collections::{TYPE_ID_FRAME, TYPE_ID_PERSISTENT_VEC, TYPE_ID_PERSISTENT_VEC_NODE};
 
 /// Represents a reference to a GC root that needs updating after collection.
 /// Points to a mutable slot holding the root value (stack slots, GlobalObjectBlock entries).
@@ -337,6 +337,65 @@ pub struct GenerationalGC {
 }
 
 impl GenerationalGC {
+    fn debug_tmp_vec_gc_log(&self, line: impl AsRef<str>) {
+        let Ok(path) = std::env::var("BEAGLE_DEBUG_TMP_VEC_GC_FILE") else {
+            return;
+        };
+        let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        else {
+            return;
+        };
+        let _ = writeln!(file, "{}", line.as_ref());
+    }
+
+    fn log_bad_continuation_closure_fields(&mut self, phase: &str) {
+        let mut bad_count = 0usize;
+        self.old.walk_objects_mut(|obj_addr, heap_obj| {
+            let object = HeapObject::from_untagged(heap_obj.untagged() as *const u8);
+            if object.get_type_id() != 0 {
+                return;
+            }
+            let function_tagged = object.get_field(0);
+            if BuiltInTypes::get_kind(function_tagged) != BuiltInTypes::Function {
+                return;
+            }
+            let function_ptr = BuiltInTypes::untag(function_tagged) as *const u8;
+            let is_continuation_trampoline = crate::get_runtime()
+                .get()
+                .get_function_by_pointer(function_ptr)
+                .map(|f| f.name == "beagle.builtin/continuation-trampoline")
+                .unwrap_or(false);
+            if !is_continuation_trampoline {
+                return;
+            }
+
+            let field3 = object.get_field(3);
+            let tag = BuiltInTypes::get_kind(field3);
+            if tag != BuiltInTypes::HeapObject {
+                bad_count += 1;
+                eprintln!(
+                    "[gen-post-gc-bad-closure] phase={} closure={:#x} obj_addr={:#x} field3={:#x} tag={:?} fn_ptr={:#x}",
+                    phase,
+                    BuiltInTypes::Closure.tag(obj_addr as isize) as usize,
+                    obj_addr,
+                    field3,
+                    tag,
+                    function_ptr as usize,
+                );
+            }
+        });
+
+        if bad_count != 0 {
+            eprintln!(
+                "[gen-post-gc-bad-closure-summary] phase={} count={}",
+                phase, bad_count
+            );
+        }
+    }
+
     fn scan_continuation_segment<F>(&self, object: &HeapObject, mut callback: F)
     where
         F: FnMut(usize, usize),
@@ -735,7 +794,19 @@ impl GenerationalGC {
             if untagged == 0 {
                 return;
             }
+            let should_log = std::env::var("BEAGLE_DEBUG_TMP_VEC_GC_FILE").is_ok();
             if self.young.contains(untagged as *const u8) {
+                if should_log {
+                    self.debug_tmp_vec_gc_log(format!(
+                        "[tmp-vec-root] kind=young slot={:#x} value={:#x} untagged={:#x} allocated={} young_base={:#x} young_alloc_offset={:#x}",
+                        slot_addr,
+                        slot_value,
+                        untagged,
+                        self.young.contains_allocated(untagged as *const u8),
+                        self.young.base_address(),
+                        self.young.allocation_offset(),
+                    ));
+                }
                 assert!(
                     self.young.contains_allocated(untagged as *const u8),
                     "Stale young gen pointer {:#x} (offset={}) found on stack at {:#x}, \
@@ -747,7 +818,24 @@ impl GenerationalGC {
                 );
                 roots.push((slot_addr, slot_value));
             } else if self.old.contains(untagged as *const u8) {
+                if should_log {
+                    self.debug_tmp_vec_gc_log(format!(
+                        "[tmp-vec-root] kind=old slot={:#x} value={:#x} untagged={:#x}",
+                        slot_addr, slot_value, untagged
+                    ));
+                }
                 old_gen_objects.push(slot_value);
+            } else if should_log {
+                self.debug_tmp_vec_gc_log(format!(
+                    "[tmp-vec-root] kind=neither slot={:#x} value={:#x} untagged={:#x} young_base={:#x} young_limit={:#x} old_base={:#x} old_limit={:#x}",
+                    slot_addr,
+                    slot_value,
+                    untagged,
+                    self.young.base_address(),
+                    self.young.base_address() + self.young.byte_count(),
+                    self.old.heap_start(),
+                    self.old.heap_start() + self.old.heap_size(),
+                ));
             }
         });
 
@@ -770,6 +858,12 @@ impl GenerationalGC {
 
             // copy() handles non-heap, misaligned, and non-young-gen checks
             let new_value = self.copy(old_value);
+            if std::env::var("BEAGLE_DEBUG_TMP_VEC_GC_FILE").is_ok() {
+                self.debug_tmp_vec_gc_log(format!(
+                    "[tmp-vec-root-update] slot={:#x} old={:#x} new={:#x}",
+                    root_ref.0 as usize, old_value, new_value
+                ));
+            }
 
             if new_value != old_value {
                 self.update_root(&root_ref, new_value);
@@ -828,6 +922,7 @@ impl GenerationalGC {
         self.copy_remaining();
 
         self.young.clear();
+        self.log_bad_continuation_closure_fields("after-minor-gc");
 
         // Clear only the dirty cards (much faster than clearing entire table)
         self.card_table.clear();
@@ -890,6 +985,28 @@ impl GenerationalGC {
         let mut heap_obj = HeapObject::from_tagged(old_object);
         let container_type_id = heap_obj.get_type_id();
         let container_untagged = heap_obj.untagged();
+        let log_vec = std::env::var("BEAGLE_DEBUG_TMP_VEC_GC_FILE").is_ok()
+            && (container_type_id == TYPE_ID_PERSISTENT_VEC as usize
+                || container_type_id == TYPE_ID_PERSISTENT_VEC_NODE as usize);
+        if log_vec {
+            let fields = heap_obj
+                .get_fields()
+                .iter()
+                .enumerate()
+                .map(|(i, value)| format!("{}:{:#x}", i, value))
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.debug_tmp_vec_gc_log(format!(
+                "[tmp-vec-old-scan] object={:#x} type_id={} fields=[{}]",
+                old_object, container_type_id, fields
+            ));
+        }
+        let is_cont_resume_closure = heap_obj.get_object_type() == Some(BuiltInTypes::Closure)
+            && crate::get_runtime()
+                .get()
+                .get_function_by_pointer(BuiltInTypes::untag(heap_obj.get_field(0)) as *const u8)
+                .map(|f| f.name == "beagle.builtin/continuation-trampoline")
+                .unwrap_or(false);
 
         // Process this old gen object's fields
         {
@@ -906,6 +1023,18 @@ impl GenerationalGC {
                     let field_ptr = field_obj.get_pointer();
 
                     if self.young.contains(field_ptr) {
+                        if log_vec {
+                            self.debug_tmp_vec_gc_log(format!(
+                                "[tmp-vec-old-field-copy] object={:#x} field_index={} old={:#x}",
+                                old_object, i, *field
+                            ));
+                        }
+                        if is_cont_resume_closure && i == 3 {
+                            eprintln!(
+                                "[gen-old-update-before] closure={:#x} field3={:#x}",
+                                old_object, *field
+                            );
+                        }
                         assert!(
                             self.young.contains_allocated(field_ptr),
                             "Stale young gen pointer {:#x} found in old object type {} at {:#x} field {} (young alloc_offset={})",
@@ -945,8 +1074,20 @@ impl GenerationalGC {
                             i, *field
                         );
                         *field = self.copy(*field);
+                        if log_vec {
+                            self.debug_tmp_vec_gc_log(format!(
+                                "[tmp-vec-old-field-copy] object={:#x} field_index={} new={:#x}",
+                                old_object, i, *field
+                            ));
+                        }
                         #[cfg(feature = "debug-gc")]
                         eprintln!("[GC DEBUG]   -> new value: {:#x}", *field);
+                        if is_cont_resume_closure && i == 3 {
+                            eprintln!(
+                                "[gen-old-update-after] closure={:#x} field3={:#x}",
+                                old_object, *field
+                            );
+                        }
                     }
                 }
             }
@@ -1010,6 +1151,13 @@ impl GenerationalGC {
 
         let heap_object = HeapObject::from_tagged(root);
         let tag = BuiltInTypes::get_kind(root);
+        let is_continuation_object = heap_object.get_type_id() == crate::collections::TYPE_ID_CONTINUATION as usize;
+        let is_cont_resume_closure = tag == BuiltInTypes::Closure
+            && crate::get_runtime()
+                .get()
+                .get_function_by_pointer(BuiltInTypes::untag(heap_object.get_field(0)) as *const u8)
+                .map(|f| f.name == "beagle.builtin/continuation-trampoline")
+                .unwrap_or(false);
         // Skip if not in young gen
         if !self.young.contains(heap_object.get_pointer()) {
             return root;
@@ -1025,6 +1173,12 @@ impl GenerationalGC {
             // Preserve the original root's tag - different references to the same
             // object may use different tags (e.g., Closure vs HeapObject)
             let result = (result & !7) | (root & 7);
+            if is_continuation_object {
+                eprintln!(
+                    "[gen-copy-cont-forwarded] root={:#x} header={:#x} result={:#x}",
+                    root, header_data, result
+                );
+            }
             return result;
         }
 
@@ -1052,6 +1206,11 @@ impl GenerationalGC {
 
         // Check if this user struct needs migration to a new shape
         // Closures also have type_id=0 but must NOT be migrated as structs
+        let old_field3 = if is_cont_resume_closure {
+            Some(heap_object.get_field(3))
+        } else {
+            None
+        };
         let new_pointer = if heap_object.get_type_id() == 0 && !heap_object.is_opaque_object() {
             let is_closure = heap_object.get_object_type() == Some(BuiltInTypes::Closure);
             if !is_closure {
@@ -1087,6 +1246,24 @@ impl GenerationalGC {
 
         // Get the new object and add to processing queue
         let new_object = HeapObject::from_untagged(new_pointer);
+        if is_continuation_object {
+            eprintln!(
+                "[gen-copy-cont] old={:#x} new={:#x}",
+                root,
+                tag.tag(new_pointer as isize) as usize
+            );
+        }
+        if is_cont_resume_closure {
+            let new_tagged = tag.tag(new_pointer as isize) as usize;
+            let new_heap_obj = HeapObject::from_tagged(new_tagged);
+            eprintln!(
+                "[gen-copy-closure] old={:#x} new={:#x} field3_before={:#x} field3_after_copy={:#x}",
+                root,
+                new_tagged,
+                old_field3.unwrap_or(0),
+                new_heap_obj.get_field(3)
+            );
+        }
         self.copied.push(new_object);
 
         // Store forwarding pointer in header for all objects (works even for 0-field objects)
@@ -1150,6 +1327,16 @@ impl GenerationalGC {
             }
             let container_type_id = object.get_type_id();
             let container_untagged = object.untagged();
+            let object_tagged = BuiltInTypes::Closure.tag(container_untagged as isize) as usize;
+            let is_cont_resume_closure = container_type_id == 0
+                && BuiltInTypes::get_kind(object.get_field(0)) == BuiltInTypes::Function
+                && crate::get_runtime()
+                    .get()
+                    .get_function_by_pointer(
+                        BuiltInTypes::untag(object.get_field(0)) as *const u8
+                    )
+                    .map(|f| f.name == "beagle.builtin/continuation-trampoline")
+                    .unwrap_or(false);
             let initial_fields = object.get_fields().to_vec();
             let container_struct_info = if container_type_id == 0 {
                 let struct_id = object.get_struct_id();
@@ -1166,6 +1353,13 @@ impl GenerationalGC {
                 if let Some(heap_obj) = HeapObject::try_from_tagged(*field)
                     && self.young.contains(heap_obj.get_pointer())
                 {
+                    if is_cont_resume_closure && field_index == 3 {
+                        eprintln!(
+                            "[gen-copy-remaining-before] closure={:#x} field3={:#x}",
+                            object_tagged,
+                            *field
+                        );
+                    }
                     if !self.young.contains_allocated(heap_obj.get_pointer()) {
                         let fields = initial_fields
                             .iter()
@@ -1212,6 +1406,13 @@ impl GenerationalGC {
                     #[cfg(feature = "debug-gc")]
                     eprintln!("[GC DEBUG]   copying young-gen field {:#x}", *field);
                     *field = self.copy(*field);
+                    if is_cont_resume_closure && field_index == 3 {
+                        eprintln!(
+                            "[gen-copy-remaining-after] closure={:#x} field3={:#x}",
+                            object_tagged,
+                            *field
+                        );
+                    }
                 }
             }
             let segment_slots = self.collect_continuation_segment_slots(&object);
@@ -1268,6 +1469,7 @@ impl GenerationalGC {
         usdt_probes::fire_gc_full_start(self.gc_count);
         self.minor_gc(gc_frame_tops, extra_roots);
         self.old.gc(gc_frame_tops, extra_roots);
+        self.log_bad_continuation_closure_fields("after-full-gc");
         if std::env::var("BEAGLE_DEBUG_CONT_LIVE").is_ok() {
             let mut continuation_count = 0usize;
             let mut continuation_segment_bytes = 0usize;

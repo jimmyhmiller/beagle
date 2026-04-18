@@ -16,6 +16,16 @@ pub extern "C" fn mark_card(untagged_addr: usize) -> usize {
     0b111 // Return null
 }
 
+/// Full write barrier for generated code heap stores.
+/// Takes the untagged address of the object being written to and the value written.
+/// This mirrors Runtime::set_field_with_barrier for stores emitted directly by codegen.
+pub extern "C" fn write_barrier(untagged_addr: usize, value: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+    let tagged_addr = BuiltInTypes::HeapObject.tag(untagged_addr as isize) as usize;
+    runtime.write_barrier(tagged_addr, value);
+    0b111
+}
+
 pub extern "C" fn allocate(stack_pointer: usize, frame_pointer: usize, size: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let size = BuiltInTypes::untag(size);

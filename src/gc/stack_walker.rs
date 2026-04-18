@@ -1,6 +1,7 @@
 use crate::collections::TYPE_ID_FRAME;
 use crate::types::{BuiltInTypes, Header};
 use std::collections::HashSet;
+use std::io::Write;
 
 /// Stack walker that traverses the GC frame linked list (Henderson/Pizderson frames).
 ///
@@ -21,6 +22,20 @@ use std::collections::HashSet;
 /// (they were unlinked when captured), and restored frames are included (they were
 /// re-linked during restoration).
 pub struct StackWalker;
+
+fn stack_root_log_line(line: impl AsRef<str>) {
+    let Ok(path) = std::env::var("BEAGLE_DEBUG_STACK_ROOTS_FILE") else {
+        return;
+    };
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    let _ = writeln!(file, "{}", line.as_ref());
+}
 
 impl StackWalker {
     fn detached_frame_live_slots(_header_addr: usize, header: Header) -> usize {
@@ -84,6 +99,35 @@ impl StackWalker {
             // Only scan frames with a valid frame header
             if header.type_id == TYPE_ID_FRAME {
                 let num_slots = header.size as usize;
+                let frame_pointer = header_addr + 8;
+                let return_addr = unsafe { *((frame_pointer + 8) as *const usize) };
+                let frame_name = crate::get_runtime()
+                    .get()
+                    .get_function_containing_pointer(return_addr as *const u8)
+                    .map(|(function, offset)| {
+                        let source = function
+                            .source_file
+                            .as_deref()
+                            .map(|file| {
+                                if let Some(line) = function.source_line {
+                                    format!(" {}:{}", file, line)
+                                } else {
+                                    format!(" {}", file)
+                                }
+                            })
+                            .unwrap_or_default();
+                        format!(
+                            "{}+{:#x} ptr={:#x}{}",
+                            function.name, offset, function.pointer.ptr as usize, source
+                        )
+                    })
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                if std::env::var("BEAGLE_DEBUG_STACK_ROOTS_FILE").is_ok() {
+                    stack_root_log_line(format!(
+                        "[stack-frame] header={:#x} fp={:#x} slots={} fn={}",
+                        header_addr, frame_pointer, num_slots, frame_name
+                    ));
+                }
 
                 #[cfg(feature = "debug-gc")]
                 eprintln!(
@@ -93,9 +137,19 @@ impl StackWalker {
 
                 for i in 0..num_slots {
                     // Locals are at [header_addr - 16], [header_addr - 24], etc.
+                    // because header_addr is [FP-8] and local[0] is [FP-24].
                     // (header_addr - 8 is the prev pointer)
                     let slot_addr = header_addr - 16 - (i * 8);
                     let slot_value = unsafe { *(slot_addr as *const usize) };
+                    if std::env::var("BEAGLE_DEBUG_STACK_ROOTS_FILE").is_ok() {
+                        stack_root_log_line(format!(
+                            "[stack-slot] slot={} addr={:#x} value={:#x} is_heap_ptr={}",
+                            i,
+                            slot_addr,
+                            slot_value,
+                            BuiltInTypes::is_heap_pointer(slot_value)
+                        ));
+                    }
 
                     #[cfg(feature = "debug-gc")]
                     {
@@ -123,6 +177,12 @@ impl StackWalker {
                     }
 
                     if BuiltInTypes::is_heap_pointer(slot_value) {
+                        if std::env::var("BEAGLE_DEBUG_STACK_ROOTS_FILE").is_ok() {
+                            stack_root_log_line(format!(
+                                "[stack-root] slot={} addr={:#x} value={:#x}",
+                                i, slot_addr, slot_value
+                            ));
+                        }
                         let untagged = BuiltInTypes::untag(slot_value);
                         if !untagged.is_multiple_of(8) {
                             #[cfg(feature = "debug-gc")]

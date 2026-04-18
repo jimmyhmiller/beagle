@@ -2480,9 +2480,7 @@ fn __main__(main_fn, args) {
 fn __run_thread_start() {
     let thread-obj = primitive/__get-my-thread-obj();
     let f = thread-obj.closure;
-    // REFACTOR A: same treatment as __main__ above. The original wrapped
-    // the thunk in `handle effect/Handler(Async) { ... }` inside a
-    // try/catch. For now, skip the handle block and let any uncaught
-    // exception panic the thread.
-    f()
+    handle effect/Handler(Async) with ImplicitAsyncHandler {} {
+        f()
+    }
 }

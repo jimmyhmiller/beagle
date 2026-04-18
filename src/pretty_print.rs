@@ -552,6 +552,14 @@ impl PrettyPrint for Instruction {
             Instruction::PopPromptHandler(result, _) => {
                 format!("pop_prompt_handler {}", result.pretty_print())
             }
+            Instruction::PushPromptTag(tag, abort_label, local, _) => {
+                format!(
+                    "push_prompt_tag {}, label_{}, {}",
+                    tag.pretty_print(),
+                    abort_label.index,
+                    local.pretty_print()
+                )
+            }
             Instruction::LoadLabelAddress(dest, label) => {
                 format!(
                     "load_label_address {}, {}",
@@ -573,6 +581,32 @@ impl PrettyPrint for Instruction {
                     dest.pretty_print(),
                     label.index,
                     local_index,
+                    saves.pretty_print()
+                )
+            }
+            Instruction::CaptureContinuationTagged(dest, label, local_index, _, tag) => {
+                format!(
+                    "capture_continuation_tagged {}, label_{}, local_{}, {}",
+                    dest.pretty_print(),
+                    label.index,
+                    local_index,
+                    tag.pretty_print()
+                )
+            }
+            Instruction::CaptureContinuationTaggedWithSaves(
+                dest,
+                label,
+                local_index,
+                _,
+                tag,
+                saves,
+            ) => {
+                format!(
+                    "capture_continuation_tagged_with_saves {}, label_{}, local_{}, {}, {}",
+                    dest.pretty_print(),
+                    label.index,
+                    local_index,
+                    tag.pretty_print(),
                     saves.pretty_print()
                 )
             }

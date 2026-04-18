@@ -66,6 +66,7 @@
 //!   reset/shift. Their error-throwing stubs live in
 //!   `src/builtins/continuations.rs`.
 
+use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 
 use crate::builtins::GC_FRAME_TOP;
@@ -82,6 +83,54 @@ use crate::types::{BuiltInTypes, Header, HeapObject};
 /// once and never changed — `__reset__`'s compiled code address is
 /// stable for the life of the runtime.
 static RESET_CODE_RANGE: OnceLock<(usize, usize)> = OnceLock::new();
+
+const CONTINUATION_SCRATCH_STACK_SIZE: usize = 64 * 1024;
+
+struct ContinuationRestorePlan {
+    seg_base: usize,
+    seg_size: usize,
+    dst: usize,
+    copy_size: usize,
+    innermost_offset: usize,
+    result_local_offset: isize,
+    caller_gc_header: usize,
+    value: usize,
+    resume_address: usize,
+    return_jump_ptr: *const u8,
+    gc_frame_top_slot: *mut usize,
+    /// Tag carried by the continuation. Zero means "untagged" (plain
+    /// shift); non-zero triggers the trampoline's per-resume prompt-tag
+    /// push so nested performs in the resumed body capture against this
+    /// resume boundary instead of the outer handle's record.
+    cont_tag: u64,
+    /// Address of the slot at `[trampoline_fp + 8]` — the outermost
+    /// body frame's saved-LR slot after teleport. Tagged resumes
+    /// overwrite this with `pop_top_tag_and_return_stub` so a normal
+    /// body return goes through the stub, which pops the per-resume
+    /// record and longjmps to the original LR captured below.
+    saved_lr_slot: *mut usize,
+    /// The trampoline's invoker FP, snapshotted from
+    /// `[trampoline_fp + 0]` before the body bytes overlay anything.
+    /// Stored on the per-resume prompt-tag record as the FP to restore
+    /// when the body returns through the stub.
+    saved_caller_fp: usize,
+    /// The trampoline's invoker LR, snapshotted from
+    /// `[trampoline_fp + 8]`. This is the address right after the
+    /// handler's `bl resume`; the per-resume record's `link_register`
+    /// captures it so the stub (or a tagged abort) can longjmp here.
+    saved_caller_lr: usize,
+    /// SP value to record in the per-resume prompt-tag record. This is
+    /// `trampoline_fp + 16` — the SP that exists after the outermost
+    /// body frame's epilogue (`ldp x29, x30, [sp], #16; ret`) runs.
+    /// Tagged returns longjmp to this SP so the resumed-handler's
+    /// stack shape matches "resume just returned normally."
+    post_overlay_sp: usize,
+}
+
+thread_local! {
+    static CONTINUATION_RESTORE_PLAN: Cell<*mut ContinuationRestorePlan> = const { Cell::new(std::ptr::null_mut()) };
+    static CONTINUATION_SCRATCH_STACK: RefCell<Vec<u8>> = RefCell::new(vec![0u8; CONTINUATION_SCRATCH_STACK_SIZE]);
+}
 
 /// Returns `true` if `pc` lies within the code range of
 /// `beagle.core/__reset__`. Used by `find_enclosing_reset_frame` to
@@ -145,9 +194,16 @@ fn make_segment_fp_links_relative(
         return;
     }
     let mut fp = data_base + fp_offset;
+    let mut step = 0usize;
     while fp >= data_base && fp < data_base + size {
         let saved_slot = fp as *mut usize;
         let saved_fp = unsafe { *saved_slot };
+        if step < 8 {
+            eprintln!(
+                "[cont-capture-fp] step={} data_base={:#x} size={} fp_offset={} fp={:#x} saved_fp={:#x} stack_base={:#x}",
+                step, data_base, size, fp_offset, fp, saved_fp, original_stack_base
+            );
+        }
         // saved_fp is an absolute stack address; convert to relative offset
         if saved_fp >= original_stack_base && saved_fp < original_stack_base + size {
             let relative = saved_fp - original_stack_base;
@@ -156,6 +212,7 @@ fn make_segment_fp_links_relative(
         } else {
             break;
         }
+        step += 1;
     }
 }
 
@@ -222,10 +279,18 @@ impl ContinuationObject {
     /// starts executing with — and also the entry point for the
     /// saved-FP-chain relocation walk.
     const FIELD_SEGMENT_FRAME_POINTER_OFFSET: usize = 3;
+    /// Prompt tag associated with this continuation. Zero means
+    /// "untagged" (the continuation was produced by a plain `shift`,
+    /// not by an effect-handler `perform`). Non-zero tags are pushed
+    /// as a fresh prompt-tag record by the trampoline at resume time,
+    /// so nested performs inside the resumed body see a boundary that
+    /// tracks the resume point — this is what keeps captured segment
+    /// sizes bounded across long resume chains.
+    const FIELD_TAG: usize = 4;
 
     /// Total number of fields; used when allocating a fresh
     /// continuation object.
-    pub const NUM_FIELDS: usize = 4;
+    pub const NUM_FIELDS: usize = 5;
 
     pub fn from_tagged(tagged: usize) -> Option<Self> {
         let heap_obj = HeapObject::try_from_tagged(tagged)?;
@@ -407,6 +472,20 @@ impl ContinuationObject {
         }
     }
 
+    /// Read the prompt tag. Zero indicates "untagged" (plain-shift
+    /// continuation); non-zero tags are re-pushed as a fresh prompt-tag
+    /// record at resume time so nested performs stay bounded.
+    pub fn tag(&self) -> u64 {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_TAG)) as u64
+    }
+
+    pub fn set_tag(&self, tag: u64) {
+        self.heap_obj.write_field(
+            Self::FIELD_TAG as i32,
+            BuiltInTypes::Int.tag(tag as isize) as usize,
+        );
+    }
+
     /// Initialize a freshly-allocated continuation heap object.
     /// Segment metadata is set to zero and expected to be filled in
     /// by the caller after the backing segment object is allocated.
@@ -426,6 +505,10 @@ impl ContinuationObject {
         );
         heap_obj.write_field(
             Self::FIELD_SEGMENT_FRAME_POINTER_OFFSET as i32,
+            BuiltInTypes::Int.tag(0) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_TAG as i32,
             BuiltInTypes::Int.tag(0) as usize,
         );
     }
@@ -559,7 +642,7 @@ pub unsafe fn capture_continuation_runtime_inner(
 
     let runtime = crate::get_runtime().get_mut();
 
-    let cont_words = ContinuationObject::NUM_FIELDS + 3; // +3 word header slack
+    let cont_words = ContinuationObject::NUM_FIELDS;
     let segment_words = stack_size.div_ceil(8);
 
     // Pre-trigger GC so both allocations below are GC-free.
@@ -662,25 +745,31 @@ pub unsafe extern "C" fn capture_continuation_tagged_runtime(
     tag: usize,
 ) -> usize {
     crate::save_gc_context!(stack_pointer, frame_pointer);
+    // Beagle hands us a tagged int — untag before comparing against the
+    // u64 keys on the prompt-tag stack. (`push_prompt_tag_runtime` and
+    // the handler-registry lookup both do the same.)
+    let tag_raw = BuiltInTypes::untag(tag) as u64;
     assert!(
-        tag != 0,
+        tag_raw != 0,
         "capture_continuation_tagged: tag must be non-zero"
     );
 
     let capture_top = {
         let runtime = crate::get_runtime().get();
-        let (idx, record) = runtime.find_prompt_tag(tag as u64).unwrap_or_else(|| {
+        let (_idx, record) = runtime.find_prompt_tag(tag_raw).unwrap_or_else(|| {
             panic!(
                 "capture_continuation_tagged: no prompt-tag record with \
                  tag={} on the prompt-tag stack. This is a compiler bug — \
                  perform must be inside a matching handle.",
-                tag
+                tag_raw
             )
         });
-        // Pop records above the matched one (nested resets whose frames
-        // are inside the captured segment). Leave the matched record;
-        // return_from_shift_tagged pops it when the shift body returns.
-        runtime.truncate_prompt_tags(idx + 1);
+        // Leave records above the match in place: they correspond to
+        // nested handle scopes whose frames are part of the captured
+        // segment. When the continuation is later resumed, those scopes
+        // come back live and need their records to still be there. Tag
+        // pops use find-and-remove (see `Runtime::pop_prompt_tag`) so
+        // exit ordering doesn't have to match push ordering.
         record.stack_pointer
     };
 
@@ -688,7 +777,7 @@ pub unsafe extern "C" fn capture_continuation_tagged_runtime(
     let innermost_fp_offset = frame_pointer - stack_pointer;
 
     let runtime = crate::get_runtime().get_mut();
-    let cont_words = ContinuationObject::NUM_FIELDS + 3;
+    let cont_words = ContinuationObject::NUM_FIELDS;
     let segment_words = stack_size.div_ceil(8);
     runtime.ensure_space_for(cont_words + segment_words + 6, stack_pointer);
 
@@ -747,6 +836,11 @@ pub unsafe extern "C" fn capture_continuation_tagged_runtime(
     let mut cont = ContinuationObject::from_tagged(cont_ptr).unwrap();
     cont.set_segment_ptr_with_barrier(runtime, segment_heap_ptr);
     cont.set_segment_frame_pointer_offset(innermost_fp_offset);
+    // Record the prompt tag on the continuation so the trampoline can
+    // re-push a prompt-tag record at resume time. Without this, nested
+    // performs in resumed bodies capture all the way up to the outer
+    // handle's record and the captured segment grows unboundedly.
+    cont.set_tag(tag_raw);
 
     cont_ptr
 }
@@ -770,6 +864,12 @@ pub unsafe extern "C" fn return_from_shift_runtime(
 /// Tag-aware return_from_shift. Called by the shift-body completion
 /// path for effect-handler perform. Pops the matching prompt-tag
 /// record and longjmps to its saved SP/FP/LR with `value` in X0.
+///
+/// Also writes `value` into the local slot designated by the record's
+/// `result_local_offset`, so the post-longjmp landing code can read the
+/// value as a normal local instead of trying to observe X0 at a label.
+/// Offset `0` means "no local write"; any non-zero offset is interpreted
+/// relative to `frame_pointer`.
 pub unsafe extern "C" fn return_from_shift_tagged_runtime(
     _stack_pointer: usize,
     _frame_pointer: usize,
@@ -789,6 +889,12 @@ pub unsafe extern "C" fn return_from_shift_tagged_runtime(
             hdr = unsafe { *((hdr.wrapping_sub(8)) as *const usize) };
         }
         GC_FRAME_TOP.with(|cell| cell.set(hdr));
+    }
+
+    if record.result_local_offset != 0 {
+        let slot =
+            (record.frame_pointer as isize).wrapping_add(record.result_local_offset) as *mut usize;
+        unsafe { *slot = value };
     }
 
     let return_jump_fn = runtime
@@ -918,8 +1024,19 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     // Closure layout: header(8) + fn_ptr(8) + num_free(8) + num_locals(8) + free_var[0]...
     let untagged_closure = BuiltInTypes::untag(closure_ptr);
     let cont_ptr = unsafe { *((untagged_closure + 32) as *const usize) };
-    let cont = ContinuationObject::from_tagged(cont_ptr)
-        .expect("continuation_trampoline: closure free var is not a ContinuationObject");
+    let cont = match ContinuationObject::from_tagged(cont_ptr) {
+        Some(cont) => cont,
+        None => {
+            let fn_ptr = unsafe { *((untagged_closure + 8) as *const usize) };
+            let num_free = unsafe { *((untagged_closure + 16) as *const usize) };
+            let num_locals = unsafe { *((untagged_closure + 24) as *const usize) };
+            eprintln!(
+                "[continuation-trampoline-bad-freevar] closure={:#x} fn_ptr={:#x} num_free={:#x} num_locals={:#x} freevar0={:#x} value={:#x}",
+                closure_ptr, fn_ptr, num_free, num_locals, cont_ptr, value
+            );
+            panic!("continuation_trampoline: closure free var is not a ContinuationObject");
+        }
+    };
 
     // Normalize segment — this handles GC moves by re-relocating the
     // in-segment saved-FP chain against the current heap data base.
@@ -933,6 +1050,17 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     let outermost_offset = cont.segment_outermost_fp_offset();
     let resume_address = cont.resume_address();
     let result_local_offset = cont.result_local();
+    eprintln!(
+        "[continuation-trampoline] closure={:#x} cont={:#x} segment_ptr={:#x} seg_size={} inner_off={} outer_off={} resume={:#x} result_local={}",
+        closure_ptr,
+        cont_ptr,
+        cont.segment_ptr(),
+        seg_size,
+        innermost_offset,
+        outermost_offset,
+        resume_address,
+        result_local_offset
+    );
 
     // Read the trampoline's own FP via `read-fp` — a 2-instruction
     // Beagle-side JIT trampoline that returns x29. This function call
@@ -948,7 +1076,6 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
             unsafe { std::mem::transmute::<_, _>(fn_entry.pointer) };
         read_fp()
     };
-
     // Read return-jump's pointer here, before we start writing dst,
     // so that the final call doesn't need any function lookups.
     let return_jump_ptr: *const u8 = {
@@ -971,6 +1098,11 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     // here, while ordinary function calls are still safe, removes all
     // `LocalKey::with` invocations from the critical section below.
     let gc_frame_top_slot: *mut usize = GC_FRAME_TOP.with(|cell| cell.as_ptr());
+    // Snapshot the live caller-side GC chain before we overwrite it with the
+    // restored continuation. The outermost restored frame must splice back to
+    // this header so GC and dynamic-var walks continue into the still-live
+    // stack below the teleport boundary.
+    let caller_gc_header = unsafe { *gc_frame_top_slot };
 
     // Destination placement: outermost_fp_in_dst must equal trampoline_fp.
     //   outermost_fp_in_dst = dst + outermost_offset
@@ -983,15 +1115,89 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     // exactly what the outermost frame's saved FP/LR need to be.
     let dst = trampoline_fp - outermost_offset;
     let copy_size = outermost_offset;
+    eprintln!(
+        "[continuation-trampoline-dst] trampoline_fp={:#x} dst={:#x} copy_size={} outer_off={}",
+        trampoline_fp, dst, copy_size, outermost_offset
+    );
 
-    // ------------------------------------------------------------------
-    // From here until the final `return_jump` call, NO function calls
-    // may happen. All writes go to `dst` (which may overlap Rust's
-    // own frame); a function call would push a frame below
-    // trampoline's SP, into a region of `dst` we're actively writing.
-    // ------------------------------------------------------------------
+    // Snapshot the trampoline's invoker FP/LR (= the values our prologue
+    // wrote into [trampoline_fp + 0/8]) before they get overlaid as the
+    // outermost body frame's saved FP/LR. For a tagged resume, these are
+    // the values we'll record on the per-resume prompt-tag record so a
+    // body return (via the stub) or a nested abort (via
+    // return_from_shift_tagged) can longjmp back to "right after the
+    // handler's bl resume."
+    let saved_lr_slot = (trampoline_fp + 8) as *mut usize;
+    let saved_caller_fp = unsafe { *(trampoline_fp as *const usize) };
+    let saved_caller_lr = unsafe { *saved_lr_slot };
+    let post_overlay_sp = trampoline_fp + 16;
+    let cont_tag = cont.tag();
 
-    // 1. Copy bytes: [seg_base, seg_base + copy_size) → [dst, dst + copy_size).
+    let plan = Box::new(ContinuationRestorePlan {
+        seg_base,
+        seg_size,
+        dst,
+        copy_size,
+        innermost_offset,
+        result_local_offset,
+        caller_gc_header,
+        value,
+        resume_address,
+        return_jump_ptr,
+        gc_frame_top_slot,
+        cont_tag,
+        saved_lr_slot,
+        saved_caller_fp,
+        saved_caller_lr,
+        post_overlay_sp,
+    });
+    CONTINUATION_RESTORE_PLAN.with(|slot| slot.set(Box::into_raw(plan)));
+
+    let stack_switch: extern "C" fn(usize, usize) -> ! = {
+        let runtime = crate::get_runtime().get();
+        let fn_entry = runtime
+            .get_function_by_name("beagle.builtin/stack-switch")
+            .expect("stack-switch trampoline not found");
+        unsafe { std::mem::transmute::<_, _>(fn_entry.pointer) }
+    };
+    let scratch_top = CONTINUATION_SCRATCH_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if stack.len() < CONTINUATION_SCRATCH_STACK_SIZE {
+            stack.resize(CONTINUATION_SCRATCH_STACK_SIZE, 0);
+        }
+        let top = stack.as_mut_ptr() as usize + stack.len();
+        top & !0xfusize
+    });
+    stack_switch(scratch_top, continuation_restore_on_scratch as usize);
+}
+
+unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target: usize) -> ! {
+    let plan_ptr = CONTINUATION_RESTORE_PLAN.with(|slot| slot.replace(std::ptr::null_mut()));
+    assert!(
+        !plan_ptr.is_null(),
+        "continuation_restore_on_scratch: missing restore plan"
+    );
+    let plan = unsafe { *Box::from_raw(plan_ptr) };
+
+    let ContinuationRestorePlan {
+        seg_base,
+        seg_size,
+        dst,
+        copy_size,
+        innermost_offset,
+        result_local_offset,
+        caller_gc_header,
+        value,
+        resume_address,
+        return_jump_ptr,
+        gc_frame_top_slot,
+        cont_tag,
+        saved_lr_slot,
+        saved_caller_fp,
+        saved_caller_lr,
+        post_overlay_sp,
+    } = plan;
+
     let mut i = 0usize;
     while i < copy_size {
         let src_word = unsafe { *((seg_base + i) as *const usize) };
@@ -999,8 +1205,6 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         i += 8;
     }
 
-    // 2. Convert saved-FP chain in dst from segment-relative offsets
-    //    to stack-absolute addresses.
     let mut fp = dst + innermost_offset;
     loop {
         let saved_slot = fp as *mut usize;
@@ -1013,17 +1217,6 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         fp = absolute;
     }
 
-    // 3. Rebuild GC prev chain in dst. For each frame header (at
-    //    [fp-8]), write to [header-8] (the GC prev slot) the address
-    //    of the parent frame's header, or 0 if the parent is outside
-    //    the copy range (i.e., this is the outermost frame, which
-    //    logically chains into the invoker — GC will pick that up
-    //    naturally via GC_FRAME_TOP once we update it below).
-    //
-    //    Range check uses the header address (fp - 8), not fp,
-    //    because the outermost frame's fp equals dst + copy_size and
-    //    is therefore not strictly less than dst + copy_size. Its
-    //    header at dst + copy_size - 8 IS within range.
     let copy_end = dst + copy_size;
     let mut fp = dst + innermost_offset;
     loop {
@@ -1034,7 +1227,11 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         let saved_fp = unsafe { *(fp as *const usize) };
         let parent_header = saved_fp.wrapping_sub(8);
         let parent_in_range = parent_header >= dst && parent_header < copy_end;
-        let prev_val = if parent_in_range { parent_header } else { 0 };
+        let prev_val = if parent_in_range {
+            parent_header
+        } else {
+            caller_gc_header
+        };
         unsafe { *((header_addr - 8) as *mut usize) = prev_val };
         if !parent_in_range {
             break;
@@ -1042,7 +1239,6 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         fp = saved_fp;
     }
 
-    // 4. Write value to the resume point's result slot.
     let innermost_fp_in_dst = dst + innermost_offset;
     if result_local_offset != 0 {
         let result_ptr =
@@ -1050,23 +1246,27 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         unsafe { *result_ptr = value };
     }
 
-    // 5. Update GC_FRAME_TOP to the innermost frame's header in dst.
-    //    Using the cell pointer cached at the top of the function —
-    //    this is a plain store and emits NO call, even when the
-    //    compiler declines to inline `LocalKey::with` here.
     unsafe { *gc_frame_top_slot = innermost_fp_in_dst - 8 };
 
-    // 6. Final jump via return-jump. Signature:
-    //    return_jump(new_sp, new_fp, new_lr, jump_target, callee_saved_ptr, value)
-    //    It sets sp/fp/lr/x0 and branches. noreturn.
-    //
-    // Pass `value` as the last arg so X0 is set on resume. Some resume
-    // sites expect the value in X0 rather than in a stack slot — in
-    // particular, runtime-triggered throws (throw_runtime_error) set
-    // result_local_offset=0 and resume at the instruction after a
-    // builtin call, where the builtin's return value convention puts
-    // the result in X0. User-level throws write to a stack slot
-    // (handled in step 4 above); for them, X0 is irrelevant.
+    // Tagged resume: stash a per-resume prompt-tag record for nested
+    // performs in the resumed body, and redirect the outermost body
+    // frame's `ret` target to the stub that pops this record. Both
+    // the stub path (body returns naturally) and the tagged-abort
+    // path (`return_from_shift_tagged` finds this record) end up at
+    // `saved_caller_lr` — i.e., right after the handler's `bl
+    // resume`. Untagged plain-shift continuations skip this.
+    if cont_tag != 0 {
+        let runtime = crate::get_runtime().get();
+        runtime.push_prompt_tag(
+            cont_tag,
+            post_overlay_sp,
+            saved_caller_fp,
+            saved_caller_lr,
+            0,
+        );
+        unsafe { *saved_lr_slot = pop_top_tag_and_return_stub as usize };
+    }
+
     let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
         unsafe { std::mem::transmute(return_jump_ptr) };
     return_jump(
@@ -1074,6 +1274,44 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         innermost_fp_in_dst,
         0,
         resume_address,
+        std::ptr::null(),
+        value,
+    );
+}
+
+/// Tail of the per-resume prompt-tag dance. Called via `ret` when a
+/// resumed body completes its outermost frame: the trampoline rewrites
+/// that frame's saved-LR slot to point here so a normal body return
+/// goes through this stub instead of straight back to the handler.
+///
+/// Pops the per-resume prompt-tag record (which the trampoline pushed
+/// just before jumping to the resume address), reads its
+/// `link_register` as the original "after `bl resume`" address in the
+/// handler, and `return-jump`s there with the body's return value in
+/// X0. The stub's own Rust frame is abandoned by `return-jump`.
+///
+/// On the abort path (`return_from_shift_tagged` matches the per-resume
+/// record), the runtime pops the record itself and longjmps to the
+/// same `link_register`, bypassing this stub entirely.
+unsafe extern "C" fn pop_top_tag_and_return_stub(value: usize) -> ! {
+    let ptd = crate::runtime::per_thread_data();
+    let record = ptd
+        .prompt_tags
+        .pop()
+        .expect("pop_top_tag_and_return_stub: prompt-tag stack is empty");
+
+    let runtime = crate::get_runtime().get();
+    let return_jump_fn = runtime
+        .get_function_by_name("beagle.builtin/return-jump")
+        .expect("return-jump function not found");
+    let ptr: *const u8 = return_jump_fn.pointer.into();
+    let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
+        unsafe { std::mem::transmute(ptr) };
+    return_jump(
+        record.stack_pointer,
+        record.frame_pointer,
+        0,
+        record.link_register,
         std::ptr::null(),
         value,
     );

@@ -1,151 +1,81 @@
-# Generational GC Bug: Zero-Field Structs + Continuations
+# GC "Zero-Field Struct" Bug
 
-**Filed:** 2026-04-15
-**Affects:** 7 tests under `// gc-always` with the default generational GC
-**Does NOT affect:** mark-and-sweep GC (`--features mark-and-sweep`)
+## Summary
 
----
+The root cause was not a special-case bug in the generational copier for 8-byte structs.
 
-## Minimal repro
+The real bug was that the active effect-handler registry stored a raw heap pointer to the handler object in thread-local state, but that pointer was not itself a GC root. Under `// gc-always`, the handler could be moved or reclaimed while still logically installed. Later `perform`/`resume` paths then read a stale pointer from the registry and treated whatever now lived at that address as the handler.
 
-```beagle
-namespace repro
-// gc-always
+That failure showed up most reliably with `struct H {}` because zero-field handlers are the smallest possible heap objects, so `gc-always` made their allocation, promotion, and address reuse pattern much tighter. The object size was a trigger, not the root cause.
 
-use beagle.effect as effect
+## What Was Wrong
 
-enum C { X }
+Before the fix, the handler registry entry was:
 
-struct H {}
+- `protocol_key: String`
+- `handler_instance: usize`
+- `tag: u64`
 
-extend H with effect/Handler(C) {
-    fn handle(self, op, resume) { resume(1) }
-}
+That meant `push_handler_builtin` saved the tagged handler pointer directly in TLS, and `find_handler_builtin` returned that same raw value later. The GC never traced or rewrote that TLS field.
 
-fn f(n) {
-    if n <= 0 { 0 }
-    else {
-        let h = H {}
-        let r = handle effect/Handler(C) with h {
-            let x = perform C.X
-            x * n
-        }
-        r + f(n - 1)
-    }
-}
+Relevant pre-fix code:
 
-fn main() {
-    println(f(3))
-}
-```
+- `src/builtins/effects.rs` from the parent of `44088d7`
+  - `push_handler_builtin` stored `handler_instance` directly
+  - `find_handler_builtin` returned `e.handler_instance`
+- `src/runtime.rs` from the parent of `44088d7`
+  - `HandlerRegistryEntry` contained `handler_instance: usize`
 
-**Expected:** prints `6` (3 + 2 + 1)
-**Actual:** prints nothing, exits 0 (first iteration works, second iteration's `resume(1)` never returns — the trampoline teleports correctly but the return path exits the program instead of returning to the handler)
+## Failure Chain
 
-## What makes it trigger
+1. `handle ... with h` pushed `h` into the thread-local handler registry.
+2. The registry kept only the raw tagged heap pointer.
+3. A GC ran while the handler was still installed.
+4. The collector moved or reclaimed the handler object, but the registry entry was unchanged because the GC did not scan that TLS pointer.
+5. A later `perform` looked up the handler and got the stale address.
+6. Dispatch/resume then executed against corrupted or unrelated heap data, which produced the "zero-field struct" crashes and silent exits.
 
-ALL of these must be true:
+This also explains the old observations:
 
-| Condition | Change it and... |
-|---|---|
-| `struct H {}` (zero fields, 8-byte object) | Change to `struct H { _pad }` → **passes** |
-| `// gc-always` (GC on every allocation) | Remove → **passes** |
-| Handle block inlined in the recursive function | Move handle into a separate `fn do_handle(n)` called from the recursion → **passes** |
-| Generational GC (default) | Switch to `--features mark-and-sweep` → **passes** |
+- `mark-and-sweep` often passed because the object was not moved, so the stale pointer still happened to be usable.
+- Adding a field often passed because the larger object changed reuse timing and made the stale-pointer race harder to hit.
+- `// gc-always` made the bug deterministic because every allocation stressed the untraced registry entry.
 
-Sequential calls to the same handle block (no recursion) also pass. The bug requires the *combination* of all four conditions.
+## The Fix
 
-## What the investigation found
+The handler registry now stores a GC root slot id instead of the raw pointer.
 
-### The crash site
+Code:
 
-lldb shows `EXC_BAD_ACCESS` deep in JIT code — `ldur x20, [x19, #0x8]` with `x19 = 1`. An integer value `1` is being treated as a heap pointer.
+- [src/builtins/effects.rs](/Users/jimmyhmiller/Documents/Code/beagle/src/builtins/effects.rs:24)
+  - `push_handler_builtin` calls `register_temporary_root(handler_instance)`
+  - `pop_handler_builtin` calls `unregister_temporary_root(...)`
+  - `find_handler_builtin` reads the current pointer with `peek_temporary_root(...)`
+- [src/runtime.rs](/Users/jimmyhmiller/Documents/Code/beagle/src/runtime.rs:3655)
+  - `HandlerRegistryEntry` now stores `handler_root_id`
+- [src/runtime.rs](/Users/jimmyhmiller/Documents/Code/beagle/src/runtime.rs:5107)
+  - temporary roots are backed by handle-root slots
+- [src/runtime.rs](/Users/jimmyhmiller/Documents/Code/beagle/src/runtime.rs:5433)
+  - handle roots live in the per-thread `GlobalObjectBlock` chain that the GC already traces and updates
 
-Protocol dispatch instrumentation confirmed: the handler pointer arriving at `perform_dispatch_and_return_runtime` has the correct `struct_id=188` for both iterations. The `save_volatile_registers3` call enters the handler correctly. But **it never returns** on the second iteration.
+After this change, the GC rewrites the root slot when the handler moves, and handler lookup always returns the current address.
 
-Inside the handler, `resume(1)` is called. The continuation trampoline fires (confirmed by logging). The resumed body runs. But the return path from the body back through the handler frame chain goes somewhere wrong, and the program silently exits with code 0.
+## Verification
 
-### Why zero-field structs specifically
-
-A zero-field struct is exactly 8 bytes (header only). When the generational GC promotes it from young gen to old gen:
-
-1. The object's 8 bytes are copied to old gen
-2. A forwarding pointer is written at the old young-gen location — this **overwrites the entire object** (since the forwarding pointer IS 8 bytes and the object IS 8 bytes)
-3. Young gen is cleared (`allocation_offset = 0`, memory NOT zeroed)
-4. Next allocation reuses the same young-gen address, writing a new header over the forwarding pointer
-
-For 16-byte objects (1+ fields), the forwarding pointer overwrites only the header; the field data remains and there's more room for the GC to work correctly.
-
-### What's NOT the cause
-
-- **Stale virtual registers:** We added early-store-to-local + late-reload-from-local for handler/op/enum_id values across GC-triggering allocations. Correct fix for a real class of bugs, but doesn't fix this specific issue.
-- **GC prev chain corruption:** The `GC_FRAME_TOP` truncation in `return_from_shift_runtime_inner` is correct and tested.
-- **Continuation segment scanning:** `scan_continuation_segment` does run during promotion and updates young-gen pointers inside the segment. Segment heap pointers were validated at trampoline time — no forwarding bits set, all headers valid.
-- **Deep-handler wrapper:** Same failure with `BEAGLE_NO_DEEP_WRAP=1` (raw trampoline closure, no wrapper).
-
-### Proof that it's the generational copier
+The previously representative zero-field handler repro now passes:
 
 ```bash
-# Fails (generational GC, default):
-cargo run --release -- run --gc-always /tmp/repro.bg
-# exits 0, no output
-
-# Passes (mark-and-sweep, non-moving GC):
-cargo run --release --features mark-and-sweep -- run --gc-always /tmp/repro.bg
-# prints: 6
-
-# Passes (generational but struct has a field):
-# change `struct H {}` to `struct H { _pad }` and `H {}` to `H { _pad: 0 }`
-cargo run --release -- run --gc-always /tmp/repro_with_field.bg
-# prints: 6
+cargo run --release -- test resources/gc_handler_minimal_test.bg
 ```
 
-### Workaround that confirms the size theory
+Current result in this workspace:
 
-Adding `let size = size.max(1);` in `src/builtins/allocation.rs` (forcing all allocations to have at least 1 word of payload = 16 bytes minimum) makes the zero-field test pass. But it regresses ~40 other tests because the header's `size` field (0) no longer matches the actual allocation size (1), confusing `get_fields_mut`, `num_traced_slots`, and the GC scanner.
-
-## Where to look
-
-The bug is in the interaction between:
-
-1. **`src/gc/generational.rs` — `copy()` (line ~1002):** Copies the object, writes forwarding pointer. For 8-byte objects, the forwarding pointer replaces the entire object contents.
-
-2. **`src/gc/generational.rs` — `minor_gc()` / `full_gc()`:** Under `gc_always`, `full_gc` runs on every allocation. Young gen is cleared at line 830 (`self.young.clear()`), which just resets `allocation_offset` to 0 without zeroing memory.
-
-3. **`src/builtins/reset_shift.rs` — `continuation_trampoline` (line ~916):** Reads the continuation segment and copies it back onto the stack. If any pointer in the segment or in a closure referenced by the segment is stale, the restored stack has bad data.
-
-### Hypotheses to test
-
-**H1: Young-gen address reuse after clear.** After minor GC promotes objects and clears young gen, the next allocation at offset 0 writes a new header at the same address where a forwarding pointer used to be. If any code path reads the old address expecting to find the forwarding pointer (to follow it to old gen), it instead finds the new object's header. The forwarding pointer is gone.
-
-To test: zero the young gen memory in `clear()` and see if behavior changes (it should panic at a different point if something reads from a cleared address).
-
-**H2: Inline cache staleness.** The protocol dispatcher's inline cache stores `(type_id, fn_ptr)` pairs. After GC moves an object, the cache entry might match the wrong object (one that happened to land at the same address). For 8-byte objects, this is more likely because they're more densely packed.
-
-To test: disable inline caching (always fall through to `protocol_dispatch` slow path) and see if the test passes.
-
-**H3: Frame header confusion.** A zero-field struct's header (`type_id=0, type_data=struct_id, size=0`) could be confused with a frame header or other internal object during GC scanning, especially if adjacent memory contains frame-like data.
-
-To test: set `type_id` to a unique value (e.g., `TYPE_ID_EMPTY_STRUCT = 254`) for zero-field structs so they can't be confused with frames.
-
-## Affected tests
-
-```
-resources/gc_frame_chain_continuation_test.bg   (signal 11)
-resources/gc_frame_chain_multishot_test.bg      (signal 6)
-resources/gc_frame_chain_nested_handler_test.bg (depends on prev-chain fix variant)
-resources/gc_handler_minimal_test.bg            (was fixed by handler root-id change)
-resources/gc_shift_reset_basic_test.bg          (pre-existing, different crash)
-resources/continuation_stack_stress_test.bg     (signal 11)
-resources/dynamic_var_continuation_test.bg      (semantic: wrong value, not crash)
+```text
+pass  resources/gc_handler_minimal_test.bg
 ```
 
-The non-GC failures (`async_ambient_thread_test`, `concurrent_socket_echo_test`, `repl_namespace_integration_test`) are unrelated — they're about threading and socket setup.
+## Scope
 
-## Files
+This explains the reproducible zero-field handler failure that originally motivated this document.
 
-- `src/gc/generational.rs` — copier, promotion, `copy()`, `minor_gc`, `full_gc`
-- `src/gc/stack_walker.rs` — frame scanning, `walk_segment_gc_roots`
-- `src/builtins/reset_shift.rs` — continuation capture/restore/trampoline
-- `src/builtins/allocation.rs` — struct allocation entry point
-- `src/types.rs` — `Header`, `HeapObject`, `fields_size`, `num_traced_slots`
+It does **not** explain the remaining `gc_frame_chain_continuation_test.bg` / `gc_frame_chain_multishot_test.bg` continuation-chain crashes. Those still fail in the current workspace and are a separate GC/continuation interaction.
