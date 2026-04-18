@@ -642,15 +642,21 @@ pub extern "C" fn tcp_result_pop_for_op_id(loop_id: usize, op_id: usize) -> usiz
     match maybe_result {
         None => BuiltInTypes::Int.tag(0) as usize,
         Some(result) => {
+            // Bindings below feed the `trace!` macro body, which is
+            // only expanded when the `trace` feature is on. The
+            // `#[allow(unused_variables)]` keeps the no-trace build
+            // warning-free without forcing `_`-patterns that would
+            // break the tracing build.
+            #[allow(unused_variables)]
             let type_code = match &result {
-                TcpResult::ConnectOk { socket_id: _, .. } => {
+                TcpResult::ConnectOk { socket_id, .. } => {
                     trace!(
                         "tcp",
                         "tcp_result_pop_for_op_id: ConnectOk socket={} op_id={}", socket_id, op_id
                     );
                     1
                 }
-                TcpResult::ConnectErr { error: _, .. } => {
+                TcpResult::ConnectErr { error, .. } => {
                     trace!(
                         "tcp",
                         "tcp_result_pop_for_op_id: ConnectErr error={} op_id={}", error, op_id
@@ -658,8 +664,8 @@ pub extern "C" fn tcp_result_pop_for_op_id(loop_id: usize, op_id: usize) -> usiz
                     2
                 }
                 TcpResult::AcceptOk {
-                    socket_id: _,
-                    listener_id: _,
+                    socket_id,
+                    listener_id,
                     ..
                 } => {
                     trace!(
@@ -671,14 +677,14 @@ pub extern "C" fn tcp_result_pop_for_op_id(loop_id: usize, op_id: usize) -> usiz
                     );
                     3
                 }
-                TcpResult::AcceptErr { error: _, .. } => {
+                TcpResult::AcceptErr { error, .. } => {
                     trace!(
                         "tcp",
                         "tcp_result_pop_for_op_id: AcceptErr error={} op_id={}", error, op_id
                     );
                     4
                 }
-                TcpResult::ReadOk { data: _, .. } => {
+                TcpResult::ReadOk { data, .. } => {
                     trace!(
                         "tcp",
                         "tcp_result_pop_for_op_id: ReadOk data_len={} op_id={} data={:?}",
@@ -688,23 +694,21 @@ pub extern "C" fn tcp_result_pop_for_op_id(loop_id: usize, op_id: usize) -> usiz
                     );
                     5
                 }
-                TcpResult::ReadErr { error: _, .. } => {
+                TcpResult::ReadErr { error, .. } => {
                     trace!(
                         "tcp",
                         "tcp_result_pop_for_op_id: ReadErr error={} op_id={}", error, op_id
                     );
                     6
                 }
-                TcpResult::WriteOk {
-                    bytes_written: _, ..
-                } => {
+                TcpResult::WriteOk { bytes_written, .. } => {
                     trace!(
                         "tcp",
                         "tcp_result_pop_for_op_id: WriteOk bytes={} op_id={}", bytes_written, op_id
                     );
                     7
                 }
-                TcpResult::WriteErr { error: _, .. } => {
+                TcpResult::WriteErr { error, .. } => {
                     trace!(
                         "tcp",
                         "tcp_result_pop_for_op_id: WriteErr error={} op_id={}", error, op_id
