@@ -123,6 +123,11 @@ struct ContinuationRestorePlan {
     /// Tagged returns longjmp to this SP so the resumed-handler's
     /// stack shape matches "resume just returned normally."
     post_overlay_sp: usize,
+    /// Tagged heap pointer to the continuation's captured side-state
+    /// object, or null. Re-pushed onto the live prompt-tag /
+    /// effect-handler stacks (with SP/FP relocated to `dst`) just
+    /// before the final `return_jump`.
+    side_state_ptr: usize,
 }
 
 thread_local! {
@@ -277,10 +282,18 @@ impl ContinuationObject {
     /// tracks the resume point — this is what keeps captured segment
     /// sizes bounded across long resume chains.
     const FIELD_TAG: usize = 4;
+    /// Tagged heap pointer to the captured side-state heap object (or
+    /// null if no nested handle scopes were caught inside the
+    /// segment). The side-state object records the `prompt_tags` and
+    /// `effect_handlers` entries that belong to handle scopes whose
+    /// frames were captured by this continuation; at invoke time the
+    /// trampoline re-pushes them so the resumed body's `perform` calls
+    /// see fresh, correctly-relocated records.
+    const FIELD_SIDE_STATE: usize = 5;
 
     /// Total number of fields; used when allocating a fresh
     /// continuation object.
-    pub const NUM_FIELDS: usize = 5;
+    pub const NUM_FIELDS: usize = 6;
 
     pub fn from_tagged(tagged: usize) -> Option<Self> {
         let heap_obj = HeapObject::try_from_tagged(tagged)?;
@@ -476,6 +489,16 @@ impl ContinuationObject {
         );
     }
 
+    /// Read the side-state heap-object pointer (or null if no nested
+    /// handle scopes were caught inside the segment).
+    pub fn side_state(&self) -> usize {
+        self.heap_obj.get_field(Self::FIELD_SIDE_STATE)
+    }
+
+    pub fn set_side_state_with_barrier(&mut self, runtime: &mut Runtime, side_state_ptr: usize) {
+        runtime.set_field_with_barrier(self.tagged_ptr(), Self::FIELD_SIDE_STATE, side_state_ptr);
+    }
+
     /// Initialize a freshly-allocated continuation heap object.
     /// Segment metadata is set to zero and expected to be filled in
     /// by the caller after the backing segment object is allocated.
@@ -498,6 +521,239 @@ impl ContinuationObject {
             BuiltInTypes::Int.tag(0) as usize,
         );
         heap_obj.write_field(Self::FIELD_TAG as i32, BuiltInTypes::Int.tag(0) as usize);
+        heap_obj.write_field(
+            Self::FIELD_SIDE_STATE as i32,
+            BuiltInTypes::null_value() as usize,
+        );
+    }
+}
+
+// ============================================================================
+// §3b. Captured side-state
+// ============================================================================
+//
+// Nested `handle` blocks whose frames are captured by a tagged `shift`
+// need their `prompt_tags` / `effect_handlers` state preserved across
+// resumes. This mini-layout lives in a regular (non-opaque) heap
+// object pointed to by `ContinuationObject::FIELD_SIDE_STATE` so GC
+// can trace the handler pointers stored inside.
+//
+// Slot 0: num_prompts         (tagged int)
+// Slot 1: num_handlers        (tagged int)
+// Then num_prompts * 5 slots of prompt-record fields, all tagged ints:
+//     [tag, sp_offset, fp_offset, link_register, result_local_offset]
+//   (offsets are relative to the segment's `stack_pointer` base.)
+// Then num_handlers * 3 slots:
+//     [enum_type_id (tagged int), tag (tagged int), handler_ptr (heap)]
+//   handler_ptr is a regular tagged heap pointer so GC traces it.
+//
+// Both vectors are stored in original push order (outermost first) so
+// re-pushing on invoke reproduces the original stack shape.
+
+const SIDE_STATE_HEADER_SLOTS: usize = 2;
+const PROMPT_RECORD_SLOTS: usize = 5;
+const HANDLER_RECORD_SLOTS: usize = 3;
+
+struct SavedPromptRecord {
+    tag: u64,
+    sp_offset: usize,
+    fp_offset: usize,
+    link_register: usize,
+    result_local_offset: isize,
+}
+
+struct SavedHandlerRecord {
+    enum_type_id: usize,
+    tag: u64,
+    handler_pointer: usize,
+}
+
+/// Collect the prompt-tag records whose `stack_pointer` lies inside
+/// `[capture_low, capture_high)`. Returns the records in original push
+/// order (bottom of the stack first). Each returned record's offsets
+/// are relative to `capture_low` (the segment's byte-zero).
+fn collect_captured_prompt_records(
+    capture_low: usize,
+    capture_high: usize,
+) -> Vec<SavedPromptRecord> {
+    let ptd = crate::runtime::per_thread_data();
+    let mut out = Vec::new();
+    for rec in ptd.prompt_tags.iter() {
+        if rec.stack_pointer >= capture_low && rec.stack_pointer < capture_high {
+            out.push(SavedPromptRecord {
+                tag: rec.tag,
+                sp_offset: rec.stack_pointer - capture_low,
+                fp_offset: rec.frame_pointer.wrapping_sub(capture_low),
+                link_register: rec.link_register,
+                result_local_offset: rec.result_local_offset,
+            });
+        }
+    }
+    out
+}
+
+/// For each tag in `tags`, collect the matching `effect_handlers`
+/// entry — resolved to a raw handler pointer via the temporary-root
+/// slot — in push order. The root is NOT unregistered here; the
+/// caller is responsible for cleanup after the side-state object has
+/// been populated (so an OOM abort leaves the live stacks untouched).
+fn collect_captured_handler_records(tags: &[u64]) -> Vec<SavedHandlerRecord> {
+    if tags.is_empty() {
+        return Vec::new();
+    }
+    let ptd = crate::runtime::per_thread_data();
+    let runtime = crate::get_runtime().get();
+    let mut out = Vec::new();
+    for entry in ptd.effect_handlers.iter() {
+        if tags.contains(&entry.tag) {
+            let handler_pointer = runtime.peek_temporary_root(entry.handler_root_id);
+            out.push(SavedHandlerRecord {
+                enum_type_id: entry.enum_type_id,
+                tag: entry.tag,
+                handler_pointer,
+            });
+        }
+    }
+    out
+}
+
+fn side_state_word_count(num_prompts: usize, num_handlers: usize) -> usize {
+    SIDE_STATE_HEADER_SLOTS
+        + num_prompts * PROMPT_RECORD_SLOTS
+        + num_handlers * HANDLER_RECORD_SLOTS
+}
+
+/// Write the saved-state payload into an already-allocated, regular
+/// (non-opaque) heap object. Uses plain field writes; no barrier is
+/// needed because the object is fresh and can't yet reach old-gen.
+fn write_side_state_fields(
+    side_state_ptr: usize,
+    prompts: &[SavedPromptRecord],
+    handlers: &[SavedHandlerRecord],
+) {
+    let obj = HeapObject::from_tagged(side_state_ptr);
+    obj.write_field(0, BuiltInTypes::Int.tag(prompts.len() as isize) as usize);
+    obj.write_field(1, BuiltInTypes::Int.tag(handlers.len() as isize) as usize);
+    let mut slot = SIDE_STATE_HEADER_SLOTS as i32;
+    for p in prompts {
+        obj.write_field(slot, BuiltInTypes::Int.tag(p.tag as isize) as usize);
+        obj.write_field(
+            slot + 1,
+            BuiltInTypes::Int.tag(p.sp_offset as isize) as usize,
+        );
+        obj.write_field(
+            slot + 2,
+            BuiltInTypes::Int.tag(p.fp_offset as isize) as usize,
+        );
+        obj.write_field(
+            slot + 3,
+            BuiltInTypes::Int.tag(p.link_register as isize) as usize,
+        );
+        obj.write_field(
+            slot + 4,
+            BuiltInTypes::Int.tag(p.result_local_offset) as usize,
+        );
+        slot += PROMPT_RECORD_SLOTS as i32;
+    }
+    for h in handlers {
+        obj.write_field(
+            slot,
+            BuiltInTypes::Int.tag(h.enum_type_id as isize) as usize,
+        );
+        obj.write_field(slot + 1, BuiltInTypes::Int.tag(h.tag as isize) as usize);
+        obj.write_field(slot + 2, h.handler_pointer);
+        slot += HANDLER_RECORD_SLOTS as i32;
+    }
+}
+
+/// Remove from the live per-thread prompt-tag stack every record whose
+/// `tag` is in `tags` AND whose `stack_pointer` falls in
+/// `[capture_low, capture_high)`. Paired with the corresponding
+/// `effect_handlers` drain (`drop_captured_handlers`) so the two side
+/// stacks stay consistent. Must be called AFTER the side-state heap
+/// object is populated.
+fn drop_captured_prompts(tags: &[u64], capture_low: usize, capture_high: usize) {
+    let ptd = crate::runtime::per_thread_data();
+    ptd.prompt_tags.retain(|rec| {
+        !(tags.contains(&rec.tag)
+            && rec.stack_pointer >= capture_low
+            && rec.stack_pointer < capture_high)
+    });
+}
+
+/// Remove from the live per-thread effect-handler stack every entry
+/// whose `tag` is in `tags`, unregistering its handler root so the
+/// handler pointer is no longer pinned. The caller must have already
+/// copied the pointer into the side-state object.
+fn drop_captured_handlers(tags: &[u64]) {
+    // Snapshot root ids first; `unregister_temporary_root` borrows
+    // runtime mutably and the per-thread-data borrow isn't re-entrant.
+    let root_ids: Vec<usize> = {
+        let ptd = crate::runtime::per_thread_data();
+        ptd.effect_handlers
+            .iter()
+            .filter(|e| tags.contains(&e.tag))
+            .map(|e| e.handler_root_id)
+            .collect()
+    };
+    {
+        let ptd = crate::runtime::per_thread_data();
+        ptd.effect_handlers.retain(|e| !tags.contains(&e.tag));
+    }
+    let runtime = crate::get_runtime().get_mut();
+    for id in root_ids {
+        runtime.unregister_temporary_root(id);
+    }
+}
+
+/// Restore side-state by re-pushing every saved record, relocated to
+/// `dst` (the teleported segment's new base). Re-registers handler
+/// roots. Called inside the no-call critical section of the
+/// continuation trampoline.
+unsafe fn restore_side_state_into_live_stacks(side_state_ptr: usize, dst: usize) {
+    if side_state_ptr == 0 || side_state_ptr == BuiltInTypes::null_value() as usize {
+        return;
+    }
+    if !BuiltInTypes::is_heap_pointer(side_state_ptr) {
+        return;
+    }
+    let obj = HeapObject::from_tagged(side_state_ptr);
+    let num_prompts = BuiltInTypes::untag(obj.get_field(0));
+    let num_handlers = BuiltInTypes::untag(obj.get_field(1));
+
+    let mut slot: usize = SIDE_STATE_HEADER_SLOTS;
+
+    let runtime = crate::get_runtime().get();
+    for _ in 0..num_prompts {
+        let tag = BuiltInTypes::untag(obj.get_field(slot)) as u64;
+        let sp_offset = BuiltInTypes::untag(obj.get_field(slot + 1));
+        let fp_offset = BuiltInTypes::untag(obj.get_field(slot + 2));
+        let link_register = BuiltInTypes::untag(obj.get_field(slot + 3));
+        let result_local_offset = BuiltInTypes::untag_isize(obj.get_field(slot + 4) as isize);
+        runtime.push_prompt_tag(
+            tag,
+            dst + sp_offset,
+            dst + fp_offset,
+            link_register,
+            result_local_offset,
+        );
+        slot += PROMPT_RECORD_SLOTS;
+    }
+
+    let runtime_mut = crate::get_runtime().get_mut();
+    for _ in 0..num_handlers {
+        let enum_type_id = BuiltInTypes::untag(obj.get_field(slot));
+        let tag = BuiltInTypes::untag(obj.get_field(slot + 1)) as u64;
+        let handler_pointer = obj.get_field(slot + 2);
+        let handler_root_id = runtime_mut.register_temporary_root(handler_pointer);
+        let ptd = crate::runtime::per_thread_data();
+        ptd.effect_handlers
+            .push(crate::runtime::HandlerRegistryEntry {
+                enum_type_id,
+                handler_root_id,
+                tag,
+            });
+        slot += HANDLER_RECORD_SLOTS;
     }
 }
 
@@ -764,10 +1020,30 @@ pub unsafe extern "C" fn capture_continuation_tagged_runtime(
     let stack_size = capture_top.saturating_sub(stack_pointer);
     let innermost_fp_offset = frame_pointer - stack_pointer;
 
+    // Snapshot any nested handle-scope state whose frames lie inside
+    // the captured segment. We need this before allocation because
+    // `drop_captured_*` below mutates the live per-thread stacks, and
+    // we must still have the data to write into the saved-state heap
+    // object. `peek_temporary_root` reads the handler pointers before
+    // their roots are unregistered.
+    let saved_prompts = collect_captured_prompt_records(stack_pointer, capture_top);
+    let captured_tags: Vec<u64> = saved_prompts.iter().map(|p| p.tag).collect();
+    let saved_handlers = collect_captured_handler_records(&captured_tags);
+
     let runtime = crate::get_runtime().get_mut();
     let cont_words = ContinuationObject::NUM_FIELDS;
     let segment_words = stack_size.div_ceil(8);
-    runtime.ensure_space_for(cont_words + segment_words + 6, stack_pointer);
+    let side_state_words = if saved_prompts.is_empty() && saved_handlers.is_empty() {
+        0
+    } else {
+        side_state_word_count(saved_prompts.len(), saved_handlers.len())
+    };
+    // The +6 fudge matches the untagged path — slack for header words
+    // across up-to-three heap-object allocations.
+    runtime.ensure_space_for(
+        cont_words + segment_words + side_state_words + 6,
+        stack_pointer,
+    );
 
     let cont_ptr = match runtime.allocate_no_gc(cont_words, BuiltInTypes::HeapObject) {
         Ok(ptr) => ptr,
@@ -821,14 +1097,47 @@ pub unsafe extern "C" fn capture_continuation_tagged_runtime(
         BuiltInTypes::null_value() as usize
     };
 
+    // Allocate and populate the side-state object if there is nested
+    // handle state to save. Regular (non-opaque) heap object so GC
+    // traces the `handler_pointer` slots.
+    let side_state_ptr = if side_state_words > 0 {
+        match runtime.allocate_no_gc(side_state_words, BuiltInTypes::HeapObject) {
+            Ok(ptr) => {
+                write_side_state_fields(ptr, &saved_prompts, &saved_handlers);
+                ptr
+            }
+            Err(_) => unsafe {
+                crate::builtins::throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate continuation side state - out of memory".to_string(),
+                );
+            },
+        }
+    } else {
+        BuiltInTypes::null_value() as usize
+    };
+
     let mut cont = ContinuationObject::from_tagged(cont_ptr).unwrap();
     cont.set_segment_ptr_with_barrier(runtime, segment_heap_ptr);
     cont.set_segment_frame_pointer_offset(innermost_fp_offset);
+    if side_state_words > 0 {
+        cont.set_side_state_with_barrier(runtime, side_state_ptr);
+    }
     // Record the prompt tag on the continuation so the trampoline can
     // re-push a prompt-tag record at resume time. Without this, nested
     // performs in resumed bodies capture all the way up to the outer
     // handle's record and the captured segment grows unboundedly.
     cont.set_tag(tag_raw);
+
+    // Now that the saved state is durably recorded on the heap,
+    // remove the nested records from the live per-thread stacks.
+    // After this point the captured scope is "owned" by the
+    // continuation — re-installed on every resume, nowhere else.
+    if !captured_tags.is_empty() {
+        drop_captured_prompts(&captured_tags, stack_pointer, capture_top);
+        drop_captured_handlers(&captured_tags);
+    }
 
     cont_ptr
 }
@@ -899,10 +1208,7 @@ pub unsafe extern "C" fn return_from_shift_tagged_runtime(
     let mut stale_roots: Vec<usize> = Vec::new();
     {
         let ptd = crate::runtime::per_thread_data();
-        if let Some(outer_handler_pos) = ptd
-            .effect_handlers
-            .iter()
-            .rposition(|e| e.tag == tag_u64)
+        if let Some(outer_handler_pos) = ptd.effect_handlers.iter().rposition(|e| e.tag == tag_u64)
         {
             for entry in ptd.effect_handlers.drain(outer_handler_pos + 1..) {
                 stale_roots.push(entry.handler_root_id);
@@ -1151,6 +1457,7 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     let saved_caller_lr = unsafe { *saved_lr_slot };
     let post_overlay_sp = trampoline_fp + 16;
     let cont_tag = cont.tag();
+    let side_state_ptr = cont.side_state();
 
     let plan = Box::new(ContinuationRestorePlan {
         seg_base,
@@ -1169,6 +1476,7 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         saved_caller_fp,
         saved_caller_lr,
         post_overlay_sp,
+        side_state_ptr,
     });
     CONTINUATION_RESTORE_PLAN.with(|slot| slot.set(Box::into_raw(plan)));
 
@@ -1215,6 +1523,7 @@ unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target:
         saved_caller_fp,
         saved_caller_lr,
         post_overlay_sp,
+        side_state_ptr,
     } = plan;
 
     let mut i = 0usize;
@@ -1285,6 +1594,15 @@ unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target:
         );
         unsafe { *saved_lr_slot = pop_top_tag_and_return_entry_address() };
     }
+
+    // Re-push side-state for nested handle scopes captured inside
+    // the segment — addresses relocated to `dst`. This must come
+    // AFTER the per-resume outer push so that nested records sit on
+    // top (mirroring the original push order: outer was installed
+    // first, nested later). Without this, a `perform` in the
+    // resumed body for a nested effect would miss its handler /
+    // read stale SP/FP from a dangling record.
+    unsafe { restore_side_state_into_live_stacks(side_state_ptr, dst) };
 
     let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
         unsafe { std::mem::transmute(return_jump_ptr) };

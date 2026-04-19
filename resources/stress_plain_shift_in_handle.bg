@@ -1,0 +1,45 @@
+namespace stress_plain_shift_in_handle
+// gc-always
+
+// Theory A: a plain (untagged) `shift` inside a `handle` body targets
+// the handle's internal __reset__, NOT any outer reset. Multi-shot
+// resume of that continuation should therefore NOT cross the handle
+// boundary — the handle's push-prompt-tag record sits ABOVE the
+// capture range and is never touched.
+
+use beagle.effect as effect
+
+enum E { Op {} }
+
+struct H {}
+
+extend H with effect/Handler(E) {
+    fn handle(self, op, resume) {
+        resume(999)
+    }
+}
+
+fn main() {
+    let h = H {}
+    let result = handle effect/Handler(E) with h {
+        // Plain multi-shot shift INSIDE the handle body. If the
+        // capture boundary were the outer (main's) __reset__, we'd
+        // cross the handle record on the side stack and crash on the
+        // second resume. It must instead target the handle's internal
+        // __reset__.
+        let v = reset {
+            shift(fn(k) {
+                let a = k(10)
+                let b = k(20)
+                a + b
+            })
+        }
+        // And the handler still works after the inner reset completes.
+        let e = perform E.Op {}
+        v + e
+    }
+    println(result)
+}
+
+// @beagle.core.snapshot
+// 1029

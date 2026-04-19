@@ -1,0 +1,59 @@
+namespace stress_nested_handler_3level
+// gc-always
+
+// Three-level nested handlers, outer is multi-shot. Exercises
+// save/restore of multiple nested side-state records across resumes
+// under heavy GC.
+
+use beagle.effect as effect
+
+enum E1 { A {} }
+enum E2 { B {} }
+enum E3 { C {} }
+
+struct H1 {}
+struct H2 {}
+struct H3 {}
+
+extend H1 with effect/Handler(E1) {
+    fn handle(self, op, resume) {
+        let a = resume(1)
+        let b = resume(2)
+        a + b
+    }
+}
+
+extend H2 with effect/Handler(E2) {
+    fn handle(self, op, resume) {
+        resume(10)
+    }
+}
+
+extend H3 with effect/Handler(E3) {
+    fn handle(self, op, resume) {
+        resume(100)
+    }
+}
+
+struct Box { value }
+
+fn main() {
+    let h1 = H1 {}
+    let h2 = H2 {}
+    let h3 = H3 {}
+    let total = handle effect/Handler(E1) with h1 {
+        handle effect/Handler(E2) with h2 {
+            handle effect/Handler(E3) with h3 {
+                let x = perform E1.A {}
+                let y = perform E2.B {}
+                let z = perform E3.C {}
+                let box = Box { value: x + y + z }
+                box.value
+            }
+        }
+    }
+    println(total)
+}
+
+// @beagle.core.snapshot
+// 223

@@ -1,0 +1,46 @@
+namespace stress_deep_recursion_multishot
+// gc-always
+
+use beagle.effect as effect
+
+// Multi-shot handler where the resumed body runs a recursive call
+// that exercises capture-segment GC while on the resume path.
+
+enum Pick { P {} }
+
+struct H {}
+
+extend H with effect/Handler(Pick) {
+    fn handle(self, op, resume) {
+        let a = resume(1)
+        let b = resume(2)
+        let c = resume(3)
+        a + b + c
+    }
+}
+
+struct Box { value }
+
+fn sum(n) {
+    if n <= 0 {
+        0
+    } else {
+        let b = Box { value: n }
+        b.value + sum(n - 1)
+    }
+}
+
+fn main() {
+    let h = H {}
+    let total = handle effect/Handler(Pick) with h {
+        let x = perform Pick.P {}
+        // Heavy recursion after the capture point, allocating box at
+        // every depth so GC fires and the captured segment's FP chain
+        // gets traversed.
+        sum(20) + x
+    }
+    println(total)
+}
+
+// @beagle.core.snapshot
+// 636

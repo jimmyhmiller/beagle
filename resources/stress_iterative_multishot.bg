@@ -1,0 +1,53 @@
+namespace stress_iterative_multishot
+// gc-always
+
+// Heavy GC pressure: a multi-shot handler resumed 10 times, each
+// resume allocates a Box and recurses a bit so GC fires frequently
+// while captured segments are live.
+
+use beagle.effect as effect
+
+enum Gen { Next {} }
+
+struct G {}
+struct Box { value }
+
+extend G with effect/Handler(Gen) {
+    fn handle(self, op, resume) {
+        let mut sum = 0
+        let mut i = 1
+        loop {
+            if i > 10 {
+                break(null)
+            }
+            let r = resume(i)
+            sum = sum + r
+            i = i + 1
+        }
+        sum
+    }
+}
+
+fn chain(depth, value) {
+    if depth <= 0 {
+        Box { value: value }
+    } else {
+        let b = Box { value: value + depth }
+        chain(depth - 1, b.value)
+    }
+}
+
+fn main() {
+    let g = G {}
+    let total = handle effect/Handler(Gen) with g {
+        let x = perform Gen.Next {}
+        let b = chain(8, x)
+        b.value
+    }
+    // Each resume with i produces a chain terminating at i + 36.
+    // sum for i=1..10 = 10*36 + 55 = 415.
+    println(total)
+}
+
+// @beagle.core.snapshot
+// 415

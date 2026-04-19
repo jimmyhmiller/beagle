@@ -1,0 +1,53 @@
+namespace stress_nested_handler_abort
+// gc-always
+
+// Outer handler does resume(1), then on second resume the inner handler
+// aborts (returns without calling resume). The saved side state must
+// survive the first resume's normal unwind AND the second resume's abort
+// without leaking or corrupting the stacks.
+
+use beagle.effect as effect
+
+enum E1 { A {} }
+enum E2 { B {} }
+
+struct H1 {}
+struct H2 { mut count }
+
+extend H1 with effect/Handler(E1) {
+    fn handle(self, op, resume) {
+        let a = resume(1)
+        let b = resume(2)
+        a + b
+    }
+}
+
+extend H2 with effect/Handler(E2) {
+    fn handle(self, op, resume) {
+        self.count = self.count + 1
+        if self.count == 1 {
+            resume(10)
+        } else {
+            999
+        }
+    }
+}
+
+fn main() {
+    let h1 = H1 {}
+    let h2 = H2 { count: 0 }
+    let total = handle effect/Handler(E1) with h1 {
+        handle effect/Handler(E2) with h2 {
+            let x = perform E1.A {}
+            let y = perform E2.B {}
+            x + y
+        }
+    }
+    // First resume: x=1, E2 resumes with 10, y=10, body returns 11.
+    // Second resume: x=2, E2 aborts with 999.
+    // Outer: 11 + 999 = 1010.
+    println(total)
+}
+
+// @beagle.core.snapshot
+// 1010

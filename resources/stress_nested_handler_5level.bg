@@ -1,0 +1,57 @@
+namespace stress_nested_handler_5level
+// gc-always
+
+// 5-level deep nesting with outer multi-shot. Exercises the saved
+// side-state object holding 4 nested prompt-tag records and 4 nested
+// handler entries — larger than anything else in the suite.
+
+use beagle.effect as effect
+
+enum E1 { A {} }
+enum E2 { B {} }
+enum E3 { C {} }
+enum E4 { D {} }
+enum E5 { F {} }
+
+struct H1 {}
+struct H2 {}
+struct H3 {}
+struct H4 {}
+struct H5 {}
+
+extend H1 with effect/Handler(E1) {
+    fn handle(self, op, resume) {
+        let a = resume(1)
+        let b = resume(2)
+        a + b
+    }
+}
+extend H2 with effect/Handler(E2) { fn handle(self, op, resume) { resume(10) } }
+extend H3 with effect/Handler(E3) { fn handle(self, op, resume) { resume(100) } }
+extend H4 with effect/Handler(E4) { fn handle(self, op, resume) { resume(1000) } }
+extend H5 with effect/Handler(E5) { fn handle(self, op, resume) { resume(10000) } }
+
+fn main() {
+    let total = handle effect/Handler(E1) with H1 {} {
+        handle effect/Handler(E2) with H2 {} {
+            handle effect/Handler(E3) with H3 {} {
+                handle effect/Handler(E4) with H4 {} {
+                    handle effect/Handler(E5) with H5 {} {
+                        let a = perform E1.A {}
+                        let b = perform E2.B {}
+                        let c = perform E3.C {}
+                        let d = perform E4.D {}
+                        let e = perform E5.F {}
+                        a + b + c + d + e
+                    }
+                }
+            }
+        }
+    }
+    // Each resume: x + 10 + 100 + 1000 + 10000 = x + 11110.
+    // Resume(1) + Resume(2) = 11111 + 11112 = 22223.
+    println(total)
+}
+
+// @beagle.core.snapshot
+// 22223

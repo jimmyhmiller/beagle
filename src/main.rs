@@ -825,10 +825,7 @@ fn compile_x86_continuation_return_stub(runtime: &mut Runtime) {
             dest: RBP,
             src: RSI,
         });
-        lang.instructions.push(X86Asm::MovRR {
-            dest: RAX,
-            src: R9,
-        });
+        lang.instructions.push(X86Asm::MovRR { dest: RAX, src: R9 });
         lang.instructions.push(X86Asm::JmpR { target: RCX });
 
         let code = lang.compile_to_bytes();
@@ -976,7 +973,6 @@ fn compile_x86_continuation_return_stub(runtime: &mut Runtime) {
         function.is_builtin = true;
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct CommandLineArguments {

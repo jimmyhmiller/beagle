@@ -1,0 +1,65 @@
+namespace stress_nested_abort_during_multishot
+// gc-always
+
+// Theory B / ordering probe: inside a multi-shot outer resume,
+// the nested handler ABORTS (returns without calling resume). The
+// return_from_shift_tagged path:
+//   1. find_prompt_tag(inner_tag) must return the RESTORED nested
+//      record (not some stale one), so SP/FP point at the correct
+//      teleported frames.
+//   2. truncate_prompt_tags must drop only the nested record, leaving
+//      the per-resume outer record intact so the next outer abort /
+//      body-return path still works.
+//
+// If restore ordering were wrong (nested BELOW per-resume), truncating
+// at the nested index would wipe the per-resume record too and the
+// body-return stub would unwind through an empty stack.
+
+use beagle.effect as effect
+
+enum E1 { A {} }
+enum E2 { B {} }
+
+struct H1 {}
+struct H2 { mut count }
+
+extend H1 with effect/Handler(E1) {
+    fn handle(self, op, resume) {
+        let first = resume(1)
+        let second = resume(2)
+        let third = resume(3)
+        first + second + third
+    }
+}
+
+extend H2 with effect/Handler(E2) {
+    fn handle(self, op, resume) {
+        self.count = self.count + 1
+        // Abort on the middle resume.
+        if self.count == 2 {
+            99
+        } else {
+            resume(10)
+        }
+    }
+}
+
+fn main() {
+    let h1 = H1 {}
+    let h2 = H2 { count: 0 }
+    let total = handle effect/Handler(E1) with h1 {
+        handle effect/Handler(E2) with h2 {
+            let x = perform E1.A {}
+            let y = perform E2.B {}
+            x + y
+        }
+    }
+    // Resume 1: x=1, y=10 (resume), body = 11.
+    // Resume 2: x=2, y=99 (abort), body = 99.   <-- abort path in middle
+    // Resume 3: x=3, y=10 (resume), body = 13.
+    // Outer sum = 11 + 99 + 13 = 123.
+    println(total)
+}
+
+// @beagle.core.snapshot
+// 123

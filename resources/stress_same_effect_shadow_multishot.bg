@@ -1,0 +1,64 @@
+namespace stress_same_effect_shadow_multishot
+// gc-always
+
+// Same effect type installed at two nesting levels with DIFFERENT
+// handler implementations. Outer is multi-shot. Inner shadows outer
+// by dynamic scope. The restored side-state must preserve push order
+// so `find_handler` (rposition) picks the inner handler for nested
+// performs — not some wrong record.
+
+use beagle.effect as effect
+
+enum E { Op {} }
+
+struct HOuter { mut count }
+struct HInner {}
+
+extend HOuter with effect/Handler(E) {
+    fn handle(self, op, resume) {
+        self.count = self.count + 1
+        // Multi-shot: first resume is live; second resume reveals any
+        // ordering bug in the restored side-state.
+        if self.count == 1 {
+            let a = resume(1)
+            let b = resume(2)
+            a + b
+        } else {
+            // Outer handler should NEVER be called a second time
+            // because the inner handler shadows it for the inner
+            // `perform` — ordering correctness probe.
+            99999
+        }
+    }
+}
+
+extend HInner with effect/Handler(E) {
+    fn handle(self, op, resume) {
+        resume(100)
+    }
+}
+
+fn main() {
+    let outer = HOuter { count: 0 }
+    let total = handle effect/Handler(E) with outer {
+        // The outer `perform` reaches only the outer handler because
+        // nothing else is installed yet.
+        let x = perform E.Op {}
+        // Now the inner handle shadows. The perform inside must go
+        // to the inner handler — both on the first and second resume
+        // of the outer continuation.
+        let y = handle effect/Handler(E) with HInner {} {
+            perform E.Op {}
+        }
+        x + y
+    }
+    // Resume 1: x=1, y=100, body=101.
+    // Resume 2: x=2, y=100, body=102.   <- if ordering broken, inner
+    //                                      handler missing or outer
+    //                                      fires again (returns 99999).
+    // Outer total = 101 + 102 = 203.
+    println(total)
+}
+
+// @beagle.core.snapshot
+// 203

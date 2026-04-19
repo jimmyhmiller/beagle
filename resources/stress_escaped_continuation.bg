@@ -1,0 +1,36 @@
+namespace stress_escaped_continuation
+// gc-always
+
+// Capture a continuation, return it from shift/reset, and invoke it
+// later — after GC has moved the captured segment.
+
+struct Holder { mut k }
+
+fn capture() {
+    let mut cell = Holder { k: null }
+    let first = reset {
+        let v = shift(fn(k) {
+            cell.k = k
+            42
+        })
+        v * 2
+    }
+    Holder { k: cell.k }
+}
+
+fn main() {
+    let h = capture()
+    // Invoke the captured continuation several times after its
+    // original reset scope has exited.
+    let r1 = h.k(5)
+    let r2 = h.k(10)
+    let r3 = h.k(100)
+    println(r1)
+    println(r2)
+    println(r3)
+}
+
+// @beagle.core.snapshot
+// 10
+// 20
+// 200

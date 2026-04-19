@@ -1,0 +1,48 @@
+namespace stress_nested_handler_cross_multishot
+// gc-always
+
+// Both handlers are multi-shot — full cross product (2×2 = 4 leaves).
+// Second-level resume invokes the captured continuation at least twice,
+// which re-runs the side-state save/restore on each resume.
+
+use beagle.effect as effect
+
+enum E1 { A {} }
+enum E2 { B {} }
+
+struct H1 {}
+struct H2 {}
+
+extend H1 with effect/Handler(E1) {
+    fn handle(self, op, resume) {
+        let a = resume(1)
+        let b = resume(2)
+        a + b
+    }
+}
+
+extend H2 with effect/Handler(E2) {
+    fn handle(self, op, resume) {
+        let a = resume(10)
+        let b = resume(20)
+        a + b
+    }
+}
+
+fn main() {
+    let h1 = H1 {}
+    let h2 = H2 {}
+    let total = handle effect/Handler(E1) with h1 {
+        handle effect/Handler(E2) with h2 {
+            let x = perform E1.A {}
+            let y = perform E2.B {}
+            x + y
+        }
+    }
+    // For each x, E2 handler yields (x+10)+(x+20) = 2x+30.
+    // Outer yields (2+30) + (4+30) = 32 + 34 = 66.
+    println(total)
+}
+
+// @beagle.core.snapshot
+// 66

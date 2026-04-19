@@ -103,4 +103,3 @@ pub unsafe extern "C" fn resume_tail_runtime(
         unsafe { std::mem::transmute(raw_fn_ptr) };
     closure_body(resume_closure, value)
 }
-

@@ -1,0 +1,53 @@
+namespace stress_reperform_outer_from_body
+// gc-always
+
+// Theory B, sharper: inside the resumed body, perform the OUTER
+// effect AGAIN (nested inside the same handle). If per-resume ordering
+// is wrong, `find_prompt_tag(outer_tag)` could return the original
+// outer record (stale after teleport) instead of the per-resume
+// record, and the re-perform's capture_top would be garbage.
+
+use beagle.effect as effect
+
+enum E { Op {} }
+
+struct H { mut count }
+
+extend H with effect/Handler(E) {
+    fn handle(self, op, resume) {
+        self.count = self.count + 1
+        if self.count <= 3 {
+            resume(self.count)
+        } else {
+            0
+        }
+    }
+}
+
+fn main() {
+    let h = H { count: 0 }
+    let total = handle effect/Handler(E) with h {
+        // Perform in a loop. Each perform captures up to the same
+        // `handle` boundary. With multi-shot in play (this handler
+        // calls resume once per invocation and aborts on count=4),
+        // we exercise the per-resume prompt-tag record repeatedly.
+        let a = perform E.Op {}
+        let b = perform E.Op {}
+        let c = perform E.Op {}
+        let d = perform E.Op {}
+        a + b + c + d
+    }
+    // a=1, b=2, c=3, d=0 (count=4 aborts inner chain; outer handler
+    // returns 0 on abort path, so d = handle's abort value = 0).
+    // But actually: the abort unwinds THE HANDLE SCOPE, so we never
+    // reach `b`, `c`, `d`. On count=4, handle returns 0 and that
+    // becomes `total`.
+    // First resume from perform a: count=1, resume(1) → a=1.
+    //   perform b: count=2, resume(2) → b=2.
+    //     perform c: count=3, resume(3) → c=3.
+    //       perform d: count=4, abort with 0 → total = 0.
+    println(total)
+}
+
+// @beagle.core.snapshot
+// 0

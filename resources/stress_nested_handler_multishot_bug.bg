@@ -1,0 +1,46 @@
+namespace stress_nested_handler_multishot_bug
+
+// Regression: multi-shot outer handler with a nested `handle` block.
+// The nested handler's side-stack state is saved on the ContinuationObject
+// at capture and re-pushed (with SP/FP relocated to the new teleport base)
+// on each resume. Before the fix, the second resume crashed in
+// capture_continuation_tagged_runtime because the stale nested prompt-tag
+// record pointed at a long-abandoned stack region.
+
+use beagle.effect as effect
+
+enum Outer { O {} }
+enum Inner { I {} }
+
+struct HO {}
+struct HI {}
+
+extend HO with effect/Handler(Outer) {
+    fn handle(self, op, resume) {
+        let a = resume(1)
+        let b = resume(2)
+        a + b
+    }
+}
+
+extend HI with effect/Handler(Inner) {
+    fn handle(self, op, resume) {
+        resume(10)
+    }
+}
+
+fn main() {
+    let ho = HO {}
+    let hi = HI {}
+    let total = handle effect/Handler(Outer) with ho {
+        handle effect/Handler(Inner) with hi {
+            let x = perform Outer.O {}
+            let y = perform Inner.I {}
+            x + y
+        }
+    }
+    println(total)
+}
+
+// @beagle.core.snapshot
+// 23

@@ -1,0 +1,45 @@
+namespace stress_plain_shift_crossing_handle
+// gc-always
+
+// Theory A, sharper form: an outer `reset` surrounds a `handle` block
+// which contains a plain `shift`. The shift targets the NEAREST
+// __reset__, which is the handle's internal one — not the outer plain
+// reset. If the FP-walker somehow crossed the handle, it would
+// capture past the handle's push-prompt-tag record and we'd see the
+// same side-stack-address bug on second resume.
+
+use beagle.effect as effect
+
+enum E { Op {} }
+
+struct H {}
+
+extend H with effect/Handler(E) {
+    fn handle(self, op, resume) {
+        resume(5)
+    }
+}
+
+fn main() {
+    let outer = reset {
+        let s = handle effect/Handler(E) with H {} {
+            // Plain multi-shot shift inside the handle body.
+            let x = shift(fn(k) {
+                let a = k(1)
+                let b = k(2)
+                a + b
+            })
+            // The handler must still dispatch correctly on each
+            // resume of the captured continuation.
+            let e = perform E.Op {}
+            x + e
+        }
+        s
+    }
+    println(outer)
+}
+
+// Each resume: x + 5 (from handler resume(5)). Shift: k(1)+k(2) = 6+7 = 13.
+// Outer reset just returns the handle's result.
+// @beagle.core.snapshot
+// 13

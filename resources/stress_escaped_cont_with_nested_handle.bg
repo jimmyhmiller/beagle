@@ -1,0 +1,67 @@
+namespace stress_escaped_cont_with_nested_handle
+// gc-always
+
+// Captured continuation escapes its capturing handler's scope and is
+// invoked outside, where the dynamic handler context is different.
+// The saved side-state on the continuation must make the inner handle
+// still dispatch correctly even though the outer enclosing frame is
+// long gone.
+
+use beagle.effect as effect
+
+enum Outer { O {} }
+enum Inner { I {} }
+
+struct Holder { mut k }
+
+struct H1 {}
+struct H2 {}
+
+extend H1 with effect/Handler(Outer) {
+    fn handle(self, op, resume) {
+        // Only capture the continuation; don't resume here. We'll
+        // resume from outside the handle later.
+        Holder { k: resume }
+    }
+}
+
+extend H2 with effect/Handler(Inner) {
+    fn handle(self, op, resume) {
+        resume(42)
+    }
+}
+
+fn capture() {
+    handle effect/Handler(Outer) with H1 {} {
+        handle effect/Handler(Inner) with H2 {} {
+            let x = perform Outer.O {}
+            let y = perform Inner.I {}
+            x + y
+        }
+    }
+}
+
+fn main() {
+    // The first invocation produces a Holder whose `k` is the
+    // captured continuation. Its body still contains `perform Inner.I`
+    // and expects an Inner handler — supplied via the saved side
+    // state on the continuation, NOT from the ambient dynamic scope.
+    let holder = capture()
+    // Resume at x=7.
+    let r1 = holder.k(7)
+    // Resume again at x=100 — truly multi-shot, outside the original
+    // handle's scope.
+    let r2 = holder.k(100)
+    println(r1)
+    println(r2)
+}
+
+// Each resume: x + 42 (from Inner handler). 7+42 = 49. 100+42 = 142.
+// Outer H1 wraps results into Holder on FIRST perform only; on
+// subsequent resumes, H1 is never re-entered — the continuation
+// body just runs and returns x+42 directly.
+// But wait: the body returns the value; that's the "handle expression's
+// result" which the Holder.k(v) call returns.
+// @beagle.core.snapshot
+// 49
+// 142
