@@ -164,28 +164,14 @@ pub unsafe extern "C" fn throw_exception(
             let new_fp = handler.frame_pointer;
             let new_lr = handler.link_register;
 
-            cfg_if::cfg_if! {
-                if #[cfg(target_arch = "x86_64")] {
-                    let _ = new_lr;
-                    let runtime = get_runtime().get();
-                    let handler_jump_fn = runtime
-                        .get_function_by_name("beagle.builtin/handler-jump")
-                        .expect("handler-jump function not found");
-                    let ptr: *const u8 = handler_jump_fn.pointer.into();
-                    let handler_jump: extern "C" fn(usize, usize, usize) -> ! =
-                        unsafe { std::mem::transmute(ptr) };
-                    handler_jump(new_sp, new_fp, handler_address);
-                } else {
-                    let runtime = get_runtime().get();
-                    let return_jump_fn = runtime
-                        .get_function_by_name("beagle.builtin/return-jump")
-                        .expect("return-jump function not found");
-                    let ptr: *const u8 = return_jump_fn.pointer.into();
-                    let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
-                        unsafe { std::mem::transmute(ptr) };
-                    return_jump(new_sp, new_fp, new_lr, handler_address, std::ptr::null(), 0);
-                }
-            }
+            let runtime = get_runtime().get();
+            let return_jump_fn = runtime
+                .get_function_by_name("beagle.builtin/return-jump")
+                .expect("return-jump function not found");
+            let ptr: *const u8 = return_jump_fn.pointer.into();
+            let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
+                unsafe { std::mem::transmute(ptr) };
+            return_jump(new_sp, new_fp, new_lr, handler_address, std::ptr::null(), 0);
         } else {
             // Non-resumable path: existing behavior
             // Unwind GC frame chain (same as resumable path above)
@@ -207,28 +193,14 @@ pub unsafe extern "C" fn throw_exception(
             let result_ptr = (new_fp as isize).wrapping_add(result_local_offset) as *mut usize;
             unsafe { *result_ptr = exception };
 
-            cfg_if::cfg_if! {
-                if #[cfg(target_arch = "x86_64")] {
-                    let _ = new_lr;
-                    let runtime = get_runtime().get();
-                    let handler_jump_fn = runtime
-                        .get_function_by_name("beagle.builtin/handler-jump")
-                        .expect("handler-jump function not found");
-                    let ptr: *const u8 = handler_jump_fn.pointer.into();
-                    let handler_jump: extern "C" fn(usize, usize, usize) -> ! =
-                        unsafe { std::mem::transmute(ptr) };
-                    handler_jump(new_sp, new_fp, handler_address);
-                } else {
-                    let runtime = get_runtime().get();
-                    let return_jump_fn = runtime
-                        .get_function_by_name("beagle.builtin/return-jump")
-                        .expect("return-jump function not found");
-                    let ptr: *const u8 = return_jump_fn.pointer.into();
-                    let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
-                        unsafe { std::mem::transmute(ptr) };
-                    return_jump(new_sp, new_fp, new_lr, handler_address, std::ptr::null(), 0);
-                }
-            }
+            let runtime = get_runtime().get();
+            let return_jump_fn = runtime
+                .get_function_by_name("beagle.builtin/return-jump")
+                .expect("return-jump function not found");
+            let ptr: *const u8 = return_jump_fn.pointer.into();
+            let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
+                unsafe { std::mem::transmute(ptr) };
+            return_jump(new_sp, new_fp, new_lr, handler_address, std::ptr::null(), 0);
         }
     } else {
         // No try-catch handler found

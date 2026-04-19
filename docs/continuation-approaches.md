@@ -2,6 +2,11 @@
 
 See `docs/continuation-stack-restoration.md` for the problem description.
 
+> Both backends (ARM64 and x86-64) now share the pure-Rust continuation
+> trampoline in `src/builtins/reset_shift.rs` and differ only in the
+> small JIT helpers installed by `compile_arm_continuation_return_stub`
+> / `compile_x86_continuation_return_stub` in `src/main.rs`.
+
 ## Chosen Approach: Segmented Stack with Lazy Restoration (Chez Scheme style)
 
 See the detailed implementation plan in the next section.

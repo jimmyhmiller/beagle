@@ -1237,7 +1237,7 @@ unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target:
             saved_caller_lr,
             0,
         );
-        unsafe { *saved_lr_slot = pop_top_tag_and_return_stub as usize };
+        unsafe { *saved_lr_slot = pop_top_tag_and_return_entry_address() };
     }
 
     let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
@@ -1250,6 +1250,42 @@ unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target:
         std::ptr::null(),
         value,
     );
+}
+
+/// Return the address written into the resumed body's outermost-frame
+/// saved-LR slot so a natural body return lands at the tag-pop logic.
+///
+/// On ARM64 that's just `pop_top_tag_and_return_stub` directly: the
+/// AAPCS return register (X0) doubles as arg0, so the body's return
+/// value reaches the stub's `value` parameter unchanged.
+///
+/// On x86-64 the System V return register is RAX but arg0 is RDI, so
+/// we route through a tiny JIT shim (`beagle.builtin/pop-top-tag-and-return`)
+/// that does `mov rdi, rax; jmp <stub>`. The shim is installed by
+/// `compile_x86_continuation_return_stub` in main.rs.
+pub fn pop_top_tag_and_return_entry_address() -> usize {
+    #[cfg(any(
+        feature = "backend-x86-64",
+        all(target_arch = "x86_64", not(feature = "backend-arm64"))
+    ))]
+    {
+        let runtime = crate::get_runtime().get();
+        let fn_entry = runtime
+            .get_function_by_name("beagle.builtin/pop-top-tag-and-return")
+            .expect("pop-top-tag-and-return shim not found");
+        let ptr: *const u8 = fn_entry.pointer.into();
+        ptr as usize
+    }
+    #[cfg(all(target_arch = "aarch64", not(feature = "backend-x86-64")))]
+    {
+        pop_top_tag_and_return_stub as usize
+    }
+}
+
+/// Raw entry address for the Rust stub. Used only by the x86-64 JIT
+/// shim to target its tail-jump.
+pub fn pop_top_tag_and_return_stub_entry() -> usize {
+    pop_top_tag_and_return_stub as usize
 }
 
 /// Tail of the per-resume prompt-tag dance. Called via `ret` when a
