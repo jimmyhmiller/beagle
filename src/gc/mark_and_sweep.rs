@@ -510,15 +510,17 @@ impl MarkAndSweep {
                 .copied()
                 .filter(|entry| entry.offset == offset)
             {
-                // Old free-list state is supposed to describe only dead space, but if it
-                // ever goes stale we must not blindly preserve it over a newly marked live
-                // object. That leaves the object allocatable and causes later overlap.
-                if !heap_object.marked() {
-                    rebuilt_free_list.append_sorted_coalesced(entry);
-                    offset = entry.end();
-                    old_ranges.next();
-                    continue;
-                }
+                // Free-list entries are truth: only the allocator and this
+                // sweep modify them, and memory inside a free region can
+                // contain arbitrary leftover bytes (including values whose
+                // low byte happens to pattern-match a marked-object header,
+                // e.g. `null`'s 0b111 tag). Trust the entry and splice it
+                // forward unchanged — do NOT consult `heap_object.marked()`
+                // on a region already known to be free.
+                rebuilt_free_list.append_sorted_coalesced(entry);
+                offset = entry.end();
+                old_ranges.next();
+                continue;
             }
 
             let full_size = heap_object.full_size();
