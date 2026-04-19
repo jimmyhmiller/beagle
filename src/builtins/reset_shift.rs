@@ -38,23 +38,28 @@
 //!
 //! 1. `is_pc_in_reset_function` — lazily-cached lookup of `__reset__`'s
 //!    code range. Used by `find_enclosing_reset_frame`.
-//! 2. Stack-segment byte utilities (`relocate_segment_caller_fp_links`
-//!    and friends) — walk a region of copied frame bytes and patch
-//!    saved-FP links by a delta. Shared between capture and invoke.
+//! 2. Stack-segment byte utilities (`make_segment_fp_links_relative`,
+//!    `rebuild_gc_prev_links`) — walk a region of copied frame bytes
+//!    and patch saved-FP links by a delta. Shared between capture and
+//!    invoke.
 //! 3. `ContinuationObject` — heap-object wrapper. A captured
 //!    continuation is a `TYPE_ID_CONTINUATION` heap object whose
-//!    fields describe how to resume it. Also owns the
-//!    `normalized_segment_base` helper that transparently re-patches
-//!    FP links when GC moves the backing heap object.
+//!    fields describe how to resume it.
+//! 3b. Side-state heap object — saved `prompt_tags` /
+//!    `effect_handlers` records for nested handle scopes whose
+//!    frames are captured. Re-pushed on each invoke.
 //! 4. `find_enclosing_reset_frame` — the FP-chain walker that locates
-//!    the prompt boundary.
-//! 5. `capture_continuation_runtime_inner` — called from `shift`.
-//!    Builds a `ContinuationObject` from the current execution state.
-//! 6. `return_from_shift_runtime_inner` — called when a `shift` body
-//!    completes normally. Longjmps back to `__reset__`'s caller with
-//!    the shift body's result as `__reset__`'s return value.
+//!    the prompt boundary for untagged `shift`.
+//! 5. `capture_continuation_runtime_inner` /
+//!    `capture_continuation_tagged_runtime` — called from `shift` and
+//!    `perform`. Build a `ContinuationObject` from the current
+//!    execution state.
+//! 6. `return_from_shift_runtime_inner` /
+//!    `return_from_shift_tagged_runtime` — called when a shift body
+//!    completes normally. Longjmps back to the reset's caller.
 //! 7. `continuation_trampoline` — the closure body for invoked
-//!    continuations. Copies bytes, patches chains, jumps.
+//!    continuations. Copies bytes, patches chains, restores
+//!    side-state, jumps.
 //!
 //! # What's not here
 //!
@@ -142,21 +147,18 @@ pub fn is_pc_in_reset_function(pc: usize) -> bool {
     let (start, end) = *RESET_CODE_RANGE.get_or_init(|| {
         let runtime = crate::get_runtime().get();
         match runtime.get_function_by_name("beagle.core/__reset__") {
+            // Sentinel (0,0) if `__reset__` isn't compiled yet; the
+            // OnceLock latches this value, so the caller below retries
+            // via direct lookup on each call until the stdlib is up.
             Some(f) => {
                 let start: usize = f.pointer.into();
                 (start, start + f.size)
             }
-            // Before stdlib compiles there's nothing to match. Return an
-            // empty range; the OnceLock will be re-populated on the next
-            // call after compilation completes... actually no, OnceLock
-            // locks once. Use a sentinel value so future calls re-check.
             None => (0, 0),
         }
     });
-    // Empty sentinel: try once more to populate (OnceLock only runs the
-    // closure once, so this only helps for the specific case where the
-    // first call happens before __reset__ exists; fall back to a direct
-    // name lookup). Practically this only matters during early bring-up.
+    // Fallback for the bring-up window where `__reset__` wasn't yet
+    // registered when the OnceLock first fired.
     if end == 0 {
         let runtime = crate::get_runtime().get();
         if let Some(f) = runtime.get_function_by_name("beagle.core/__reset__") {
@@ -336,20 +338,13 @@ impl ContinuationObject {
     /// Returns the offset of the outermost frame pointer within the captured segment data.
     /// Derived by walking the saved-FP chain (stored as relative offsets) from innermost outward.
     pub fn segment_outermost_fp_offset(&self) -> usize {
-        let size = self.segment_size();
+        let Some((data_base, size)) = self.segment_base_and_size() else {
+            return usize::MAX;
+        };
         let fp_offset = self.segment_frame_pointer_offset();
-        if size == 0 || fp_offset >= size {
+        if fp_offset >= size {
             return usize::MAX;
         }
-        let seg_tagged = self.segment_ptr();
-        if seg_tagged == 0
-            || seg_tagged == BuiltInTypes::null_value() as usize
-            || !BuiltInTypes::is_heap_pointer(seg_tagged)
-        {
-            return usize::MAX;
-        }
-        let seg_obj = HeapObject::from_tagged(seg_tagged);
-        let data_base = seg_obj.untagged() + seg_obj.header_size();
 
         // Walk the saved-FP chain: each [fp+0] holds a segment-relative offset.
         let mut outermost = fp_offset;
@@ -368,24 +363,17 @@ impl ContinuationObject {
     /// Returns the size of the captured segment data in bytes.
     /// Derived from the segment heap object's header — no stored field needed.
     pub fn segment_size(&self) -> usize {
-        let seg_tagged = self.segment_ptr();
-        if seg_tagged == 0
-            || seg_tagged == BuiltInTypes::null_value() as usize
-            || !BuiltInTypes::is_heap_pointer(seg_tagged)
-        {
-            return 0;
-        }
-        HeapObject::from_tagged(seg_tagged).fields_size()
+        self.segment_base_and_size().map(|(_, size)| size).unwrap_or(0)
     }
 
-    pub fn set_segment_frame_pointer_offset(&self, offset: usize) {
+    fn set_segment_frame_pointer_offset(&self, offset: usize) {
         self.heap_obj.write_field(
             Self::FIELD_SEGMENT_FRAME_POINTER_OFFSET as i32,
             BuiltInTypes::Int.tag(offset as isize) as usize,
         );
     }
 
-    pub fn set_segment_ptr_with_barrier(&mut self, runtime: &mut Runtime, segment_ptr: usize) {
+    fn set_segment_ptr_with_barrier(&mut self, runtime: &mut Runtime, segment_ptr: usize) {
         runtime.set_field_with_barrier(self.tagged_ptr(), Self::FIELD_SEGMENT_PTR, segment_ptr);
     }
 
@@ -482,7 +470,7 @@ impl ContinuationObject {
         BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_TAG)) as u64
     }
 
-    pub fn set_tag(&self, tag: u64) {
+    fn set_tag(&self, tag: u64) {
         self.heap_obj.write_field(
             Self::FIELD_TAG as i32,
             BuiltInTypes::Int.tag(tag as isize) as usize,
@@ -491,11 +479,11 @@ impl ContinuationObject {
 
     /// Read the side-state heap-object pointer (or null if no nested
     /// handle scopes were caught inside the segment).
-    pub fn side_state(&self) -> usize {
+    fn side_state(&self) -> usize {
         self.heap_obj.get_field(Self::FIELD_SIDE_STATE)
     }
 
-    pub fn set_side_state_with_barrier(&mut self, runtime: &mut Runtime, side_state_ptr: usize) {
+    fn set_side_state_with_barrier(&mut self, runtime: &mut Runtime, side_state_ptr: usize) {
         runtime.set_field_with_barrier(self.tagged_ptr(), Self::FIELD_SIDE_STATE, side_state_ptr);
     }
 
@@ -1061,10 +1049,11 @@ pub unsafe extern "C" fn capture_continuation_tagged_runtime(
             Ok(ptr) => {
                 let seg_obj = HeapObject::from_tagged(ptr);
                 let header_ptr = seg_obj.untagged() as *mut usize;
-                let mut header_val = unsafe { *header_ptr };
-                header_val |= 0x2;
+                // GC must not scan the copied stack bytes as heap
+                // pointers — the segment is walked by hand via the
+                // relocated FP chain, not as a struct of fields.
                 unsafe {
-                    *header_ptr = header_val;
+                    *header_ptr |= Header::OPAQUE_BIT_MASK;
                 }
                 let data_ptr = seg_obj.untagged() + seg_obj.header_size();
                 unsafe {
@@ -1325,37 +1314,31 @@ pub unsafe fn return_from_shift_runtime_inner(
 /// the shift point's result slot.
 ///
 /// The design is:
-/// 1. Compute a destination address `dst` on this trampoline's own
-///    stack such that the outermost captured frame's FP slot lands
-///    exactly at the trampoline's own FP. The trampoline's prologue
-///    already wrote the invoker's FP at `[trampoline_fp + 0]` and
-///    the invoker's LR at `[trampoline_fp + 8]`. By overlaying the
-///    outermost captured frame on those slots, the resumed body's
-///    eventual "return past bottom" unwinds directly into the
-///    invoker — no return stubs, no prompt pushes, no side tables.
-/// 2. Copy the captured bytes (minus the bottom 16) from the heap
-///    segment into `[dst, dst + copy_size)`.
-/// 3. Walk the copy and relocate saved-FP links from heap-addresses
-///    to stack-addresses by a constant delta.
-/// 4. Rebuild the GC prev chain in the copy so GC can walk it as
-///    normal stack frames.
-/// 5. Write `value` into the resume point's result slot.
-/// 6. Use `return-jump` to set SP/FP and branch to resume_address.
+/// 1. Compute a destination address `dst` such that the outermost
+///    captured frame's FP slot lands exactly at the trampoline's own
+///    FP. The trampoline's prologue already wrote the invoker's FP
+///    at `[trampoline_fp + 0]` and LR at `[trampoline_fp + 8]`. By
+///    overlaying the outermost captured frame on those slots, the
+///    resumed body's eventual "return past bottom" unwinds directly
+///    into the invoker.
+/// 2. Stash everything we need (`dst`, segment base, resume address,
+///    side-state pointer, etc.) in a `ContinuationRestorePlan` on the
+///    thread-local slot and switch to a per-thread scratch stack via
+///    `beagle.builtin/stack-switch`. This makes the subsequent byte
+///    copy, FP-chain relocation, and side-state restore safe — we are
+///    no longer mutating memory that overlaps our own frame.
+/// 3. On the scratch stack: copy the captured bytes into `[dst,
+///    dst + copy_size)`, convert saved-FP links from segment-relative
+///    offsets to absolute addresses, rebuild the GC prev-chain, write
+///    `value` into the resume point's result slot, push the per-resume
+///    prompt-tag record (for tagged continuations), and restore any
+///    saved nested-handle side state — all addresses relocated to the
+///    new `dst`.
+/// 4. Use `return-jump` to set SP/FP and branch to resume_address.
 ///
 /// Multi-shot is automatic: the heap segment's bytes are never
 /// mutated, so each invocation copies fresh bytes to a fresh
 /// destination.
-///
-/// Safety: All writes to `dst` happen while Rust is mid-function.
-/// The `dst` region overlaps Rust's own local area but Rust has
-/// already packed every value it needs into local variables (which
-/// the compiler keeps in registers for the remaining straight-line
-/// code). Between the first dst write and the final `return_jump`
-/// call, no helper function is invoked — so no frame gets pushed
-/// below Rust's SP into a region that might overlap dst. Once
-/// `return_jump` runs, SP is set to `dst` and control transfers to
-/// the resumed body; the old Rust frame is abandoned.
-#[allow(unused_variables)]
 pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usize) -> ! {
     // Extract the continuation from the closure's free variables.
     // Closure layout: header(8) + fn_ptr(8) + num_free(8) + num_locals(8) + free_var[0]...
