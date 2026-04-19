@@ -553,7 +553,12 @@ struct SavedPromptRecord {
 struct SavedHandlerRecord {
     enum_type_id: usize,
     tag: u64,
-    handler_pointer: usize,
+    /// Root slot id. The actual handler pointer is `peek`'d from this
+    /// at side-state write time so we see the post-GC address. Storing
+    /// a raw tagged pointer here would go stale if a GC fires between
+    /// collection and the side-state write (e.g., inside
+    /// `ensure_space_for`).
+    handler_root_id: usize,
 }
 
 /// Collect the prompt-tag records whose `stack_pointer` lies inside
@@ -581,24 +586,25 @@ fn collect_captured_prompt_records(
 }
 
 /// For each tag in `tags`, collect the matching `effect_handlers`
-/// entry — resolved to a raw handler pointer via the temporary-root
-/// slot — in push order. The root is NOT unregistered here; the
-/// caller is responsible for cleanup after the side-state object has
-/// been populated (so an OOM abort leaves the live stacks untouched).
+/// entry (in push order), recording the root slot id rather than the
+/// handler pointer. The pointer is read at side-state-write time via
+/// `peek_temporary_root`, so a GC fired between collection and write
+/// (e.g., from `ensure_space_for`) still produces an up-to-date
+/// address. The root is NOT unregistered here; the caller cleans up
+/// after the side-state object has been populated so an OOM abort
+/// leaves the live stacks untouched.
 fn collect_captured_handler_records(tags: &[u64]) -> Vec<SavedHandlerRecord> {
     if tags.is_empty() {
         return Vec::new();
     }
     let ptd = crate::runtime::per_thread_data();
-    let runtime = crate::get_runtime().get();
     let mut out = Vec::new();
     for entry in ptd.effect_handlers.iter() {
         if tags.contains(&entry.tag) {
-            let handler_pointer = runtime.peek_temporary_root(entry.handler_root_id);
             out.push(SavedHandlerRecord {
                 enum_type_id: entry.enum_type_id,
                 tag: entry.tag,
-                handler_pointer,
+                handler_root_id: entry.handler_root_id,
             });
         }
     }
@@ -643,13 +649,18 @@ fn write_side_state_fields(
         );
         slot += PROMPT_RECORD_SLOTS as i32;
     }
+    let runtime = crate::get_runtime().get();
     for h in handlers {
+        // Peek the handler pointer HERE (not at collection time): any
+        // GC that fired between collection and this write would have
+        // moved the handler, but the root slot is always current.
+        let handler_pointer = runtime.peek_temporary_root(h.handler_root_id);
         obj.write_field(
             slot,
             BuiltInTypes::Int.tag(h.enum_type_id as isize) as usize,
         );
         obj.write_field(slot + 1, BuiltInTypes::Int.tag(h.tag as isize) as usize);
-        obj.write_field(slot + 2, h.handler_pointer);
+        obj.write_field(slot + 2, handler_pointer);
         slot += HANDLER_RECORD_SLOTS as i32;
     }
 }
