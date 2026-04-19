@@ -269,7 +269,7 @@ impl CompactingHeap {
         full_size <= remaining_bytes && full_size.is_multiple_of(8)
     }
 
-    fn scan_continuation_segment<F>(&mut self, object: &HeapObject, mut callback: F)
+    fn scan_continuation_segment<F>(&mut self, object: &HeapObject, callback: F)
     where
         F: FnMut(usize, usize),
     {

@@ -966,21 +966,19 @@ pub unsafe fn capture_continuation_runtime_inner(
 
 /// Tag-aware capture variant used by effect-handler `perform`.
 /// Looks up a matching prompt-tag record on the per-thread side stack;
-/// the record's `stack_pointer` is the capture boundary. Pops records
-/// stacked above the match (nested resets whose frames are inside the
-/// captured segment and are about to be abandoned). Leaves the matched
-/// record for `return_from_shift_tagged` to consume.
-///
-/// Tracking the popped nested-tag records so they can be re-pushed on
-/// invoke is the work of Step E5.
+/// the record's `stack_pointer` is the capture boundary. Leaves the
+/// matched record for `return_from_shift_tagged` to consume. Any
+/// prompt-tag / effect-handler records for nested `handle` scopes
+/// whose frames lie inside the captured segment are snapshotted onto
+/// the ContinuationObject and dropped from the live per-thread stacks
+/// — the trampoline re-pushes fresh copies at invoke time.
 ///
 /// Body intentionally duplicates `capture_continuation_runtime_inner`
 /// rather than sharing via a helper. Factoring the body out into a
 /// helper changes Rust's call-stack shape enough that
 /// `save_gc_context!`'s `get_current_rust_frame_pointer` reads the
 /// wrong saved LR on some paths, causing intermittent SIGSEGVs in
-/// threaded-resume scenarios. Short-term duplication trades tidiness
-/// for reliability.
+/// threaded-resume scenarios.
 pub unsafe extern "C" fn capture_continuation_tagged_runtime(
     stack_pointer: usize,
     frame_pointer: usize,
@@ -1008,12 +1006,11 @@ pub unsafe extern "C" fn capture_continuation_tagged_runtime(
                 tag_raw
             )
         });
-        // Leave records above the match in place: they correspond to
-        // nested handle scopes whose frames are part of the captured
-        // segment. When the continuation is later resumed, those scopes
-        // come back live and need their records to still be there. Tag
-        // pops use find-and-remove (see `Runtime::pop_prompt_tag`) so
-        // exit ordering doesn't have to match push ordering.
+        // Records for nested handle scopes (tag positions above the
+        // matched one, frames inside the captured segment) are NOT
+        // cleared here. They are snapshotted into the ContinuationObject
+        // below and removed from the live stacks once the snapshot is
+        // durably written.
         record.stack_pointer
     };
 
@@ -1647,7 +1644,11 @@ pub fn pop_top_tag_and_return_entry_address() -> usize {
 }
 
 /// Raw entry address for the Rust stub. Used only by the x86-64 JIT
-/// shim to target its tail-jump.
+/// shim to target its tail-jump; gated to match its single caller.
+#[cfg(any(
+    feature = "backend-x86-64",
+    all(target_arch = "x86_64", not(feature = "backend-arm64"))
+))]
 pub fn pop_top_tag_and_return_stub_entry() -> usize {
     pop_top_tag_and_return_stub as usize
 }
