@@ -1437,6 +1437,13 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     let saved_caller_lr = unsafe { *saved_lr_slot };
     let post_overlay_sp = trampoline_fp + 16;
     let cont_tag = cont.tag();
+    // Raw tagged pointer — not a GC root. Invariant: no GC-heap
+    // allocation between here and `restore_side_state_into_live_stacks`
+    // below, or the pointer goes stale under compacting GC. The same
+    // invariant applies to `seg_base` and every other raw snapshot
+    // packed into the plan. Today no call in that window allocates;
+    // do not add one without rooting this value first (or switching
+    // to a HandleRoot guard).
     let side_state_ptr = cont.side_state();
 
     let plan = Box::new(ContinuationRestorePlan {
