@@ -941,6 +941,12 @@ fn compile_x86_continuation_return_stub(runtime: &mut Runtime) {
     //
     // Loaded at `*saved_lr_slot` by the tagged-resume trampoline instead of
     // the Rust fn directly.
+    //
+    // Entry via Beagle `ret` leaves RSP 16-byte aligned (leave/ret pops the
+    // frame and the return address). SysV expects a callee to be entered
+    // with RSP % 16 == 8 (as it would be right after a `call`). Without the
+    // `sub rsp, 8`, the Rust stub runs with misaligned RSP — any SSE spill
+    // or callee that assumes alignment can crash or miscompile.
     // ========================================================================
     {
         let mut lang = x86::LowLevelX86::new();
@@ -948,6 +954,7 @@ fn compile_x86_continuation_return_stub(runtime: &mut Runtime) {
             dest: RDI,
             src: RAX,
         });
+        lang.instructions.push(X86Asm::SubRI { dest: RSP, imm: 8 });
         let target = pop_top_tag_and_return_stub_entry() as i64;
         lang.instructions.push(X86Asm::MovRI {
             dest: R11,

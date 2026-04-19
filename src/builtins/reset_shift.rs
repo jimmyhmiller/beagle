@@ -864,8 +864,54 @@ pub unsafe extern "C" fn return_from_shift_tagged_runtime(
     value: usize,
     tag: usize,
 ) -> ! {
-    let runtime = crate::get_runtime().get();
-    let record = runtime.pop_prompt_tag(tag as u64);
+    let runtime = crate::get_runtime().get_mut();
+    let tag_u64 = tag as u64;
+
+    // Locate the outer handle's prompt-tag record. The longjmp below
+    // abandons every frame between here and the handle's enclosing
+    // frame, so anything installed inside those frames — nested
+    // prompt-tag records and nested handler-registry entries — never
+    // gets popped by its normal exit code. We must clear it here, or
+    // a later `perform` (or shift) in the landing handler can dispatch
+    // through a stale record and crash or leak the handler.
+    let (outer_prompt_pos, record) = runtime.find_prompt_tag(tag_u64).unwrap_or_else(|| {
+        panic!(
+            "return_from_shift_tagged_runtime(tag={}) — no record with that tag on the prompt-tag stack",
+            tag_u64
+        )
+    });
+
+    // Drop the outer prompt-tag record itself plus every record above
+    // it. Records above belong to frames nested inside the outer
+    // handle's body — those frames are being abandoned by the longjmp.
+    runtime.truncate_prompt_tags(outer_prompt_pos);
+
+    // Drop effect-handler entries installed strictly *after* the outer
+    // handle's entry, freeing their pinned handler roots. The outer
+    // entry itself stays: the `after_abort` landing code runs a
+    // compiler-emitted `pop-handler` that expects to find it.
+    //
+    // `push-handler` is always called before `push-prompt-tag` for the
+    // same `handle`, and both are append-only during body execution
+    // (pops happen after the body returns), so any entry at a higher
+    // index than the outer handler's was installed by a nested `handle`
+    // whose exit code will never run.
+    let mut stale_roots: Vec<usize> = Vec::new();
+    {
+        let ptd = crate::runtime::per_thread_data();
+        if let Some(outer_handler_pos) = ptd
+            .effect_handlers
+            .iter()
+            .rposition(|e| e.tag == tag_u64)
+        {
+            for entry in ptd.effect_handlers.drain(outer_handler_pos + 1..) {
+                stale_roots.push(entry.handler_root_id);
+            }
+        }
+    }
+    for root_id in stale_roots {
+        runtime.unregister_temporary_root(root_id);
+    }
 
     // Truncate GC frame chain: longjmp abandons every frame between
     // here and the handle's enclosing function (whose FP is

@@ -1,0 +1,97 @@
+namespace handler_nested_abort_cleanup_test
+
+use beagle.effect as effect
+
+// Regression test: when an outer handler aborts (returns without
+// resume) while an inner handler is active, the inner handler's
+// registry entry and prompt-tag record must be cleaned up so that
+// subsequent performs for the inner effect (outside the inner
+// handle's dynamic scope) don't dispatch to the stranded entries.
+
+enum Outer { Bail { why } }
+enum Inner { Ping {} }
+
+struct OuterHandler { default_value }
+extend OuterHandler with effect/Handler(Outer) {
+    fn handle(self, op, resume) {
+        match op {
+            Outer.Bail { why } => {
+                println("[Outer] aborting:", why)
+                self.default_value
+            }
+        }
+    }
+}
+
+struct InnerHandler {}
+extend InnerHandler with effect/Handler(Inner) {
+    fn handle(self, op, resume) {
+        match op {
+            Inner.Ping {} => {
+                println("[Inner] pinged")
+                resume(null)
+            }
+        }
+    }
+}
+
+struct FallbackInnerHandler {}
+extend FallbackInnerHandler with effect/Handler(Inner) {
+    fn handle(self, op, resume) {
+        match op {
+            Inner.Ping {} => {
+                println("[Fallback Inner] pinged")
+                resume(null)
+            }
+        }
+    }
+}
+
+fn main() {
+    println("=== Nested Abort Cleanup Test ===")
+
+    let outer_h = OuterHandler { default_value: 42 }
+    let inner_h = InnerHandler {}
+    let fallback_h = FallbackInnerHandler {}
+
+    // First scenario: outer aborts while inner is active. Before the
+    // fix, the inner handler registry entry and its prompt-tag record
+    // were left installed after the abort; a later perform of Inner
+    // (without a fresh inner `handle`) would dispatch through those
+    // stale records and jump into a long-dead frame.
+    let result = handle effect/Handler(Outer) with outer_h {
+        handle effect/Handler(Inner) with inner_h {
+            perform Inner.Ping {}
+            perform Outer.Bail { why: "stop" }
+            // Unreached — outer aborts here.
+            999
+        }
+    }
+    println("after outer abort:", result)
+
+    // Second scenario: after the outer abort lands, install a fresh
+    // pair of handlers and perform Inner. Before the fix, the stale
+    // inner handler and prompt-tag record from the first scenario
+    // remained installed beneath any newly pushed records. In certain
+    // cases — e.g., if a later pop runs `rposition` for the same
+    // enum_type_id — the stale entry would be targeted for removal
+    // instead of the current one.
+    let second = handle effect/Handler(Outer) with outer_h {
+        handle effect/Handler(Inner) with fallback_h {
+            perform Inner.Ping {}
+            "done"
+        }
+    }
+    println("second result:", second)
+
+    println("=== Test Complete ===")
+}
+
+// @beagle.core.snapshot
+// === Nested Abort Cleanup Test ===
+// [Inner] pinged
+// [Outer] aborting: stop
+// after outer abort: 42
+// [Fallback Inner] pinged
+// second result: done
+// === Test Complete ===
