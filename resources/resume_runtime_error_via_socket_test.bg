@@ -1,0 +1,48 @@
+namespace resume_runtime_error_via_socket_test
+
+use beagle.core as core
+
+// Mirrors repl-main/run-with-recovery: a worker thread schedules a resume
+// after a delay (standing in for "another thread fixes the code and sends
+// main-resume" via the REPL socket). Combined with a runtime-thrown error
+// from a fast-path Div instruction, this is the path the live-coding
+// agent's beagle_main_resume actually triggers.
+fn run_with_recovery(main_fn) {
+    try {
+        main_fn()
+    } catch (e, resume) {
+        let resume_atom = atom(null)
+
+        thread(fn() {
+            core/sleep(50)
+            reset!(resume_atom, 7)
+        })
+
+        let mut done = false
+        let mut value = null
+        while !done {
+            let v = deref(resume_atom)
+            if v != null {
+                value = v
+                done = true
+            } else {
+                core/sleep(5)
+            }
+        }
+        resume(value)
+    }
+}
+
+fn main() {
+    let result = run_with_recovery(fn() {
+        // Fast-path Div div-by-zero: this is the exact instruction class
+        // that crashed pre-fix when resumed.
+        100 / 0
+    })
+    println(result)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// 7
+// done

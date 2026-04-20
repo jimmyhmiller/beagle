@@ -117,11 +117,11 @@ pub struct StringValue {
 
 #[derive(Debug, Clone, Encode, Decode)]
 pub enum Instruction {
-    Sub(Value, Value, Value),
+    Sub(Value, Value, Value, Label),
     AddInt(Value, Value, Value),
-    Mul(Value, Value, Value),
-    Div(Value, Value, Value),
-    Modulo(Value, Value, Value),
+    Mul(Value, Value, Value, Label),
+    Div(Value, Value, Value, Label),
+    Modulo(Value, Value, Value, Label),
     Assign(Value, Value),
     Recurse(Value, Vec<Value>),
     RecurseWithSaves(Value, Vec<Value>, Vec<SavedValue>),
@@ -174,12 +174,12 @@ pub enum Instruction {
     MulFloat(Value, Value, Value),
     DivFloat(Value, Value, Value),
     CompareFloat(Value, Value, Value, Condition),
-    ShiftRightImm(Value, Value, i32),
+    ShiftRightImm(Value, Value, i32, Label),
     ShiftRightImmRaw(Value, Value, i32),
     AndImm(Value, Value, u64),
-    ShiftLeft(Value, Value, Value),
-    ShiftRight(Value, Value, Value),
-    ShiftRightZero(Value, Value, Value),
+    ShiftLeft(Value, Value, Value, Label),
+    ShiftRight(Value, Value, Value, Label),
+    ShiftRightZero(Value, Value, Value, Label),
     And(Value, Value, Value),
     Or(Value, Value, Value),
     Xor(Value, Value, Value),
@@ -305,28 +305,28 @@ impl Instruction {
     pub fn get_registers(&self) -> Vec<VirtualRegister> {
         match self {
             Instruction::Label(_) => vec![],
-            Instruction::Sub(a, b, c) => {
+            Instruction::Sub(a, b, c, _) => {
                 get_registers!(a, b, c)
             }
             Instruction::AddInt(a, b, c) => {
                 get_registers!(a, b, c)
             }
-            Instruction::Mul(a, b, c) => {
+            Instruction::Mul(a, b, c, _) => {
                 get_registers!(a, b, c)
             }
-            Instruction::Div(a, b, c) => {
+            Instruction::Div(a, b, c, _) => {
                 get_registers!(a, b, c)
             }
-            Instruction::Modulo(a, b, c) => {
+            Instruction::Modulo(a, b, c, _) => {
                 get_registers!(a, b, c)
             }
-            Instruction::ShiftLeft(a, b, c) => {
+            Instruction::ShiftLeft(a, b, c, _) => {
                 get_registers!(a, b, c)
             }
-            Instruction::ShiftRight(a, b, c) => {
+            Instruction::ShiftRight(a, b, c, _) => {
                 get_registers!(a, b, c)
             }
-            Instruction::ShiftRightZero(a, b, c) => {
+            Instruction::ShiftRightZero(a, b, c, _) => {
                 get_registers!(a, b, c)
             }
             Instruction::And(a, b, c) => {
@@ -371,7 +371,7 @@ impl Instruction {
             Instruction::DivFloat(a, b, c) => {
                 get_registers!(a, b, c)
             }
-            Instruction::ShiftRightImm(a, b, _) => {
+            Instruction::ShiftRightImm(a, b, _, _) => {
                 get_registers!(a, b)
             }
             Instruction::ShiftRightImmRaw(a, b, _) => {
@@ -629,16 +629,16 @@ impl Instruction {
                 replace_register!(value3, old_register, new_register);
             }
 
-            Instruction::Sub(value, value1, value2)
+            Instruction::Sub(value, value1, value2, _)
             | Instruction::AddInt(value, value1, value2)
-            | Instruction::Mul(value, value1, value2)
-            | Instruction::Div(value, value1, value2)
-            | Instruction::Modulo(value, value1, value2)
+            | Instruction::Mul(value, value1, value2, _)
+            | Instruction::Div(value, value1, value2, _)
+            | Instruction::Modulo(value, value1, value2, _)
             | Instruction::HeapLoadReg(value, value1, value2)
             | Instruction::HeapStoreOffsetReg(value, value1, value2)
-            | Instruction::ShiftLeft(value, value1, value2)
-            | Instruction::ShiftRight(value, value1, value2)
-            | Instruction::ShiftRightZero(value, value1, value2)
+            | Instruction::ShiftLeft(value, value1, value2, _)
+            | Instruction::ShiftRight(value, value1, value2, _)
+            | Instruction::ShiftRightZero(value, value1, value2, _)
             | Instruction::And(value, value1, value2)
             | Instruction::Or(value, value1, value2)
             | Instruction::Xor(value, value1, value2)
@@ -673,7 +673,7 @@ impl Instruction {
             | Instruction::FmovFloatToGeneral(value, value1)
             | Instruction::IntToFloat(value, value1)
             | Instruction::FRoundToZero(value, value1)
-            | Instruction::ShiftRightImm(value, value1, _)
+            | Instruction::ShiftRightImm(value, value1, _, _)
             | Instruction::ShiftRightImmRaw(value, value1, _)
             | Instruction::AndImm(value, value1, _)
             | Instruction::JumpIf(_, _, value, value1) => {
@@ -865,7 +865,6 @@ pub struct Ir {
     label_locations: HashMap<usize, usize>,
     pub num_locals: usize,
     allocate_fn_pointer: usize,
-    after_return: Label,
     pub error_fn_pointer: usize,
     pub ir_to_machine_code_range: Vec<(usize, MachineCodeRange)>,
     pub ir_range_to_token_range: Vec<(crate::ast::TokenRange, IRRange)>,
@@ -892,7 +891,7 @@ impl Ir {
         )))]
         let num_arg_registers = 8; // ARM64: X0-X7
 
-        let mut me = Self {
+        Self {
             register_index: 0,
             instructions: vec![],
             debug_name: None,
@@ -901,17 +900,13 @@ impl Ir {
             label_locations: HashMap::new(),
             num_locals: 0,
             allocate_fn_pointer,
-            after_return: Label { index: 0 },
             error_fn_pointer: 0,
             ir_to_machine_code_range: vec![],
             ir_range_to_token_range: vec![],
             num_arg_registers,
             mark_local_index: None,
             local_stack: vec![],
-        };
-
-        me.insert_label("after_return", me.after_return);
-        me
+        }
     }
 
     pub fn current_position(&self) -> usize {
@@ -1001,8 +996,18 @@ impl Ir {
         let result = self.volatile_register();
         let a = self.assign_new(a.into());
         let b = self.assign_new(b.into());
-        self.instructions
-            .push(Instruction::Sub(result.into(), a.into(), b.into()));
+        let error_label = self.label("sub_type_error");
+        let after_label = self.label("sub_after");
+        self.instructions.push(Instruction::Sub(
+            result.into(),
+            a.into(),
+            b.into(),
+            error_label,
+        ));
+        self.jump(after_label);
+        self.write_label(error_label);
+        self.emit_type_error_with_resume(result, after_label);
+        self.write_label(after_label);
         Value::Register(result)
     }
 
@@ -1184,8 +1189,18 @@ impl Ir {
         let register = self.volatile_register();
         let a = self.assign_new(a.into());
         let b = self.assign_new(b.into());
-        self.instructions
-            .push(Instruction::Mul(register.into(), a.into(), b.into()));
+        let error_label = self.label("mul_type_error");
+        let after_label = self.label("mul_after");
+        self.instructions.push(Instruction::Mul(
+            register.into(),
+            a.into(),
+            b.into(),
+            error_label,
+        ));
+        self.jump(after_label);
+        self.write_label(error_label);
+        self.emit_type_error_with_resume(register, after_label);
+        self.write_label(after_label);
         Value::Register(register)
     }
 
@@ -1205,8 +1220,18 @@ impl Ir {
         let register = self.volatile_register();
         let a = self.assign_new(a.into());
         let b = self.assign_new(b.into());
-        self.instructions
-            .push(Instruction::Div(register.into(), a.into(), b.into()));
+        let error_label = self.label("div_type_error");
+        let after_label = self.label("div_after");
+        self.instructions.push(Instruction::Div(
+            register.into(),
+            a.into(),
+            b.into(),
+            error_label,
+        ));
+        self.jump(after_label);
+        self.write_label(error_label);
+        self.emit_type_error_with_resume(register, after_label);
+        self.write_label(after_label);
         Value::Register(register)
     }
 
@@ -1226,8 +1251,18 @@ impl Ir {
         let register = self.volatile_register();
         let a = self.assign_new(a.into());
         let b = self.assign_new(b.into());
-        self.instructions
-            .push(Instruction::Modulo(register.into(), a.into(), b.into()));
+        let error_label = self.label("modulo_type_error");
+        let after_label = self.label("modulo_after");
+        self.instructions.push(Instruction::Modulo(
+            register.into(),
+            a.into(),
+            b.into(),
+            error_label,
+        ));
+        self.jump(after_label);
+        self.write_label(error_label);
+        self.emit_type_error_with_resume(register, after_label);
+        self.write_label(after_label);
         Value::Register(register)
     }
 
@@ -1374,19 +1409,22 @@ impl Ir {
 
         // Default path - neither operand is a number, or non-numeric types
         self.write_label(default_compare_label);
-        match condition {
+        let cmp_type_error_label = match condition {
             Condition::LessThan
             | Condition::LessThanOrEqual
             | Condition::GreaterThan
             | Condition::GreaterThanOrEqual => {
                 let tag_a = self.get_tag(a.into());
                 let tag_b = self.get_tag(b.into());
-                self.jump_if(self.after_return, Condition::NotEqual, tag_a, tag_b);
+                let cmp_type_error = self.label("compare_type_error");
+                self.jump_if(cmp_type_error, Condition::NotEqual, tag_a, tag_b);
+                Some(cmp_type_error)
             }
             Condition::Equal | Condition::NotEqual => {
                 // Equality/inequality can compare any types - no guard needed
+                None
             }
-        }
+        };
         let tag = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
         let dest = self.volatile_register();
         self.instructions.push(Instruction::Compare(
@@ -1398,6 +1436,11 @@ impl Ir {
         self.instructions
             .push(Instruction::Tag(dest.into(), dest.into(), tag.into()));
         self.assign(result_register, dest);
+        if let Some(cmp_type_error) = cmp_type_error_label {
+            self.jump(after_compare);
+            self.write_label(cmp_type_error);
+            self.emit_type_error_with_resume(result_register, after_compare);
+        }
 
         self.write_label(after_compare);
         Value::Register(result_register)
@@ -1417,8 +1460,18 @@ impl Ir {
     pub fn shift_right_imm(&mut self, a: Value, b: i32) -> Value {
         let a = self.assign_new(a);
         let destination = self.volatile_register();
-        self.instructions
-            .push(Instruction::ShiftRightImm(destination.into(), a.into(), b));
+        let error_label = self.label("shr_imm_type_error");
+        let after_label = self.label("shr_imm_after");
+        self.instructions.push(Instruction::ShiftRightImm(
+            destination.into(),
+            a.into(),
+            b,
+            error_label,
+        ));
+        self.jump(after_label);
+        self.write_label(error_label);
+        self.emit_type_error_with_resume(destination, after_label);
+        self.write_label(after_label);
         destination.into()
     }
 
@@ -1445,11 +1498,18 @@ impl Ir {
         let a = self.assign_new(a);
         let b = self.assign_new(b);
         let destination = self.volatile_register();
+        let error_label = self.label("shl_type_error");
+        let after_label = self.label("shl_after");
         self.instructions.push(Instruction::ShiftLeft(
             destination.into(),
             a.into(),
             b.into(),
+            error_label,
         ));
+        self.jump(after_label);
+        self.write_label(error_label);
+        self.emit_type_error_with_resume(destination, after_label);
+        self.write_label(after_label);
         destination.into()
     }
 
@@ -1457,11 +1517,18 @@ impl Ir {
         let a = self.assign_new(a);
         let b = self.assign_new(b);
         let destination = self.volatile_register();
+        let error_label = self.label("shr_type_error");
+        let after_label = self.label("shr_after");
         self.instructions.push(Instruction::ShiftRight(
             destination.into(),
             a.into(),
             b.into(),
+            error_label,
         ));
+        self.jump(after_label);
+        self.write_label(error_label);
+        self.emit_type_error_with_resume(destination, after_label);
+        self.write_label(after_label);
         destination.into()
     }
 
@@ -1469,11 +1536,18 @@ impl Ir {
         let a = self.assign_new(a);
         let b = self.assign_new(b);
         let destination = self.volatile_register();
+        let error_label = self.label("shrz_type_error");
+        let after_label = self.label("shrz_after");
         self.instructions.push(Instruction::ShiftRightZero(
             destination.into(),
             a.into(),
             b.into(),
+            error_label,
         ));
+        self.jump(after_label);
+        self.write_label(error_label);
+        self.emit_type_error_with_resume(destination, after_label);
+        self.write_label(after_label);
         destination.into()
     }
 
@@ -1564,7 +1638,7 @@ impl Ir {
             .insert(self.instructions.len(), label.index);
     }
 
-    pub fn compile<B: CodegenBackend>(&mut self, mut backend: B, error_fn_pointer: usize) -> B {
+    pub fn compile<B: CodegenBackend>(&mut self, mut backend: B, _error_fn_pointer: usize) -> B {
         debug_assert!(!self.ir_range_to_token_range.is_empty());
 
         // backend.breakpoint();
@@ -1662,15 +1736,6 @@ impl Ir {
 
         backend.epilogue();
         backend.ret();
-        // Error handler code placed after normal return
-        let backend_after_return = backend.get_label_by_name("after_return");
-        backend.write_label(backend_after_return);
-        let register = backend.get_volatile_register(0);
-        backend.mov_64(register, error_fn_pointer as isize);
-        backend.get_stack_pointer_imm(backend.arg(0), 0);
-        // throw_error expects (stack_pointer, frame_pointer)
-        backend.mov_reg(backend.arg(1), backend.frame_pointer());
-        backend.call(register);
         backend
     }
 
@@ -1824,25 +1889,18 @@ impl Ir {
                 }
                 Instruction::Label(_) => {}
                 Instruction::ExtendLifeTime(_) => {}
-                Instruction::Sub(dest, a, b) => {
+                Instruction::Sub(dest, a, b, error_label) => {
                     let a = self.value_to_register(a, backend);
                     let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
+                    let error_label = ir_label_to_lang_label[error_label];
 
                     // Use a temporary register for guard checks to avoid clobbering operands
                     // if dest happens to be the same register as a or b
                     let guard_temp = backend.temporary_register();
-                    backend.guard_integer(
-                        guard_temp,
-                        a,
-                        ir_label_to_lang_label[&self.after_return],
-                    );
-                    backend.guard_integer(
-                        guard_temp,
-                        b,
-                        ir_label_to_lang_label[&self.after_return],
-                    );
+                    backend.guard_integer(guard_temp, a, error_label);
+                    backend.guard_integer(guard_temp, b, error_label);
                     backend.free_temporary_register(guard_temp);
 
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
@@ -1867,25 +1925,18 @@ impl Ir {
                     backend.add(dest, a, b);
                     self.store_spill(dest, dest_spill, backend);
                 }
-                Instruction::Mul(dest, a, b) => {
+                Instruction::Mul(dest, a, b, error_label) => {
                     let a = self.value_to_register(a, backend);
                     let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
+                    let error_label = ir_label_to_lang_label[error_label];
 
                     // Use a temporary register for guard checks to avoid clobbering operands
                     // if dest happens to be the same register as a or b
                     let guard_temp = backend.temporary_register();
-                    backend.guard_integer(
-                        guard_temp,
-                        a,
-                        ir_label_to_lang_label[&self.after_return],
-                    );
-                    backend.guard_integer(
-                        guard_temp,
-                        b,
-                        ir_label_to_lang_label[&self.after_return],
-                    );
+                    backend.guard_integer(guard_temp, a, error_label);
+                    backend.guard_integer(guard_temp, b, error_label);
                     backend.free_temporary_register(guard_temp);
 
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
@@ -1902,12 +1953,12 @@ impl Ir {
                     }
                     self.store_spill(dest, dest_spill, backend);
                 }
-                Instruction::Div(dest, a, b) => {
+                Instruction::Div(dest, a, b, error_label) => {
                     let a = self.value_to_register(a, backend);
                     let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
-                    let error_label = ir_label_to_lang_label[&self.after_return];
+                    let error_label = ir_label_to_lang_label[error_label];
 
                     // Use a temporary register for guard checks to avoid clobbering operands
                     // if dest happens to be the same register as a or b
@@ -1935,12 +1986,12 @@ impl Ir {
                     }
                     self.store_spill(dest, dest_spill, backend);
                 }
-                Instruction::Modulo(dest, a, b) => {
+                Instruction::Modulo(dest, a, b, error_label) => {
                     let a = self.value_to_register(a, backend);
                     let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
-                    let error_label = ir_label_to_lang_label[&self.after_return];
+                    let error_label = ir_label_to_lang_label[error_label];
 
                     // Use a temporary register for guard checks
                     let guard_temp = backend.temporary_register();
@@ -1968,12 +2019,13 @@ impl Ir {
                     }
                     self.store_spill(dest, dest_spill, backend);
                 }
-                Instruction::ShiftRightImm(dest, value, shift) => {
+                Instruction::ShiftRightImm(dest, value, shift, error_label) => {
                     let value = self.value_to_register(value, backend);
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
+                    let error_label = ir_label_to_lang_label[error_label];
 
-                    backend.guard_integer(dest, value, ir_label_to_lang_label[&self.after_return]);
+                    backend.guard_integer(dest, value, error_label);
 
                     backend.shift_right_imm(dest, value, *shift);
                     self.store_spill(dest, dest_spill, backend);
@@ -1992,14 +2044,15 @@ impl Ir {
                     backend.and_imm(dest, value, *imm);
                     self.store_spill(dest, dest_spill, backend);
                 }
-                Instruction::ShiftLeft(dest, a, b) => {
+                Instruction::ShiftLeft(dest, a, b, error_label) => {
                     let a = self.value_to_register(a, backend);
                     let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
+                    let error_label = ir_label_to_lang_label[error_label];
 
-                    backend.guard_integer(dest, a, ir_label_to_lang_label[&self.after_return]);
-                    backend.guard_integer(dest, b, ir_label_to_lang_label[&self.after_return]);
+                    backend.guard_integer(dest, a, error_label);
+                    backend.guard_integer(dest, b, error_label);
 
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
                     backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
@@ -2009,14 +2062,15 @@ impl Ir {
                     backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
                     self.store_spill(dest, dest_spill, backend);
                 }
-                Instruction::ShiftRight(dest, a, b) => {
+                Instruction::ShiftRight(dest, a, b, error_label) => {
                     let a = self.value_to_register(a, backend);
                     let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
+                    let error_label = ir_label_to_lang_label[error_label];
 
-                    backend.guard_integer(dest, a, ir_label_to_lang_label[&self.after_return]);
-                    backend.guard_integer(dest, b, ir_label_to_lang_label[&self.after_return]);
+                    backend.guard_integer(dest, a, error_label);
+                    backend.guard_integer(dest, b, error_label);
 
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
                     backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
@@ -2026,14 +2080,15 @@ impl Ir {
                     backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
                     self.store_spill(dest, dest_spill, backend);
                 }
-                Instruction::ShiftRightZero(dest, a, b) => {
+                Instruction::ShiftRightZero(dest, a, b, error_label) => {
                     let a = self.value_to_register(a, backend);
                     let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
+                    let error_label = ir_label_to_lang_label[error_label];
 
-                    backend.guard_integer(dest, a, ir_label_to_lang_label[&self.after_return]);
-                    backend.guard_integer(dest, b, ir_label_to_lang_label[&self.after_return]);
+                    backend.guard_integer(dest, a, error_label);
+                    backend.guard_integer(dest, b, error_label);
 
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
                     backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
@@ -3799,18 +3854,20 @@ impl Ir {
         result_register: VirtualRegister,
         after_label: Label,
     ) {
-        if self.error_fn_pointer != 0 {
-            let stack_pointer = self.get_stack_pointer_imm(0);
-            let frame_pointer = self.get_frame_pointer();
-            let f = self.assign_new(Value::Function(self.error_fn_pointer));
-            let resumed_value = self.call_builtin(f.into(), vec![stack_pointer, frame_pointer]);
-            // If we reach here, the error was caught and resumed with a value
-            self.assign(result_register, resumed_value);
-            self.jump(after_label);
-        } else {
-            // Fallback: jump to the shared error handler (no resume support)
-            self.jump(self.after_return);
-        }
+        assert!(
+            self.error_fn_pointer != 0,
+            "throw-type-error builtin not registered: cannot emit guarded operation \
+             without resume support. Ensure beagle.builtin/throw-type-error is installed \
+             before compiling this function ({}).",
+            self.debug_name.as_deref().unwrap_or("<anonymous>"),
+        );
+        let stack_pointer = self.get_stack_pointer_imm(0);
+        let frame_pointer = self.get_frame_pointer();
+        let f = self.assign_new(Value::Function(self.error_fn_pointer));
+        let resumed_value = self.call_builtin(f.into(), vec![stack_pointer, frame_pointer]);
+        // If we reach here, the error was caught and resumed with a value
+        self.assign(result_register, resumed_value);
+        self.jump(after_label);
     }
 
     fn allocate(&mut self, size: Value) -> Value {
@@ -3818,13 +3875,5 @@ impl Ir {
         let frame_pointer = self.get_frame_pointer();
         let f = self.assign_new(Value::Function(self.allocate_fn_pointer));
         self.call_builtin(f.into(), vec![stack_pointer, frame_pointer, size])
-    }
-
-    fn insert_label(&mut self, name: &str, label: Label) -> usize {
-        let index = self.labels.len();
-        assert!(index == label.index);
-        self.labels.push(label);
-        self.label_names.push(name.to_string());
-        self.label_names.len() - 1
     }
 }

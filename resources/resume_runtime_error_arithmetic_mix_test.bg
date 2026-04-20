@@ -1,0 +1,41 @@
+namespace resume_runtime_error_arithmetic_mix_test
+
+// `null - 1` falls through both the int and float guards in the math_any
+// slow path. `2 * "hello"` and `7 % 0` exercise the Mul / Modulo fast-path
+// throw blocks (these were the cases that crashed pre-fix on resume).
+fn main() {
+    let a = try {
+        null - 1
+    } catch (e, resume) {
+        println("caught a")
+        resume(10)
+    }
+    println(a)
+
+    let b = try {
+        2 * "hello"
+    } catch (e, resume) {
+        println("caught b")
+        resume(20)
+    }
+    println(b)
+
+    let c = try {
+        7 % 0
+    } catch (e, resume) {
+        println("caught c")
+        resume(30)
+    }
+    println(c)
+
+    println("done")
+}
+
+// @beagle.core.snapshot
+// caught a
+// 10
+// caught b
+// 20
+// caught c
+// 30
+// done

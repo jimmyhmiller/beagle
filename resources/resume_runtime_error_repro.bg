@@ -1,0 +1,9 @@
+namespace resume_runtime_error_repro
+
+fn main() {
+    try {
+        let _ = 1 / 0
+    } catch (e, resume) {
+        resume(null)
+    }
+}

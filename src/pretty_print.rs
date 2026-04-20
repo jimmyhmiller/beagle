@@ -103,7 +103,7 @@ impl PrettyPrint for Instruction {
             Instruction::Label(label) => {
                 format!("label{}:", label.index)
             }
-            Instruction::Sub(value, value1, value2) => {
+            Instruction::Sub(value, value1, value2, _) => {
                 format!(
                     "sub {}, {}, {}",
                     value.pretty_print(),
@@ -119,7 +119,7 @@ impl PrettyPrint for Instruction {
                     value2.pretty_print()
                 )
             }
-            Instruction::Mul(value, value1, value2) => {
+            Instruction::Mul(value, value1, value2, _) => {
                 format!(
                     "mul {}, {}, {}",
                     value.pretty_print(),
@@ -127,7 +127,7 @@ impl PrettyPrint for Instruction {
                     value2.pretty_print()
                 )
             }
-            Instruction::Div(value, value1, value2) => {
+            Instruction::Div(value, value1, value2, _) => {
                 format!(
                     "div {}, {}, {}",
                     value.pretty_print(),
@@ -135,7 +135,7 @@ impl PrettyPrint for Instruction {
                     value2.pretty_print()
                 )
             }
-            Instruction::Modulo(value, value1, value2) => {
+            Instruction::Modulo(value, value1, value2, _) => {
                 format!(
                     "mod {}, {}, {}",
                     value.pretty_print(),
@@ -434,7 +434,7 @@ impl PrettyPrint for Instruction {
                     value2.pretty_print()
                 )
             }
-            Instruction::ShiftRightImm(value, value1, _) => {
+            Instruction::ShiftRightImm(value, value1, _, _) => {
                 format!(
                     "shift_right_imm {}, {}, _",
                     value.pretty_print(),
@@ -455,7 +455,7 @@ impl PrettyPrint for Instruction {
                     value1.pretty_print()
                 )
             }
-            Instruction::ShiftLeft(value, value1, value2) => {
+            Instruction::ShiftLeft(value, value1, value2, _) => {
                 format!(
                     "shift_left {}, {}, {}",
                     value.pretty_print(),
@@ -463,7 +463,7 @@ impl PrettyPrint for Instruction {
                     value2.pretty_print()
                 )
             }
-            Instruction::ShiftRight(value, value1, value2) => {
+            Instruction::ShiftRight(value, value1, value2, _) => {
                 format!(
                     "shift_right {}, {}, {}",
                     value.pretty_print(),
@@ -471,7 +471,7 @@ impl PrettyPrint for Instruction {
                     value2.pretty_print()
                 )
             }
-            Instruction::ShiftRightZero(value, value1, value2) => {
+            Instruction::ShiftRightZero(value, value1, value2, _) => {
                 format!(
                     "shift_right_zero {}, {}, {}",
                     value.pretty_print(),

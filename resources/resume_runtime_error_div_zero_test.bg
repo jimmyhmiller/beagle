@@ -1,0 +1,17 @@
+namespace resume_runtime_error_div_zero_test
+
+fn main() {
+    let result = try {
+        1 / 0
+    } catch (e, resume) {
+        println("caught div-by-zero")
+        resume(99)
+    }
+    println(result)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// caught div-by-zero
+// 99
+// done

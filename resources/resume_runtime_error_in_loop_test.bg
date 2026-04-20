@@ -1,0 +1,29 @@
+namespace resume_runtime_error_in_loop_test
+
+// Drive a runtime error through the fast-path Div instruction many times
+// in a tight tail-recursive loop, resuming on every iteration. Asserts no
+// stack/segment corruption: the counter must increment exactly once per
+// iteration and the final sum must match.
+fn loop_resume(n, sum) {
+    if n <= 0 {
+        sum
+    } else {
+        let v = try {
+            10 / 0
+        } catch (e, resume) {
+            resume(n)
+        }
+        loop_resume(n - 1, sum + v)
+    }
+}
+
+fn main() {
+    // Sum 1..100 = 5050
+    let total = loop_resume(100, 0)
+    println(total)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// 5050
+// done

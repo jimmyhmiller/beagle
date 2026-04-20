@@ -1,0 +1,27 @@
+namespace resume_runtime_error_field_test
+
+struct Point {
+    x
+    y
+}
+
+fn read_field(p) {
+    p.no_such_field
+}
+
+fn main() {
+    let p = Point { x: 1, y: 2 }
+    let result = try {
+        read_field(p)
+    } catch (e, resume) {
+        println("caught field error")
+        resume(42)
+    }
+    println(result)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// caught field error
+// 42
+// done

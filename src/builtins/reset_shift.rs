@@ -363,7 +363,9 @@ impl ContinuationObject {
     /// Returns the size of the captured segment data in bytes.
     /// Derived from the segment heap object's header — no stored field needed.
     pub fn segment_size(&self) -> usize {
-        self.segment_base_and_size().map(|(_, size)| size).unwrap_or(0)
+        self.segment_base_and_size()
+            .map(|(_, size)| size)
+            .unwrap_or(0)
     }
 
     fn set_segment_frame_pointer_offset(&self, offset: usize) {
