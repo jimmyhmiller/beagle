@@ -97,7 +97,9 @@ impl CodeAllocator {
                 std::ptr::copy_nonoverlapping(first.as_ptr(), start, first.len());
                 self.current_offset += first.len();
                 self.mark_page_as_pending();
-                self.write_bytes(second);
+                if !second.is_empty() {
+                    self.write_bytes(second);
+                }
                 start
             }
         }
