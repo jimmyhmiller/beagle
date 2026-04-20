@@ -8324,19 +8324,17 @@ impl Runtime {
             .namespaces
             .get(current_namespace)
             .expect("Current namespace not found in namespaces - this is a fatal error");
-        let current_namespace = current_namespace
-            .lock()
-            .expect("Failed to lock current namespace - this is a fatal error");
-        let namespace_id = current_namespace.aliases.get(alias)?;
-        let namespace = self
-            .namespaces
-            .namespaces
-            .get(*namespace_id)
-            .expect("Alias target namespace not found - this is a fatal error");
-        let namespace = namespace
-            .lock()
-            .expect("Failed to lock alias target namespace - this is a fatal error");
-        Some(namespace.name.clone())
+        // Read the alias target id under the current-namespace lock, then drop
+        // the lock before resolving the target's name. Otherwise, when the alias
+        // points back to the current namespace itself (e.g. `use foo as f` while
+        // already in `foo`), the second lock would deadlock on the same mutex.
+        let namespace_id = {
+            let current_namespace = current_namespace
+                .lock()
+                .expect("Failed to lock current namespace - this is a fatal error");
+            *current_namespace.aliases.get(alias)?
+        };
+        self.namespaces.get_namespace_name(namespace_id)
     }
 
     pub fn get_pointer_for_function(&self, function: &Function) -> Option<usize> {
