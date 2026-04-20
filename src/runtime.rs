@@ -739,6 +739,9 @@ pub enum FFIType {
     Void,
     U16,
     U64,
+    I8,
+    I16,
+    I64,
     Structure(Vec<FFIType>),
 }
 

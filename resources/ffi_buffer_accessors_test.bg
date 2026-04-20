@@ -1,0 +1,112 @@
+namespace ffi_buffer_accessors_test
+
+use beagle.ffi as ffi
+
+fn assert_eq(name, expected, actual) {
+    if expected == actual {
+        println("PASS: " ++ name)
+    } else {
+        println("FAIL: " ++ name ++ " expected=" ++ to-string(expected) ++ " got=" ++ to-string(actual))
+    }
+}
+
+fn test_i8() {
+    let buf = ffi/allocate(16)
+    ffi/set-i8(buf, 0, -1)
+    ffi/set-i8(buf, 1, 127)
+    ffi/set-i8(buf, 2, -128)
+    assert_eq("i8 -1", -1, ffi/get-i8(buf, 0))
+    assert_eq("i8 127", 127, ffi/get-i8(buf, 1))
+    assert_eq("i8 -128", -128, ffi/get-i8(buf, 2))
+    ffi/deallocate(buf)
+}
+
+fn test_u16_i16() {
+    let buf = ffi/allocate(16)
+    ffi/set-u16(buf, 0, 65535)
+    ffi/set-u16(buf, 2, 0)
+    ffi/set-u16(buf, 4, 256)
+    assert_eq("u16 65535", 65535, ffi/get-u16(buf, 0))
+    assert_eq("u16 0", 0, ffi/get-u16(buf, 2))
+    assert_eq("u16 256", 256, ffi/get-u16(buf, 4))
+
+    ffi/set-i16(buf, 6, -1)
+    ffi/set-i16(buf, 8, -32768)
+    assert_eq("i16 -1", -1, ffi/get-i16(buf, 6))
+    assert_eq("i16 -32768", -32768, ffi/get-i16(buf, 8))
+    ffi/deallocate(buf)
+}
+
+fn test_u32() {
+    let buf = ffi/allocate(16)
+    ffi/set-u32(buf, 0, 4000000000)
+    assert_eq("u32 4000000000", 4000000000, ffi/get-u32(buf, 0))
+    ffi/deallocate(buf)
+}
+
+fn test_i64_u64() {
+    let buf = ffi/allocate(32)
+    ffi/set-i64(buf, 0, -1234567890)
+    ffi/set-i64(buf, 8, 1234567890)
+    assert_eq("i64 -1234567890", -1234567890, ffi/get-i64(buf, 0))
+    assert_eq("i64 1234567890", 1234567890, ffi/get-i64(buf, 8))
+
+    ffi/set-u64(buf, 16, 9000000000)
+    assert_eq("u64 9000000000", 9000000000, ffi/get-u64(buf, 16))
+    ffi/deallocate(buf)
+}
+
+fn test_f32() {
+    let buf = ffi/allocate(16)
+    // Values exactly representable in f32
+    ffi/set-f32(buf, 0, 3.25)
+    ffi/set-f32(buf, 4, -0.5)
+    ffi/set-f32(buf, 8, 2)
+
+    assert_eq("f32 3.25", 3.25, ffi/get-f32(buf, 0))
+    assert_eq("f32 -0.5", -0.5, ffi/get-f32(buf, 4))
+    assert_eq("f32 from int 2", 2.0, ffi/get-f32(buf, 8))
+    ffi/deallocate(buf)
+}
+
+fn test_f64() {
+    let buf = ffi/allocate(24)
+    ffi/set-f64(buf, 0, 3.14159)
+    ffi/set-f64(buf, 8, -2.5)
+    ffi/set-f64(buf, 16, 42)
+
+    assert_eq("f64 3.14159", 3.14159, ffi/get-f64(buf, 0))
+    assert_eq("f64 -2.5", -2.5, ffi/get-f64(buf, 8))
+    assert_eq("f64 from int 42", 42.0, ffi/get-f64(buf, 16))
+    ffi/deallocate(buf)
+}
+
+fn main() {
+    test_i8()
+    test_u16_i16()
+    test_u32()
+    test_i64_u64()
+    test_f32()
+    test_f64()
+    "done"
+}
+
+// @beagle.core.snapshot
+// PASS: i8 -1
+// PASS: i8 127
+// PASS: i8 -128
+// PASS: u16 65535
+// PASS: u16 0
+// PASS: u16 256
+// PASS: i16 -1
+// PASS: i16 -32768
+// PASS: u32 4000000000
+// PASS: i64 -1234567890
+// PASS: i64 1234567890
+// PASS: u64 9000000000
+// PASS: f32 3.25
+// PASS: f32 -0.5
+// PASS: f32 from int 2
+// PASS: f64 3.14159
+// PASS: f64 -2.5
+// PASS: f64 from int 42

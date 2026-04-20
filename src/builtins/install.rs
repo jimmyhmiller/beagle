@@ -887,6 +887,118 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
+            "beagle.ffi/set-i8",
+            ffi_set_i8 as *const u8,
+            false,
+            &["ptr", "offset", "value"],
+            "Write a signed 8-bit integer to memory at ptr + offset.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/get-i8",
+            ffi_get_i8 as *const u8,
+            false,
+            &["ptr", "offset"],
+            "Read a signed 8-bit integer from memory at ptr + offset.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/set-u16",
+            ffi_set_u16 as *const u8,
+            false,
+            &["ptr", "offset", "value"],
+            "Write an unsigned 16-bit integer to memory at ptr + offset.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/get-u16",
+            ffi_get_u16 as *const u8,
+            false,
+            &["ptr", "offset"],
+            "Read an unsigned 16-bit integer from memory at ptr + offset.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/get-i16",
+            ffi_get_i16 as *const u8,
+            false,
+            &["ptr", "offset"],
+            "Read a signed 16-bit integer from memory at ptr + offset.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/set-u32",
+            ffi_set_u32 as *const u8,
+            false,
+            &["ptr", "offset", "value"],
+            "Write an unsigned 32-bit integer to memory at ptr + offset.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/set-i64",
+            ffi_set_i64 as *const u8,
+            false,
+            &["ptr", "offset", "value"],
+            "Write a signed 64-bit integer to memory at ptr + offset.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/get-i64",
+            ffi_get_i64 as *const u8,
+            false,
+            &["ptr", "offset"],
+            "Read a signed 64-bit integer from memory at ptr + offset.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/set-u64",
+            ffi_set_u64 as *const u8,
+            false,
+            &["ptr", "offset", "value"],
+            "Write an unsigned 64-bit integer to memory at ptr + offset.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/get-u64",
+            ffi_get_u64 as *const u8,
+            false,
+            &["ptr", "offset"],
+            "Read an unsigned 64-bit integer from memory at ptr + offset.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/set-f32",
+            ffi_set_f32 as *const u8,
+            true,
+            &["ptr", "offset", "value"],
+            "Write a 32-bit float to memory at ptr + offset. Accepts Int or Float.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/set-f64",
+            ffi_set_f64 as *const u8,
+            true,
+            &["ptr", "offset", "value"],
+            "Write a 64-bit float to memory at ptr + offset. Accepts Int or Float.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/get-f32",
+            ffi_get_f32 as *const u8,
+            true,
+            &["ptr", "offset"],
+            "Read a 32-bit float from memory at ptr + offset. Returns a Beagle Float.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/get-f64",
+            ffi_get_f64 as *const u8,
+            true,
+            &["ptr", "offset"],
+            "Read a 64-bit float from memory at ptr + offset. Returns a Beagle Float.",
+        )?;
+
+        self.add_builtin_with_doc(
             "beagle.ffi/get-string",
             ffi_get_string as *const u8,
             true,

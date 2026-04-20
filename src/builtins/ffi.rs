@@ -49,7 +49,10 @@ pub fn map_beagle_type_to_ffi_type(runtime: &Runtime, value: usize) -> Result<FF
         "Type.U16" => Ok(FFIType::U16),
         "Type.U32" => Ok(FFIType::U32),
         "Type.U64" => Ok(FFIType::U64),
+        "Type.I8" => Ok(FFIType::I8),
+        "Type.I16" => Ok(FFIType::I16),
         "Type.I32" => Ok(FFIType::I32),
+        "Type.I64" => Ok(FFIType::I64),
         "Type.F32" => Ok(FFIType::F32),
         "Type.F64" => Ok(FFIType::F64),
         "Type.Pointer" => Ok(FFIType::Pointer),
@@ -326,8 +329,20 @@ unsafe extern "C" fn invoke_beagle_callback(
                 FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 => {
                     BuiltInTypes::Int.tag(c_val as isize) as usize
                 }
+                FFIType::I8 => {
+                    let signed = c_val as i8 as isize;
+                    BuiltInTypes::Int.tag(signed) as usize
+                }
+                FFIType::I16 => {
+                    let signed = c_val as i16 as isize;
+                    BuiltInTypes::Int.tag(signed) as usize
+                }
                 FFIType::I32 => {
                     let signed = c_val as i32 as isize;
+                    BuiltInTypes::Int.tag(signed) as usize
+                }
+                FFIType::I64 => {
+                    let signed = c_val as i64 as isize;
                     BuiltInTypes::Int.tag(signed) as usize
                 }
                 FFIType::Pointer | FFIType::MutablePointer => {
@@ -558,7 +573,7 @@ unsafe extern "C" fn invoke_beagle_callback(
             FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 => {
                 BuiltInTypes::untag(result) as u64
             }
-            FFIType::I32 => {
+            FFIType::I8 | FFIType::I16 | FFIType::I32 | FFIType::I64 => {
                 let val = BuiltInTypes::untag(result) as i64;
                 val as u64
             }
@@ -1147,8 +1162,19 @@ unsafe fn marshal_ffi_argument(
             c_string as u64
         }
         BuiltInTypes::Int => match ffi_type {
-            FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 | FFIType::I32 => {
-                BuiltInTypes::untag(argument) as u64
+            FFIType::U8
+            | FFIType::U16
+            | FFIType::U32
+            | FFIType::U64
+            | FFIType::I8
+            | FFIType::I16
+            | FFIType::I32
+            | FFIType::I64 => {
+                // Use signed shift so negative Beagle Ints sign-extend to 64 bits.
+                // For I64 this is required (full width visible to C); for narrower
+                // signed types C truncates the high bits, and unsigned types are
+                // unaffected because Beagle Ints are at most 61 bits.
+                BuiltInTypes::untag_isize(argument as isize) as i64 as u64
             }
             FFIType::F32 => {
                 // Convert integer to f32 and get its bit representation
@@ -1227,9 +1253,14 @@ unsafe fn marshal_ffi_argument(
                     f32_val.to_bits() as u64
                 }
                 FFIType::F64 => f64_val.to_bits(),
-                FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 | FFIType::I32 => {
-                    f64_val as i64 as u64
-                }
+                FFIType::U8
+                | FFIType::U16
+                | FFIType::U32
+                | FFIType::U64
+                | FFIType::I8
+                | FFIType::I16
+                | FFIType::I32
+                | FFIType::I64 => f64_val as i64 as u64,
                 _ => unsafe {
                     throw_runtime_error(
                         stack_pointer,
@@ -2089,9 +2120,21 @@ unsafe fn unmarshal_ffi_return(
             FFIType::U8 | FFIType::U16 | FFIType::U32 | FFIType::U64 => {
                 BuiltInTypes::Int.tag(low as isize) as usize
             }
+            FFIType::I8 => {
+                let signed_result = low as i8 as isize;
+                BuiltInTypes::Int.tag(signed_result) as usize
+            }
+            FFIType::I16 => {
+                let signed_result = low as i16 as isize;
+                BuiltInTypes::Int.tag(signed_result) as usize
+            }
             FFIType::I32 => {
                 // Sign-extend I32 to isize properly
                 let signed_result = low as i32 as isize;
+                BuiltInTypes::Int.tag(signed_result) as usize
+            }
+            FFIType::I64 => {
+                let signed_result = low as i64 as isize;
                 BuiltInTypes::Int.tag(signed_result) as usize
             }
             FFIType::F32 => {
@@ -2395,6 +2438,209 @@ pub unsafe extern "C" fn ffi_get_i32(buffer: usize, offset: usize) -> usize {
     }
 }
 
+pub unsafe extern "C" fn ffi_set_i8(buffer: usize, offset: usize, value: usize) -> usize {
+    unsafe {
+        let buffer = extract_raw_ptr(buffer);
+        let offset = BuiltInTypes::untag(offset);
+        let value = BuiltInTypes::untag(value) as i8;
+        *(buffer.add(offset) as *mut i8) = value;
+        BuiltInTypes::null_value() as usize
+    }
+}
+
+pub unsafe extern "C" fn ffi_get_i8(buffer: usize, offset: usize) -> usize {
+    unsafe {
+        let buffer = extract_raw_ptr(buffer);
+        let offset = BuiltInTypes::untag(offset);
+        let value = *(buffer.add(offset) as *const i8);
+        BuiltInTypes::Int.tag(value as isize) as usize
+    }
+}
+
+pub unsafe extern "C" fn ffi_set_u16(buffer: usize, offset: usize, value: usize) -> usize {
+    unsafe {
+        let buffer = extract_raw_ptr(buffer);
+        let offset = BuiltInTypes::untag(offset);
+        let value = BuiltInTypes::untag(value) as u16;
+        *(buffer.add(offset) as *mut u16) = value;
+        BuiltInTypes::null_value() as usize
+    }
+}
+
+pub unsafe extern "C" fn ffi_get_u16(buffer: usize, offset: usize) -> usize {
+    unsafe {
+        let buffer = extract_raw_ptr(buffer);
+        let offset = BuiltInTypes::untag(offset);
+        let value = *(buffer.add(offset) as *const u16);
+        BuiltInTypes::Int.tag(value as isize) as usize
+    }
+}
+
+pub unsafe extern "C" fn ffi_get_i16(buffer: usize, offset: usize) -> usize {
+    unsafe {
+        let buffer = extract_raw_ptr(buffer);
+        let offset = BuiltInTypes::untag(offset);
+        let value = *(buffer.add(offset) as *const i16);
+        BuiltInTypes::Int.tag(value as isize) as usize
+    }
+}
+
+pub unsafe extern "C" fn ffi_set_u32(buffer: usize, offset: usize, value: usize) -> usize {
+    unsafe {
+        let buffer = extract_raw_ptr(buffer);
+        let offset = BuiltInTypes::untag(offset);
+        let value = BuiltInTypes::untag(value) as u32;
+        *(buffer.add(offset) as *mut u32) = value;
+        BuiltInTypes::null_value() as usize
+    }
+}
+
+pub unsafe extern "C" fn ffi_set_i64(buffer: usize, offset: usize, value: usize) -> usize {
+    unsafe {
+        let buffer = extract_raw_ptr(buffer);
+        let offset = BuiltInTypes::untag(offset);
+        let value = BuiltInTypes::untag(value) as i64;
+        *(buffer.add(offset) as *mut i64) = value;
+        BuiltInTypes::null_value() as usize
+    }
+}
+
+pub unsafe extern "C" fn ffi_get_i64(buffer: usize, offset: usize) -> usize {
+    unsafe {
+        let buffer = extract_raw_ptr(buffer);
+        let offset = BuiltInTypes::untag(offset);
+        let value = *(buffer.add(offset) as *const i64);
+        BuiltInTypes::Int.tag(value as isize) as usize
+    }
+}
+
+pub unsafe extern "C" fn ffi_set_u64(buffer: usize, offset: usize, value: usize) -> usize {
+    unsafe {
+        let buffer = extract_raw_ptr(buffer);
+        let offset = BuiltInTypes::untag(offset);
+        let value = BuiltInTypes::untag(value) as u64;
+        *(buffer.add(offset) as *mut u64) = value;
+        BuiltInTypes::null_value() as usize
+    }
+}
+
+pub unsafe extern "C" fn ffi_get_u64(buffer: usize, offset: usize) -> usize {
+    unsafe {
+        let buffer = extract_raw_ptr(buffer);
+        let offset = BuiltInTypes::untag(offset);
+        let value = *(buffer.add(offset) as *const u64);
+        BuiltInTypes::Int.tag(value as isize) as usize
+    }
+}
+
+/// Extract an f64 value from a Beagle Int or Float.
+/// Throws FFIError for any other type.
+unsafe fn ffi_value_as_f64(stack_pointer: usize, value: usize) -> f64 {
+    match BuiltInTypes::get_kind(value) {
+        BuiltInTypes::Int => BuiltInTypes::untag(value) as i64 as f64,
+        BuiltInTypes::Float => {
+            let ptr = BuiltInTypes::untag(value) as *const f64;
+            unsafe { *ptr.add(1) }
+        }
+        kind => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "FFIError",
+                format!("Expected Int or Float, got {:?}", kind),
+            );
+        },
+    }
+}
+
+pub unsafe extern "C" fn ffi_set_f32(
+    stack_pointer: usize,
+    _frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+    value: usize,
+) -> usize {
+    unsafe {
+        let buffer = extract_raw_ptr(buffer);
+        let offset = BuiltInTypes::untag(offset);
+        let f64_val = ffi_value_as_f64(stack_pointer, value);
+        *(buffer.add(offset) as *mut f32) = f64_val as f32;
+        BuiltInTypes::null_value() as usize
+    }
+}
+
+pub unsafe extern "C" fn ffi_set_f64(
+    stack_pointer: usize,
+    _frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+    value: usize,
+) -> usize {
+    unsafe {
+        let buffer = extract_raw_ptr(buffer);
+        let offset = BuiltInTypes::untag(offset);
+        let f64_val = ffi_value_as_f64(stack_pointer, value);
+        *(buffer.add(offset) as *mut f64) = f64_val;
+        BuiltInTypes::null_value() as usize
+    }
+}
+
+pub unsafe extern "C" fn ffi_get_f32(
+    stack_pointer: usize,
+    _frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+) -> usize {
+    unsafe {
+        let runtime = get_runtime().get_mut();
+        let buffer_ptr = extract_raw_ptr(buffer);
+        let offset_val = BuiltInTypes::untag(offset);
+        let f32_val = *(buffer_ptr.add(offset_val) as *const f32);
+        let f64_val = f32_val as f64;
+        let new_float_ptr = match (*runtime).allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate Float for get-f32 - out of memory".to_string(),
+                );
+            }
+        };
+        let untagged = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged as *mut f64;
+        *result_ptr.add(1) = f64_val;
+        new_float_ptr
+    }
+}
+
+pub unsafe extern "C" fn ffi_get_f64(
+    stack_pointer: usize,
+    _frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+) -> usize {
+    unsafe {
+        let runtime = get_runtime().get_mut();
+        let buffer_ptr = extract_raw_ptr(buffer);
+        let offset_val = BuiltInTypes::untag(offset);
+        let f64_val = *(buffer_ptr.add(offset_val) as *const f64);
+        let new_float_ptr = match (*runtime).allocate(1, stack_pointer, BuiltInTypes::Float) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    "Failed to allocate Float for get-f64 - out of memory".to_string(),
+                );
+            }
+        };
+        let untagged = BuiltInTypes::untag(new_float_ptr);
+        let result_ptr = untagged as *mut f64;
+        *result_ptr.add(1) = f64_val;
+        new_float_ptr
+    }
+}
+
 pub unsafe extern "C" fn ffi_get_string(
     stack_pointer: usize,
     _frame_pointer: usize, // Frame pointer for GC stack walking
@@ -2518,8 +2764,20 @@ pub unsafe extern "C" fn ffi_create_array(
                     let val = BuiltInTypes::untag(*field) as u64;
                     buffer.push(val as *mut i8);
                 }
+                FFIType::I8 => {
+                    let val = BuiltInTypes::untag(*field) as i8;
+                    buffer.push(val as *mut i8);
+                }
+                FFIType::I16 => {
+                    let val = BuiltInTypes::untag(*field) as i16;
+                    buffer.push(val as *mut i8);
+                }
                 FFIType::I32 => {
                     let val = BuiltInTypes::untag(*field) as i32;
+                    buffer.push(val as *mut i8);
+                }
+                FFIType::I64 => {
+                    let val = BuiltInTypes::untag(*field) as i64;
                     buffer.push(val as *mut i8);
                 }
                 FFIType::F32 => {
