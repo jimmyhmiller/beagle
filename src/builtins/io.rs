@@ -2,8 +2,11 @@ use super::*;
 use crate::save_gc_context;
 
 pub unsafe extern "C" fn println_value(value: usize) -> usize {
-    if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
-        eprintln!("[println_value] arg={:#x}", value);
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
+            eprintln!("[println_value] arg={:#x}", value);
+        }
     }
     let runtime = get_runtime().get_mut();
     let result = runtime.println(value);

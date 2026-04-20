@@ -16,37 +16,40 @@ pub extern "C" fn make_closure(
     num_free: usize,
     free_variable_pointer: usize,
 ) -> usize {
-    if std::env::var("BEAGLE_DEBUG_MAKE_CLOSURE_FRAME").is_ok() {
-        let gc_top = get_gc_frame_top();
-        let saved_fp = unsafe { *(frame_pointer as *const usize) };
-        let return_addr = unsafe { *((frame_pointer + 8) as *const usize) };
-        if let Some((function, offset)) = get_runtime()
-            .get()
-            .get_function_containing_pointer(return_addr as *const u8)
-        {
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var("BEAGLE_DEBUG_MAKE_CLOSURE_FRAME").is_ok() {
+            let gc_top = get_gc_frame_top();
+            let saved_fp = unsafe { *(frame_pointer as *const usize) };
+            let return_addr = unsafe { *((frame_pointer + 8) as *const usize) };
+            if let Some((function, offset)) = get_runtime()
+                .get()
+                .get_function_containing_pointer(return_addr as *const u8)
+            {
+                eprintln!(
+                    "[make_closure-frame] sp={:#x} fp={:#x} saved_fp={:#x} ret={:#x} caller={}+{:#x}",
+                    stack_pointer, frame_pointer, saved_fp, return_addr, function.name, offset
+                );
+            } else {
+                eprintln!(
+                    "[make_closure-frame] sp={:#x} fp={:#x} saved_fp={:#x} ret={:#x}",
+                    stack_pointer, frame_pointer, saved_fp, return_addr
+                );
+            }
             eprintln!(
-                "[make_closure-frame] sp={:#x} fp={:#x} saved_fp={:#x} ret={:#x} caller={}+{:#x}",
-                stack_pointer, frame_pointer, saved_fp, return_addr, function.name, offset
+                "[make_closure-frame] fp_slots prev={:#x} header={:#x} local0={:#x}",
+                unsafe { *((frame_pointer - 16) as *const usize) },
+                unsafe { *((frame_pointer - 8) as *const usize) },
+                unsafe { *((frame_pointer - 24) as *const usize) },
             );
-        } else {
-            eprintln!(
-                "[make_closure-frame] sp={:#x} fp={:#x} saved_fp={:#x} ret={:#x}",
-                stack_pointer, frame_pointer, saved_fp, return_addr
-            );
-        }
-        eprintln!(
-            "[make_closure-frame] fp_slots prev={:#x} header={:#x} local0={:#x}",
-            unsafe { *((frame_pointer - 16) as *const usize) },
-            unsafe { *((frame_pointer - 8) as *const usize) },
-            unsafe { *((frame_pointer - 24) as *const usize) },
-        );
-        if gc_top != 0 {
-            let gc_top_fp = gc_top + 8;
-            let gc_top_ret = unsafe { *((gc_top_fp + 8) as *const usize) };
-            eprintln!(
-                "[make_closure-frame] gc_top={:#x} gc_top_fp={:#x} gc_top_ret={:#x}",
-                gc_top, gc_top_fp, gc_top_ret
-            );
+            if gc_top != 0 {
+                let gc_top_fp = gc_top + 8;
+                let gc_top_ret = unsafe { *((gc_top_fp + 8) as *const usize) };
+                eprintln!(
+                    "[make_closure-frame] gc_top={:#x} gc_top_fp={:#x} gc_top_ret={:#x}",
+                    gc_top, gc_top_fp, gc_top_ret
+                );
+            }
         }
     }
     save_gc_context!(stack_pointer, frame_pointer);
@@ -197,6 +200,7 @@ pub extern "C" fn property_access(
     }
 
     let runtime = get_runtime().get_mut();
+    #[cfg(debug_assertions)]
     let pre_result = if std::env::var("BEAGLE_DEBUG_PROPERTY_ACCESS").is_ok() {
         HeapObject::try_from_tagged(struct_pointer).map(|obj| obj.get_field(0))
     } else {
@@ -207,44 +211,52 @@ pub extern "C" fn property_access(
         .unwrap_or_else(|error| unsafe {
             throw_runtime_error(stack_pointer, "FieldError", error.to_string());
         });
-    if std::env::var("BEAGLE_DEBUG_PROPERTY_ACCESS").is_ok() {
-        let str_constant_idx = BuiltInTypes::untag(str_constant_ptr);
-        let property_name = runtime.string_constants[str_constant_idx].str.clone();
-        if property_name == "v" {
-            let pre_header = HeapObject::try_from_tagged(struct_pointer).map(|obj| {
-                let raw_header = unsafe { *(obj.untagged() as *const usize) };
-                let header = obj.get_header();
-                (
-                    raw_header,
-                    header.marked,
-                    header.opaque,
-                    header.large,
-                    obj.get_struct_id(),
-                )
-            });
-            let struct_name = HeapObject::try_from_tagged(struct_pointer)
-                .and_then(|obj| runtime.get_struct_by_id(obj.get_struct_id()))
-                .map(|def| def.name.clone())
-                .unwrap_or_else(|| "<unknown>".to_string());
-            let post_result =
-                HeapObject::try_from_tagged(struct_pointer).map(|obj| obj.get_field(0));
-            eprintln!(
-                "[property_access] struct={} object={:#x} property={} pre={:?} header={:?} result={:#x} post={:?} index={}",
-                struct_name,
-                struct_pointer,
-                property_name,
-                pre_result,
-                pre_header,
-                result,
-                post_result,
-                index
-            );
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var("BEAGLE_DEBUG_PROPERTY_ACCESS").is_ok() {
+            let str_constant_idx = BuiltInTypes::untag(str_constant_ptr);
+            let property_name = runtime.string_constants[str_constant_idx].str.clone();
+            if property_name == "v" {
+                let pre_header = HeapObject::try_from_tagged(struct_pointer).map(|obj| {
+                    let raw_header = unsafe { *(obj.untagged() as *const usize) };
+                    let header = obj.get_header();
+                    (
+                        raw_header,
+                        header.marked,
+                        header.opaque,
+                        header.large,
+                        obj.get_struct_id(),
+                    )
+                });
+                let struct_name = HeapObject::try_from_tagged(struct_pointer)
+                    .and_then(|obj| runtime.get_struct_by_id(obj.get_struct_id()))
+                    .map(|def| def.name.clone())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                let post_result =
+                    HeapObject::try_from_tagged(struct_pointer).map(|obj| obj.get_field(0));
+                eprintln!(
+                    "[property_access] struct={} object={:#x} property={} pre={:?} header={:?} result={:#x} post={:?} index={}",
+                    struct_name,
+                    struct_pointer,
+                    property_name,
+                    pre_result,
+                    pre_header,
+                    result,
+                    post_result,
+                    index
+                );
+            }
         }
     }
     // Don't cache if:
     // - field_index is usize::MAX (field was added after object creation, returned null)
     // - object has an old layout version (its field offsets differ from current layout)
-    if index != usize::MAX && std::env::var("BEAGLE_DISABLE_PROPERTY_CACHE").is_err() {
+    #[cfg(debug_assertions)]
+    let should_cache =
+        index != usize::MAX && std::env::var("BEAGLE_DISABLE_PROPERTY_CACHE").is_err();
+    #[cfg(not(debug_assertions))]
+    let should_cache = index != usize::MAX;
+    if should_cache {
         let heap_obj = HeapObject::from_tagged(struct_pointer);
         let layout_version = heap_obj.get_layout_version();
         let struct_id = heap_obj.get_struct_id();

@@ -179,6 +179,7 @@ impl StackWalker {
                         header_addr, frame_pointer, return_addr, saved_fp, prev_value, slot_preview
                     );
                 }
+                #[cfg(debug_assertions)]
                 crate::builtins::dump_gc_chain_trace();
                 panic!(
                     "BUG: misaligned GC prev pointer {:#x} from frame header {:#x}",

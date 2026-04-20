@@ -1,6 +1,9 @@
+#[cfg(debug_assertions)]
+use std::cell::RefCell;
+#[cfg(debug_assertions)]
+use std::collections::VecDeque;
 use std::{
-    cell::{Cell, RefCell},
-    collections::VecDeque,
+    cell::Cell,
     error::Error,
     ffi::{CStr, c_void},
     mem::{self, transmute},
@@ -8,16 +11,20 @@ use std::{
     thread,
 };
 
+#[cfg(debug_assertions)]
+use crate::collections::TYPE_ID_FRAME;
+#[cfg(debug_assertions)]
+use crate::types::Header;
 use crate::{
     Message,
     collections::{
-        GcHandle, PersistentVec, TYPE_ID_CONS_STRING, TYPE_ID_FRAME, TYPE_ID_KEYWORD,
+        GcHandle, PersistentVec, TYPE_ID_CONS_STRING, TYPE_ID_KEYWORD,
         TYPE_ID_MULTI_ARITY_FUNCTION, TYPE_ID_STRING, TYPE_ID_STRING_SLICE,
     },
     gc::STACK_SIZE,
     get_runtime,
     runtime::{DispatchTable, FFIInfo, FFIType, RawPtr, Runtime},
-    types::{BuiltInTypes, Header, HeapObject},
+    types::{BuiltInTypes, HeapObject},
 };
 
 // FileResultData is used in local imports where needed
@@ -49,6 +56,7 @@ thread_local! {
 // continuation frames are naturally excluded/included.
 thread_local! {
     static GC_FRAME_TOP: Cell<usize> = const { Cell::new(0) };
+    #[cfg(debug_assertions)]
     static GC_CHAIN_TRACE: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
 }
 
@@ -162,51 +170,54 @@ pub fn get_gc_frame_top() -> usize {
 /// Set the GC frame top directly.
 /// Used when restoring continuation frames into the GC chain.
 pub fn set_gc_frame_top(v: usize) {
-    if std::env::var("BEAGLE_DEBUG_GC_CHAIN_TRACE").is_ok() {
-        if v == 0 {
-            gc_frame::record_gc_chain_event("set_gc_frame_top header=0x0".to_string());
-        } else {
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var("BEAGLE_DEBUG_GC_CHAIN_TRACE").is_ok() {
+            if v == 0 {
+                gc_frame::record_gc_chain_event("set_gc_frame_top header=0x0".to_string());
+            } else {
+                let header = Header::from_usize(unsafe { *(v as *const usize) });
+                let fp = v + 8;
+                let saved_fp = unsafe { *(fp as *const usize) };
+                let return_addr = unsafe { *((fp + 8) as *const usize) };
+                let function = crate::get_runtime()
+                    .get()
+                    .get_function_containing_pointer(return_addr as *const u8)
+                    .map(|(function, offset)| format!(" {}+{:#x}", function.name, offset))
+                    .unwrap_or_default();
+                gc_frame::record_gc_chain_event(format!(
+                    "set_gc_frame_top header={:#x} fp={:#x} type_id={} size={} saved_fp={:#x} ret={:#x}{}",
+                    v, fp, header.type_id, header.size, saved_fp, return_addr, function
+                ));
+            }
+        }
+        if std::env::var("BEAGLE_DEBUG_GC_CHAIN_WRITES").is_ok() && v != 0 {
             let header = Header::from_usize(unsafe { *(v as *const usize) });
             let fp = v + 8;
             let saved_fp = unsafe { *(fp as *const usize) };
             let return_addr = unsafe { *((fp + 8) as *const usize) };
-            let function = crate::get_runtime()
-                .get()
-                .get_function_containing_pointer(return_addr as *const u8)
-                .map(|(function, offset)| format!(" {}+{:#x}", function.name, offset))
-                .unwrap_or_default();
-            gc_frame::record_gc_chain_event(format!(
-                "set_gc_frame_top header={:#x} fp={:#x} type_id={} size={} saved_fp={:#x} ret={:#x}{}",
-                v, fp, header.type_id, header.size, saved_fp, return_addr, function
-            ));
-        }
-    }
-    if std::env::var("BEAGLE_DEBUG_GC_CHAIN_WRITES").is_ok() && v != 0 {
-        let header = Header::from_usize(unsafe { *(v as *const usize) });
-        let fp = v + 8;
-        let saved_fp = unsafe { *(fp as *const usize) };
-        let return_addr = unsafe { *((fp + 8) as *const usize) };
-        if header.type_id != TYPE_ID_FRAME || saved_fp == 0 || return_addr < 0x1000 {
-            if let Some((function, offset)) = crate::get_runtime()
-                .get()
-                .get_function_containing_pointer(return_addr as *const u8)
-            {
-                eprintln!(
-                    "[gc-top-write] via=set_gc_frame_top header={:#x} fp={:#x} type_id={} size={} saved_fp={:#x} ret={:#x} fn={}+{:#x}",
-                    v,
-                    fp,
-                    header.type_id,
-                    header.size,
-                    saved_fp,
-                    return_addr,
-                    function.name,
-                    offset
-                );
-            } else {
-                eprintln!(
-                    "[gc-top-write] via=set_gc_frame_top header={:#x} fp={:#x} type_id={} size={} saved_fp={:#x} ret={:#x}",
-                    v, fp, header.type_id, header.size, saved_fp, return_addr
-                );
+            if header.type_id != TYPE_ID_FRAME || saved_fp == 0 || return_addr < 0x1000 {
+                if let Some((function, offset)) = crate::get_runtime()
+                    .get()
+                    .get_function_containing_pointer(return_addr as *const u8)
+                {
+                    eprintln!(
+                        "[gc-top-write] via=set_gc_frame_top header={:#x} fp={:#x} type_id={} size={} saved_fp={:#x} ret={:#x} fn={}+{:#x}",
+                        v,
+                        fp,
+                        header.type_id,
+                        header.size,
+                        saved_fp,
+                        return_addr,
+                        function.name,
+                        offset
+                    );
+                } else {
+                    eprintln!(
+                        "[gc-top-write] via=set_gc_frame_top header={:#x} fp={:#x} type_id={} size={} saved_fp={:#x} ret={:#x}",
+                        v, fp, header.type_id, header.size, saved_fp, return_addr
+                    );
+                }
             }
         }
     }

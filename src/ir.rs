@@ -1645,44 +1645,47 @@ impl Ir {
 
         let mut linear_scan = LinearScan::new(self.instructions.clone(), self.num_locals);
         linear_scan.allocate();
-        if std::env::var("BEAGLE_DEBUG_ROOT_SLOTS").is_ok() {
-            eprintln!(
-                "[root-slots] function={} pre_num_locals={} post_stack_slot={} instructions={}",
-                self.debug_name.as_deref().unwrap_or("<anonymous>"),
-                self.num_locals,
-                linear_scan.stack_slot,
-                linear_scan.instructions.len()
-            );
-            let mut entries: Vec<_> = linear_scan
-                .root_slots
-                .iter()
-                .map(|(reg, slot)| {
-                    let lifetime = linear_scan.lifetimes.get(reg).copied().unwrap_or((0, 0));
-                    (
-                        *slot,
-                        reg.index,
-                        reg.argument,
-                        reg.is_physical,
-                        lifetime.0,
-                        lifetime.1,
-                    )
-                })
-                .collect();
-            entries.sort();
-            for (slot, reg_index, argument, is_physical, start, end) in entries {
+        #[cfg(debug_assertions)]
+        {
+            if std::env::var("BEAGLE_DEBUG_ROOT_SLOTS").is_ok() {
                 eprintln!(
-                    "[root-slot] slot={} reg={} arg={:?} physical={} lifetime={}..{}",
-                    slot, reg_index, argument, is_physical, start, end
+                    "[root-slots] function={} pre_num_locals={} post_stack_slot={} instructions={}",
+                    self.debug_name.as_deref().unwrap_or("<anonymous>"),
+                    self.num_locals,
+                    linear_scan.stack_slot,
+                    linear_scan.instructions.len()
                 );
+                let mut entries: Vec<_> = linear_scan
+                    .root_slots
+                    .iter()
+                    .map(|(reg, slot)| {
+                        let lifetime = linear_scan.lifetimes.get(reg).copied().unwrap_or((0, 0));
+                        (
+                            *slot,
+                            reg.index,
+                            reg.argument,
+                            reg.is_physical,
+                            lifetime.0,
+                            lifetime.1,
+                        )
+                    })
+                    .collect();
+                entries.sort();
+                for (slot, reg_index, argument, is_physical, start, end) in entries {
+                    eprintln!(
+                        "[root-slot] slot={} reg={} arg={:?} physical={} lifetime={}..{}",
+                        slot, reg_index, argument, is_physical, start, end
+                    );
+                }
             }
-        }
-        if std::env::var("BEAGLE_DEBUG_POST_ALLOC_IR").is_ok() {
-            eprintln!(
-                "[post-alloc-ir] function={}",
-                self.debug_name.as_deref().unwrap_or("<anonymous>")
-            );
-            for (index, instruction) in linear_scan.instructions.iter().enumerate() {
-                eprintln!("{:04}: {}", index, instruction.pretty_print());
+            if std::env::var("BEAGLE_DEBUG_POST_ALLOC_IR").is_ok() {
+                eprintln!(
+                    "[post-alloc-ir] function={}",
+                    self.debug_name.as_deref().unwrap_or("<anonymous>")
+                );
+                for (index, instruction) in linear_scan.instructions.iter().enumerate() {
+                    eprintln!("{:04}: {}", index, instruction.pretty_print());
+                }
             }
         }
 

@@ -1317,18 +1317,21 @@ impl AstCompiler<'_> {
                 let mut backend = self.ir.compile(backend, error_fn_pointer);
                 let token_map = self.ir.ir_range_to_token_range.clone();
 
-                if let Some(filter) = std::env::var("BEAGLE_DEBUG_IR_FILTER").ok()
-                    && full_function_name
-                        .as_deref()
-                        .map(|function_name| function_name.contains(&filter))
-                        .unwrap_or(true)
+                #[cfg(debug_assertions)]
                 {
-                    eprintln!(
-                        "[ir_dump] function={}",
-                        full_function_name.as_deref().unwrap_or("<anonymous>")
-                    );
-                    for instruction in self.ir.instructions.iter() {
-                        eprintln!("{}", instruction.pretty_print());
+                    if let Some(filter) = std::env::var("BEAGLE_DEBUG_IR_FILTER").ok()
+                        && full_function_name
+                            .as_deref()
+                            .map(|function_name| function_name.contains(&filter))
+                            .unwrap_or(true)
+                    {
+                        eprintln!(
+                            "[ir_dump] function={}",
+                            full_function_name.as_deref().unwrap_or("<anonymous>")
+                        );
+                        for instruction in self.ir.instructions.iter() {
+                            eprintln!("{}", instruction.pretty_print());
+                        }
                     }
                 }
 

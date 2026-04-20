@@ -915,28 +915,31 @@ impl GenerationalGC {
                             i,
                             self.young.allocation_offset(),
                         );
-                        if std::env::var("BEAGLE_DEBUG_PROMOTION").is_ok() {
-                            let pointer = field_obj.untagged() as *const usize;
-                            let raw_header = unsafe { *pointer };
-                            let header = Header::from_usize(raw_header);
-                            let large_size_words = if header.large {
-                                Some(unsafe { *pointer.add(1) })
-                            } else {
-                                None
-                            };
-                            if large_size_words.is_some_and(|words| words > (1024 * 1024)) {
-                                eprintln!(
-                                    "[promotion-old-field] container_type={} container={:#x} field_index={} field={:#x} raw_header={:#x} type_id={} inline_size={} large_size_words={:?} opaque={}",
-                                    container_type_id,
-                                    container_untagged,
-                                    i,
-                                    *field,
-                                    raw_header,
-                                    header.type_id,
-                                    header.size,
-                                    large_size_words,
-                                    header.opaque
-                                );
+                        #[cfg(debug_assertions)]
+                        {
+                            if std::env::var("BEAGLE_DEBUG_PROMOTION").is_ok() {
+                                let pointer = field_obj.untagged() as *const usize;
+                                let raw_header = unsafe { *pointer };
+                                let header = Header::from_usize(raw_header);
+                                let large_size_words = if header.large {
+                                    Some(unsafe { *pointer.add(1) })
+                                } else {
+                                    None
+                                };
+                                if large_size_words.is_some_and(|words| words > (1024 * 1024)) {
+                                    eprintln!(
+                                        "[promotion-old-field] container_type={} container={:#x} field_index={} field={:#x} raw_header={:#x} type_id={} inline_size={} large_size_words={:?} opaque={}",
+                                        container_type_id,
+                                        container_untagged,
+                                        i,
+                                        *field,
+                                        raw_header,
+                                        header.type_id,
+                                        header.size,
+                                        large_size_words,
+                                        header.opaque
+                                    );
+                                }
                             }
                         }
                         #[cfg(feature = "debug-gc")]
@@ -965,28 +968,31 @@ impl GenerationalGC {
                     slot_addr,
                     self.young.allocation_offset(),
                 );
-                if std::env::var("BEAGLE_DEBUG_PROMOTION").is_ok() {
-                    let pointer = untagged as *const usize;
-                    let raw_header = unsafe { *pointer };
-                    let header = Header::from_usize(raw_header);
-                    let large_size_words = if header.large {
-                        Some(unsafe { *pointer.add(1) })
-                    } else {
-                        None
-                    };
-                    if large_size_words.is_some_and(|words| words > (1024 * 1024)) {
-                        eprintln!(
-                            "[promotion-old-segment] container_type={} container={:#x} slot_addr={:#x} slot_value={:#x} raw_header={:#x} type_id={} inline_size={} large_size_words={:?} opaque={}",
-                            container_type_id,
-                            container_untagged,
-                            slot_addr,
-                            slot_value,
-                            raw_header,
-                            header.type_id,
-                            header.size,
-                            large_size_words,
-                            header.opaque
-                        );
+                #[cfg(debug_assertions)]
+                {
+                    if std::env::var("BEAGLE_DEBUG_PROMOTION").is_ok() {
+                        let pointer = untagged as *const usize;
+                        let raw_header = unsafe { *pointer };
+                        let header = Header::from_usize(raw_header);
+                        let large_size_words = if header.large {
+                            Some(unsafe { *pointer.add(1) })
+                        } else {
+                            None
+                        };
+                        if large_size_words.is_some_and(|words| words > (1024 * 1024)) {
+                            eprintln!(
+                                "[promotion-old-segment] container_type={} container={:#x} slot_addr={:#x} slot_value={:#x} raw_header={:#x} type_id={} inline_size={} large_size_words={:?} opaque={}",
+                                container_type_id,
+                                container_untagged,
+                                slot_addr,
+                                slot_value,
+                                raw_header,
+                                header.type_id,
+                                header.size,
+                                large_size_words,
+                                header.opaque
+                            );
+                        }
                     }
                 }
                 unsafe {
@@ -1028,25 +1034,28 @@ impl GenerationalGC {
             return result;
         }
 
-        if std::env::var("BEAGLE_DEBUG_PROMOTION").is_ok() {
-            let header = Header::from_usize(header_data);
-            let large_size_words = if header.large {
-                Some(unsafe { *pointer.add(1) })
-            } else {
-                None
-            };
-            if large_size_words.is_some_and(|words| words > (1024 * 1024)) {
-                eprintln!(
-                    "[promotion-raw] root={:#x} tag={:?} ptr={:#x} raw_header={:#x} type_id={} inline_size={} large_size_words={:?} opaque={}",
-                    root,
-                    tag,
-                    heap_object.untagged(),
-                    header_data,
-                    header.type_id,
-                    header.size,
-                    large_size_words,
-                    header.opaque
-                );
+        #[cfg(debug_assertions)]
+        {
+            if std::env::var("BEAGLE_DEBUG_PROMOTION").is_ok() {
+                let header = Header::from_usize(header_data);
+                let large_size_words = if header.large {
+                    Some(unsafe { *pointer.add(1) })
+                } else {
+                    None
+                };
+                if large_size_words.is_some_and(|words| words > (1024 * 1024)) {
+                    eprintln!(
+                        "[promotion-raw] root={:#x} tag={:?} ptr={:#x} raw_header={:#x} type_id={} inline_size={} large_size_words={:?} opaque={}",
+                        root,
+                        tag,
+                        heap_object.untagged(),
+                        header_data,
+                        header.type_id,
+                        header.size,
+                        large_size_words,
+                        header.opaque
+                    );
+                }
             }
         }
 
@@ -1185,28 +1194,31 @@ impl GenerationalGC {
                             fields,
                         );
                     }
-                    if std::env::var("BEAGLE_DEBUG_PROMOTION").is_ok() {
-                        let pointer = heap_obj.untagged() as *const usize;
-                        let raw_header = unsafe { *pointer };
-                        let header = Header::from_usize(raw_header);
-                        let large_size_words = if header.large {
-                            Some(unsafe { *pointer.add(1) })
-                        } else {
-                            None
-                        };
-                        if large_size_words.is_some_and(|words| words > (1024 * 1024)) {
-                            eprintln!(
-                                "[promotion-field] container_type={} container={:#x} field_index={} field={:#x} raw_header={:#x} type_id={} inline_size={} large_size_words={:?} opaque={}",
-                                container_type_id,
-                                container_untagged,
-                                field_index,
-                                *field,
-                                raw_header,
-                                header.type_id,
-                                header.size,
-                                large_size_words,
-                                header.opaque
-                            );
+                    #[cfg(debug_assertions)]
+                    {
+                        if std::env::var("BEAGLE_DEBUG_PROMOTION").is_ok() {
+                            let pointer = heap_obj.untagged() as *const usize;
+                            let raw_header = unsafe { *pointer };
+                            let header = Header::from_usize(raw_header);
+                            let large_size_words = if header.large {
+                                Some(unsafe { *pointer.add(1) })
+                            } else {
+                                None
+                            };
+                            if large_size_words.is_some_and(|words| words > (1024 * 1024)) {
+                                eprintln!(
+                                    "[promotion-field] container_type={} container={:#x} field_index={} field={:#x} raw_header={:#x} type_id={} inline_size={} large_size_words={:?} opaque={}",
+                                    container_type_id,
+                                    container_untagged,
+                                    field_index,
+                                    *field,
+                                    raw_header,
+                                    header.type_id,
+                                    header.size,
+                                    large_size_words,
+                                    header.opaque
+                                );
+                            }
                         }
                     }
                     #[cfg(feature = "debug-gc")]
@@ -1227,28 +1239,31 @@ impl GenerationalGC {
                         slot_addr,
                         self.young.allocation_offset(),
                     );
-                    if std::env::var("BEAGLE_DEBUG_PROMOTION").is_ok() {
-                        let pointer = untagged as *const usize;
-                        let raw_header = unsafe { *pointer };
-                        let header = Header::from_usize(raw_header);
-                        let large_size_words = if header.large {
-                            Some(unsafe { *pointer.add(1) })
-                        } else {
-                            None
-                        };
-                        if large_size_words.is_some_and(|words| words > (1024 * 1024)) {
-                            eprintln!(
-                                "[promotion-segment-slot] container_type={} container={:#x} slot_addr={:#x} slot_value={:#x} raw_header={:#x} type_id={} inline_size={} large_size_words={:?} opaque={}",
-                                container_type_id,
-                                container_untagged,
-                                slot_addr,
-                                slot_value,
-                                raw_header,
-                                header.type_id,
-                                header.size,
-                                large_size_words,
-                                header.opaque
-                            );
+                    #[cfg(debug_assertions)]
+                    {
+                        if std::env::var("BEAGLE_DEBUG_PROMOTION").is_ok() {
+                            let pointer = untagged as *const usize;
+                            let raw_header = unsafe { *pointer };
+                            let header = Header::from_usize(raw_header);
+                            let large_size_words = if header.large {
+                                Some(unsafe { *pointer.add(1) })
+                            } else {
+                                None
+                            };
+                            if large_size_words.is_some_and(|words| words > (1024 * 1024)) {
+                                eprintln!(
+                                    "[promotion-segment-slot] container_type={} container={:#x} slot_addr={:#x} slot_value={:#x} raw_header={:#x} type_id={} inline_size={} large_size_words={:?} opaque={}",
+                                    container_type_id,
+                                    container_untagged,
+                                    slot_addr,
+                                    slot_value,
+                                    raw_header,
+                                    header.type_id,
+                                    header.size,
+                                    large_size_words,
+                                    header.opaque
+                                );
+                            }
                         }
                     }
                     unsafe {
@@ -1268,23 +1283,26 @@ impl GenerationalGC {
         usdt_probes::fire_gc_full_start(self.gc_count);
         self.minor_gc(gc_frame_tops, extra_roots);
         self.old.gc(gc_frame_tops, extra_roots);
-        if std::env::var("BEAGLE_DEBUG_CONT_LIVE").is_ok() {
-            let mut continuation_count = 0usize;
-            let mut continuation_segment_bytes = 0usize;
-            self.old.walk_objects_mut(|_, heap_obj| {
-                let object = HeapObject::from_untagged(heap_obj.untagged() as *const u8);
-                if let Some(cont) = ContinuationObject::from_heap_object(object) {
-                    continuation_count += 1;
-                    continuation_segment_bytes += cont.segment_size();
-                }
-            });
-            eprintln!(
-                "[cont-live] gc_count={} continuations={} segment_bytes={} old_free={}",
-                self.gc_count,
-                continuation_count,
-                continuation_segment_bytes,
-                self.old.free_bytes()
-            );
+        #[cfg(debug_assertions)]
+        {
+            if std::env::var("BEAGLE_DEBUG_CONT_LIVE").is_ok() {
+                let mut continuation_count = 0usize;
+                let mut continuation_segment_bytes = 0usize;
+                self.old.walk_objects_mut(|_, heap_obj| {
+                    let object = HeapObject::from_untagged(heap_obj.untagged() as *const u8);
+                    if let Some(cont) = ContinuationObject::from_heap_object(object) {
+                        continuation_count += 1;
+                        continuation_segment_bytes += cont.segment_size();
+                    }
+                });
+                eprintln!(
+                    "[cont-live] gc_count={} continuations={} segment_bytes={} old_free={}",
+                    self.gc_count,
+                    continuation_count,
+                    continuation_segment_bytes,
+                    self.old.free_bytes()
+                );
+            }
         }
         usdt_probes::fire_gc_full_end(self.gc_count);
     }

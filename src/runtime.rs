@@ -149,14 +149,17 @@ impl GlobalObjectBlock {
     pub fn set_entry(&self, index: usize, value: usize) {
         debug_assert!(index < GLOBAL_BLOCK_SIZE);
         let heap_obj = HeapObject::from_tagged(self.ptr);
-        if std::env::var("BEAGLE_DEBUG_ROOT_SLOT2").is_ok() && index == 2 {
-            eprintln!(
-                "[global-block:set-entry] block={:#x} index={} value={:#x} kind={:?}",
-                self.ptr,
-                index,
-                value,
-                BuiltInTypes::get_kind(value)
-            );
+        #[cfg(debug_assertions)]
+        {
+            if std::env::var("BEAGLE_DEBUG_ROOT_SLOT2").is_ok() && index == 2 {
+                eprintln!(
+                    "[global-block:set-entry] block={:#x} index={} value={:#x} kind={:?}",
+                    self.ptr,
+                    index,
+                    value,
+                    BuiltInTypes::get_kind(value)
+                );
+            }
         }
         heap_obj.write_field((GLOBAL_BLOCK_HEADER_FIELDS + index) as i32, value);
         crate::get_runtime()
@@ -271,13 +274,16 @@ impl ThreadGlobal {
                 if block.is_entry_free(i) {
                     block.set_entry(i, value);
                     let slot = block_num * GLOBAL_BLOCK_SIZE + i;
-                    if std::env::var("BEAGLE_DEBUG_ROOT_SLOT2").is_ok() && slot == 2 {
-                        eprintln!(
-                            "[root-slot2:add] value={:#x} kind={:?}",
-                            value,
-                            BuiltInTypes::get_kind(value)
-                        );
-                        eprintln!("{:?}", std::backtrace::Backtrace::force_capture());
+                    #[cfg(debug_assertions)]
+                    {
+                        if std::env::var("BEAGLE_DEBUG_ROOT_SLOT2").is_ok() && slot == 2 {
+                            eprintln!(
+                                "[root-slot2:add] value={:#x} kind={:?}",
+                                value,
+                                BuiltInTypes::get_kind(value)
+                            );
+                            eprintln!("{:?}", std::backtrace::Backtrace::force_capture());
+                        }
                     }
                     self.next_free_slot = slot + 1;
                     return Some(slot);
@@ -295,12 +301,15 @@ impl ThreadGlobal {
     pub fn remove_root(&mut self, slot: usize) -> usize {
         let (block, index) = self.find_slot(slot);
         let value = block.get_entry(index);
-        if std::env::var("BEAGLE_DEBUG_ROOT_SLOT2").is_ok() && slot == 2 {
-            eprintln!(
-                "[root-slot2:remove] value={:#x} kind={:?}",
-                value,
-                BuiltInTypes::get_kind(value)
-            );
+        #[cfg(debug_assertions)]
+        {
+            if std::env::var("BEAGLE_DEBUG_ROOT_SLOT2").is_ok() && slot == 2 {
+                eprintln!(
+                    "[root-slot2:remove] value={:#x} kind={:?}",
+                    value,
+                    BuiltInTypes::get_kind(value)
+                );
+            }
         }
         block.set_entry(index, GLOBAL_BLOCK_FREE_SLOT);
         // Update hint if this slot is earlier
@@ -2453,15 +2462,18 @@ impl EventLoopState {
             match result {
                 Ok(n) => {
                     buffer.truncate(n);
-                    if std::env::var("BEAGLE_DEBUG_TCP_PAYLOADS").is_ok() {
-                        eprintln!(
-                            "[tcp-read-ok] socket={} op_id={} bytes={} data={:?}",
-                            socket_id,
-                            op_id,
-                            n,
-                            std::str::from_utf8(&buffer[..buffer.len().min(120)])
-                                .unwrap_or("<binary>")
-                        );
+                    #[cfg(debug_assertions)]
+                    {
+                        if std::env::var("BEAGLE_DEBUG_TCP_PAYLOADS").is_ok() {
+                            eprintln!(
+                                "[tcp-read-ok] socket={} op_id={} bytes={} data={:?}",
+                                socket_id,
+                                op_id,
+                                n,
+                                std::str::from_utf8(&buffer[..buffer.len().min(120)])
+                                    .unwrap_or("<binary>")
+                            );
+                        }
                     }
                     trace!(
                         "tcp",
@@ -2539,16 +2551,19 @@ impl EventLoopState {
             match result {
                 Ok(n) => {
                     let total_written = bytes_written + n;
-                    if std::env::var("BEAGLE_DEBUG_TCP_PAYLOADS").is_ok() {
-                        let preview_end = total_written.min(data.len()).min(120);
-                        eprintln!(
-                            "[tcp-write] socket={} op_id={} wrote={}/{} data={:?}",
-                            socket_id,
-                            op_id,
-                            total_written,
-                            data.len(),
-                            std::str::from_utf8(&data[..preview_end]).unwrap_or("<binary>")
-                        );
+                    #[cfg(debug_assertions)]
+                    {
+                        if std::env::var("BEAGLE_DEBUG_TCP_PAYLOADS").is_ok() {
+                            let preview_end = total_written.min(data.len()).min(120);
+                            eprintln!(
+                                "[tcp-write] socket={} op_id={} wrote={}/{} data={:?}",
+                                socket_id,
+                                op_id,
+                                total_written,
+                                data.len(),
+                                std::str::from_utf8(&data[..preview_end]).unwrap_or("<binary>")
+                            );
+                        }
                     }
                     if total_written >= data.len() {
                         trace!(
@@ -4917,7 +4932,9 @@ impl Runtime {
         // Save the frame pointer so that any nested __pause calls use the correct address.
         crate::builtins::save_frame_pointer(frame_pointer);
 
+        #[cfg(debug_assertions)]
         let gc_probe_enabled = std::env::var("BEAGLE_DEBUG_GC_CALLER_SLOT0_FILE").ok();
+        #[cfg(debug_assertions)]
         let log_gc_probe = |phase: &str, frame_pointer: usize| {
             let Some(path) = gc_probe_enabled.as_deref() else {
                 return;
@@ -4971,6 +4988,8 @@ impl Runtime {
                 );
             }
         };
+        #[cfg(not(debug_assertions))]
+        let log_gc_probe = |_phase: &str, _frame_pointer: usize| {};
         log_gc_probe("before", frame_pointer);
 
         if self.memory.threads.len() == 1 {
@@ -5671,20 +5690,23 @@ impl Runtime {
             self.unregister_temporary_root(root);
         }
 
-        // Debug: Verify closure was created correctly
-        if std::env::var("BEAGLE_CLOSURE_DEBUG").is_ok() {
-            let verify_fn_ptr = heap_object.get_field(0);
-            if verify_fn_ptr != function {
-                eprintln!(
-                    "[CLOSURE_DEBUG] make_closure: MISMATCH! wrote fn={:#x} but read back {:#x}",
-                    function, verify_fn_ptr
-                );
-            }
-            if verify_fn_ptr == 0x7 {
-                eprintln!(
-                    "[CLOSURE_DEBUG] make_closure: CREATED WITH NULL fn_ptr! closure={:#x}",
-                    heap_pointer
-                );
+        #[cfg(debug_assertions)]
+        {
+            // Debug: Verify closure was created correctly
+            if std::env::var("BEAGLE_CLOSURE_DEBUG").is_ok() {
+                let verify_fn_ptr = heap_object.get_field(0);
+                if verify_fn_ptr != function {
+                    eprintln!(
+                        "[CLOSURE_DEBUG] make_closure: MISMATCH! wrote fn={:#x} but read back {:#x}",
+                        function, verify_fn_ptr
+                    );
+                }
+                if verify_fn_ptr == 0x7 {
+                    eprintln!(
+                        "[CLOSURE_DEBUG] make_closure: CREATED WITH NULL fn_ptr! closure={:#x}",
+                        heap_pointer
+                    );
+                }
             }
         }
 
@@ -5971,30 +5993,33 @@ impl Runtime {
         // Unregister closure temp root - Thread struct now holds the closure
         self.unregister_temporary_root(closure_temp_id);
 
-        if std::env::var("BEAGLE_THREAD_DEBUG").is_ok() {
-            let current_thread_obj = self.peek_temporary_root(thread_temp_id);
-            let heap_obj = HeapObject::from_tagged(current_thread_obj);
-            let closure_field = heap_obj.get_field(0);
-            eprintln!(
-                "[THREAD_DEBUG] new_thread: thread_obj={:#x} closure_field={:#x}",
-                current_thread_obj, closure_field
-            );
-            if BuiltInTypes::is_heap_pointer(closure_field)
-                && matches!(BuiltInTypes::get_kind(closure_field), BuiltInTypes::Closure)
-            {
-                let closure_obj = HeapObject::from_tagged(closure_field);
-                let fn_ptr = closure_obj.get_field(0);
-                let fn_ptr_untagged = BuiltInTypes::untag(fn_ptr);
-                if let Some(function) = self.get_function_by_pointer(fn_ptr_untagged as *const u8) {
-                    eprintln!(
-                        "[THREAD_DEBUG] new_thread: closure fn={} args={}",
-                        function.name, function.number_of_args
-                    );
-                } else {
-                    eprintln!(
-                        "[THREAD_DEBUG] new_thread: closure fn ptr not found: {:#x}",
-                        fn_ptr
-                    );
+        #[cfg(debug_assertions)]
+        {
+            if std::env::var("BEAGLE_THREAD_DEBUG").is_ok() {
+                let current_thread_obj = self.peek_temporary_root(thread_temp_id);
+                let heap_obj = HeapObject::from_tagged(current_thread_obj);
+                let closure_field = heap_obj.get_field(0);
+                eprintln!(
+                    "[THREAD_DEBUG] new_thread: thread_obj={:#x} closure_field={:#x}",
+                    current_thread_obj, closure_field
+                );
+                if BuiltInTypes::is_heap_pointer(closure_field)
+                    && matches!(BuiltInTypes::get_kind(closure_field), BuiltInTypes::Closure)
+                {
+                    let closure_obj = HeapObject::from_tagged(closure_field);
+                    let fn_ptr = closure_obj.get_field(0);
+                    let fn_ptr_untagged = BuiltInTypes::untag(fn_ptr);
+                    if let Some(function) = self.get_function_by_pointer(fn_ptr_untagged as *const u8) {
+                        eprintln!(
+                            "[THREAD_DEBUG] new_thread: closure fn={} args={}",
+                            function.name, function.number_of_args
+                        );
+                    } else {
+                        eprintln!(
+                            "[THREAD_DEBUG] new_thread: closure fn ptr not found: {:#x}",
+                            fn_ptr
+                        );
+                    }
                 }
             }
         }

@@ -139,11 +139,14 @@ pub unsafe extern "C" fn build_rest_array_from_locals(
     first_local_index: usize,
     first_arg_index: usize,
 ) -> usize {
-    if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
-        eprintln!(
-            "[build_rest_array] sp={:#x} fp={:#x} arg_count={:#x} min_args={:#x} first_local={} first_arg={:#x}",
-            stack_pointer, frame_pointer, arg_count, min_args, first_local_index, first_arg_index
-        );
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
+            eprintln!(
+                "[build_rest_array] sp={:#x} fp={:#x} arg_count={:#x} min_args={:#x} first_local={} first_arg={:#x}",
+                stack_pointer, frame_pointer, arg_count, min_args, first_local_index, first_arg_index
+            );
+        }
     }
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();

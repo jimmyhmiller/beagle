@@ -307,36 +307,39 @@ pub extern "C" fn get_my_thread_obj(stack_pointer: usize, frame_pointer: usize) 
         break obj;
     };
 
-    if std::env::var("BEAGLE_THREAD_DEBUG").is_ok() {
-        eprintln!(
-            "[THREAD_DEBUG] get_my_thread_obj: thread_id={:?} thread_obj={:#x}",
-            thread_id, thread_obj
-        );
-        if BuiltInTypes::is_heap_pointer(thread_obj) {
-            let heap_obj = HeapObject::from_tagged(thread_obj);
-            let closure_field = heap_obj.get_field(0);
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var("BEAGLE_THREAD_DEBUG").is_ok() {
             eprintln!(
-                "[THREAD_DEBUG]   closure_field={:#x} is_heap_ptr={}",
-                closure_field,
-                BuiltInTypes::is_heap_pointer(closure_field)
+                "[THREAD_DEBUG] get_my_thread_obj: thread_id={:?} thread_obj={:#x}",
+                thread_id, thread_obj
             );
-            if BuiltInTypes::is_heap_pointer(closure_field) {
-                let closure_tag = BuiltInTypes::get_kind(closure_field);
-                eprintln!("[THREAD_DEBUG]   closure_tag={:?}", closure_tag);
-                if matches!(closure_tag, BuiltInTypes::Closure) {
-                    let closure_obj = HeapObject::from_tagged(closure_field);
-                    let fn_ptr = closure_obj.get_field(0);
-                    let fn_ptr_untagged = BuiltInTypes::untag(fn_ptr);
-                    if let Some(function) =
-                        runtime.get_function_by_pointer(fn_ptr_untagged as *const u8)
-                    {
-                        eprintln!(
-                            "[THREAD_DEBUG]   closure fn={} args={}",
-                            function.name, function.number_of_args
-                        );
-                    } else {
-                        eprintln!("[THREAD_DEBUG]   closure fn ptr not found: {:#x}", fn_ptr);
-                        panic!("Closure function pointer not found in runtime");
+            if BuiltInTypes::is_heap_pointer(thread_obj) {
+                let heap_obj = HeapObject::from_tagged(thread_obj);
+                let closure_field = heap_obj.get_field(0);
+                eprintln!(
+                    "[THREAD_DEBUG]   closure_field={:#x} is_heap_ptr={}",
+                    closure_field,
+                    BuiltInTypes::is_heap_pointer(closure_field)
+                );
+                if BuiltInTypes::is_heap_pointer(closure_field) {
+                    let closure_tag = BuiltInTypes::get_kind(closure_field);
+                    eprintln!("[THREAD_DEBUG]   closure_tag={:?}", closure_tag);
+                    if matches!(closure_tag, BuiltInTypes::Closure) {
+                        let closure_obj = HeapObject::from_tagged(closure_field);
+                        let fn_ptr = closure_obj.get_field(0);
+                        let fn_ptr_untagged = BuiltInTypes::untag(fn_ptr);
+                        if let Some(function) =
+                            runtime.get_function_by_pointer(fn_ptr_untagged as *const u8)
+                        {
+                            eprintln!(
+                                "[THREAD_DEBUG]   closure fn={} args={}",
+                                function.name, function.number_of_args
+                            );
+                        } else {
+                            eprintln!("[THREAD_DEBUG]   closure fn ptr not found: {:#x}", fn_ptr);
+                            panic!("Closure function pointer not found in runtime");
+                        }
                     }
                 }
             }
