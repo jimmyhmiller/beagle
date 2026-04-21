@@ -4916,6 +4916,14 @@ impl Runtime {
         self.memory.heap.write_barrier(object_ptr, new_value);
     }
 
+    /// Tell the GC that the given heap object has a registered finalizer
+    /// (e.g. an FFI Buffer/Cell/TypedArray). For generational GC this adds
+    /// the object to a young-gen side list so dead finalizables can be found
+    /// at minor GC without sweeping the whole young space.
+    pub fn register_finalizable(&mut self, tagged_ptr: usize) {
+        self.memory.heap.register_finalizable(tagged_ptr);
+    }
+
     /// Get the card table biased pointer for generated code write barriers.
     ///
     /// For generational GC, returns a biased pointer such that:

@@ -41,6 +41,14 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         bytes: usize,
         kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>> {
+        // Single-threaded fast path: skip the pthread_mutex when only one
+        // thread is registered. The lock exists to serialize allocator state
+        // across mutators; with one mutator there is no contention and the
+        // lock is pure overhead. Profiling showed pthread_mutex_lock/unlock
+        // accounting for ~10% of CPU on the binary-tree benchmark.
+        if self.registered_threads.load(Ordering::Acquire) <= 1 {
+            return self.alloc.try_allocate(bytes, kind);
+        }
         let lock = self.mutex.lock().unwrap();
         let result = self.alloc.try_allocate(bytes, kind);
         drop(lock);
@@ -52,6 +60,9 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         words: usize,
         kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>> {
+        if self.registered_threads.load(Ordering::Acquire) <= 1 {
+            return self.alloc.try_allocate_zeroed(words, kind);
+        }
         let lock = self.mutex.lock().unwrap();
         let result = self.alloc.try_allocate_zeroed(words, kind);
         drop(lock);
@@ -101,6 +112,11 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         // Delegate to inner allocator to mark the card
         // No lock needed - card marking is atomic and only read during GC (which holds the lock)
         self.alloc.mark_card_unconditional(object_ptr);
+    }
+
+    fn register_finalizable(&mut self, tagged_ptr: usize) {
+        let _lock = self.mutex.lock().unwrap();
+        self.alloc.register_finalizable(tagged_ptr);
     }
 
     fn can_allocate(&self, words: usize, kind: BuiltInTypes) -> bool {

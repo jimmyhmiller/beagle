@@ -3414,6 +3414,24 @@ impl AstCompiler<'_> {
             } => {
                 let name = self.get_qualified_function_name(&name)?;
 
+                // Fast path for `==` (parsed as Ast::Call to beagle.core/equal).
+                // Most equality checks are between values whose tags differ
+                // (e.g. `node.left == null`) or are identity-equal. Both cases
+                // can be answered inline without an extern call, and the
+                // builtin is invoked only for the few combinations that need
+                // deep equality (same-tag heap objects, string/heap pairs,
+                // int/float pairs).
+                if name == "beagle.core/equal" && args.len() == 2 {
+                    let mut args_iter = args.into_iter();
+                    let lhs_ast = args_iter.next().unwrap();
+                    let rhs_ast = args_iter.next().unwrap();
+                    self.not_tail_position();
+                    let a = self.call_compile(&lhs_ast)?;
+                    self.not_tail_position();
+                    let b = self.call_compile(&rhs_ast)?;
+                    return Ok(self.ir.equal_with_deep_fallback(a, b));
+                }
+
                 if self.name_matches(&name) {
                     // Check arity for recursive calls
                     if self.current_function_is_variadic {

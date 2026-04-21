@@ -138,4 +138,13 @@ pub trait Allocator {
     fn mark_card_unconditional(&mut self, _object_ptr: usize) {
         // Default: no-op for non-generational GCs
     }
+
+    /// Register a freshly-constructed heap object whose struct type has a
+    /// finalizer (e.g. FFI Buffer/Cell/TypedArray). For generational GC, this
+    /// adds the object to a young-gen side list so minor GC can find dead
+    /// finalizables in O(finalizable count) instead of O(young allocations).
+    ///
+    /// Default is a no-op: other allocators discover finalizables via their
+    /// own per-object sweep walk.
+    fn register_finalizable(&mut self, _tagged_ptr: usize) {}
 }

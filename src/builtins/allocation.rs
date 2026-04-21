@@ -11,6 +11,16 @@ pub extern "C" fn write_barrier(untagged_addr: usize, value: usize) -> usize {
     0b111
 }
 
+/// Register a freshly-constructed heap object as finalizable so the GC
+/// can find it at minor-collection time without sweeping the whole young
+/// space. Called from beagle.ffi.bg right after constructing a Buffer/
+/// Cell/TypedArray. Returns the same pointer for convenient chaining.
+pub extern "C" fn register_finalizable(tagged_ptr: usize) -> usize {
+    let runtime = get_runtime().get_mut();
+    runtime.register_finalizable(tagged_ptr);
+    tagged_ptr
+}
+
 pub extern "C" fn allocate(stack_pointer: usize, frame_pointer: usize, size: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let size = BuiltInTypes::untag(size);

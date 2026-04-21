@@ -3621,6 +3621,78 @@ impl Ir {
         dest
     }
 
+    /// Inline `==` with a deep-equality fallback. Most equality checks at
+    /// runtime are between values that are either identity-equal or have
+    /// different tags (e.g. `node.left == null`). Both cases get answered by
+    /// 1–2 inline instructions; only same-tag-non-trivial pairs and the few
+    /// special cross-tag pairs (string ⇔ heap-string, int ⇔ float) actually
+    /// need the deep-equality builtin.
+    pub fn equal_with_deep_fallback(&mut self, a: Value, b: Value) -> Value {
+        use crate::types::BuiltInTypes;
+        let a: VirtualRegister = self.assign_new(a);
+        let b: VirtualRegister = self.assign_new(b);
+        let result_register = self.assign_new(Value::True);
+        let call_builtin_label = self.label("eq_call_builtin");
+        let after = self.label("eq_after");
+
+        // Identity short-circuit: covers ints, bools, null, closures,
+        // identity-equal heap pointers, interned strings.
+        let a_val: Value = a.into();
+        let b_val: Value = b.into();
+        self.jump_if(after, Condition::Equal, a_val, b_val);
+
+        let tag_a = self.get_tag(a.into());
+        let tag_b = self.get_tag(b.into());
+
+        // Same tag → could be deep-equal heap object / float / etc.
+        self.jump_if(call_builtin_label, Condition::Equal, tag_a, tag_b);
+
+        // String literal ↔ HeapObject string fallback (deep): heap-side could be
+        // a String/StringSlice/ConsString. Punt to builtin for tag mismatches
+        // that involve String tag with HeapObject tag.
+        let string_tag: Value = Value::RawValue(BuiltInTypes::String.get_tag() as usize);
+        let heap_tag: Value = Value::RawValue(BuiltInTypes::HeapObject.get_tag() as usize);
+        let int_tag: Value = Value::RawValue(BuiltInTypes::Int.get_tag() as usize);
+        let float_tag: Value = Value::RawValue(BuiltInTypes::Float.get_tag() as usize);
+
+        let after_str_heap = self.label("eq_after_str_heap");
+        self.jump_if(after_str_heap, Condition::NotEqual, tag_a, string_tag);
+        self.jump_if(call_builtin_label, Condition::Equal, tag_b, heap_tag);
+        self.write_label(after_str_heap);
+
+        let after_heap_str = self.label("eq_after_heap_str");
+        self.jump_if(after_heap_str, Condition::NotEqual, tag_a, heap_tag);
+        self.jump_if(call_builtin_label, Condition::Equal, tag_b, string_tag);
+        self.write_label(after_heap_str);
+
+        // Int ↔ Float mixed numeric.
+        let after_int_float = self.label("eq_after_int_float");
+        self.jump_if(after_int_float, Condition::NotEqual, tag_a, int_tag);
+        self.jump_if(call_builtin_label, Condition::Equal, tag_b, float_tag);
+        self.write_label(after_int_float);
+
+        let after_float_int = self.label("eq_after_float_int");
+        self.jump_if(after_float_int, Condition::NotEqual, tag_a, float_tag);
+        self.jump_if(call_builtin_label, Condition::Equal, tag_b, int_tag);
+        self.write_label(after_float_int);
+
+        // No fast-path special case applies — they're not equal.
+        self.assign(result_register, Value::False);
+        self.jump(after);
+
+        // Slow path: real deep equality via the builtin.
+        self.write_label(call_builtin_label);
+        let equal_fn =
+            Value::RawValue((crate::builtins::equal as usize) << BuiltInTypes::tag_size());
+        let a_v: Value = a.into();
+        let b_v: Value = b.into();
+        let call_result = self.call_builtin(equal_fn, vec![a_v, b_v]);
+        self.assign(result_register, call_result);
+
+        self.write_label(after);
+        Value::Register(result_register)
+    }
+
     pub fn call_builtin(&mut self, function: Value, vec: Vec<Value>) -> Value {
         let dest = self.volatile_register().into();
         self.instructions

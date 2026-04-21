@@ -30,6 +30,11 @@ struct FinalizerWork {
 }
 
 static REGISTRY: OnceLock<RwLock<HashMap<usize, FinalizerFn>>> = OnceLock::new();
+static REGISTRY_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+pub fn any_finalizers_registered() -> bool {
+    REGISTRY_COUNT.load(Ordering::Relaxed) != 0
+}
 static SENDER: OnceLock<Sender<FinalizerWork>> = OnceLock::new();
 // Paired counters so tests (and anything needing synchronization) can tell
 // when the finalizer thread has caught up with everything the GC enqueued.
@@ -63,7 +68,10 @@ fn sender() -> &'static Sender<FinalizerWork> {
 /// initialization once per finalizable type. Later registrations for the
 /// same struct_id overwrite — typically harmless; indicates a re-init.
 pub fn register_finalizer(struct_id: usize, finalizer: FinalizerFn) {
-    registry().write().unwrap().insert(struct_id, finalizer);
+    let prev = registry().write().unwrap().insert(struct_id, finalizer);
+    if prev.is_none() {
+        REGISTRY_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Look up the finalizer for a struct_id, if any. GC calls this during
@@ -105,6 +113,12 @@ pub fn drain() {
 /// but are `opaque == true`, so both checks are required to avoid aliasing a
 /// string's byte length onto an unrelated struct_id.
 pub unsafe fn maybe_enqueue_finalizer(heap_object: &crate::types::HeapObject) {
+    // FAST PATH: avoid acquiring the registry RwLock for every dead object
+    // when no finalizers are registered. Otherwise minor GC pays a lock+
+    // HashMap lookup per dead user-struct (millions for tree-style workloads).
+    if !any_finalizers_registered() {
+        return;
+    }
     if heap_object.get_type_id() != 0 {
         return;
     }

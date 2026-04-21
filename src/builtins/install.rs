@@ -1055,6 +1055,14 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
+            "beagle.ffi/__register-finalizable",
+            crate::builtins::allocation::register_finalizable as *const u8,
+            false,
+            &["x"],
+            "Internal: tell the GC this freshly-constructed object owns off-heap memory and needs its finalizer run when collected. Called immediately after constructing Buffer / Cell / TypedArray instances. Returns the same value for chaining.",
+        )?;
+
+        self.add_builtin_with_doc(
             "beagle.ffi/realloc",
             ffi_realloc as *const u8,
             false,

@@ -12,7 +12,7 @@ use super::{
     stack_walker::StackWalker,
 };
 use crate::builtins::reset_shift::ContinuationObject;
-use crate::collections::TYPE_ID_FRAME;
+use crate::collections::{TYPE_ID_CONTINUATION, TYPE_ID_FRAME};
 
 /// Represents a reference to a GC root that needs updating after collection.
 /// Points to a mutable slot holding the root value (stack slots, GlobalObjectBlock entries).
@@ -319,42 +319,6 @@ impl Space {
     }
 }
 
-/// Walk a young-gen Space in address order, enqueuing finalizers for any
-/// dead finalizable objects. Run after minor GC's evacuation, before the
-/// space is cleared. Live objects have their headers replaced by forwarding
-/// pointers (size field clobbered); follow the forwarding link to their
-/// old-gen copy to get the size. Dead objects retain their original headers.
-unsafe fn sweep_young_finalizers(space: &Space) {
-    if space.allocation_offset == 0 {
-        return;
-    }
-    let start = space.start as usize;
-    let end = start + space.allocation_offset;
-    let mut addr = start;
-    while addr < end {
-        let header_data = unsafe { *(addr as *const usize) };
-        if Header::is_forwarding_bit_set(header_data) {
-            let tagged_new = Header::clear_forwarding_bit(header_data);
-            let Some(new_hobj) = HeapObject::try_from_tagged(tagged_new) else {
-                break;
-            };
-            let size = new_hobj.full_size();
-            if size == 0 || !size.is_multiple_of(8) {
-                break;
-            }
-            addr += size;
-        } else {
-            let hobj = HeapObject::from_untagged(addr as *const u8);
-            unsafe { crate::gc::finalizers::maybe_enqueue_finalizer(&hobj) };
-            let size = hobj.full_size();
-            if size == 0 || !size.is_multiple_of(8) {
-                break;
-            }
-            addr += size;
-        }
-    }
-}
-
 pub struct GenerationalGC {
     young: Space,
     old: MarkAndSweep,
@@ -370,6 +334,11 @@ pub struct GenerationalGC {
     /// Card table for tracking writes to old generation from generated code.
     /// Each 512-byte region ("card") of old gen has one byte in this table.
     card_table: CardTable,
+    /// Tagged pointers to young-gen objects whose struct type has a registered
+    /// finalizer. Built up by Runtime::register_finalizable as Beagle code
+    /// constructs Buffer/Cell/TypedArray instances. Walked at minor GC instead
+    /// of sweeping the entire young space.
+    young_finalizable: Vec<usize>,
 }
 
 impl GenerationalGC {
@@ -540,6 +509,7 @@ impl Allocator for GenerationalGC {
             options,
             remembered_set: Vec::with_capacity(64),
             card_table,
+            young_finalizable: Vec::new(),
         }
     }
 
@@ -666,6 +636,19 @@ impl Allocator for GenerationalGC {
 
     fn get_card_table_biased_ptr(&self) -> *mut u8 {
         self.card_table.biased_ptr()
+    }
+
+    fn register_finalizable(&mut self, tagged_ptr: usize) {
+        if !BuiltInTypes::is_heap_pointer(tagged_ptr) {
+            return;
+        }
+        let untagged = BuiltInTypes::untag(tagged_ptr);
+        // Only track young-gen finalizables here. If the object is already in
+        // old gen (e.g., GC promoted it between construction and registration),
+        // mark-and-sweep's existing per-object sweep walk will catch it.
+        if self.young.contains(untagged as *const u8) {
+            self.young_finalizable.push(tagged_ptr);
+        }
     }
 
     fn mark_card_unconditional(&mut self, object_ptr: usize) {
@@ -863,11 +846,11 @@ impl GenerationalGC {
 
         self.copy_remaining();
 
-        // Walk young gen to find dead finalizable objects. After evacuation,
-        // live objects have their headers replaced by forwarding pointers;
-        // dead objects retain their original headers. Same pattern as
-        // compacting::sweep_finalizers — see that function for details.
-        unsafe { sweep_young_finalizers(&self.young) };
+        // Process the young finalizable side list. After evacuation, each
+        // entry's header either has a forwarding bit (object survived; the
+        // major-GC sweep will catch it later) or is intact (object died;
+        // enqueue its finalizer here).
+        self.process_young_finalizables();
 
         self.young.clear();
 
@@ -877,6 +860,29 @@ impl GenerationalGC {
         usdt_probes::fire_gc_minor_end(self.gc_count);
         if self.options.print_stats {
             println!("Minor gc took {:?}", start.elapsed());
+        }
+    }
+
+    /// Walk the young finalizable side list (built up at construction time).
+    /// For each entry, the header tells us whether the object survived:
+    /// forwarding bit set → promoted to old gen (mark-and-sweep will handle
+    /// finalization when it eventually dies); intact header → dead in young
+    /// gen, snapshot fields and enqueue the finalizer.
+    fn process_young_finalizables(&mut self) {
+        if self.young_finalizable.is_empty() {
+            return;
+        }
+        for tagged_ptr in self.young_finalizable.drain(..) {
+            let untagged = BuiltInTypes::untag(tagged_ptr);
+            let header_data = unsafe { *(untagged as *const usize) };
+            if Header::is_forwarding_bit_set(header_data) {
+                // Survived; future mark-and-sweep handles it in old gen.
+                continue;
+            }
+            // Dead in young gen — original header still intact, so we can read
+            // struct_id and snapshot fields normally.
+            let hobj = HeapObject::from_untagged(untagged as *const u8);
+            unsafe { crate::gc::finalizers::maybe_enqueue_finalizer(&hobj) };
         }
     }
 
@@ -932,6 +938,7 @@ impl GenerationalGC {
         let mut heap_obj = HeapObject::from_tagged(old_object);
         let container_type_id = heap_obj.get_type_id();
         let container_untagged = heap_obj.untagged();
+        let _ = container_untagged; // used by error/debug paths
 
         // Process this old gen object's fields
         {
@@ -997,6 +1004,12 @@ impl GenerationalGC {
             }
         }
 
+        // Only continuation objects own a saved segment that needs scanning.
+        // Skipping this for everything else avoids an empty-Vec allocation per
+        // old-gen object every minor GC.
+        if container_type_id != TYPE_ID_CONTINUATION as usize {
+            return;
+        }
         let segment_slots = self.collect_continuation_segment_slots(&heap_obj);
         for (slot_addr, slot_value) in segment_slots {
             let untagged = BuiltInTypes::untag(slot_value);
@@ -1186,6 +1199,51 @@ impl GenerationalGC {
         self.old.copy_data_to_offset(&data)
     }
 
+    /// Cold path: only entered when copy_remaining hits a stale young pointer.
+    /// Building the rich error message (re-reading fields, looking up the
+    /// struct name) costs allocations we don't want on the success path.
+    #[cold]
+    #[inline(never)]
+    fn panic_stale_young_in_copied(
+        &self,
+        field: usize,
+        container_type_id: usize,
+        container_untagged: usize,
+        field_index: usize,
+    ) -> ! {
+        let object = HeapObject::from_untagged(container_untagged as *const u8);
+        let initial_fields = object.get_fields();
+        let container_struct_info = if container_type_id == 0 {
+            let struct_id = object.get_struct_id();
+            let runtime = crate::get_runtime().get();
+            let struct_name = runtime
+                .get_struct_by_id(struct_id)
+                .map(|s| s.name.as_str())
+                .unwrap_or("<unknown>")
+                .to_string();
+            format!(" struct_id={} struct_name={}", struct_id, struct_name)
+        } else {
+            String::new()
+        };
+        let fields = initial_fields
+            .iter()
+            .enumerate()
+            .map(|(i, value)| format!("{}:{:#x}", i, value))
+            .collect::<Vec<_>>()
+            .join(" ");
+        panic!(
+            "Stale young gen pointer {:#x} found while scanning copied object type {} at {:#x} field {} (field_count={}, young alloc_offset={}){} fields=[{}]",
+            field,
+            container_type_id,
+            container_untagged,
+            field_index,
+            initial_fields.len(),
+            self.young.allocation_offset(),
+            container_struct_info,
+            fields,
+        );
+    }
+
     fn copy_remaining(&mut self) {
         #[cfg(feature = "debug-gc")]
         let mut iterations = 0;
@@ -1201,39 +1259,16 @@ impl GenerationalGC {
             }
             let container_type_id = object.get_type_id();
             let container_untagged = object.untagged();
-            let initial_fields = object.get_fields().to_vec();
-            let container_struct_info = if container_type_id == 0 {
-                let struct_id = object.get_struct_id();
-                let runtime = crate::get_runtime().get();
-                let struct_name = runtime
-                    .get_struct_by_id(struct_id)
-                    .map(|s| s.name.as_str())
-                    .unwrap_or("<unknown>");
-                format!(" struct_id={} struct_name={}", struct_id, struct_name)
-            } else {
-                String::new()
-            };
             for (field_index, field) in object.get_fields_mut().iter_mut().enumerate() {
                 if let Some(heap_obj) = HeapObject::try_from_tagged(*field)
                     && self.young.contains(heap_obj.get_pointer())
                 {
                     if !self.young.contains_allocated(heap_obj.get_pointer()) {
-                        let fields = initial_fields
-                            .iter()
-                            .enumerate()
-                            .map(|(i, value)| format!("{}:{:#x}", i, value))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        panic!(
-                            "Stale young gen pointer {:#x} found while scanning copied object type {} at {:#x} field {} (field_count={}, young alloc_offset={}){} fields=[{}]",
+                        self.panic_stale_young_in_copied(
                             *field,
                             container_type_id,
                             container_untagged,
                             field_index,
-                            initial_fields.len(),
-                            self.young.allocation_offset(),
-                            container_struct_info,
-                            fields,
                         );
                     }
                     #[cfg(debug_assertions)]
@@ -1267,6 +1302,12 @@ impl GenerationalGC {
                     eprintln!("[GC DEBUG]   copying young-gen field {:#x}", *field);
                     *field = self.copy(*field);
                 }
+            }
+            // Only continuation objects own a saved segment that needs scanning.
+            // Skipping this for everything else avoids a Vec allocation per
+            // copied object — the dominant cost for tree-shaped workloads.
+            if container_type_id != TYPE_ID_CONTINUATION as usize {
+                continue;
             }
             let segment_slots = self.collect_continuation_segment_slots(&object);
             for (slot_addr, slot_value) in segment_slots {

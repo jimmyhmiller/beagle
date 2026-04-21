@@ -27,12 +27,33 @@ pub fn dump_gc_chain_trace() {
     });
 }
 
+// Per-thread cached raw pointer to the GC_FRAME_TOP cell. Avoids the
+// LocalKey::with thunk on every Beagle function entry/exit (gc_frame_link /
+// gc_frame_unlink fire on every call). Safe: each thread only ever reads its
+// own slot via its own TLS.
+thread_local! {
+    static GC_FRAME_TOP_SLOT_CACHE: std::cell::Cell<*mut usize> =
+        const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+#[inline(always)]
+fn gc_frame_top_slot() -> *mut usize {
+    let cached = GC_FRAME_TOP_SLOT_CACHE.with(|c| c.get());
+    if !cached.is_null() {
+        return cached;
+    }
+    let p = GC_FRAME_TOP.with(|cell| cell.as_ptr());
+    GC_FRAME_TOP_SLOT_CACHE.with(|c| c.set(p));
+    p
+}
+
 /// Called by JIT prologue AFTER arguments have been saved to locals.
 /// Links the new frame into the GC frame chain.
 /// Returns the old gc_frame_top (to be stored as the prev pointer at [FP-16]).
 #[unsafe(no_mangle)]
 pub extern "C" fn gc_frame_link(frame_header_addr: usize) -> usize {
-    let prev = GC_FRAME_TOP.with(|cell| cell.get());
+    let slot = gc_frame_top_slot();
+    let prev = unsafe { *slot };
     #[cfg(debug_assertions)]
     {
         if std::env::var("BEAGLE_DEBUG_GC_CHAIN_TRACE").is_ok() {
@@ -94,7 +115,7 @@ pub extern "C" fn gc_frame_link(frame_header_addr: usize) -> usize {
             }
         }
     }
-    GC_FRAME_TOP.with(|cell| cell.set(frame_header_addr));
+    unsafe { *slot = frame_header_addr };
     if prev == frame_header_addr {
         // Resumed/rewritten frames can reuse the same header slot. In that case,
         // preserve the predecessor already stored in the frame instead of
@@ -119,5 +140,5 @@ pub extern "C" fn gc_frame_unlink(prev: usize) {
             ));
         }
     }
-    GC_FRAME_TOP.with(|cell| cell.set(prev));
+    unsafe { *gc_frame_top_slot() = prev };
 }

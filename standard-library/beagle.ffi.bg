@@ -28,7 +28,9 @@ fn __make_pointer_struct(lo, hi) {
 }
 
 fn __make_buffer_struct(ptr, size) {
-    Buffer { ptr: ptr, size: size }
+    let b = Buffer { ptr: ptr, size: size }
+    __register-finalizable(b)
+    b
 }
 
 // A typed one-element off-heap cell. Layout convention matches Buffer:
@@ -178,6 +180,7 @@ fn cell(ty, initial) {
     let n = size-of(ty)
     let buf = allocate(n)
     let c = Cell { ptr: buf.ptr, size: n, ty: ty }
+    __register-finalizable(c)
     forget(buf)
     write-at(c, 0, ty, initial)
     c
@@ -199,6 +202,7 @@ fn array(ty, length) {
     let bytes = stride * length
     let buf = allocate(bytes)
     let a = TypedArray { ptr: buf.ptr, size: bytes, ty: ty, length: length }
+    __register-finalizable(a)
     forget(buf)
     a
 }
