@@ -1854,10 +1854,12 @@ impl Parser {
                     };
 
                     let end_position = self.position;
+                    let token_range = TokenRange::new(start_position, end_position);
+                    self.record_definition_byte_range(token_range);
                     return Ok(Some(Ast::LetDynamic {
                         name,
                         value: Box::new(value),
-                        token_range: TokenRange::new(start_position, end_position),
+                        token_range,
                     }));
                 }
 

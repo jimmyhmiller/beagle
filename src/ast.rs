@@ -3684,6 +3684,16 @@ impl AstCompiler<'_> {
                     });
                 }
 
+                // Capture reflection metadata before compiling the value,
+                // the same way the plain top-level `let` branch does. A
+                // `let dynamic` is always at namespace scope (enforced
+                // above) so it always gets a Binding record.
+                let let_token_range = ast.token_range();
+                let binding_source_text = self.extract_source_text(let_token_range, None);
+                let binding_disk_location = self.make_disk_location(let_token_range);
+                let binding_full_name =
+                    format!("{}/{}", self.compiler.current_namespace_name(), name);
+
                 // Compile the initial value
                 self.not_tail_position();
                 let value_compiled = self.call_compile(&value)?;
@@ -3703,6 +3713,11 @@ impl AstCompiler<'_> {
                 self.insert_variable(
                     name.to_string(),
                     VariableLocation::DynamicVariable(namespace_id, slot),
+                );
+                self.compiler.upsert_binding_metadata(
+                    &binding_full_name,
+                    binding_source_text,
+                    binding_disk_location,
                 );
 
                 Ok(reg.into())

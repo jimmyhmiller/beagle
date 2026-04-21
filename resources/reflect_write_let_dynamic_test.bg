@@ -1,0 +1,35 @@
+namespace reflect_write_let_dynamic_test
+
+use beagle.reflect as reflect
+
+let dynamic log_level = "info"
+
+fn main() {
+    let original_src = reflect/source("log_level")
+    let original_val = log_level
+
+    reflect/write-source("log_level", "let dynamic log_level = \"debug\"")
+    let after_val = log_level
+    let after_src = reflect/source("log_level")
+
+    reflect/write-source("log_level", original_src)
+    let restored_val = log_level
+    let restored_src = reflect/source("log_level")
+
+    println(original_val)
+    println(after_val)
+    println(after_src)
+    println(restored_val)
+    println(restored_src == original_src)
+    println(reflect/location("log_level") != null)
+
+    "done"
+}
+
+// @beagle.core.snapshot
+// info
+// debug
+// let dynamic log_level = "debug"
+// info
+// true
+// true
