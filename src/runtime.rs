@@ -2933,6 +2933,82 @@ impl<T, R> From<RawPtr<T>> for *const R {
     }
 }
 
+/// Metadata for a top-level `let` binding. Tracks the disk origin and
+/// original source text so `reflect/write-source` can persist edits to
+/// the binding back to its file, the same way fn/struct/enum do.
+///
+/// The runtime value stored in the namespace slot for the binding is
+/// produced when `__top_level` runs; this record only carries the
+/// reflection metadata, not the value itself.
+#[derive(Debug, Clone)]
+pub struct Binding {
+    pub name: String,
+    pub source_text: Option<String>,
+    pub disk_location: Option<DiskLocation>,
+}
+
+#[derive(Debug, Default)]
+pub struct BindingManager {
+    name_to_id: HashMap<String, usize>,
+    bindings: Vec<Binding>,
+}
+
+impl BindingManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert or update a binding. Sticky on redefinition:
+    /// - `source_text` is replaced whenever the caller supplies `Some`.
+    /// - `disk_location` is only replaced when the caller supplies `Some`
+    ///   (so a REPL re-eval that doesn't know the on-disk origin leaves
+    ///   the existing location intact).
+    pub fn upsert(
+        &mut self,
+        name: &str,
+        source_text: Option<String>,
+        disk_location: Option<DiskLocation>,
+    ) {
+        if let Some(&id) = self.name_to_id.get(name) {
+            let existing = &mut self.bindings[id];
+            if source_text.is_some() {
+                existing.source_text = source_text;
+            }
+            if disk_location.is_some() {
+                existing.disk_location = disk_location;
+            }
+        } else {
+            let id = self.bindings.len();
+            self.name_to_id.insert(name.to_string(), id);
+            self.bindings.push(Binding {
+                name: name.to_string(),
+                source_text,
+                disk_location,
+            });
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Binding> {
+        let id = self.name_to_id.get(name)?;
+        self.bindings.get(*id)
+    }
+
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut Binding> {
+        let id = *self.name_to_id.get(name)?;
+        self.bindings.get_mut(id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Binding> {
+        self.bindings.iter()
+    }
+
+    pub fn for_each_mut(&mut self, mut f: impl FnMut(&mut Binding)) {
+        for b in self.bindings.iter_mut() {
+            f(b);
+        }
+    }
+}
+
 /// Location of a top-level definition on disk, including the line and
 /// byte ranges for the full definition block (doc comments + fn body).
 ///
@@ -3879,6 +3955,12 @@ pub struct Runtime {
     namespaces: NamespaceManager,
     pub structs: StructManager,
     pub enums: EnumManager,
+    /// Metadata for top-level `let`-bindings: source text + disk origin.
+    /// Populated when an `Ast::Let` at the top level compiles; used by
+    /// `reflect/source`, `reflect/location`, and `reflect/write-source`
+    /// to let agents inspect and persist edits to `let`-defined values
+    /// the same way they do for fn/struct/enum definitions.
+    pub bindings: BindingManager,
     pub string_constants: Vec<StringValue>,
     /// Pre-interned tagged string literal values for ASCII chars 0..128.
     /// Indexed by byte value. Avoids heap allocation for single-char string returns.
@@ -4001,6 +4083,7 @@ impl Runtime {
             namespaces: NamespaceManager::new(),
             structs: StructManager::new(),
             enums: EnumManager::new(),
+            bindings: BindingManager::new(),
             string_constants: vec![],
             ascii_char_cache: [0; 128],
             keyword_constants: vec![],
@@ -8475,6 +8558,29 @@ impl Runtime {
             .push(StringValue { str: keyword_text });
         self.keyword_heap_ptrs.push(None);
         self.keyword_constants.len() - 1
+    }
+
+    /// Register or update a top-level `let`-binding's reflection
+    /// metadata. Called by the compiler when an `Ast::Let` at the top
+    /// level of a namespace is compiled. Sticky: see `BindingManager::upsert`.
+    pub fn upsert_binding_metadata(
+        &mut self,
+        full_name: &str,
+        source_text: Option<String>,
+        disk_location: Option<DiskLocation>,
+    ) {
+        self.bindings.upsert(full_name, source_text, disk_location);
+    }
+
+    /// Overwrite the on-disk location of a binding by fully-qualified name.
+    /// Returns `true` if the binding was found.
+    pub fn patch_binding_disk_location(&mut self, full_name: &str, loc: DiskLocation) -> bool {
+        if let Some(b) = self.bindings.get_mut(full_name) {
+            b.disk_location = Some(loc);
+            true
+        } else {
+            false
+        }
     }
 
     /// Update the on-disk location recorded for the struct named

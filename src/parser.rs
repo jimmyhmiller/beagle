@@ -1890,10 +1890,17 @@ impl Parser {
                     }
                 })?;
                 let end_position = self.position;
+                let token_range = TokenRange::new(start_position, end_position);
+                // Record extended byte range for this let so top-level
+                // `let`-bindings can participate in `reflect/location` and
+                // `reflect/write-source`. Non-top-level lets also record,
+                // but never get looked up (no Binding record is registered
+                // for them).
+                self.record_definition_byte_range(token_range);
                 Ok(Some(Ast::Let {
                     pattern,
                     value: Box::new(value),
-                    token_range: TokenRange::new(start_position, end_position),
+                    token_range,
                 }))
             }
             Token::Binding => {

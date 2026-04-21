@@ -3575,6 +3575,19 @@ impl AstCompiler<'_> {
                             return Err(CompileError::GlobalMutableVariable);
                         }
 
+                        // Capture reflection metadata for this top-level
+                        // binding BEFORE compiling the value. `ast` is the
+                        // outer `Ast::Let`, so `token_range()` gives the
+                        // full `let name = expr` span; the parser already
+                        // folded in any preceding doc comments when it
+                        // recorded the definition byte range.
+                        let let_token_range = ast.token_range();
+                        let binding_source_text =
+                            self.extract_source_text(let_token_range, None);
+                        let binding_disk_location = self.make_disk_location(let_token_range);
+                        let binding_full_name =
+                            format!("{}/{}", self.compiler.current_namespace_name(), name);
+
                         self.not_tail_position();
                         let value = self.call_compile(&value)?;
                         self.not_tail_position();
@@ -3591,6 +3604,11 @@ impl AstCompiler<'_> {
                                 namespace_id,
                                 reserved_namespace_slot,
                             ),
+                        );
+                        self.compiler.upsert_binding_metadata(
+                            &binding_full_name,
+                            binding_source_text,
+                            binding_disk_location,
                         );
                         Ok(reg.into())
                     } else {

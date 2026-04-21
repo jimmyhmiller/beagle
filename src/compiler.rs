@@ -1000,6 +1000,21 @@ impl Compiler {
         runtime.add_enum(e);
     }
 
+    /// Register reflection metadata for a top-level `let`-binding. Called
+    /// from the AST compiler when a `let name = ...` is compiled at
+    /// namespace scope. Sticky: a later REPL re-eval that passes `None`
+    /// for `disk_location` will not clobber the binding's original
+    /// on-disk origin.
+    pub fn upsert_binding_metadata(
+        &mut self,
+        full_name: &str,
+        source_text: Option<String>,
+        disk_location: Option<crate::runtime::DiskLocation>,
+    ) {
+        let runtime = get_runtime().get_mut();
+        runtime.upsert_binding_metadata(full_name, source_text, disk_location);
+    }
+
     pub fn get_enum(&self, name: &str) -> Option<&Enum> {
         let runtime = get_runtime().get_mut();
         runtime.get_enum(name)

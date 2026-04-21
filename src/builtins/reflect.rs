@@ -981,8 +981,16 @@ pub extern "C" fn reflect_namespace_info(
 
 /// Resolve a value (function, struct instance/descriptor, or enum
 /// variant/descriptor) to the `source_text` stored on the matching
-/// Function/Struct/Enum record. Returns `None` if no source is available.
+/// Function/Struct/Enum/Binding record. Returns `None` if no source is
+/// available.
 fn resolve_source_text(runtime: &Runtime, stack_pointer: usize, value: usize) -> Option<String> {
+    // String argument: treat as a definition name (lets agents look up
+    // top-level `let`-bindings, whose values can't be reverse-mapped).
+    if value_is_string(value) {
+        let name = runtime.get_string(stack_pointer, value);
+        return resolve_by_name(runtime, &name).and_then(|d| d.source_text);
+    }
+
     let tag = BuiltInTypes::get_kind(value);
 
     if matches!(tag, BuiltInTypes::Function) {
@@ -1121,6 +1129,16 @@ pub extern "C" fn reflect_namespace_source(
         }
     }
 
+    // Top-level `let`-bindings
+    for b in runtime.bindings.iter() {
+        if !b.name.starts_with(&prefix) {
+            continue;
+        }
+        if let Some(text) = &b.source_text {
+            blocks.push(text.clone());
+        }
+    }
+
     // Functions
     for f in runtime.functions.iter() {
         if !f.name.starts_with(&prefix) {
@@ -1162,6 +1180,68 @@ struct DefinitionInfo {
     disk_location: Option<DiskLocation>,
 }
 
+/// True if `value` is any kind of string (constant, heap, slice, cons).
+/// Used so that `reflect/source(name)` / `reflect/write-source(name, ...)`
+/// can accept a bare string name in place of the live value, which is
+/// the only way to address `let`-bindings whose value is an integer,
+/// map, or other type that can't be reverse-mapped to its binding slot.
+fn value_is_string(value: usize) -> bool {
+    match BuiltInTypes::get_kind(value) {
+        BuiltInTypes::String => true,
+        BuiltInTypes::HeapObject if BuiltInTypes::is_heap_pointer(value) => {
+            let heap = HeapObject::from_tagged(value);
+            let t = heap.get_header().type_id;
+            t == TYPE_ID_STRING || t == TYPE_ID_STRING_SLICE || t == TYPE_ID_CONS_STRING
+        }
+        _ => false,
+    }
+}
+
+/// Resolve a `DefinitionInfo` for a name string. Searches, in order:
+/// Binding (top-level `let`), Function, Struct, Enum. The name is tried
+/// verbatim first (e.g. `"my.ns/foo"`) then, if unqualified, against
+/// the current namespace (e.g. `"foo"` → `"<current>/foo"`).
+fn resolve_by_name(runtime: &Runtime, name: &str) -> Option<DefinitionInfo> {
+    let candidates: Vec<String> = if name.contains('/') {
+        vec![name.to_string()]
+    } else {
+        let ns = runtime.current_namespace_name();
+        vec![format!("{}/{}", ns, name), name.to_string()]
+    };
+
+    for candidate in &candidates {
+        if let Some(b) = runtime.bindings.get(candidate) {
+            return Some(DefinitionInfo {
+                full_name: b.name.clone(),
+                source_text: b.source_text.clone(),
+                disk_location: b.disk_location.clone(),
+            });
+        }
+        if let Some(f) = runtime.functions.iter().find(|f| f.name == *candidate) {
+            return Some(DefinitionInfo {
+                full_name: f.name.clone(),
+                source_text: f.source_text.clone(),
+                disk_location: f.disk_location.clone(),
+            });
+        }
+        if let Some((_, s)) = runtime.get_struct(candidate) {
+            return Some(DefinitionInfo {
+                full_name: s.name.clone(),
+                source_text: s.source_text.clone(),
+                disk_location: s.disk_location.clone(),
+            });
+        }
+        if let Some(e) = runtime.enums.get(candidate) {
+            return Some(DefinitionInfo {
+                full_name: e.name.clone(),
+                source_text: e.source_text.clone(),
+                disk_location: e.disk_location.clone(),
+            });
+        }
+    }
+    None
+}
+
 /// Look up a runtime record for a value following the same dispatch logic
 /// as `resolve_source_text`, and return a bundled `DefinitionInfo`.
 fn resolve_definition(
@@ -1169,6 +1249,10 @@ fn resolve_definition(
     stack_pointer: usize,
     value: usize,
 ) -> Option<DefinitionInfo> {
+    if value_is_string(value) {
+        let name = runtime.get_string(stack_pointer, value);
+        return resolve_by_name(runtime, &name);
+    }
     let tag = BuiltInTypes::get_kind(value);
 
     if matches!(tag, BuiltInTypes::Function) {
@@ -1396,6 +1480,11 @@ fn shift_byte_ranges_after(runtime: &mut Runtime, file: &str, after_byte: usize,
             apply(loc);
         }
     });
+    runtime.bindings.for_each_mut(|b| {
+        if let Some(loc) = b.disk_location.as_mut() {
+            apply(loc);
+        }
+    });
 }
 
 /// reflect/write-source(value, new-text) - Persist an edited definition
@@ -1582,5 +1671,8 @@ fn patch_disk_location(runtime: &mut Runtime, full_name: &str, loc: DiskLocation
     if runtime.patch_struct_disk_location(full_name, loc.clone()) {
         return;
     }
-    runtime.patch_enum_disk_location(full_name, loc);
+    if runtime.patch_enum_disk_location(full_name, loc.clone()) {
+        return;
+    }
+    runtime.patch_binding_disk_location(full_name, loc);
 }

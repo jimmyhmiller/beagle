@@ -1,0 +1,51 @@
+namespace reflect_write_let_test
+
+use beagle.reflect as reflect
+
+let PORT = 8080
+let GREETING = "hello"
+
+fn main() {
+    // reflect/source and reflect/location accept a string naming a binding.
+    let original_src = reflect/source("PORT")
+    let original_loc = reflect/location("PORT")
+    let original_val = PORT
+
+    // Splice a new definition in for PORT.
+    reflect/write-source("PORT", "let PORT = 9090")
+    let after_val = PORT
+    let after_src = reflect/source("PORT")
+
+    reflect/write-source("PORT", original_src)
+    let restored_val = PORT
+    let restored_src = reflect/source("PORT")
+
+    // String bindings also work.
+    let greeting_src = reflect/source("GREETING")
+    reflect/write-source("GREETING", "let GREETING = \"howdy\"")
+    let new_greeting = GREETING
+    reflect/write-source("GREETING", greeting_src)
+    let restored_greeting = GREETING
+
+    println(original_val)                        // 8080
+    println(after_val)                           // 9090
+    println(after_src)                           // let PORT = 9090
+    println(restored_val)                        // 8080
+    println(restored_src == original_src)        // true
+    println(get(original_loc, :file) != null)    // true
+
+    println(new_greeting)                        // howdy
+    println(restored_greeting)                   // hello
+
+    "done"
+}
+
+// @beagle.core.snapshot
+// 8080
+// 9090
+// let PORT = 9090
+// 8080
+// true
+// true
+// howdy
+// hello
