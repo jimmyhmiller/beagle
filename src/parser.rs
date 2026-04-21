@@ -1125,17 +1125,21 @@ impl Tokenizer {
     pub fn parse_all(
         &mut self,
         input_bytes: &[u8],
-    ) -> Result<(Vec<Token>, Vec<(usize, usize)>), ParseError> {
+    ) -> Result<(Vec<Token>, Vec<(usize, usize)>, Vec<(usize, usize)>), ParseError> {
         let mut result = Vec::new();
         let mut token_line_column_map = Vec::new();
+        let mut token_byte_spans = Vec::new();
         while !self.at_end(input_bytes) {
+            let start = self.position;
             if let Some(token) = self.parse_single(input_bytes)? {
+                let end = self.position;
                 result.push(token);
                 token_line_column_map.push((self.line, self.column));
+                token_byte_spans.push((start, end));
             }
         }
         self.position = 0;
-        Ok((result, token_line_column_map))
+        Ok((result, token_line_column_map, token_byte_spans))
     }
 
     /// Tokenize input and return (token, start_byte, end_byte) triples.
@@ -1180,6 +1184,9 @@ pub struct Parser {
     position: usize,
     tokens: Vec<Token>,
     token_line_column_map: Vec<(usize, usize)>,
+    /// Byte ranges into `source` for each token (parallel to `tokens`).
+    /// Used to extract the original source text for a definition's TokenRange.
+    token_byte_spans: Vec<(usize, usize)>,
     /// Accumulated doc comments (///) seen during whitespace skipping.
     /// These are collected and assigned to the next fn/struct/enum definition.
     pending_docstring: Option<String>,
@@ -1190,7 +1197,7 @@ impl Parser {
         let mut tokenizer = Tokenizer::new();
         let input_bytes = source.as_bytes();
         // TODO: It is probably better not to parse all at once
-        let (tokens, token_line_column_map) = tokenizer.parse_all(input_bytes)?;
+        let (tokens, token_line_column_map, token_byte_spans) = tokenizer.parse_all(input_bytes)?;
 
         crate::debug_flag_only! {
             debugger(crate::Message {
@@ -1213,8 +1220,17 @@ impl Parser {
             position: 0,
             tokens,
             token_line_column_map,
+            token_byte_spans,
             pending_docstring: None,
         })
+    }
+
+    pub fn get_token_byte_spans(&self) -> Vec<(usize, usize)> {
+        self.token_byte_spans.clone()
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
     }
 
     pub fn current_location(&self) -> String {
@@ -5451,7 +5467,7 @@ fn test_tokenizer2() {
         }
     ";
     let input_bytes = input.as_bytes();
-    let (tokens, _mappings) = tokenizer.parse_all(input_bytes).unwrap();
+    let (tokens, _mappings, _spans) = tokenizer.parse_all(input_bytes).unwrap();
     let literals = tokens
         .iter()
         .map(|x| x.literal(input_bytes).unwrap())

@@ -430,6 +430,9 @@ pub struct Struct {
     pub docstring: Option<String>,
     /// Docstrings for each field (in same order as fields)
     pub field_docstrings: Vec<Option<String>>,
+    /// Original source text for the struct definition (including any
+    /// preceding `///` doc comment lines). `None` for synthetic structs.
+    pub source_text: Option<String>,
 }
 
 impl Struct {
@@ -601,6 +604,7 @@ mod struct_manager_tests {
             mutable_fields: vec![false; fields.len()],
             docstring: None,
             field_docstrings: vec![None; fields.len()],
+            source_text: None,
         }
     }
 
@@ -2931,6 +2935,11 @@ pub struct Function {
     pub source_line: Option<usize>,
     /// Source column number where the function was defined
     pub source_column: Option<usize>,
+    /// Original source text for the function definition (including any
+    /// preceding `///` doc comment lines). Populated for user-defined
+    /// functions; `None` for builtins, foreign functions, and the synthetic
+    /// `__top_level` wrappers. Exposed via `beagle.reflect/source`.
+    pub source_text: Option<String>,
 }
 
 // ============================================================================
@@ -3417,6 +3426,9 @@ pub struct Enum {
     pub variants: Vec<EnumVariant>,
     /// Docstring for the enum (from /// comments in source)
     pub docstring: Option<String>,
+    /// Original source text for the enum definition (including any
+    /// preceding `///` doc comment lines).
+    pub source_text: Option<String>,
 }
 
 pub struct EnumManager {
@@ -3965,6 +3977,7 @@ impl Runtime {
             mutable_fields: vec![false, false, false],
             docstring: Some("A first-class function object.".to_string()),
             field_docstrings: vec![None, None, None],
+            source_text: None,
         };
         self.structs
             .insert("beagle.core/Function".to_string(), fn_struct);
@@ -6009,7 +6022,9 @@ impl Runtime {
                     let closure_obj = HeapObject::from_tagged(closure_field);
                     let fn_ptr = closure_obj.get_field(0);
                     let fn_ptr_untagged = BuiltInTypes::untag(fn_ptr);
-                    if let Some(function) = self.get_function_by_pointer(fn_ptr_untagged as *const u8) {
+                    if let Some(function) =
+                        self.get_function_by_pointer(fn_ptr_untagged as *const u8)
+                    {
                         eprintln!(
                             "[THREAD_DEBUG] new_thread: closure fn={} args={}",
                             function.name, function.number_of_args
@@ -7600,6 +7615,7 @@ impl Runtime {
             source_file: None,
             source_line: None,
             source_column: None,
+            source_text: None,
         });
         debugger(Message {
             kind: "foreign_function".to_string(),
@@ -7682,6 +7698,7 @@ impl Runtime {
             source_file: None,
             source_line: None,
             source_column: None,
+            source_text: None,
         });
         let pointer = Self::get_function_pointer(
             self,
@@ -7741,6 +7758,7 @@ impl Runtime {
             source_file: None,
             source_line: None,
             source_column: None,
+            source_text: None,
         });
         let pointer = Self::get_function_pointer(
             self,
@@ -7793,6 +7811,7 @@ impl Runtime {
         arg_names: Vec<String>,
         source_file: Option<String>,
         source_line: Option<usize>,
+        source_text: Option<String>,
     ) -> Result<usize, Box<dyn Error>> {
         let mut already_defined = false;
         let mut function_pointer = 0;
@@ -7815,6 +7834,9 @@ impl Runtime {
                     }
                     if source_line.is_some() {
                         self.functions[index].source_line = source_line;
+                    }
+                    if source_text.is_some() {
+                        self.functions[index].source_text = source_text.clone();
                     }
                     // Create a function object if we have a stack (main thread).
                     // On the compiler thread, fall back to Function-tagged pointer.
@@ -7851,6 +7873,7 @@ impl Runtime {
                 arg_names,
                 source_file,
                 source_line,
+                source_text,
             )?;
         }
         assert!(function_pointer != 0);
@@ -7903,6 +7926,7 @@ impl Runtime {
             source_file: None,
             source_line: None,
             source_column: None,
+            source_text: None,
         };
         self.functions.push(function.clone());
         Ok(function)
@@ -7922,6 +7946,7 @@ impl Runtime {
         arg_names: Vec<String>,
         source_file: Option<String>,
         source_line: Option<usize>,
+        source_text: Option<String>,
     ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
         self.functions.push(Function {
@@ -7943,6 +7968,7 @@ impl Runtime {
             source_file,
             source_line,
             source_column: None,
+            source_text,
         });
         let function_pointer = Self::get_function_pointer(
             self,

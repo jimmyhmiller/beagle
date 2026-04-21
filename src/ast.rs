@@ -740,6 +740,8 @@ impl Ast {
         compiler: &mut Compiler,
         file_name: &str,
         token_line_column_map: Vec<(usize, usize)>,
+        source_text: String,
+        token_byte_spans: Vec<(usize, usize)>,
     ) -> CompileResult {
         let test_mode = compiler.command_line_arguments.test;
         let allocate_fn_pointer = compiler.allocate_fn_pointer()?;
@@ -775,6 +777,8 @@ impl Ast {
             current_function_is_variadic: false,
             current_function_min_args: 0,
             token_line_column_map,
+            source_text,
+            token_byte_spans,
             diagnostics: Vec::new(),
             test_mode,
         };
@@ -933,6 +937,14 @@ pub struct AstCompiler<'a> {
     pub current_function_is_variadic: bool,
     pub current_function_min_args: usize,
     pub token_line_column_map: Vec<(usize, usize)>,
+    /// Original source text for the file/string being compiled.
+    /// Used to extract source slices for top-level definitions so that
+    /// `reflect/source` can return the original text of a fn/struct/enum.
+    pub source_text: String,
+    /// Byte ranges in `source_text` for each token (parallel to the
+    /// tokenizer's token vector). Used together with `TokenRange` to
+    /// recover the byte slice for a definition.
+    pub token_byte_spans: Vec<(usize, usize)>,
     /// Diagnostics collected during compilation of this file
     pub diagnostics: Vec<crate::compiler::Diagnostic>,
     /// Whether we are compiling in test mode (test blocks are compiled as functions)
@@ -954,6 +966,50 @@ impl AstCompiler<'_> {
 
     pub fn is_tail_position(&self) -> bool {
         self.current_context.tail_position
+    }
+
+    /// Extract the original source text for a `TokenRange`, optionally
+    /// prepending a docstring synthesized as `///` comment lines.
+    ///
+    /// `TokenRange` is half-open at both ends in different code paths in this
+    /// codebase, so we treat `range.end` as exclusive (the typical convention
+    /// established at AST construction sites). Returns `None` if the range is
+    /// out of bounds or the source text is empty (e.g. compiled from bytecode
+    /// without a source file).
+    pub fn extract_source_text(
+        &self,
+        token_range: TokenRange,
+        docstring: Option<&str>,
+    ) -> Option<String> {
+        if self.source_text.is_empty() || self.token_byte_spans.is_empty() {
+            return None;
+        }
+        let start_idx = token_range.start;
+        // `end` is exclusive in our parser conventions, but we have at least
+        // one token so the last included index is `end - 1`. Clamp defensively.
+        let last_idx = token_range.end.saturating_sub(1);
+        if start_idx >= self.token_byte_spans.len() || last_idx >= self.token_byte_spans.len() {
+            return None;
+        }
+        let start_byte = self.token_byte_spans[start_idx].0;
+        let end_byte = self.token_byte_spans[last_idx].1;
+        if start_byte > end_byte || end_byte > self.source_text.len() {
+            return None;
+        }
+        let body = &self.source_text[start_byte..end_byte];
+        match docstring {
+            Some(doc) if !doc.is_empty() => {
+                let mut out = String::with_capacity(doc.len() + body.len() + 8);
+                for line in doc.lines() {
+                    out.push_str("/// ");
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                out.push_str(body);
+                Some(out)
+            }
+            _ => Some(body.to_string()),
+        }
     }
 
     pub fn call_compile(&mut self, ast: &Ast) -> Result<Value, CompileError> {
@@ -1347,6 +1403,14 @@ impl AstCompiler<'_> {
                     None
                 };
 
+                // Extract original source text (with reattached docstring) so
+                // `reflect/source` can return it. Anonymous functions get None.
+                let source_text = if name.is_some() {
+                    self.extract_source_text(token_range, docstring.as_deref())
+                } else {
+                    None
+                };
+
                 let function_pointer = self
                     .compiler
                     .upsert_function(
@@ -1360,6 +1424,7 @@ impl AstCompiler<'_> {
                         arg_names,
                         Some(self.file_name.clone()),
                         source_line,
+                        source_text,
                     )
                     .unwrap();
 
@@ -5613,7 +5678,7 @@ impl AstCompiler<'_> {
                 name,
                 fields,
                 docstring,
-                ..
+                token_range,
             } => {
                 let (namespace, name) = self.get_namespace_name_and_name(name)?;
                 let mut field_names = Vec::new();
@@ -5658,21 +5723,24 @@ impl AstCompiler<'_> {
                         .struct_defaults
                         .insert(full_name.clone(), defaults);
                 }
+                let source_text = self.extract_source_text(*token_range, docstring.as_deref());
                 self.compiler.add_struct(Struct {
                     name: full_name,
                     fields: field_names,
                     mutable_fields,
                     docstring: docstring.clone(),
                     field_docstrings,
+                    source_text,
                 });
             }
             Ast::Enum {
                 name,
                 variants,
                 docstring,
-                ..
+                token_range,
             } => {
                 let (namespace, enum_name) = self.get_namespace_name_and_name(name)?;
+                let enum_source_text = self.extract_source_text(*token_range, docstring.as_deref());
 
                 // Build variants list
                 let mut enum_variants = Vec::new();
@@ -5718,6 +5786,7 @@ impl AstCompiler<'_> {
                     name: format!("{}/{}", namespace, enum_name),
                     variants: enum_variants,
                     docstring: docstring.clone(),
+                    source_text: enum_source_text.clone(),
                 };
 
                 // Build variant_names for the enum struct
@@ -5742,6 +5811,10 @@ impl AstCompiler<'_> {
                     mutable_fields,
                     docstring: None, // Enums don't have struct docstrings
                     field_docstrings,
+                    // The companion struct exists for runtime dispatch only;
+                    // the actual source lives on the `Enum` record so it
+                    // isn't reported twice from `namespace-source`.
+                    source_text: None,
                 });
 
                 self.compiler.add_enum(enum_repr);
@@ -5781,6 +5854,7 @@ impl AstCompiler<'_> {
                                 mutable_fields,
                                 docstring: None,
                                 field_docstrings,
+                                source_text: None,
                             });
                             // Register variant-to-enum mapping for effect handlers
                             if let Some((struct_id, _)) =
@@ -5801,6 +5875,7 @@ impl AstCompiler<'_> {
                                 mutable_fields: vec![],
                                 docstring: None,
                                 field_docstrings: vec![],
+                                source_text: None,
                             });
                             // Register variant-to-enum mapping for effect handlers
                             if let Some((struct_id, _)) =

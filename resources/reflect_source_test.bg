@@ -1,0 +1,172 @@
+namespace reflect_source_test
+
+use beagle.reflect as reflect
+
+/// A friendly greeting function.
+fn greet(name) {
+    println("Hello, " + name)
+}
+
+fn add(x, y) {
+    x + y
+}
+
+/// A 2-d point.
+struct Point { x, y }
+
+enum Color {
+    Red,
+    Green,
+    Blue
+}
+
+fn main() {
+    // Source text for a function with a docstring is reattached as `///` lines.
+    let greet_src = reflect/source(greet)
+    println(greet_src)
+    println("---")
+
+    // Source text for a function without a docstring is verbatim.
+    println(reflect/source(add))
+    println("---")
+
+    // Struct source text (with reattached docstring).
+    println(reflect/source(Point))
+    println("---")
+
+    // Enum source text.
+    println(reflect/source(Color))
+    println("---")
+
+    // Source text for a struct INSTANCE returns the struct's source text.
+    let p = Point { x: 1, y: 2 }
+    println(reflect/source(p))
+    println("---")
+
+    // Source text for an enum variant returns the enum's source text.
+    let c = Color.Red
+    println(reflect/source(c))
+    println("---")
+
+    // Builtins have no source text — returns null.
+    println(reflect/source(println))
+    println("---")
+
+    // Whole-namespace source: concatenated definitions in a stable order
+    // (structs, then enums, then functions).
+    let ns_src = reflect/namespace-source("reflect_source_test")
+    println(ns_src)
+
+    "done"
+}
+
+// @beagle.core.snapshot
+// |/// A friendly greeting function.
+// |fn greet(name) {
+// |    println("Hello, " + name)
+// |}
+// |---
+// |fn add(x, y) {
+// |    x + y
+// |}
+// |---
+// |/// A 2-d point.
+// |struct Point { x, y }
+// |---
+// |null
+// |---
+// |/// A 2-d point.
+// |struct Point { x, y }
+// |---
+// |enum Color {
+// |    Red,
+// |    Green,
+// |    Blue
+// |}
+// |---
+// |/// Print arguments separated by spaces with a trailing newline.
+// |/// 
+// |/// Accepts any number of arguments. Each is formatted and printed.
+// |/// Returns the last argument.
+// |/// 
+// |/// Examples:
+// |///   (println "Hello" "World")  ; prints: Hello World\n
+// |///   (println 1 2 3)            ; prints: 1 2 3\n
+// |fn println(...args) {
+// |    let len = length(args)
+// |    if len == 0 {
+// |        write(out, "\n")
+// |        null
+// |    } else {
+// |        let mut last = null
+// |        let mut i = 0
+// |        while i < len {
+// |            if i > 0 {
+// |                write(out, " ")
+// |            }
+// |            last = get(args, i)
+// |            write(out, format(last, 0))
+// |            i = i + 1
+// |        }
+// |        write(out, "\n")
+// |        last
+// |    }
+// |}
+// |---
+// |/// A 2-d point.
+// |struct Point { x, y }
+// |
+// |enum Color {
+// |    Red,
+// |    Green,
+// |    Blue
+// |}
+// |
+// |/// A friendly greeting function.
+// |fn greet(name) {
+// |    println("Hello, " + name)
+// |}
+// |
+// |fn add(x, y) {
+// |    x + y
+// |}
+// |
+// |fn main() {
+// |    // Source text for a function with a docstring is reattached as `///` lines.
+// |    let greet_src = reflect/source(greet)
+// |    println(greet_src)
+// |    println("---")
+// |
+// |    // Source text for a function without a docstring is verbatim.
+// |    println(reflect/source(add))
+// |    println("---")
+// |
+// |    // Struct source text (with reattached docstring).
+// |    println(reflect/source(Point))
+// |    println("---")
+// |
+// |    // Enum source text.
+// |    println(reflect/source(Color))
+// |    println("---")
+// |
+// |    // Source text for a struct INSTANCE returns the struct's source text.
+// |    let p = Point { x: 1, y: 2 }
+// |    println(reflect/source(p))
+// |    println("---")
+// |
+// |    // Source text for an enum variant returns the enum's source text.
+// |    let c = Color.Red
+// |    println(reflect/source(c))
+// |    println("---")
+// |
+// |    // Builtins have no source text — returns null.
+// |    println(reflect/source(println))
+// |    println("---")
+// |
+// |    // Whole-namespace source: concatenated definitions in a stable order
+// |    // (structs, then enums, then functions).
+// |    let ns_src = reflect/namespace-source("reflect_source_test")
+// |    println(ns_src)
+// |
+// |    "done"
+// |}

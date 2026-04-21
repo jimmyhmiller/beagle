@@ -337,6 +337,7 @@ struct DeferredFunctionUpdate {
     arg_names: Vec<String>,
     source_file: Option<String>,
     source_line: Option<usize>,
+    source_text: Option<String>,
 }
 
 pub struct Compiler {
@@ -452,6 +453,8 @@ impl Compiler {
         let mut parser = Parser::new("".to_string(), string.to_string())?;
         let ast = parser.parse()?;
         let token_line_column_map = parser.get_token_line_column_map();
+        let token_byte_spans = parser.get_token_byte_spans();
+        let source_text = parser.source().to_string();
 
         // Track function count before compilation so we can clean up on failure.
         // The first pass reserves functions (with null pointers) before compiling
@@ -473,6 +476,8 @@ impl Compiler {
             Some("REPL_FUNCTION".to_string()),
             "repl",
             token_line_column_map,
+            source_text,
+            token_byte_spans,
         );
 
         let (top_level, diagnostics) = match compile_result {
@@ -556,6 +561,8 @@ impl Compiler {
         let mut parser = Parser::new(file_name.to_string(), code.to_string())?;
         let ast = parser.parse()?;
         let token_line_column_map = parser.get_token_line_column_map();
+        let token_byte_spans = parser.get_token_byte_spans();
+        let source_text = parser.source().to_string();
 
         if self.command_line_arguments.print_parse {
             println!("{:#?}", ast);
@@ -571,8 +578,14 @@ impl Compiler {
 
         let mut top_levels_to_run = self.compile_dependencies(&ast, file_name)?;
 
-        let (top_level, diagnostics) =
-            self.compile_ast(ast, None, file_name, token_line_column_map)?;
+        let (top_level, diagnostics) = self.compile_ast(
+            ast,
+            None,
+            file_name,
+            token_line_column_map,
+            source_text,
+            token_byte_spans,
+        )?;
         if let Some(top_level) = top_level {
             top_levels_to_run.push(top_level);
         }
@@ -610,6 +623,8 @@ impl Compiler {
         let mut parser = Parser::new(name.to_string(), source.to_string())?;
         let ast = parser.parse()?;
         let token_line_column_map = parser.get_token_line_column_map();
+        let token_byte_spans = parser.get_token_byte_spans();
+        let source_text = parser.source().to_string();
 
         if self.command_line_arguments.print_parse {
             println!("{:#?}", ast);
@@ -625,7 +640,14 @@ impl Compiler {
 
         let mut top_levels_to_run = self.compile_dependencies(&ast, name)?;
 
-        let (top_level, diagnostics) = self.compile_ast(ast, None, name, token_line_column_map)?;
+        let (top_level, diagnostics) = self.compile_ast(
+            ast,
+            None,
+            name,
+            token_line_column_map,
+            source_text,
+            token_byte_spans,
+        )?;
         if let Some(top_level) = top_level {
             top_levels_to_run.push(top_level);
         }
@@ -689,9 +711,16 @@ impl Compiler {
         fn_name: Option<String>,
         file_name: &str,
         token_line_column_map: Vec<(usize, usize)>,
+        source_text: String,
+        token_byte_spans: Vec<(usize, usize)>,
     ) -> Result<(Option<String>, Vec<Diagnostic>), Box<dyn Error>> {
-        let (mut ir, token_map, diagnostics) =
-            ast.compile(self, file_name, token_line_column_map)?;
+        let (mut ir, token_map, diagnostics) = ast.compile(
+            self,
+            file_name,
+            token_line_column_map,
+            source_text,
+            token_byte_spans,
+        )?;
         let top_level_name =
             fn_name.unwrap_or_else(|| format!("{}/__top_level", self.current_namespace_name()));
         if ast.has_top_level() {
@@ -721,6 +750,7 @@ impl Compiler {
                 None,
                 vec![],
                 Some(file_name.to_string()),
+                None,
                 None,
             )?;
             debug_only! {
@@ -1132,6 +1162,7 @@ impl Compiler {
         arg_names: Vec<String>,
         source_file: Option<String>,
         source_line: Option<usize>,
+        source_text: Option<String>,
     ) -> Result<usize, Box<dyn Error>> {
         if let Some(name) = function_name {
             backend.set_function_name(name);
@@ -1163,6 +1194,7 @@ impl Compiler {
                 arg_names,
                 source_file,
                 source_line,
+                source_text,
             });
             // Return a placeholder — the real pointer will be set during flush.
             // For now, return the code pointer (it's valid, just not in the jump table yet).
@@ -1187,6 +1219,7 @@ impl Compiler {
                 arg_names,
                 source_file,
                 source_line,
+                source_text,
             )
         }
     }
@@ -1217,6 +1250,7 @@ impl Compiler {
                 update.arg_names,
                 update.source_file,
                 update.source_line,
+                update.source_text,
             );
         }
     }
@@ -1245,6 +1279,7 @@ impl Compiler {
             vec![],
             None,
             None,
+            None,
         )
     }
 
@@ -1266,6 +1301,7 @@ impl Compiler {
             function.arg_names.clone(),
             function.source_file.clone(),
             function.source_line,
+            function.source_text.clone(),
         )?;
         Ok(())
     }
@@ -1516,7 +1552,7 @@ impl Compiler {
             token_range: TokenRange::new(0, 0),
         };
         // Ignore diagnostics from reify method compilation - these are internal
-        let _ = self.compile_ast(ast, None, "test", vec![])?;
+        let _ = self.compile_ast(ast, None, "test", vec![], String::new(), vec![])?;
         self.code_allocator.make_executable();
         self.set_current_namespace(current_namespace_id);
         Ok(())

@@ -718,11 +718,24 @@ fn handle_command(runtime: &mut Runtime, input: &str) -> bool {
             }
             let full_name = resolve_name(runtime, arg);
             match runtime.get_function_by_name(&full_name) {
-                Some(f) => match (&f.source_file, f.source_line) {
-                    (Some(file), Some(line)) => println!("{}:{}", file, line),
-                    (Some(file), None) => println!("{}", file),
-                    _ => println!("{DIM}(no source location){RESET}"),
-                },
+                Some(f) => {
+                    if let Some(text) = &f.source_text {
+                        println!("{}", text);
+                    } else {
+                        match (&f.source_file, f.source_line) {
+                            (Some(file), Some(line)) => {
+                                println!(
+                                    "{DIM}(no source text; defined at {}:{}){RESET}",
+                                    file, line
+                                )
+                            }
+                            (Some(file), None) => {
+                                println!("{DIM}(no source text; defined in {}){RESET}", file)
+                            }
+                            _ => println!("{DIM}(no source available){RESET}"),
+                        }
+                    }
+                }
                 None => {
                     println!("Not found: {}", arg);
                 }

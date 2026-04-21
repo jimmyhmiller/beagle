@@ -978,3 +978,169 @@ pub extern "C" fn reflect_namespace_info(
 
     result.unwrap_or(BuiltInTypes::null_value() as usize)
 }
+
+/// Resolve a value (function, struct instance/descriptor, or enum
+/// variant/descriptor) to the `source_text` stored on the matching
+/// Function/Struct/Enum record. Returns `None` if no source is available.
+fn resolve_source_text(runtime: &Runtime, stack_pointer: usize, value: usize) -> Option<String> {
+    let tag = BuiltInTypes::get_kind(value);
+
+    if matches!(tag, BuiltInTypes::Function) {
+        let fn_ptr = BuiltInTypes::untag(value) as *const u8;
+        return runtime
+            .get_function_by_pointer(fn_ptr)
+            .and_then(|f| f.source_text.clone());
+    }
+
+    if matches!(tag, BuiltInTypes::Closure) && BuiltInTypes::is_heap_pointer(value) {
+        let heap_obj = HeapObject::from_tagged(value);
+        let fn_ptr = BuiltInTypes::untag(heap_obj.get_field(0)) as *const u8;
+        return runtime
+            .get_function_by_pointer(fn_ptr)
+            .and_then(|f| f.source_text.clone());
+    }
+
+    if matches!(tag, BuiltInTypes::HeapObject) {
+        let heap_obj = HeapObject::from_tagged(value);
+        let type_id = heap_obj.get_type_id();
+        let struct_id = heap_obj.get_struct_id();
+
+        // Function struct object (first-class fn via heap wrapper)
+        if type_id == 0 && struct_id == runtime.function_struct_id {
+            let fn_ptr_tagged = heap_obj.get_field(0);
+            let fn_ptr = BuiltInTypes::untag(fn_ptr_tagged) as *const u8;
+            return runtime
+                .get_function_by_pointer(fn_ptr)
+                .and_then(|f| f.source_text.clone());
+        }
+
+        // Type descriptor: an instance of beagle.core/Struct whose field 0
+        // is the fully-qualified type name. Use it to look up the actual
+        // struct or enum definition.
+        let struct_struct_id = runtime.get_struct("beagle.core/Struct").map(|(id, _)| id);
+        let fields_size = heap_obj.fields_size() / 8;
+        if struct_struct_id == Some(struct_id) && fields_size >= 1 {
+            let name_ptr = heap_obj.get_field(0);
+            let full_name = runtime.get_string(stack_pointer, name_ptr);
+            if let Some((_, s)) = runtime.get_struct(&full_name)
+                && s.source_text.is_some()
+            {
+                return s.source_text.clone();
+            }
+            if let Some(e) = runtime.enums.get(&full_name)
+                && e.source_text.is_some()
+            {
+                return e.source_text.clone();
+            }
+        }
+
+        // Regular struct instance (or enum variant instance): look up by struct_id
+        if let Some(s) = runtime.get_struct_by_id(struct_id) {
+            if let Some(enum_name) = runtime.get_enum_name_for_variant(struct_id)
+                && let Some(e) = runtime.enums.get(enum_name)
+                && e.source_text.is_some()
+            {
+                return e.source_text.clone();
+            }
+            if s.source_text.is_some() {
+                return s.source_text.clone();
+            }
+        }
+    }
+
+    None
+}
+
+/// reflect/source(value) - Return the original source text for a definition.
+///
+/// Accepts a function value, struct/enum value or type descriptor. Returns
+/// `null` if no source text is stored (e.g. for builtins, foreign functions,
+/// or anonymous closures).
+pub extern "C" fn reflect_source(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    match resolve_source_text(runtime, stack_pointer, value) {
+        Some(text) => runtime
+            .allocate_string(stack_pointer, text)
+            .map(|s| s.into())
+            .unwrap_or(BuiltInTypes::null_value() as usize),
+        None => BuiltInTypes::null_value() as usize,
+    }
+}
+
+/// reflect/namespace-source(namespace) - Return the concatenated source text
+/// of every definition in the given namespace, in registration order.
+/// Members without stored source (builtins, foreign fns) are skipped.
+/// Returns `null` if the namespace has no members with source.
+pub extern "C" fn reflect_namespace_source(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    namespace_name: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    let ns_name = runtime.get_string(stack_pointer, namespace_name);
+    let prefix = format!("{}/", ns_name);
+
+    let mut blocks: Vec<String> = Vec::new();
+
+    // Structs (excluding enum variant structs, which are emitted as part of
+    // the enum's source block).
+    for s in runtime.structs.iter() {
+        if !s.name.starts_with(&prefix) {
+            continue;
+        }
+        let local = s.name.strip_prefix(&prefix).unwrap_or(&s.name);
+        if local.contains('.') {
+            continue;
+        }
+        if let Some(text) = &s.source_text {
+            blocks.push(text.clone());
+        }
+    }
+
+    // Enums
+    for e in runtime.enums.iter() {
+        if !e.name.starts_with(&prefix) {
+            continue;
+        }
+        if let Some(text) = &e.source_text {
+            blocks.push(text.clone());
+        }
+    }
+
+    // Functions
+    for f in runtime.functions.iter() {
+        if !f.name.starts_with(&prefix) {
+            continue;
+        }
+        if let Some(text) = &f.source_text {
+            blocks.push(text.clone());
+        }
+    }
+
+    if blocks.is_empty() {
+        return BuiltInTypes::null_value() as usize;
+    }
+
+    let mut out = String::new();
+    for (i, block) in blocks.iter().enumerate() {
+        if i > 0 {
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+        out.push_str(block);
+    }
+
+    runtime
+        .allocate_string(stack_pointer, out)
+        .map(|s| s.into())
+        .unwrap_or(BuiltInTypes::null_value() as usize)
+}

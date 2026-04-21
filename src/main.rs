@@ -2278,10 +2278,33 @@ fn get_expect(source: &str) -> Option<String> {
             .lines()
             .skip(1)
             .take_while(|line| line.starts_with("//"))
-            .map(|line| line.trim_start_matches("//").trim())
+            .map(decode_snapshot_line)
             .collect::<Vec<_>>()
             .join("\n"),
     )
+}
+
+/// Decode one snapshot comment line.
+///
+/// Two formats are supported:
+///   `// |<content>` — verbatim mode (Scala stripMargin style). The bytes
+///   after the `|` are taken exactly, preserving leading whitespace. Use
+///   this when the expected output is indented.
+///
+///   `// <content>`  — trim mode (legacy). Both ends are trimmed. Cheaper
+///   to write by hand for small one-line outputs but cannot represent
+///   indentation. All pre-existing snapshots use this format.
+fn decode_snapshot_line(line: &str) -> String {
+    let after = line.trim_start_matches("//");
+    // Verbatim mode: `// |...` — strip exactly one leading space (the one
+    // separating `//` from `|`) and the `|` itself, then take the rest as-is.
+    if let Some(rest) = after.strip_prefix(' ').and_then(|s| s.strip_prefix('|')) {
+        return rest.to_string();
+    }
+    if let Some(rest) = after.strip_prefix('|') {
+        return rest.to_string();
+    }
+    after.trim().to_string()
 }
 
 fn update_snapshot(file_path: &str, actual_output: &str) -> Result<(), Box<dyn Error>> {
@@ -2292,12 +2315,29 @@ fn update_snapshot(file_path: &str, actual_output: &str) -> Result<(), Box<dyn E
     // Find the start of the marker line
     let line_start = source[..marker_pos].rfind('\n').map_or(0, |p| p + 1);
 
-    // Build new snapshot section
+    // Use stripMargin (`// |...`) format if any line has leading whitespace
+    // OR if the existing snapshot already uses it. Plain `// ...` format
+    // can't represent indentation because the reader trims each line.
+    let any_indented = actual_output
+        .lines()
+        .any(|l| l.starts_with(' ') || l.starts_with('\t'));
+    let existing_uses_margin = source[marker_pos..]
+        .lines()
+        .skip(1)
+        .take_while(|l| l.starts_with("//"))
+        .any(|l| l.starts_with("// |") || l.starts_with("//|"));
+    let use_margin = any_indented || existing_uses_margin;
+
     let mut new_snapshot = String::new();
     new_snapshot.push_str(marker);
     new_snapshot.push('\n');
     for line in actual_output.lines() {
-        if line.is_empty() {
+        if use_margin {
+            // Verbatim format: `// |<line>`. An empty line becomes `// |`.
+            new_snapshot.push_str("// |");
+            new_snapshot.push_str(line);
+            new_snapshot.push('\n');
+        } else if line.is_empty() {
             new_snapshot.push_str("//\n");
         } else {
             new_snapshot.push_str(&format!("// {}\n", line));

@@ -2274,6 +2274,22 @@ impl Runtime {
             "Get detailed information about a namespace.\n\nReturns a map with the namespace's functions, structs, and enums.\n\nExamples:\n  (reflect/namespace-info \"beagle.core\")\n  ; => {:functions [...] :structs [...] :enums [...]}",
         )?;
 
+        self.add_builtin_with_doc(
+            "beagle.reflect/source",
+            reflect_source as *const u8,
+            true,
+            &["value"],
+            "Return the original source text for a definition.\n\nAccepts a function value, struct/enum value, or type descriptor. Returns null if no source text is stored (builtins, foreign functions, or anonymous closures).\n\nThis is the round-trippable counterpart to `eval`: read source, edit it, and re-eval the new text to redefine the function in place.\n\nExamples:\n  (reflect/source greet)\n  ; => \"fn greet(name) {\\n    println(\\\"Hello, \\\" + name)\\n}\"",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.reflect/namespace-source",
+            reflect_namespace_source as *const u8,
+            true,
+            &["namespace-name"],
+            "Return the concatenated source text of every definition in a namespace.\n\nMembers without stored source (builtins, foreign fns) are skipped. Definitions are emitted in registration order: structs first, then enums, then functions. Returns null if the namespace has no members with source.\n\nExamples:\n  (reflect/namespace-source \"my.module\")\n  ; => \"struct Point { x, y }\\n\\nfn distance(a, b) { ... }\"",
+        )?;
+
         // ============================================================================
         // JSON Serialization builtins
         // ============================================================================
