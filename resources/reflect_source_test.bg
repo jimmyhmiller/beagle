@@ -73,7 +73,11 @@ fn main() {
 // |/// A 2-d point.
 // |struct Point { x, y }
 // |---
-// |null
+// |enum Color {
+// |    Red,
+// |    Green,
+// |    Blue
+// |}
 // |---
 // |/// A 2-d point.
 // |struct Point { x, y }
@@ -85,10 +89,10 @@ fn main() {
 // |}
 // |---
 // |/// Print arguments separated by spaces with a trailing newline.
-// |/// 
+// |///
 // |/// Accepts any number of arguments. Each is formatted and printed.
 // |/// Returns the last argument.
-// |/// 
+// |///
 // |/// Examples:
 // |///   (println "Hello" "World")  ; prints: Hello World\n
 // |///   (println 1 2 3)            ; prints: 1 2 3\n

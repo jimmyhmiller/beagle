@@ -338,6 +338,7 @@ struct DeferredFunctionUpdate {
     source_file: Option<String>,
     source_line: Option<usize>,
     source_text: Option<String>,
+    disk_location: Option<crate::runtime::DiskLocation>,
 }
 
 pub struct Compiler {
@@ -430,6 +431,120 @@ impl Compiler {
         self.compile_string_in_namespace(string, None)
     }
 
+    /// Compile `string` as if it were a slice of an on-disk file at
+    /// `byte_offset` / `line_offset`. The offsets are added to the byte
+    /// spans and line numbers the parser produces, so the resulting
+    /// `Function`/`Struct`/`Enum` records point into the real file rather
+    /// than a standalone "repl" origin.
+    ///
+    /// Used by `beagle.reflect/write-source`: after splicing new text into
+    /// a file and writing it, we re-eval just the edited fragment with
+    /// the file's byte offset so the updated definition's `disk_location`
+    /// lines up with its new position in the file on disk.
+    pub fn compile_string_with_file_context(
+        &mut self,
+        string: &str,
+        namespace: Option<&str>,
+        file_name: &str,
+        byte_offset: usize,
+        line_offset: usize,
+    ) -> Result<usize, Box<dyn Error>> {
+        let saved_namespace_id = if let Some(ns_name) = namespace {
+            let current_id = self.current_namespace_id();
+            if let Some(ns_id) = self.get_namespace_id(ns_name) {
+                self.set_current_namespace(ns_id);
+                Some(current_id)
+            } else {
+                return Err(format!("Namespace '{}' not found", ns_name).into());
+            }
+        } else {
+            None
+        };
+
+        let mut parser = Parser::new(file_name.to_string(), string.to_string())?;
+        let ast = parser.parse()?;
+        let token_line_column_map: Vec<(usize, usize)> = parser
+            .get_token_line_column_map()
+            .into_iter()
+            .map(|(line, col)| (line + line_offset, col))
+            .collect();
+        let token_byte_spans: Vec<(usize, usize)> = parser
+            .get_token_byte_spans()
+            .into_iter()
+            .map(|(s, e)| (s + byte_offset, e + byte_offset))
+            .collect();
+        let definition_byte_ranges: HashMap<(usize, usize), (usize, usize)> = parser
+            .get_definition_byte_ranges()
+            .into_iter()
+            .map(|(k, (s, e))| (k, (s + byte_offset, e + byte_offset)))
+            .collect();
+        // The source string we hand to the AST compiler needs a leading
+        // padding of `byte_offset` bytes so that the shifted byte ranges
+        // resolve correctly when we slice. The padding bytes are never
+        // read for source text — `extract_source_text` only touches bytes
+        // inside recorded definition ranges.
+        let mut padded_source = String::with_capacity(byte_offset + string.len());
+        padded_source.push_str(&" ".repeat(byte_offset));
+        padded_source.push_str(string);
+
+        let functions_before = {
+            let runtime = get_runtime().get_mut();
+            runtime.functions.len()
+        };
+        self.defer_function_installs = true;
+
+        let compile_result = self.compile_ast(
+            ast,
+            None,
+            file_name,
+            token_line_column_map,
+            padded_source,
+            token_byte_spans,
+            definition_byte_ranges,
+        );
+
+        let (top_level, diagnostics) = match compile_result {
+            Ok(result) => result,
+            Err(e) => {
+                if let Some(saved_id) = saved_namespace_id {
+                    self.set_current_namespace(saved_id);
+                }
+                self.deferred_updates.clear();
+                self.defer_function_installs = false;
+                let runtime = get_runtime().get_mut();
+                runtime.functions.truncate(functions_before);
+                return Err(e);
+            }
+        };
+
+        if let Some(saved_id) = saved_namespace_id {
+            self.set_current_namespace(saved_id);
+        }
+
+        if let Ok(mut store) = self.diagnostic_store.lock() {
+            store.set_file_diagnostics(file_name.to_string(), diagnostics);
+        }
+
+        self.defer_function_installs = false;
+        self.flush_deferred_functions();
+        self.code_allocator.make_executable();
+        if let Some(top_level) = top_level {
+            let function = self.get_function_by_name(&top_level).ok_or_else(|| {
+                CompileError::FunctionNotFound {
+                    function_name: top_level.clone(),
+                }
+            })?;
+            let function_pointer = self.get_pointer_for_function(function).ok_or({
+                CompileError::InvalidFunctionPointer {
+                    function_name: top_level,
+                }
+            })?;
+            Ok(function_pointer)
+        } else {
+            Ok(0)
+        }
+    }
+
     pub fn compile_string_in_namespace(
         &mut self,
         string: &str,
@@ -455,6 +570,7 @@ impl Compiler {
         let token_line_column_map = parser.get_token_line_column_map();
         let token_byte_spans = parser.get_token_byte_spans();
         let source_text = parser.source().to_string();
+        let definition_byte_ranges = parser.get_definition_byte_ranges();
 
         // Track function count before compilation so we can clean up on failure.
         // The first pass reserves functions (with null pointers) before compiling
@@ -478,6 +594,7 @@ impl Compiler {
             token_line_column_map,
             source_text,
             token_byte_spans,
+            definition_byte_ranges,
         );
 
         let (top_level, diagnostics) = match compile_result {
@@ -563,6 +680,7 @@ impl Compiler {
         let token_line_column_map = parser.get_token_line_column_map();
         let token_byte_spans = parser.get_token_byte_spans();
         let source_text = parser.source().to_string();
+        let definition_byte_ranges = parser.get_definition_byte_ranges();
 
         if self.command_line_arguments.print_parse {
             println!("{:#?}", ast);
@@ -585,6 +703,7 @@ impl Compiler {
             token_line_column_map,
             source_text,
             token_byte_spans,
+            definition_byte_ranges,
         )?;
         if let Some(top_level) = top_level {
             top_levels_to_run.push(top_level);
@@ -625,6 +744,7 @@ impl Compiler {
         let token_line_column_map = parser.get_token_line_column_map();
         let token_byte_spans = parser.get_token_byte_spans();
         let source_text = parser.source().to_string();
+        let definition_byte_ranges = parser.get_definition_byte_ranges();
 
         if self.command_line_arguments.print_parse {
             println!("{:#?}", ast);
@@ -647,6 +767,7 @@ impl Compiler {
             token_line_column_map,
             source_text,
             token_byte_spans,
+            definition_byte_ranges,
         )?;
         if let Some(top_level) = top_level {
             top_levels_to_run.push(top_level);
@@ -713,6 +834,7 @@ impl Compiler {
         token_line_column_map: Vec<(usize, usize)>,
         source_text: String,
         token_byte_spans: Vec<(usize, usize)>,
+        definition_byte_ranges: HashMap<(usize, usize), (usize, usize)>,
     ) -> Result<(Option<String>, Vec<Diagnostic>), Box<dyn Error>> {
         let (mut ir, token_map, diagnostics) = ast.compile(
             self,
@@ -720,6 +842,7 @@ impl Compiler {
             token_line_column_map,
             source_text,
             token_byte_spans,
+            definition_byte_ranges,
         )?;
         let top_level_name =
             fn_name.unwrap_or_else(|| format!("{}/__top_level", self.current_namespace_name()));
@@ -750,6 +873,7 @@ impl Compiler {
                 None,
                 vec![],
                 Some(file_name.to_string()),
+                None,
                 None,
                 None,
             )?;
@@ -1163,6 +1287,7 @@ impl Compiler {
         source_file: Option<String>,
         source_line: Option<usize>,
         source_text: Option<String>,
+        disk_location: Option<crate::runtime::DiskLocation>,
     ) -> Result<usize, Box<dyn Error>> {
         if let Some(name) = function_name {
             backend.set_function_name(name);
@@ -1195,6 +1320,7 @@ impl Compiler {
                 source_file,
                 source_line,
                 source_text,
+                disk_location,
             });
             // Return a placeholder — the real pointer will be set during flush.
             // For now, return the code pointer (it's valid, just not in the jump table yet).
@@ -1220,6 +1346,7 @@ impl Compiler {
                 source_file,
                 source_line,
                 source_text,
+                disk_location,
             )
         }
     }
@@ -1251,6 +1378,7 @@ impl Compiler {
                 update.source_file,
                 update.source_line,
                 update.source_text,
+                update.disk_location,
             );
         }
     }
@@ -1280,6 +1408,7 @@ impl Compiler {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -1302,6 +1431,7 @@ impl Compiler {
             function.source_file.clone(),
             function.source_line,
             function.source_text.clone(),
+            function.disk_location.clone(),
         )?;
         Ok(())
     }
@@ -1552,7 +1682,15 @@ impl Compiler {
             token_range: TokenRange::new(0, 0),
         };
         // Ignore diagnostics from reify method compilation - these are internal
-        let _ = self.compile_ast(ast, None, "test", vec![], String::new(), vec![])?;
+        let _ = self.compile_ast(
+            ast,
+            None,
+            "test",
+            vec![],
+            String::new(),
+            vec![],
+            HashMap::new(),
+        )?;
         self.code_allocator.make_executable();
         self.set_current_namespace(current_namespace_id);
         Ok(())
@@ -1571,6 +1709,10 @@ pub enum CompilerMessage {
     CompileStringInNamespace(String, String), // (code, namespace_name)
     CompileFile(String),
     CompileSource(String, String),
+    /// (code, namespace_name, file_name, byte_offset, line_offset) — used
+    /// by `reflect/write-source` to re-register a function after splicing
+    /// edited text into its original file.
+    CompileStringWithFileContext(String, String, String, usize, usize),
     AddFunctionMarkExecutable(String, Vec<u8>, usize, usize),
     CompileProtocolMethod(String, String, Vec<ProtocolMethodInfo>),
     SetPauseAtomPointer(usize),
@@ -1680,6 +1822,34 @@ impl CompilerThread {
                         match self.compiler.compile_source(&name, &source) {
                             Ok(top_levels) => {
                                 work_done.mark_done(CompilerResponse::FunctionsToRun(top_levels));
+                            }
+                            Err(e) => {
+                                work_done
+                                    .mark_done(CompilerResponse::CompileError(format!("{}", e)));
+                            }
+                        }
+                    }
+                    CompilerMessage::CompileStringWithFileContext(
+                        code,
+                        namespace,
+                        file_name,
+                        byte_offset,
+                        line_offset,
+                    ) => {
+                        let ns = if namespace.is_empty() {
+                            None
+                        } else {
+                            Some(namespace.as_str())
+                        };
+                        match self.compiler.compile_string_with_file_context(
+                            &code,
+                            ns,
+                            &file_name,
+                            byte_offset,
+                            line_offset,
+                        ) {
+                            Ok(pointer) => {
+                                work_done.mark_done(CompilerResponse::FunctionPointer(pointer));
                             }
                             Err(e) => {
                                 work_done

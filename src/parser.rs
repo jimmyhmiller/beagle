@@ -1190,6 +1190,11 @@ pub struct Parser {
     /// Accumulated doc comments (///) seen during whitespace skipping.
     /// These are collected and assigned to the next fn/struct/enum definition.
     pending_docstring: Option<String>,
+    /// Per-definition extended byte ranges: maps a fn/struct/enum's
+    /// TokenRange.(start, end) to (file_byte_start, file_byte_end), where
+    /// the start is extended backward to include any preceding `///` doc
+    /// comment block. Populated by parse_function/parse_struct/parse_enum.
+    definition_byte_ranges: std::collections::HashMap<(usize, usize), (usize, usize)>,
 }
 
 impl Parser {
@@ -1222,6 +1227,7 @@ impl Parser {
             token_line_column_map,
             token_byte_spans,
             pending_docstring: None,
+            definition_byte_ranges: std::collections::HashMap::new(),
         })
     }
 
@@ -1229,8 +1235,65 @@ impl Parser {
         self.token_byte_spans.clone()
     }
 
+    pub fn get_definition_byte_ranges(
+        &self,
+    ) -> std::collections::HashMap<(usize, usize), (usize, usize)> {
+        self.definition_byte_ranges.clone()
+    }
+
     pub fn source(&self) -> &str {
         &self.source
+    }
+
+    /// Compute the byte range in `source` that covers a top-level
+    /// definition at the given TokenRange, extended backward to include
+    /// any contiguous preceding `///` doc comment lines. Used by
+    /// parse_function / parse_struct / parse_enum to populate
+    /// `definition_byte_ranges` for later use by AST compilation and
+    /// `reflect/location`.
+    fn compute_extended_byte_range(&self, token_range: TokenRange) -> (usize, usize) {
+        if self.token_byte_spans.is_empty() {
+            return (0, 0);
+        }
+        let start_idx = token_range.start.min(self.token_byte_spans.len() - 1);
+        let end_idx = token_range
+            .end
+            .saturating_sub(1)
+            .min(self.token_byte_spans.len() - 1);
+        let fn_start_byte = self.token_byte_spans[start_idx].0;
+        let end_byte = self.token_byte_spans[end_idx].1;
+
+        // Walk backward over Spaces/NewLine tokens looking for a contiguous
+        // block of DocComment tokens. Remember the earliest DocComment's
+        // byte start; that becomes the extended start. Stop at the first
+        // token that isn't whitespace or a doc comment.
+        let mut extended_start = fn_start_byte;
+        if start_idx == 0 {
+            return (extended_start, end_byte);
+        }
+        let mut i = start_idx - 1;
+        loop {
+            match self.tokens.get(i) {
+                Some(Token::DocComment(_)) => {
+                    extended_start = self.token_byte_spans[i].0;
+                }
+                Some(Token::NewLine) | Some(Token::Spaces(_)) => {
+                    // Whitespace between/around docs — keep walking.
+                }
+                _ => break,
+            }
+            if i == 0 {
+                break;
+            }
+            i -= 1;
+        }
+        (extended_start, end_byte)
+    }
+
+    fn record_definition_byte_range(&mut self, token_range: TokenRange) {
+        let range = self.compute_extended_byte_range(token_range);
+        self.definition_byte_ranges
+            .insert((token_range.start, token_range.end), range);
     }
 
     pub fn current_location(&self) -> String {
@@ -2011,12 +2074,16 @@ impl Parser {
         self.expect_close_paren()?;
         let body = self.parse_block()?;
         let end_position = self.position;
+        let token_range = TokenRange::new(start_position, end_position);
+        if name.is_some() {
+            self.record_definition_byte_range(token_range);
+        }
         Ok(Ast::Function {
             name,
             args,
             rest_param,
             body,
-            token_range: TokenRange::new(start_position, end_position),
+            token_range,
             docstring,
         })
     }
@@ -2352,10 +2419,12 @@ impl Parser {
         let fields = self.parse_struct_fields()?;
         self.expect_close_curly()?;
         let end_position = self.position;
+        let token_range = TokenRange::new(start_position, end_position);
+        self.record_definition_byte_range(token_range);
         Ok(Ast::Struct {
             name,
             fields,
-            token_range: TokenRange::new(start_position, end_position),
+            token_range,
             docstring,
         })
     }
@@ -2711,10 +2780,12 @@ impl Parser {
         let variants = self.parse_enum_variants()?;
         self.expect_close_curly()?;
         let end_position = self.position;
+        let token_range = TokenRange::new(start_position, end_position);
+        self.record_definition_byte_range(token_range);
         Ok(Ast::Enum {
             name,
             variants,
-            token_range: TokenRange::new(start_position, end_position),
+            token_range,
             docstring,
         })
     }

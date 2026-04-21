@@ -2290,6 +2290,22 @@ impl Runtime {
             "Return the concatenated source text of every definition in a namespace.\n\nMembers without stored source (builtins, foreign fns) are skipped. Definitions are emitted in registration order: structs first, then enums, then functions. Returns null if the namespace has no members with source.\n\nExamples:\n  (reflect/namespace-source \"my.module\")\n  ; => \"struct Point { x, y }\\n\\nfn distance(a, b) { ... }\"",
         )?;
 
+        self.add_builtin_with_doc(
+            "beagle.reflect/location",
+            reflect_location as *const u8,
+            true,
+            &["value"],
+            "Return the on-disk location of a definition as a map `{:file, :byte-start, :byte-end, :line-start, :line-end}`, or null.\n\nAccepts the same kinds of values as `reflect/source`: function, struct/enum value or type descriptor. The byte range covers the full block as it lives on disk, including any preceding `///` doc comment lines. REPL/eval definitions, builtins, and foreign functions return null.\n\nPair with `reflect/write-source` to persist edits back to disk.\n\nExamples:\n  (reflect/location greet)\n  ; => {:file \"my.bg\" :byte-start 120 :byte-end 200 :line-start 5 :line-end 8}",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.reflect/write-source",
+            reflect_write_source as *const u8,
+            true,
+            &["value", "new-text"],
+            "Persist an edited definition back to its source file and re-register it in the runtime.\n\nReads the file at the definition's on-disk location, verifies the bytes still match what was loaded (aborting if the file drifted), splices `new-text` in at the recorded byte range, writes the file, and re-compiles the new text in the definition's namespace so subsequent `reflect/source` returns it. Byte ranges of other definitions in the same file are shifted to account for the length change.\n\nThrows a runtime error (kind `write-source`) when the value has no on-disk origin, the file has drifted, I/O fails, or the new text doesn't parse. Returns `true` on success.\n\nExamples:\n  (reflect/write-source greet \"fn greet(name) { println(\\\"hi \\\" ++ name) }\")",
+        )?;
+
         // ============================================================================
         // JSON Serialization builtins
         // ============================================================================

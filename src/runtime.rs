@@ -433,6 +433,9 @@ pub struct Struct {
     /// Original source text for the struct definition (including any
     /// preceding `///` doc comment lines). `None` for synthetic structs.
     pub source_text: Option<String>,
+    /// On-disk origin of this struct definition. Sticky across REPL
+    /// redefinitions; see `DiskLocation` for the full contract.
+    pub disk_location: Option<DiskLocation>,
 }
 
 impl Struct {
@@ -591,6 +594,25 @@ impl StructManager {
     pub fn iter(&self) -> impl Iterator<Item = &Struct> {
         self.structs.iter()
     }
+
+    /// Mutably visit every struct (in insertion order). Used by
+    /// `reflect/write-source` to shift byte ranges after an in-place edit.
+    pub fn for_each_mut(&mut self, mut f: impl FnMut(&mut Struct)) {
+        for s in self.structs.iter_mut() {
+            f(s);
+        }
+    }
+
+    /// Overwrite the `disk_location` of a struct by fully-qualified name.
+    /// Returns `true` if a matching struct was found.
+    pub fn patch_disk_location(&mut self, full_name: &str, loc: DiskLocation) -> bool {
+        if let Some(s) = self.structs.iter_mut().find(|s| s.name == full_name) {
+            s.disk_location = Some(loc);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -605,6 +627,7 @@ mod struct_manager_tests {
             docstring: None,
             field_docstrings: vec![None; fields.len()],
             source_text: None,
+            disk_location: None,
         }
     }
 
@@ -2910,6 +2933,23 @@ impl<T, R> From<RawPtr<T>> for *const R {
     }
 }
 
+/// Location of a top-level definition on disk, including the line and
+/// byte ranges for the full definition block (doc comments + fn body).
+///
+/// Populated only when a definition is compiled from a file on disk;
+/// REPL / `eval` definitions leave this as `None`. Sticky on redefine:
+/// a subsequent `eval` of the same name does not clobber the on-disk
+/// origin, so the agent can edit a disk-resident function from the REPL
+/// and later call `reflect/write-source` to persist it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskLocation {
+    pub file: String,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub line_start: usize,
+    pub line_end: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     pub name: String,
@@ -2940,6 +2980,11 @@ pub struct Function {
     /// functions; `None` for builtins, foreign functions, and the synthetic
     /// `__top_level` wrappers. Exposed via `beagle.reflect/source`.
     pub source_text: Option<String>,
+    /// On-disk origin of this definition (file + byte/line ranges).
+    /// Sticky: a REPL redefinition (`eval`) does not clear it, so the
+    /// agent can edit a disk-defined function from the REPL and then
+    /// persist the edit via `beagle.reflect/write-source`.
+    pub disk_location: Option<DiskLocation>,
 }
 
 // ============================================================================
@@ -3429,6 +3474,9 @@ pub struct Enum {
     /// Original source text for the enum definition (including any
     /// preceding `///` doc comment lines).
     pub source_text: Option<String>,
+    /// On-disk origin of this enum definition. Sticky across REPL
+    /// redefinitions; see `DiskLocation` for the full contract.
+    pub disk_location: Option<DiskLocation>,
 }
 
 pub struct EnumManager {
@@ -3464,6 +3512,25 @@ impl EnumManager {
     /// Iterate over all enums
     pub fn iter(&self) -> impl Iterator<Item = &Enum> {
         self.enums.iter()
+    }
+
+    /// Mutably visit every enum (in insertion order). Used by
+    /// `reflect/write-source` to shift byte ranges after an in-place edit.
+    pub fn for_each_mut(&mut self, mut f: impl FnMut(&mut Enum)) {
+        for e in self.enums.iter_mut() {
+            f(e);
+        }
+    }
+
+    /// Overwrite the `disk_location` of an enum by fully-qualified name.
+    /// Returns `true` if a matching enum was found.
+    pub fn patch_disk_location(&mut self, full_name: &str, loc: DiskLocation) -> bool {
+        if let Some(e) = self.enums.iter_mut().find(|e| e.name == full_name) {
+            e.disk_location = Some(loc);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -3978,6 +4045,7 @@ impl Runtime {
             docstring: Some("A first-class function object.".to_string()),
             field_docstrings: vec![None, None, None],
             source_text: None,
+            disk_location: None,
         };
         self.structs
             .insert("beagle.core/Function".to_string(), fn_struct);
@@ -4202,6 +4270,36 @@ impl Runtime {
             .send(CompilerMessage::CompileStringInNamespace(
                 string.to_string(),
                 namespace.to_string(),
+            ));
+        match response {
+            CompilerResponse::FunctionPointer(pointer) => Ok(pointer),
+            CompilerResponse::CompileError(msg) => Err(msg.into()),
+            _ => Err("Unexpected compiler response".into()),
+        }
+    }
+
+    /// Compile `string` as if it were a slice of `file_name` at
+    /// `byte_offset` and `line_offset`. Used by `reflect/write-source`
+    /// so the edited definition's `disk_location` ends up pointing at
+    /// its new position in the file on disk.
+    pub fn compile_string_with_file_context(
+        &mut self,
+        string: &str,
+        namespace: &str,
+        file_name: &str,
+        byte_offset: usize,
+        line_offset: usize,
+    ) -> Result<usize, Box<dyn Error>> {
+        let response = self
+            .compiler_channel
+            .as_ref()
+            .expect("Compiler channel not initialized - this is a fatal error")
+            .send(CompilerMessage::CompileStringWithFileContext(
+                string.to_string(),
+                namespace.to_string(),
+                file_name.to_string(),
+                byte_offset,
+                line_offset,
             ));
         match response {
             CompilerResponse::FunctionPointer(pointer) => Ok(pointer),
@@ -7616,6 +7714,7 @@ impl Runtime {
             source_line: None,
             source_column: None,
             source_text: None,
+            disk_location: None,
         });
         debugger(Message {
             kind: "foreign_function".to_string(),
@@ -7699,6 +7798,7 @@ impl Runtime {
             source_line: None,
             source_column: None,
             source_text: None,
+            disk_location: None,
         });
         let pointer = Self::get_function_pointer(
             self,
@@ -7759,6 +7859,7 @@ impl Runtime {
             source_line: None,
             source_column: None,
             source_text: None,
+            disk_location: None,
         });
         let pointer = Self::get_function_pointer(
             self,
@@ -7812,6 +7913,7 @@ impl Runtime {
         source_file: Option<String>,
         source_line: Option<usize>,
         source_text: Option<String>,
+        disk_location: Option<DiskLocation>,
     ) -> Result<usize, Box<dyn Error>> {
         let mut already_defined = false;
         let mut function_pointer = 0;
@@ -7837,6 +7939,15 @@ impl Runtime {
                     }
                     if source_text.is_some() {
                         self.functions[index].source_text = source_text.clone();
+                    }
+                    // `disk_location` is sticky: a REPL redefinition (where
+                    // the compile doesn't know an on-disk origin and thus
+                    // passes `None`) must not clobber the location captured
+                    // when the function was first loaded from disk.
+                    // `reflect/write-source` depends on this to splice the
+                    // edited text back into the right file and byte range.
+                    if disk_location.is_some() {
+                        self.functions[index].disk_location = disk_location.clone();
                     }
                     // Create a function object if we have a stack (main thread).
                     // On the compiler thread, fall back to Function-tagged pointer.
@@ -7874,6 +7985,7 @@ impl Runtime {
                 source_file,
                 source_line,
                 source_text,
+                disk_location,
             )?;
         }
         assert!(function_pointer != 0);
@@ -7927,6 +8039,7 @@ impl Runtime {
             source_line: None,
             source_column: None,
             source_text: None,
+            disk_location: None,
         };
         self.functions.push(function.clone());
         Ok(function)
@@ -7947,6 +8060,7 @@ impl Runtime {
         source_file: Option<String>,
         source_line: Option<usize>,
         source_text: Option<String>,
+        disk_location: Option<DiskLocation>,
     ) -> Result<usize, Box<dyn Error>> {
         let index = self.functions.len();
         self.functions.push(Function {
@@ -7969,6 +8083,7 @@ impl Runtime {
             source_line,
             source_column: None,
             source_text,
+            disk_location,
         });
         let function_pointer = Self::get_function_pointer(
             self,
@@ -8311,6 +8426,18 @@ impl Runtime {
             .push(StringValue { str: keyword_text });
         self.keyword_heap_ptrs.push(None);
         self.keyword_constants.len() - 1
+    }
+
+    /// Update the on-disk location recorded for the struct named
+    /// `full_name`. Returns `true` if the struct was found.
+    pub fn patch_struct_disk_location(&mut self, full_name: &str, loc: DiskLocation) -> bool {
+        self.structs.patch_disk_location(full_name, loc)
+    }
+
+    /// Update the on-disk location recorded for the enum named
+    /// `full_name`. Returns `true` if the enum was found.
+    pub fn patch_enum_disk_location(&mut self, full_name: &str, loc: DiskLocation) -> bool {
+        self.enums.patch_disk_location(full_name, loc)
     }
 
     pub fn add_struct(&mut self, s: Struct) -> bool {

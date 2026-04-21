@@ -23,7 +23,7 @@ use crate::{
     },
     gc::STACK_SIZE,
     get_runtime,
-    runtime::{DispatchTable, FFIInfo, FFIType, RawPtr, Runtime},
+    runtime::{DiskLocation, DispatchTable, FFIInfo, FFIType, RawPtr, Runtime},
     types::{BuiltInTypes, HeapObject},
 };
 

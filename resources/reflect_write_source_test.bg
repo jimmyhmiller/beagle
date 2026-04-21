@@ -1,0 +1,33 @@
+namespace reflect_write_source_test
+
+use beagle.reflect as reflect
+
+fn stub() { 0 }
+
+fn main() {
+    let original_source = reflect/source(stub)
+    let original_value = stub()
+
+    reflect/write-source(stub, "fn stub() { 999 }")
+    let after_value = stub()
+    let after_source = reflect/source(stub)
+
+    reflect/write-source(stub, original_source)
+    let restored_value = stub()
+    let restored_source = reflect/source(stub)
+
+    println(original_value)
+    println(after_value)
+    println(after_source)
+    println(restored_value)
+    println(restored_source == original_source)
+
+    "done"
+}
+
+// @beagle.core.snapshot
+// 0
+// 999
+// fn stub() { 999 }
+// 0
+// true

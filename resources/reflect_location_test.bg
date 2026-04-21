@@ -1,0 +1,63 @@
+namespace reflect_location_test
+
+use beagle.reflect as reflect
+use beagle.core as core
+
+/// A function with a docstring.
+fn greet(name) {
+    println("Hello, " + name)
+}
+
+fn plain() {
+    42
+}
+
+struct Box { value }
+
+enum Mode {
+    On,
+    Off
+}
+
+fn main() {
+    let greet_loc = reflect/location(greet)
+    println(get(greet_loc, :file) != null)
+    println(get(greet_loc, :byte-start) < get(greet_loc, :byte-end))
+    println(get(greet_loc, :line-start) > 0)
+
+    let plain_loc = reflect/location(plain)
+    println(get(plain_loc, :byte-start) < get(plain_loc, :byte-end))
+
+    let box_loc = reflect/location(Box)
+    println(get(box_loc, :byte-start) < get(box_loc, :byte-end))
+
+    let mode_loc = reflect/location(Mode)
+    println(get(mode_loc, :byte-start) < get(mode_loc, :byte-end))
+
+    let b = Box { value: 1 }
+    println(reflect/location(b) != null)
+    let m = Mode.On
+    println(reflect/location(m) != null)
+
+    // `println` is defined in std.bg, so it has a real on-disk origin.
+    let pln_loc = reflect/location(println)
+    println(pln_loc != null)
+    println(get(pln_loc, :byte-start) < get(pln_loc, :byte-end))
+
+    println(get(greet_loc, :line-end) >= get(greet_loc, :line-start))
+
+    "done"
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true

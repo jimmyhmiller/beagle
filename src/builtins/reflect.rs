@@ -1042,6 +1042,13 @@ fn resolve_source_text(runtime: &Runtime, stack_pointer: usize, value: usize) ->
             {
                 return e.source_text.clone();
             }
+            // Enum companion struct (same name as the enum) — prefer
+            // the enum's source over the companion's empty source.
+            if let Some(e) = runtime.enums.get(&s.name)
+                && e.source_text.is_some()
+            {
+                return e.source_text.clone();
+            }
             if s.source_text.is_some() {
                 return s.source_text.clone();
             }
@@ -1143,4 +1150,417 @@ pub extern "C" fn reflect_namespace_source(
         .allocate_string(stack_pointer, out)
         .map(|s| s.into())
         .unwrap_or(BuiltInTypes::null_value() as usize)
+}
+
+/// Summary of what `resolve_definition` found for a value. Captures what
+/// the two disk-facing builtins need: the definition's fully-qualified
+/// name (for namespace-scoped recompilation), its current source text
+/// (for the integrity check), and its on-disk location.
+struct DefinitionInfo {
+    full_name: String,
+    source_text: Option<String>,
+    disk_location: Option<DiskLocation>,
+}
+
+/// Look up a runtime record for a value following the same dispatch logic
+/// as `resolve_source_text`, and return a bundled `DefinitionInfo`.
+fn resolve_definition(
+    runtime: &Runtime,
+    stack_pointer: usize,
+    value: usize,
+) -> Option<DefinitionInfo> {
+    let tag = BuiltInTypes::get_kind(value);
+
+    if matches!(tag, BuiltInTypes::Function) {
+        let fn_ptr = BuiltInTypes::untag(value) as *const u8;
+        let f = runtime.get_function_by_pointer(fn_ptr)?;
+        return Some(DefinitionInfo {
+            full_name: f.name.clone(),
+            source_text: f.source_text.clone(),
+            disk_location: f.disk_location.clone(),
+        });
+    }
+
+    if matches!(tag, BuiltInTypes::Closure) && BuiltInTypes::is_heap_pointer(value) {
+        let heap_obj = HeapObject::from_tagged(value);
+        let fn_ptr = BuiltInTypes::untag(heap_obj.get_field(0)) as *const u8;
+        let f = runtime.get_function_by_pointer(fn_ptr)?;
+        return Some(DefinitionInfo {
+            full_name: f.name.clone(),
+            source_text: f.source_text.clone(),
+            disk_location: f.disk_location.clone(),
+        });
+    }
+
+    if matches!(tag, BuiltInTypes::HeapObject) {
+        let heap_obj = HeapObject::from_tagged(value);
+        let type_id = heap_obj.get_type_id();
+        let struct_id = heap_obj.get_struct_id();
+
+        if type_id == 0 && struct_id == runtime.function_struct_id {
+            let fn_ptr_tagged = heap_obj.get_field(0);
+            let fn_ptr = BuiltInTypes::untag(fn_ptr_tagged) as *const u8;
+            if let Some(f) = runtime.get_function_by_pointer(fn_ptr) {
+                return Some(DefinitionInfo {
+                    full_name: f.name.clone(),
+                    source_text: f.source_text.clone(),
+                    disk_location: f.disk_location.clone(),
+                });
+            }
+        }
+
+        let struct_struct_id = runtime.get_struct("beagle.core/Struct").map(|(id, _)| id);
+        let fields_size = heap_obj.fields_size() / 8;
+        if struct_struct_id == Some(struct_id) && fields_size >= 1 {
+            let name_ptr = heap_obj.get_field(0);
+            let full_name = runtime.get_string(stack_pointer, name_ptr);
+            // Enums get registered both as an `Enum` and as a companion
+            // `Struct` (used for variant dispatch); the real source and
+            // disk origin live on the `Enum` record. Check enums first so
+            // type descriptors for enums resolve to the right record.
+            if let Some(e) = runtime.enums.get(&full_name) {
+                return Some(DefinitionInfo {
+                    full_name: e.name.clone(),
+                    source_text: e.source_text.clone(),
+                    disk_location: e.disk_location.clone(),
+                });
+            }
+            if let Some((_, s)) = runtime.get_struct(&full_name) {
+                return Some(DefinitionInfo {
+                    full_name: s.name.clone(),
+                    source_text: s.source_text.clone(),
+                    disk_location: s.disk_location.clone(),
+                });
+            }
+        }
+
+        if let Some(s) = runtime.get_struct_by_id(struct_id) {
+            // Variant instance → walk up to the enum.
+            if let Some(enum_name) = runtime.get_enum_name_for_variant(struct_id) {
+                if let Some(e) = runtime.enums.get(enum_name) {
+                    return Some(DefinitionInfo {
+                        full_name: e.name.clone(),
+                        source_text: e.source_text.clone(),
+                        disk_location: e.disk_location.clone(),
+                    });
+                }
+            }
+            // The enum's parent "companion" struct shares its name with
+            // the enum. A bare reference like `Mode` evaluates to an
+            // instance of this companion. Prefer the enum's source/disk
+            // info when both exist.
+            if let Some(e) = runtime.enums.get(&s.name) {
+                return Some(DefinitionInfo {
+                    full_name: e.name.clone(),
+                    source_text: e.source_text.clone(),
+                    disk_location: e.disk_location.clone(),
+                });
+            }
+            return Some(DefinitionInfo {
+                full_name: s.name.clone(),
+                source_text: s.source_text.clone(),
+                disk_location: s.disk_location.clone(),
+            });
+        }
+    }
+
+    None
+}
+
+/// Build the map `{:file, :byte-start, :byte-end, :line-start, :line-end}`
+/// GC-safely using a HandleScope, mirroring the shape of `reflect/info`.
+fn build_location_map(
+    runtime: &mut Runtime,
+    stack_pointer: usize,
+    loc: &DiskLocation,
+) -> Option<usize> {
+    use crate::collections::{HandleScope, PersistentMap};
+
+    let mut scope = HandleScope::new(runtime, stack_pointer);
+    let tg_ptr = crate::runtime::cached_thread_global_ptr();
+
+    let map = PersistentMap::empty(scope.runtime(), stack_pointer).ok()?;
+    let map_h = scope.alloc(map.as_tagged());
+
+    macro_rules! put {
+        ($key:expr, $val:expr) => {{
+            let k = scope
+                .runtime()
+                .intern_keyword(stack_pointer, $key.to_string())
+                .ok()?;
+            let k_h = scope.alloc(k);
+            let v_h = scope.alloc($val);
+            let new_map = PersistentMap::assoc(
+                scope.runtime(),
+                stack_pointer,
+                map_h.get(),
+                k_h.get(),
+                v_h.get(),
+            )
+            .ok()?;
+            let tg = unsafe { &mut *tg_ptr };
+            tg.handle_stack[map_h.slot()] = new_map.as_tagged();
+        }};
+    }
+
+    let file_str = scope
+        .runtime()
+        .allocate_string(stack_pointer, loc.file.clone())
+        .ok()?
+        .into();
+    put!("file", file_str);
+    put!(
+        "byte-start",
+        BuiltInTypes::construct_int(loc.byte_start as isize) as usize
+    );
+    put!(
+        "byte-end",
+        BuiltInTypes::construct_int(loc.byte_end as isize) as usize
+    );
+    put!(
+        "line-start",
+        BuiltInTypes::construct_int(loc.line_start as isize) as usize
+    );
+    put!(
+        "line-end",
+        BuiltInTypes::construct_int(loc.line_end as isize) as usize
+    );
+
+    Some(map_h.get())
+}
+
+/// reflect/location(value) - Return `{:file, :byte-start, :byte-end,
+/// :line-start, :line-end}` for a definition that was loaded from disk,
+/// or `null` for REPL/eval definitions, builtins, and foreign functions.
+///
+/// The byte range covers the full block as it lives on disk, including
+/// any preceding `///` doc comment lines. Pair with
+/// `reflect/write-source` to persist edits back to the file.
+pub extern "C" fn reflect_location(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let info = match resolve_definition(runtime, stack_pointer, value) {
+        Some(info) => info,
+        None => return BuiltInTypes::null_value() as usize,
+    };
+    let Some(loc) = info.disk_location else {
+        return BuiltInTypes::null_value() as usize;
+    };
+    build_location_map(runtime, stack_pointer, &loc).unwrap_or(BuiltInTypes::null_value() as usize)
+}
+
+/// Extract the namespace (the portion before the final `/`) from a
+/// fully-qualified definition name like `"my.ns/foo"`. Returns `None`
+/// for global/unqualified names.
+fn namespace_of(full_name: &str) -> Option<&str> {
+    full_name.rsplit_once('/').map(|(ns, _)| ns)
+}
+
+/// Shift the byte ranges of every runtime record whose disk origin lies
+/// in `file`, at or after `after_byte`, by `delta` (positive = later in
+/// file, negative = earlier). Called after a successful
+/// `reflect/write-source` so subsequent edits in the same file use
+/// up-to-date byte ranges.
+fn shift_byte_ranges_after(runtime: &mut Runtime, file: &str, after_byte: usize, delta: isize) {
+    let apply = |loc: &mut DiskLocation| {
+        if loc.file != file || loc.byte_start < after_byte {
+            return;
+        }
+        if delta >= 0 {
+            let d = delta as usize;
+            loc.byte_start = loc.byte_start.wrapping_add(d);
+            loc.byte_end = loc.byte_end.wrapping_add(d);
+        } else {
+            let d = (-delta) as usize;
+            loc.byte_start = loc.byte_start.saturating_sub(d);
+            loc.byte_end = loc.byte_end.saturating_sub(d);
+        }
+    };
+
+    for f in runtime.functions.iter_mut() {
+        if let Some(loc) = f.disk_location.as_mut() {
+            apply(loc);
+        }
+    }
+    runtime.structs.for_each_mut(|s| {
+        if let Some(loc) = s.disk_location.as_mut() {
+            apply(loc);
+        }
+    });
+    runtime.enums.for_each_mut(|e| {
+        if let Some(loc) = e.disk_location.as_mut() {
+            apply(loc);
+        }
+    });
+}
+
+/// reflect/write-source(value, new-text) - Persist an edited definition
+/// back to its source file and re-register it in the runtime.
+///
+/// Semantics:
+///   1. Resolve `value` to a disk-resident Function/Struct/Enum.
+///   2. Verify the file has not drifted since load — the bytes at the
+///      recorded range must equal the stored `source_text`.
+///   3. Splice `new-text` into the file at that byte range and write it.
+///   4. Shift byte ranges of later definitions in the same file by the
+///      length delta.
+///   5. Compile `new-text` in the definition's namespace with file
+///      context so the replacement's `disk_location` matches its new
+///      position in the file.
+///
+/// Returns `true` on success. Throws with a descriptive string on any
+/// failure (missing location, integrity mismatch, I/O error, compile
+/// error). Existing definitions that existed before the edit but aren't
+/// produced by the new text remain in the runtime unchanged.
+pub extern "C" fn reflect_write_source(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+    new_text: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    let info = match resolve_definition(runtime, stack_pointer, value) {
+        Some(info) => info,
+        None => {
+            throw_write_source_error(
+                stack_pointer,
+                "reflect/write-source: value has no resolvable definition",
+            );
+        }
+    };
+    let Some(loc) = info.disk_location.clone() else {
+        throw_write_source_error(
+            stack_pointer,
+            "reflect/write-source: definition has no on-disk origin (eval/REPL defs cannot be persisted)",
+        );
+    };
+    let Some(original_source) = info.source_text.clone() else {
+        throw_write_source_error(
+            stack_pointer,
+            "reflect/write-source: definition has no stored source text to verify against",
+        );
+    };
+
+    let new_text_str = runtime.get_string(stack_pointer, new_text);
+
+    // Read current file bytes.
+    let file_contents = match std::fs::read_to_string(&loc.file) {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = format!("reflect/write-source: failed to read {}: {}", loc.file, e);
+            throw_write_source_error(stack_pointer, &msg);
+        }
+    };
+
+    // Bounds + integrity check. If the file was edited outside the runtime
+    // between load and now, we refuse rather than silently stomping.
+    if loc.byte_end > file_contents.len() || loc.byte_start > loc.byte_end {
+        throw_write_source_error(
+            stack_pointer,
+            "reflect/write-source: stored byte range is out of bounds for the current file",
+        );
+    }
+    let current_slice = &file_contents[loc.byte_start..loc.byte_end];
+    if current_slice != original_source {
+        throw_write_source_error(
+            stack_pointer,
+            "reflect/write-source: file contents have changed since this definition was loaded (re-load and retry)",
+        );
+    }
+
+    // Splice.
+    let mut new_contents =
+        String::with_capacity(file_contents.len() - original_source.len() + new_text_str.len());
+    new_contents.push_str(&file_contents[..loc.byte_start]);
+    new_contents.push_str(&new_text_str);
+    new_contents.push_str(&file_contents[loc.byte_end..]);
+
+    if let Err(e) = std::fs::write(&loc.file, &new_contents) {
+        let msg = format!("reflect/write-source: failed to write {}: {}", loc.file, e);
+        throw_write_source_error(stack_pointer, &msg);
+    }
+
+    // Shift subsequent definitions in the same file. `delta` is the
+    // signed length change; earlier defs are untouched, later ones slide
+    // by exactly this amount.
+    let old_len = loc.byte_end - loc.byte_start;
+    let new_len = new_text_str.len();
+    let delta = new_len as isize - old_len as isize;
+    shift_byte_ranges_after(runtime, &loc.file, loc.byte_end, delta);
+
+    // The record we're about to overwrite in compile doesn't know its new
+    // end yet — patch its range up-front so the compiler's upsert
+    // (which leaves disk_location sticky) doesn't revert our patch.
+    let new_byte_end = loc.byte_start + new_len;
+    let new_line_end = loc.line_start + new_text_str.matches('\n').count();
+    let patched_loc = DiskLocation {
+        file: loc.file.clone(),
+        byte_start: loc.byte_start,
+        byte_end: new_byte_end,
+        line_start: loc.line_start,
+        line_end: new_line_end,
+    };
+    patch_disk_location(runtime, &info.full_name, patched_loc);
+
+    // Recompile the edited text in the target namespace with file context
+    // so the new definition's disk_location points at the updated byte
+    // range. Line offset is `line_start - 1` because the fragment's own
+    // first line maps to line 1 internally.
+    let namespace = namespace_of(&info.full_name).unwrap_or("").to_string();
+    if let Err(e) = runtime.compile_string_with_file_context(
+        &new_text_str,
+        &namespace,
+        &loc.file,
+        loc.byte_start,
+        loc.line_start.saturating_sub(1),
+    ) {
+        let msg = format!(
+            "reflect/write-source: wrote {} but re-compile failed: {}",
+            loc.file, e
+        );
+        throw_write_source_error(stack_pointer, &msg);
+    }
+
+    // The compiler thread queues namespace re-bindings when it has no
+    // stack; without flushing them on the main thread the new first-class
+    // function wrapper never makes it into the heap-side binding map, so
+    // reading `stub` after this call would still return the pre-edit
+    // wrapper pointing at the old code pointer.
+    runtime.flush_pending_heap_bindings(stack_pointer);
+
+    BuiltInTypes::construct_boolean(true) as usize
+}
+
+/// Thin wrapper around `throw_runtime_error` that fills in the
+/// `"write-source"` kind string, so we can raise with a single call
+/// inside `reflect_write_source`.
+fn throw_write_source_error(stack_pointer: usize, message: &str) -> ! {
+    // `throw_runtime_error` expects a valid `SystemError` variant name
+    // as the kind. `RuntimeError` is the catch-all for runtime failures
+    // that aren't tied to parsing, typing, or I/O specifically.
+    unsafe {
+        crate::builtins::throw_runtime_error(stack_pointer, "RuntimeError", message.to_string())
+    }
+}
+
+/// Overwrite the `disk_location` on whichever runtime record (fn, struct,
+/// or enum) is registered under `full_name`. Used by write-source to
+/// pre-emptively record the new range before recompilation, so that even
+/// if the new text doesn't redefine the same name (e.g. a rename),
+/// subsequent lookups under the old name see a sensible location.
+fn patch_disk_location(runtime: &mut Runtime, full_name: &str, loc: DiskLocation) {
+    if let Some(f) = runtime.functions.iter_mut().find(|f| f.name == full_name) {
+        f.disk_location = Some(loc.clone());
+        return;
+    }
+    if runtime.patch_struct_disk_location(full_name, loc.clone()) {
+        return;
+    }
+    runtime.patch_enum_disk_location(full_name, loc);
 }

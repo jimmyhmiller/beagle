@@ -742,6 +742,7 @@ impl Ast {
         token_line_column_map: Vec<(usize, usize)>,
         source_text: String,
         token_byte_spans: Vec<(usize, usize)>,
+        definition_byte_ranges: HashMap<(usize, usize), (usize, usize)>,
     ) -> CompileResult {
         let test_mode = compiler.command_line_arguments.test;
         let allocate_fn_pointer = compiler.allocate_fn_pointer()?;
@@ -779,6 +780,7 @@ impl Ast {
             token_line_column_map,
             source_text,
             token_byte_spans,
+            definition_byte_ranges,
             diagnostics: Vec::new(),
             test_mode,
         };
@@ -945,6 +947,12 @@ pub struct AstCompiler<'a> {
     /// tokenizer's token vector). Used together with `TokenRange` to
     /// recover the byte slice for a definition.
     pub token_byte_spans: Vec<(usize, usize)>,
+    /// Extended byte ranges for each fn/struct/enum top-level definition,
+    /// keyed by `(TokenRange.start, TokenRange.end)`. The start is rolled
+    /// back to include any preceding `///` doc comment block. Used to
+    /// populate the runtime's `disk_location` so `reflect/location` and
+    /// `reflect/write-source` can point at the right bytes on disk.
+    pub definition_byte_ranges: HashMap<(usize, usize), (usize, usize)>,
     /// Diagnostics collected during compilation of this file
     pub diagnostics: Vec<crate::compiler::Diagnostic>,
     /// Whether we are compiling in test mode (test blocks are compiled as functions)
@@ -968,6 +976,45 @@ impl AstCompiler<'_> {
         self.current_context.tail_position
     }
 
+    /// Build a `DiskLocation` for a top-level definition at the given
+    /// `TokenRange`, or `None` when this compile isn't rooted in a disk
+    /// file (e.g. the REPL or `eval`). The byte range is the extended one
+    /// captured at parse time and already includes preceding `///` docs.
+    pub fn make_disk_location(
+        &self,
+        token_range: TokenRange,
+    ) -> Option<crate::runtime::DiskLocation> {
+        // REPL / eval / synthesized ASTs use empty or "repl" file names;
+        // they don't correspond to anything we can write back to.
+        if self.file_name.is_empty() || self.file_name == "repl" {
+            return None;
+        }
+        let (byte_start, byte_end) = *self
+            .definition_byte_ranges
+            .get(&(token_range.start, token_range.end))?;
+        let line_start = self
+            .token_line_column_map
+            .get(token_range.start)
+            .map(|(l, _)| *l)
+            .unwrap_or(0);
+        let line_end_idx = token_range
+            .end
+            .saturating_sub(1)
+            .min(self.token_line_column_map.len().saturating_sub(1));
+        let line_end = self
+            .token_line_column_map
+            .get(line_end_idx)
+            .map(|(l, _)| *l)
+            .unwrap_or(line_start);
+        Some(crate::runtime::DiskLocation {
+            file: self.file_name.clone(),
+            byte_start,
+            byte_end,
+            line_start,
+            line_end,
+        })
+    }
+
     /// Extract the original source text for a `TokenRange`, optionally
     /// prepending a docstring synthesized as `///` comment lines.
     ///
@@ -981,12 +1028,35 @@ impl AstCompiler<'_> {
         token_range: TokenRange,
         docstring: Option<&str>,
     ) -> Option<String> {
-        if self.source_text.is_empty() || self.token_byte_spans.is_empty() {
+        if self.source_text.is_empty() {
+            return None;
+        }
+
+        // Preferred path: the parser recorded an extended byte range that
+        // already includes preceding `///` doc comments verbatim from the
+        // file. This preserves the exact on-disk formatting (tabs, spacing)
+        // and matches the range used by `reflect/location` and
+        // `reflect/write-source`, so a round-trip replaces exactly what
+        // was read.
+        if let Some((start, end)) = self
+            .definition_byte_ranges
+            .get(&(token_range.start, token_range.end))
+            .copied()
+            && end <= self.source_text.len()
+            && start <= end
+        {
+            return Some(self.source_text[start..end].to_string());
+        }
+
+        // Fallback: compute from token byte spans and re-synthesize the
+        // docstring as `///` lines. Used for ASTs compiled from REPL/eval
+        // input where the parser may not have recorded an extended range
+        // for the definition (e.g. anonymous lambdas), and as a safety net
+        // when the map lookup misses.
+        if self.token_byte_spans.is_empty() {
             return None;
         }
         let start_idx = token_range.start;
-        // `end` is exclusive in our parser conventions, but we have at least
-        // one token so the last included index is `end - 1`. Clamp defensively.
         let last_idx = token_range.end.saturating_sub(1);
         if start_idx >= self.token_byte_spans.len() || last_idx >= self.token_byte_spans.len() {
             return None;
@@ -1410,6 +1480,15 @@ impl AstCompiler<'_> {
                 } else {
                     None
                 };
+                // On-disk origin. `None` for anonymous fns and for any
+                // fn compiled from the REPL/eval (where `file_name` is
+                // empty or "repl"). Disk-loaded definitions use this for
+                // `reflect/location` and `reflect/write-source`.
+                let disk_location = if name.is_some() {
+                    self.make_disk_location(token_range)
+                } else {
+                    None
+                };
 
                 let function_pointer = self
                     .compiler
@@ -1425,6 +1504,7 @@ impl AstCompiler<'_> {
                         Some(self.file_name.clone()),
                         source_line,
                         source_text,
+                        disk_location,
                     )
                     .unwrap();
 
@@ -5724,6 +5804,7 @@ impl AstCompiler<'_> {
                         .insert(full_name.clone(), defaults);
                 }
                 let source_text = self.extract_source_text(*token_range, docstring.as_deref());
+                let disk_location = self.make_disk_location(*token_range);
                 self.compiler.add_struct(Struct {
                     name: full_name,
                     fields: field_names,
@@ -5731,6 +5812,7 @@ impl AstCompiler<'_> {
                     docstring: docstring.clone(),
                     field_docstrings,
                     source_text,
+                    disk_location,
                 });
             }
             Ast::Enum {
@@ -5741,6 +5823,7 @@ impl AstCompiler<'_> {
             } => {
                 let (namespace, enum_name) = self.get_namespace_name_and_name(name)?;
                 let enum_source_text = self.extract_source_text(*token_range, docstring.as_deref());
+                let enum_disk_location = self.make_disk_location(*token_range);
 
                 // Build variants list
                 let mut enum_variants = Vec::new();
@@ -5787,6 +5870,7 @@ impl AstCompiler<'_> {
                     variants: enum_variants,
                     docstring: docstring.clone(),
                     source_text: enum_source_text.clone(),
+                    disk_location: enum_disk_location.clone(),
                 };
 
                 // Build variant_names for the enum struct
@@ -5815,6 +5899,7 @@ impl AstCompiler<'_> {
                     // the actual source lives on the `Enum` record so it
                     // isn't reported twice from `namespace-source`.
                     source_text: None,
+                    disk_location: None,
                 });
 
                 self.compiler.add_enum(enum_repr);
@@ -5855,6 +5940,7 @@ impl AstCompiler<'_> {
                                 docstring: None,
                                 field_docstrings,
                                 source_text: None,
+                                disk_location: None,
                             });
                             // Register variant-to-enum mapping for effect handlers
                             if let Some((struct_id, _)) =
@@ -5876,6 +5962,7 @@ impl AstCompiler<'_> {
                                 docstring: None,
                                 field_docstrings: vec![],
                                 source_text: None,
+                                disk_location: None,
                             });
                             // Register variant-to-enum mapping for effect handlers
                             if let Some((struct_id, _)) =
