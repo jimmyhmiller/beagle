@@ -74,6 +74,7 @@ mod gc;
 pub mod ir;
 pub mod machine_code;
 pub mod mmap_utils;
+pub mod native_memory;
 pub mod parser;
 mod pretty_print;
 mod primitives;
@@ -1031,6 +1032,10 @@ fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Erro
             }
         }
     }
+
+    // Stdlib is now parsed — FFI struct ids exist, so we can register
+    // finalizers that free off-heap memory when the owning GC object dies.
+    crate::builtins::register_ffi_finalizers(runtime);
 
     Ok(all_top_levels)
 }

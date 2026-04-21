@@ -269,6 +269,49 @@ impl CompactingHeap {
         full_size <= remaining_bytes && full_size.is_multiple_of(8)
     }
 
+    /// Walk from_space in address order, enqueuing finalizers for any dead
+    /// finalizable objects (e.g., beagle.ffi/Buffer whose off-heap memory
+    /// needs freeing). Call this after the copy phase, before the space swap.
+    ///
+    /// Complication: a live object's header has been replaced by a forwarding
+    /// pointer, so `full_size()` on the in-place from_space object returns
+    /// garbage. We detect forwarded headers by checking the forwarding bit
+    /// and in that case read the size from the copied object in to_space.
+    /// Dead objects retain their original headers, so their size is readable
+    /// directly.
+    unsafe fn sweep_finalizers(&self) {
+        if self.from_space.allocation_offset == 0 {
+            return;
+        }
+        let start = self.from_space.start as usize;
+        let end = start + self.from_space.allocation_offset;
+        let mut addr = start;
+        while addr < end {
+            let header_data = unsafe { *(addr as *const usize) };
+            if Header::is_forwarding_bit_set(header_data) {
+                // Live: follow the forwarding pointer to get the post-copy size.
+                let tagged_new = Header::clear_forwarding_bit(header_data);
+                let Some(new_hobj) = HeapObject::try_from_tagged(tagged_new) else {
+                    break; // malformed; bail out of the walk
+                };
+                let size = new_hobj.full_size();
+                if size == 0 || !size.is_multiple_of(8) {
+                    break;
+                }
+                addr += size;
+            } else {
+                // Dead: run finalizer (no-op for objects without one).
+                let hobj = HeapObject::from_untagged(addr as *const u8);
+                unsafe { crate::gc::finalizers::maybe_enqueue_finalizer(&hobj) };
+                let size = hobj.full_size();
+                if size == 0 || !size.is_multiple_of(8) {
+                    break;
+                }
+                addr += size;
+            }
+        }
+    }
+
     fn scan_continuation_segment<F>(&mut self, object: &HeapObject, callback: F)
     where
         F: FnMut(usize, usize),
@@ -558,6 +601,13 @@ impl Allocator for CompactingHeap {
                 .structs
                 .complete_pending_migrations();
         }
+
+        // Walk from_space one last time to find dead finalizable objects.
+        // Live objects have their headers overwritten with forwarding pointers;
+        // dead objects retain their original headers. Forwarded objects' sizes
+        // must be read via the to_space copy because the original size field
+        // was clobbered when the forwarding pointer was written.
+        unsafe { self.sweep_finalizers() };
 
         mem::swap(&mut self.from_space, &mut self.to_space);
 

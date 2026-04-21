@@ -841,7 +841,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/get-u32",
             ffi_get_u32 as *const u8,
-            false,
+            true,
             &["ptr", "offset"],
             "Read an unsigned 32-bit integer from memory at ptr + offset.",
         )?;
@@ -849,7 +849,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/set-i16",
             ffi_set_i16 as *const u8,
-            false,
+            true,
             &["ptr", "offset", "value"],
             "Write a signed 16-bit integer to memory at ptr + offset.",
         )?;
@@ -857,7 +857,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/set-i32",
             ffi_set_i32 as *const u8,
-            false,
+            true,
             &["ptr", "offset", "value"],
             "Write a signed 32-bit integer to memory at ptr + offset.",
         )?;
@@ -865,7 +865,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/set-u8",
             ffi_set_u8 as *const u8,
-            false,
+            true,
             &["ptr", "offset", "value"],
             "Write an unsigned 8-bit integer (byte) to memory at ptr + offset.",
         )?;
@@ -873,7 +873,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/get-u8",
             ffi_get_u8 as *const u8,
-            false,
+            true,
             &["ptr", "offset"],
             "Read an unsigned 8-bit integer (byte) from memory at ptr + offset.",
         )?;
@@ -881,7 +881,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/get-i32",
             ffi_get_i32 as *const u8,
-            false,
+            true,
             &["ptr", "offset"],
             "Read a signed 32-bit integer from memory at ptr + offset.",
         )?;
@@ -889,7 +889,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/set-i8",
             ffi_set_i8 as *const u8,
-            false,
+            true,
             &["ptr", "offset", "value"],
             "Write a signed 8-bit integer to memory at ptr + offset.",
         )?;
@@ -897,7 +897,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/get-i8",
             ffi_get_i8 as *const u8,
-            false,
+            true,
             &["ptr", "offset"],
             "Read a signed 8-bit integer from memory at ptr + offset.",
         )?;
@@ -905,7 +905,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/set-u16",
             ffi_set_u16 as *const u8,
-            false,
+            true,
             &["ptr", "offset", "value"],
             "Write an unsigned 16-bit integer to memory at ptr + offset.",
         )?;
@@ -913,7 +913,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/get-u16",
             ffi_get_u16 as *const u8,
-            false,
+            true,
             &["ptr", "offset"],
             "Read an unsigned 16-bit integer from memory at ptr + offset.",
         )?;
@@ -921,7 +921,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/get-i16",
             ffi_get_i16 as *const u8,
-            false,
+            true,
             &["ptr", "offset"],
             "Read a signed 16-bit integer from memory at ptr + offset.",
         )?;
@@ -929,7 +929,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/set-u32",
             ffi_set_u32 as *const u8,
-            false,
+            true,
             &["ptr", "offset", "value"],
             "Write an unsigned 32-bit integer to memory at ptr + offset.",
         )?;
@@ -937,7 +937,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/set-i64",
             ffi_set_i64 as *const u8,
-            false,
+            true,
             &["ptr", "offset", "value"],
             "Write a signed 64-bit integer to memory at ptr + offset.",
         )?;
@@ -945,7 +945,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/get-i64",
             ffi_get_i64 as *const u8,
-            false,
+            true,
             &["ptr", "offset"],
             "Read a signed 64-bit integer from memory at ptr + offset.",
         )?;
@@ -953,7 +953,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/set-u64",
             ffi_set_u64 as *const u8,
-            false,
+            true,
             &["ptr", "offset", "value"],
             "Write an unsigned 64-bit integer to memory at ptr + offset.",
         )?;
@@ -961,7 +961,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/get-u64",
             ffi_get_u64 as *const u8,
-            false,
+            true,
             &["ptr", "offset"],
             "Read an unsigned 64-bit integer from memory at ptr + offset.",
         )?;
@@ -1025,9 +1025,33 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/copy-bytes",
             ffi_copy_bytes as *const u8,
-            false,
+            true,
             &["src", "src_offset", "dest", "dest_offset", "length"],
             "Copy length bytes from src+src_offset to dest+dest_offset.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/__native-memory-free-count",
+            ffi_native_memory_stats as *const u8,
+            false,
+            &[],
+            "Internal: cumulative off-heap free count since startup. Used by GC finalizer tests.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/__finalizer-drain",
+            ffi_finalizer_drain as *const u8,
+            false,
+            &[],
+            "Internal: block until the finalizer thread has processed everything enqueued so far. Used by GC finalizer tests.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.ffi/__ffi-forget",
+            ffi_forget as *const u8,
+            false,
+            &["x"],
+            "Internal: disown a Buffer / Cell / TypedArray. After this call the GC finalizer no-ops on the struct; beagle-side reads/writes raise FFIError. Exposed via the stdlib wrapper `forget`.",
         )?;
 
         self.add_builtin_with_doc(
@@ -1049,7 +1073,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/write-buffer-offset",
             ffi_write_buffer_offset as *const u8,
-            false,
+            true,
             &["buffer", "offset", "value", "size"],
             "Write a value to a buffer at a given offset.",
         )?;
@@ -1057,7 +1081,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/translate-bytes",
             ffi_translate_bytes as *const u8,
-            false,
+            true,
             &["buffer", "offset", "length", "table"],
             "Translate bytes using a lookup table.",
         )?;
@@ -1065,7 +1089,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/reverse-bytes",
             ffi_reverse_bytes as *const u8,
-            false,
+            true,
             &["buffer", "offset", "length"],
             "Reverse bytes in place in a buffer.",
         )?;
@@ -1073,7 +1097,7 @@ impl Runtime {
         self.add_builtin_with_doc(
             "beagle.ffi/find-byte",
             ffi_find_byte as *const u8,
-            false,
+            true,
             &["buffer", "offset", "length", "byte"],
             "Find the first occurrence of a byte in a buffer.\n\nReturns the offset or -1 if not found.",
         )?;
@@ -1081,7 +1105,7 @@ impl Runtime {
         self.add_builtin_function(
             "beagle.ffi/copy-bytes_filter",
             ffi_copy_bytes_filter as *const u8,
-            false,
+            true,
             6,
         )?;
 

@@ -1,0 +1,39 @@
+namespace ffi_typed_cells_test
+
+use beagle.ffi as ffi
+
+fn main() {
+    // One-element typed cell, initial value, read-back.
+    let pitch = ffi/cell(ffi/Type.F32, 440)
+    println(ffi/cell-get(pitch))
+
+    ffi/cell-set(pitch, 523)
+    println(ffi/cell-get(pitch))
+
+    // Integer cell.
+    let counter = ffi/cell(ffi/Type.I32, 42)
+    println(ffi/cell-get(counter))
+    ffi/cell-set(counter, 100)
+    println(ffi/cell-get(counter))
+
+    // TypedArray with F32 stride, counted by elements not bytes.
+    let arr = ffi/array(ffi/Type.F32, 4)
+    ffi/array-set(arr, 0, 1)
+    ffi/array-set(arr, 1, 2)
+    ffi/array-set(arr, 2, 3)
+    ffi/array-set(arr, 3, 4)
+    println(ffi/array-get(arr, 0))
+    println(ffi/array-get(arr, 3))
+    println(arr.length)
+
+    "done"
+}
+
+// @beagle.core.snapshot
+// 440.0
+// 523.0
+// 42
+// 100
+// 1.0
+// 4.0
+// 4

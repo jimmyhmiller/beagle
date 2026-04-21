@@ -31,6 +31,24 @@ fn __make_buffer_struct(ptr, size) {
     Buffer { ptr: ptr, size: size }
 }
 
+// A typed one-element off-heap cell. Layout convention matches Buffer:
+// field 0 = raw pointer, field 1 = byte size. The shared finalizer frees
+// the backing allocation when the Cell becomes GC-unreachable.
+struct Cell {
+    ptr
+    size
+    ty
+}
+
+// A typed fixed-length off-heap array. Same layout convention:
+// field 0 = raw pointer, field 1 = byte size = stride(ty) * length.
+struct TypedArray {
+    ptr
+    size
+    ty
+    length
+}
+
 // Struct for holding raw C struct returns (up to 16 bytes)
 // low = first 8 bytes, high = second 8 bytes
 struct StructReturn {
@@ -81,6 +99,124 @@ fn call-variadic(func_ptr, args, types, return_type) {
     let result = call-variadic-raw(func_ptr, args, types, return_type)
     builtin/__unregister_c_call()
     result
+}
+
+// Byte size of a primitive FFI type. Used by cell/array helpers to
+// translate element indices into byte offsets.
+fn size-of(ty) {
+    match ty {
+        Type.I8 => 1,
+        Type.U8 => 1,
+        Type.I16 => 2,
+        Type.U16 => 2,
+        Type.I32 => 4,
+        Type.U32 => 4,
+        Type.F32 => 4,
+        Type.I64 => 8,
+        Type.U64 => 8,
+        Type.F64 => 8,
+        Type.Pointer => 8,
+        Type.MutablePointer => 8,
+        Type.String => throw("ffi/size-of: String has no fixed size"),
+        Type.Void => throw("ffi/size-of: Void has no size"),
+        Type.Structure { types } => throw("ffi/size-of: Structure not yet supported")
+    }
+}
+
+// Typed read at a byte offset. Dispatches to the primitive get-* builtin.
+fn read-at(ptr, offset, ty) {
+    match ty {
+        Type.I8 => get-i8(ptr, offset),
+        Type.U8 => get-u8(ptr, offset),
+        Type.I16 => get-i16(ptr, offset),
+        Type.U16 => get-u16(ptr, offset),
+        Type.I32 => get-i32(ptr, offset),
+        Type.U32 => get-u32(ptr, offset),
+        Type.F32 => get-f32(ptr, offset),
+        Type.I64 => get-i64(ptr, offset),
+        Type.U64 => get-u64(ptr, offset),
+        Type.F64 => get-f64(ptr, offset),
+        Type.Pointer => throw("ffi/read-at: Pointer not yet supported"),
+        Type.MutablePointer => throw("ffi/read-at: MutablePointer not yet supported"),
+        Type.String => throw("ffi/read-at: use get-string for strings"),
+        Type.Void => throw("ffi/read-at: cannot read Void"),
+        Type.Structure { types } => throw("ffi/read-at: Structure not yet supported")
+    }
+}
+
+// Typed write at a byte offset.
+fn write-at(ptr, offset, ty, value) {
+    match ty {
+        Type.I8 => set-i8(ptr, offset, value),
+        Type.U8 => set-u8(ptr, offset, value),
+        Type.I16 => set-i16(ptr, offset, value),
+        Type.U16 => set-u16(ptr, offset, value),
+        Type.I32 => set-i32(ptr, offset, value),
+        Type.U32 => set-u32(ptr, offset, value),
+        Type.F32 => set-f32(ptr, offset, value),
+        Type.I64 => set-i64(ptr, offset, value),
+        Type.U64 => set-u64(ptr, offset, value),
+        Type.F64 => set-f64(ptr, offset, value),
+        Type.Pointer => throw("ffi/write-at: Pointer not yet supported"),
+        Type.MutablePointer => throw("ffi/write-at: MutablePointer not yet supported"),
+        Type.String => throw("ffi/write-at: strings require a different path"),
+        Type.Void => throw("ffi/write-at: cannot write Void"),
+        Type.Structure { types } => throw("ffi/write-at: Structure not yet supported")
+    }
+}
+
+// Allocate a typed one-element cell initialized with `initial`. The returned
+// Cell is GC-managed; its backing allocation is freed when the Cell becomes
+// unreachable. Can be passed directly to C functions expecting a typed pointer
+// because field 0 is the raw address.
+//
+// We reuse `allocate` (returns a Buffer) as the raw-memory primitive, then
+// disown the Buffer via `forget` so ONLY the Cell owns the allocation.
+// Without the forget the Buffer and Cell would both be on the finalizer list
+// for the same pointer → double free.
+fn cell(ty, initial) {
+    let n = size-of(ty)
+    let buf = allocate(n)
+    let c = Cell { ptr: buf.ptr, size: n, ty: ty }
+    forget(buf)
+    write-at(c, 0, ty, initial)
+    c
+}
+
+fn cell-get(c) {
+    read-at(c, 0, c.ty)
+}
+
+fn cell-set(c, value) {
+    write-at(c, 0, c.ty, value)
+}
+
+// Allocate a typed array of `length` elements. Same ownership-transfer dance
+// as cell(): Buffer-allocated, then forgotten so the TypedArray is the sole
+// finalizable owner.
+fn array(ty, length) {
+    let stride = size-of(ty)
+    let bytes = stride * length
+    let buf = allocate(bytes)
+    let a = TypedArray { ptr: buf.ptr, size: bytes, ty: ty, length: length }
+    forget(buf)
+    a
+}
+
+fn array-get(a, i) {
+    read-at(a, i * size-of(a.ty), a.ty)
+}
+
+fn array-set(a, i, value) {
+    write-at(a, i * size-of(a.ty), a.ty, value)
+}
+
+// Release the off-heap memory owned by a finalizable FFI struct (Buffer, Cell,
+// TypedArray), handing ownership to C. After this, the GC finalizer no-ops
+// and any beagle-side read/write raises a resumable FFIError. Use this when a
+// C function takes ownership of the allocation and will free it itself.
+fn forget(x) {
+    __ffi-forget(x)
 }
 
 // These functions are implemented as builtins in Rust:

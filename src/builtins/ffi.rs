@@ -1,5 +1,7 @@
 use super::*;
+use crate::native_memory;
 use crate::save_gc_context;
+use std::ptr::NonNull;
 
 pub unsafe extern "C" fn load_library(
     stack_pointer: usize,
@@ -2329,17 +2331,66 @@ pub unsafe extern "C" fn call_ffi_info(
     }
 }
 
+/// Finalizer for FFI structs that own off-heap memory.
+///
+/// Layout convention — every finalizable FFI struct must have:
+///   field 0 = raw pointer  (tagged as Int, or 0 if already released/disowned)
+///   field 1 = byte size    (tagged as Int)
+/// Extra fields (e.g. `ty`, `length` on Cell/TypedArray) come after and are
+/// irrelevant to finalization. One callback serves Buffer, Cell, TypedArray.
+fn finalize_off_heap(fields: &[usize]) {
+    if fields.len() < 2 {
+        return;
+    }
+    let ptr = BuiltInTypes::untag(fields[0]) as *mut u8;
+    let Some(nn) = NonNull::new(ptr) else {
+        return; // already freed or disowned
+    };
+    let size = BuiltInTypes::untag(fields[1]);
+    unsafe { native_memory::free(nn, size) };
+}
+
+/// Register finalizers for FFI types. Call once after the standard library is
+/// loaded — the struct_ids don't exist until `beagle.ffi.bg` has been parsed.
+pub fn register_ffi_finalizers(runtime: &Runtime) {
+    use crate::gc::finalizers::register_finalizer;
+    for name in ["beagle.ffi/Buffer", "beagle.ffi/Cell", "beagle.ffi/TypedArray"] {
+        if let Some((id, _)) = runtime.structs.get(name) {
+            register_finalizer(id, finalize_off_heap);
+        }
+    }
+}
+
+/// ffi/forget — disown a finalizable FFI struct (Buffer, Cell, TypedArray).
+/// Zeros field 0 so the GC finalizer no-ops; any subsequent read/write raises
+/// a resumable FFIError. Used to transfer ownership to C, or internally when
+/// repackaging a Buffer as a Cell/TypedArray.
+pub unsafe extern "C" fn ffi_forget(value: usize) -> usize {
+    let heap_object = unsafe { HeapObject::from_tagged(value) };
+    heap_object.write_field(0, BuiltInTypes::Int.tag(0) as usize);
+    BuiltInTypes::null_value() as usize
+}
+
+/// Returns the cumulative count of off-heap frees performed since process start.
+/// Primarily used by tests to assert GC finalization actually ran.
+pub unsafe extern "C" fn ffi_native_memory_stats() -> usize {
+    BuiltInTypes::Int.tag(native_memory::total_frees() as isize) as usize
+}
+
+/// Block the current thread until the finalizer worker thread has processed
+/// every finalizer enqueued by the GC so far. Tests call this after
+/// beagle.core/gc() to observe post-finalization state deterministically.
+pub unsafe extern "C" fn ffi_finalizer_drain() -> usize {
+    crate::gc::finalizers::drain();
+    BuiltInTypes::null_value() as usize
+}
+
 pub unsafe extern "C" fn ffi_allocate(size: usize) -> usize {
     unsafe {
         let runtime = get_runtime().get_mut();
-        // TODO: I intentionally don't want to manage this memory on the heap
-        // I probably need a better answer than this
-        // but for now we are just going to leak memory
         let size = BuiltInTypes::untag(size);
 
-        let mut buffer: Vec<u8> = vec![0; size];
-        let buffer_ptr: *mut c_void = buffer.as_mut_ptr() as *mut c_void;
-        std::mem::forget(buffer);
+        let buffer_ptr = native_memory::alloc_zeroed(size).as_ptr();
 
         let buffer = BuiltInTypes::Int.tag(buffer_ptr as isize) as usize;
         let size = BuiltInTypes::Int.tag(size as isize) as usize;
@@ -2347,50 +2398,85 @@ pub unsafe extern "C" fn ffi_allocate(size: usize) -> usize {
     }
 }
 
-/// Extract a raw pointer from a Beagle struct (Pointer or Buffer).
+/// Extract a raw pointer from a Beagle struct (Pointer, Buffer, Cell, TypedArray).
+///
 /// Pointer struct { lo, hi }: reconstruct from two 32-bit halves.
-/// Buffer struct { ptr, size }: field 0 is the full tagged pointer.
-pub unsafe fn extract_raw_ptr(tagged_struct: usize) -> *mut u8 {
+/// All other finalizable FFI structs: field 0 is the full tagged pointer, field 1 is byte size.
+///
+/// If field 0 has been zeroed (by explicit deallocate, by realloc, or by ffi/forget),
+/// throws a resumable FFIError — never hands null to a read/write that would segfault.
+pub unsafe fn extract_raw_ptr(stack_pointer: usize, tagged_struct: usize) -> *mut u8 {
     let heap_object = HeapObject::from_tagged(tagged_struct);
     let struct_id = heap_object.get_struct_id();
     let runtime = get_runtime().get_mut();
     let runtime = &*runtime;
-    let is_pointer = runtime
+    let struct_name = runtime
         .get_struct_by_id(struct_id)
-        .map(|s| s.name == "beagle.ffi/Pointer")
-        .unwrap_or(false);
-    if is_pointer {
+        .map(|s| s.name.clone());
+    let ptr = if struct_name.as_deref() == Some("beagle.ffi/Pointer") {
         let lo = BuiltInTypes::untag(heap_object.get_field(0)) as u64;
         let hi = BuiltInTypes::untag(heap_object.get_field(1)) as u64;
         (lo | (hi << 32)) as *mut u8
     } else {
         BuiltInTypes::untag(heap_object.get_field(0)) as *mut u8
+    };
+    if ptr.is_null() {
+        let what = struct_name.unwrap_or_else(|| "FFI buffer".to_string());
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "FFIError",
+                format!(
+                    "use-after-free: attempted to read/write a {} whose pointer has been released (via deallocate, realloc, or ffi/forget)",
+                    what
+                ),
+            );
+        }
     }
+    ptr
 }
 
 pub unsafe extern "C" fn ffi_deallocate(buffer: usize) -> usize {
     unsafe {
         // deallocate is Buffer-only: field 0 = ptr, field 1 = size
         let buffer_object = HeapObject::from_tagged(buffer);
-        let buffer = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
+        let ptr = BuiltInTypes::untag(buffer_object.get_field(0)) as *mut u8;
         let size = BuiltInTypes::untag(buffer_object.get_field(1));
-        let _buffer = Vec::from_raw_parts(buffer, size, size);
+        if let Some(nn) = NonNull::new(ptr) {
+            native_memory::free(nn, size);
+        }
+        // Zero the pointer so the GC finalizer (or a second explicit free)
+        // sees null and bails. Prevents double-free and use-after-free.
+        buffer_object.write_field(0, BuiltInTypes::Int.tag(0) as usize);
         BuiltInTypes::null_value() as usize
     }
 }
 
-pub unsafe extern "C" fn ffi_get_u32(buffer: usize, offset: usize) -> usize {
+pub unsafe extern "C" fn ffi_get_u32(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = *(buffer.add(offset) as *const u32);
         BuiltInTypes::Int.tag(value as isize) as usize
     }
 }
 
-pub unsafe extern "C" fn ffi_set_u8(buffer: usize, offset: usize, value: usize) -> usize {
+pub unsafe extern "C" fn ffi_set_u8(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+    value: usize,
+) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = BuiltInTypes::untag(value);
         assert!(value <= u8::MAX as usize);
@@ -2400,18 +2486,31 @@ pub unsafe extern "C" fn ffi_set_u8(buffer: usize, offset: usize, value: usize) 
     }
 }
 
-pub unsafe extern "C" fn ffi_get_u8(buffer: usize, offset: usize) -> usize {
+pub unsafe extern "C" fn ffi_get_u8(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = *(buffer.add(offset));
         BuiltInTypes::Int.tag(value as isize) as usize
     }
 }
 
-pub unsafe extern "C" fn ffi_set_i32(buffer: usize, offset: usize, value: usize) -> usize {
+pub unsafe extern "C" fn ffi_set_i32(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+    value: usize,
+) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = BuiltInTypes::untag(value) as i32;
         *(buffer.add(offset) as *mut i32) = value;
@@ -2419,9 +2518,16 @@ pub unsafe extern "C" fn ffi_set_i32(buffer: usize, offset: usize, value: usize)
     }
 }
 
-pub unsafe extern "C" fn ffi_set_i16(buffer: usize, offset: usize, value: usize) -> usize {
+pub unsafe extern "C" fn ffi_set_i16(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+    value: usize,
+) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = BuiltInTypes::untag(value) as i16;
         *(buffer.add(offset) as *mut i16) = value;
@@ -2429,18 +2535,31 @@ pub unsafe extern "C" fn ffi_set_i16(buffer: usize, offset: usize, value: usize)
     }
 }
 
-pub unsafe extern "C" fn ffi_get_i32(buffer: usize, offset: usize) -> usize {
+pub unsafe extern "C" fn ffi_get_i32(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = *(buffer.add(offset) as *const i32);
         BuiltInTypes::Int.tag(value as isize) as usize
     }
 }
 
-pub unsafe extern "C" fn ffi_set_i8(buffer: usize, offset: usize, value: usize) -> usize {
+pub unsafe extern "C" fn ffi_set_i8(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+    value: usize,
+) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = BuiltInTypes::untag(value) as i8;
         *(buffer.add(offset) as *mut i8) = value;
@@ -2448,18 +2567,31 @@ pub unsafe extern "C" fn ffi_set_i8(buffer: usize, offset: usize, value: usize) 
     }
 }
 
-pub unsafe extern "C" fn ffi_get_i8(buffer: usize, offset: usize) -> usize {
+pub unsafe extern "C" fn ffi_get_i8(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = *(buffer.add(offset) as *const i8);
         BuiltInTypes::Int.tag(value as isize) as usize
     }
 }
 
-pub unsafe extern "C" fn ffi_set_u16(buffer: usize, offset: usize, value: usize) -> usize {
+pub unsafe extern "C" fn ffi_set_u16(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+    value: usize,
+) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = BuiltInTypes::untag(value) as u16;
         *(buffer.add(offset) as *mut u16) = value;
@@ -2467,27 +2599,46 @@ pub unsafe extern "C" fn ffi_set_u16(buffer: usize, offset: usize, value: usize)
     }
 }
 
-pub unsafe extern "C" fn ffi_get_u16(buffer: usize, offset: usize) -> usize {
+pub unsafe extern "C" fn ffi_get_u16(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = *(buffer.add(offset) as *const u16);
         BuiltInTypes::Int.tag(value as isize) as usize
     }
 }
 
-pub unsafe extern "C" fn ffi_get_i16(buffer: usize, offset: usize) -> usize {
+pub unsafe extern "C" fn ffi_get_i16(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = *(buffer.add(offset) as *const i16);
         BuiltInTypes::Int.tag(value as isize) as usize
     }
 }
 
-pub unsafe extern "C" fn ffi_set_u32(buffer: usize, offset: usize, value: usize) -> usize {
+pub unsafe extern "C" fn ffi_set_u32(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+    value: usize,
+) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = BuiltInTypes::untag(value) as u32;
         *(buffer.add(offset) as *mut u32) = value;
@@ -2495,9 +2646,16 @@ pub unsafe extern "C" fn ffi_set_u32(buffer: usize, offset: usize, value: usize)
     }
 }
 
-pub unsafe extern "C" fn ffi_set_i64(buffer: usize, offset: usize, value: usize) -> usize {
+pub unsafe extern "C" fn ffi_set_i64(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+    value: usize,
+) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = BuiltInTypes::untag(value) as i64;
         *(buffer.add(offset) as *mut i64) = value;
@@ -2505,18 +2663,31 @@ pub unsafe extern "C" fn ffi_set_i64(buffer: usize, offset: usize, value: usize)
     }
 }
 
-pub unsafe extern "C" fn ffi_get_i64(buffer: usize, offset: usize) -> usize {
+pub unsafe extern "C" fn ffi_get_i64(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = *(buffer.add(offset) as *const i64);
         BuiltInTypes::Int.tag(value as isize) as usize
     }
 }
 
-pub unsafe extern "C" fn ffi_set_u64(buffer: usize, offset: usize, value: usize) -> usize {
+pub unsafe extern "C" fn ffi_set_u64(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+    value: usize,
+) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = BuiltInTypes::untag(value) as u64;
         *(buffer.add(offset) as *mut u64) = value;
@@ -2524,9 +2695,15 @@ pub unsafe extern "C" fn ffi_set_u64(buffer: usize, offset: usize, value: usize)
     }
 }
 
-pub unsafe extern "C" fn ffi_get_u64(buffer: usize, offset: usize) -> usize {
+pub unsafe extern "C" fn ffi_get_u64(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let value = *(buffer.add(offset) as *const u64);
         BuiltInTypes::Int.tag(value as isize) as usize
@@ -2560,7 +2737,7 @@ pub unsafe extern "C" fn ffi_set_f32(
     value: usize,
 ) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let f64_val = ffi_value_as_f64(stack_pointer, value);
         *(buffer.add(offset) as *mut f32) = f64_val as f32;
@@ -2576,7 +2753,7 @@ pub unsafe extern "C" fn ffi_set_f64(
     value: usize,
 ) -> usize {
     unsafe {
-        let buffer = extract_raw_ptr(buffer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let f64_val = ffi_value_as_f64(stack_pointer, value);
         *(buffer.add(offset) as *mut f64) = f64_val;
@@ -2592,7 +2769,7 @@ pub unsafe extern "C" fn ffi_get_f32(
 ) -> usize {
     unsafe {
         let runtime = get_runtime().get_mut();
-        let buffer_ptr = extract_raw_ptr(buffer);
+        let buffer_ptr = extract_raw_ptr(stack_pointer, buffer);
         let offset_val = BuiltInTypes::untag(offset);
         let f32_val = *(buffer_ptr.add(offset_val) as *const f32);
         let f64_val = f32_val as f64;
@@ -2621,7 +2798,7 @@ pub unsafe extern "C" fn ffi_get_f64(
 ) -> usize {
     unsafe {
         let runtime = get_runtime().get_mut();
-        let buffer_ptr = extract_raw_ptr(buffer);
+        let buffer_ptr = extract_raw_ptr(stack_pointer, buffer);
         let offset_val = BuiltInTypes::untag(offset);
         let f64_val = *(buffer_ptr.add(offset_val) as *const f64);
         let new_float_ptr = match (*runtime).allocate(1, stack_pointer, BuiltInTypes::Float) {
@@ -2650,7 +2827,7 @@ pub unsafe extern "C" fn ffi_get_string(
 ) -> usize {
     unsafe {
         let runtime = get_runtime().get_mut();
-        let buffer = extract_raw_ptr(buffer);
+        let buffer = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let len = BuiltInTypes::untag(len);
         let slice = std::slice::from_raw_parts(buffer.add(offset), len);
@@ -2701,8 +2878,10 @@ pub unsafe extern "C" fn ffi_get_string_and_free(
         let string_data = match std::str::from_utf8(slice) {
             Ok(s) => s.to_string(),
             Err(e) => {
-                // Free the buffer before throwing error
-                let _ = Vec::from_raw_parts(raw_ptr, buf_size, buf_size);
+                if let Some(nn) = NonNull::new(raw_ptr) {
+                    native_memory::free(nn, buf_size);
+                }
+                buffer_object.write_field(0, BuiltInTypes::Int.tag(0) as usize);
                 throw_runtime_error(
                     stack_pointer,
                     "EncodingError",
@@ -2712,7 +2891,10 @@ pub unsafe extern "C" fn ffi_get_string_and_free(
         };
 
         // Free the native buffer NOW, before any GC can happen
-        let _ = Vec::from_raw_parts(raw_ptr, buf_size, buf_size);
+        if let Some(nn) = NonNull::new(raw_ptr) {
+            native_memory::free(nn, buf_size);
+        }
+        buffer_object.write_field(0, BuiltInTypes::Int.tag(0) as usize);
 
         // Allocate the Beagle string (may trigger GC, but Buffer is already freed)
         match (*runtime).allocate_string(stack_pointer, string_data) {
@@ -2828,10 +3010,18 @@ pub unsafe extern "C" fn ffi_create_array(
         // null terminate array
         buffer.push(std::ptr::null_mut());
 
-        // For now we are intentionally leaking memory
+        // Copy the pointer array into NativeMemory. Returned as a Pointer struct
+        // (not a Buffer), so currently still leaks; future work to convert the
+        // return type to a finalizable Buffer.
+        let byte_size = buffer.len() * std::mem::size_of::<*mut i8>();
+        let dest = native_memory::alloc_zeroed(byte_size).as_ptr();
+        std::ptr::copy_nonoverlapping(
+            buffer.as_ptr() as *const u8,
+            dest,
+            byte_size,
+        );
 
-        let buffer_ptr: *mut c_void = buffer.as_mut_ptr() as *mut c_void;
-        std::mem::forget(buffer);
+        let buffer_ptr: *mut c_void = dest as *mut c_void;
         let raw = buffer_ptr as u64;
         let lo_tagged = BuiltInTypes::Int.tag((raw & 0xFFFFFFFF) as isize) as usize;
         let hi_tagged = BuiltInTypes::Int.tag(((raw >> 32) & 0xFFFFFFFF) as isize) as usize;
@@ -2847,6 +3037,8 @@ pub unsafe extern "C" fn ffi_create_array(
 // Copy bytes between FFI buffers with offsets
 // ffi_copy_bytes(src, src_off, dst, dst_off, len) -> null
 pub unsafe extern "C" fn ffi_copy_bytes(
+    stack_pointer: usize,
+    frame_pointer: usize,
     src: usize,
     src_off: usize,
     dst: usize,
@@ -2854,10 +3046,11 @@ pub unsafe extern "C" fn ffi_copy_bytes(
     len: usize,
 ) -> usize {
     unsafe {
-        let src_ptr = extract_raw_ptr(src) as *const u8;
+        save_gc_context!(stack_pointer, frame_pointer);
+        let src_ptr = extract_raw_ptr(stack_pointer, src) as *const u8;
         let src_off = BuiltInTypes::untag(src_off);
 
-        let dst_ptr = extract_raw_ptr(dst);
+        let dst_ptr = extract_raw_ptr(stack_pointer, dst);
         let dst_off = BuiltInTypes::untag(dst_off);
 
         let len = BuiltInTypes::untag(len);
@@ -2868,8 +3061,9 @@ pub unsafe extern "C" fn ffi_copy_bytes(
     }
 }
 
-// Reallocate an FFI buffer to a new size
-// ffi_realloc(buffer, new_size) -> new_buffer
+// Reallocate an FFI buffer to a new size.
+// Returns a new Buffer struct. The OLD Buffer struct's pointer is zeroed so
+// if it stays reachable its finalizer sees null and does nothing.
 pub unsafe extern "C" fn ffi_realloc(buffer: usize, new_size: usize) -> usize {
     unsafe {
         let runtime = get_runtime().get_mut();
@@ -2878,19 +3072,13 @@ pub unsafe extern "C" fn ffi_realloc(buffer: usize, new_size: usize) -> usize {
         let old_size = BuiltInTypes::untag(buffer_object.get_field(1));
         let new_size_val = BuiltInTypes::untag(new_size);
 
-        // Create new buffer
-        let mut new_buffer: Vec<u8> = vec![0; new_size_val];
-        let new_ptr: *mut u8 = new_buffer.as_mut_ptr();
+        let new_ptr = match NonNull::new(old_ptr) {
+            Some(nn) => native_memory::realloc(nn, old_size, new_size_val).as_ptr(),
+            None => native_memory::alloc_zeroed(new_size_val).as_ptr(),
+        };
 
-        // Copy old data
-        let copy_len = std::cmp::min(old_size, new_size_val);
-        std::ptr::copy_nonoverlapping(old_ptr, new_ptr, copy_len);
-
-        // Free old buffer
-        let _old_buffer = Vec::from_raw_parts(old_ptr, old_size, old_size);
-
-        // Forget new buffer (we're taking ownership)
-        std::mem::forget(new_buffer);
+        // Zero old Buffer's pointer so GC finalizer on the old struct no-ops.
+        buffer_object.write_field(0, BuiltInTypes::Int.tag(0) as usize);
 
         let new_ptr_tagged = BuiltInTypes::Int.tag(new_ptr as isize) as usize;
         let new_size_tagged = BuiltInTypes::Int.tag(new_size_val as isize) as usize;
@@ -2914,14 +3102,17 @@ pub unsafe extern "C" fn ffi_buffer_size(buffer: usize) -> usize {
 // Write from buffer at offset to a file descriptor
 // ffi_write_buffer_offset(fd, buffer, offset, len) -> bytes_written
 pub unsafe extern "C" fn ffi_write_buffer_offset(
+    stack_pointer: usize,
+    frame_pointer: usize,
     fd: usize,
     buffer: usize,
     offset: usize,
     len: usize,
 ) -> usize {
     unsafe {
+        save_gc_context!(stack_pointer, frame_pointer);
         let fd = BuiltInTypes::untag(fd) as i32;
-        let buffer_ptr = extract_raw_ptr(buffer) as *const u8;
+        let buffer_ptr = extract_raw_ptr(stack_pointer, buffer) as *const u8;
         let offset = BuiltInTypes::untag(offset);
         let len = BuiltInTypes::untag(len);
 
@@ -2934,17 +3125,20 @@ pub unsafe extern "C" fn ffi_write_buffer_offset(
 // Translate bytes in buffer using a 256-byte lookup table
 // ffi_translate_bytes(buffer, offset, len, table) -> null
 pub unsafe extern "C" fn ffi_translate_bytes(
+    stack_pointer: usize,
+    frame_pointer: usize,
     buffer: usize,
     offset: usize,
     len: usize,
     table: usize,
 ) -> usize {
     unsafe {
-        let buffer_ptr = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer_ptr = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let len = BuiltInTypes::untag(len);
 
-        let table_ptr = extract_raw_ptr(table) as *const u8;
+        let table_ptr = extract_raw_ptr(stack_pointer, table) as *const u8;
 
         for i in 0..len {
             let byte = *buffer_ptr.add(offset + i);
@@ -2958,9 +3152,16 @@ pub unsafe extern "C" fn ffi_translate_bytes(
 
 // Reverse bytes in buffer in place
 // ffi_reverse_bytes(buffer, offset, len) -> null
-pub unsafe extern "C" fn ffi_reverse_bytes(buffer: usize, offset: usize, len: usize) -> usize {
+pub unsafe extern "C" fn ffi_reverse_bytes(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    buffer: usize,
+    offset: usize,
+    len: usize,
+) -> usize {
     unsafe {
-        let buffer_ptr = extract_raw_ptr(buffer);
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer_ptr = extract_raw_ptr(stack_pointer, buffer);
         let offset = BuiltInTypes::untag(offset);
         let len = BuiltInTypes::untag(len);
 
@@ -2982,13 +3183,16 @@ pub unsafe extern "C" fn ffi_reverse_bytes(buffer: usize, offset: usize, len: us
 // Find first occurrence of a byte in buffer (like memchr)
 // ffi_find_byte(buffer, offset, len, byte) -> index or -1
 pub unsafe extern "C" fn ffi_find_byte(
+    stack_pointer: usize,
+    frame_pointer: usize,
     buffer: usize,
     offset: usize,
     len: usize,
     byte: usize,
 ) -> usize {
     unsafe {
-        let buffer_ptr = extract_raw_ptr(buffer) as *const u8;
+        save_gc_context!(stack_pointer, frame_pointer);
+        let buffer_ptr = extract_raw_ptr(stack_pointer, buffer) as *const u8;
         let offset = BuiltInTypes::untag(offset);
         let len = BuiltInTypes::untag(len);
         let byte = BuiltInTypes::untag(byte) as u8;
@@ -3005,6 +3209,8 @@ pub unsafe extern "C" fn ffi_find_byte(
 // Returns number of bytes written to dst
 // ffi_copy_bytes_filter(src, src_off, dst, dst_off, len, skip_byte) -> bytes_written
 pub unsafe extern "C" fn ffi_copy_bytes_filter(
+    stack_pointer: usize,
+    frame_pointer: usize,
     src: usize,
     src_off: usize,
     dst: usize,
@@ -3013,10 +3219,11 @@ pub unsafe extern "C" fn ffi_copy_bytes_filter(
     skip_byte: usize,
 ) -> usize {
     unsafe {
-        let src_ptr = extract_raw_ptr(src) as *const u8;
+        save_gc_context!(stack_pointer, frame_pointer);
+        let src_ptr = extract_raw_ptr(stack_pointer, src) as *const u8;
         let src_off = BuiltInTypes::untag(src_off);
 
-        let dst_ptr = extract_raw_ptr(dst);
+        let dst_ptr = extract_raw_ptr(stack_pointer, dst);
         let dst_off = BuiltInTypes::untag(dst_off);
 
         let len = BuiltInTypes::untag(len);

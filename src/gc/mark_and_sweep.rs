@@ -531,6 +531,10 @@ impl MarkAndSweep {
                 offset = (offset + 7) & !7;
                 continue;
             }
+            // Object is unreachable: run registered finalizer (e.g., free the
+            // off-heap Buffer backing). Snapshot its fields first — the storage
+            // is about to go on the free list.
+            unsafe { crate::gc::finalizers::maybe_enqueue_finalizer(&heap_object) };
             let size = full_size;
             rebuilt_free_list.append_sorted_coalesced(FreeListEntry { offset, size });
             offset += size;

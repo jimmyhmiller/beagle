@@ -1,0 +1,32 @@
+namespace ffi_gc_no_double_free_test
+
+use beagle.ffi as ffi
+use beagle.core as core
+
+fn main() {
+    // Explicitly freeing then letting GC reach the struct must not double-free.
+    // The free counter should increment exactly once per buffer.
+    let before = ffi/__native-memory-free-count()
+    let buf = ffi/allocate(64)
+    ffi/deallocate(buf)
+    let after_explicit = ffi/__native-memory-free-count()
+    let freed_by_explicit = after_explicit - before
+
+    core/gc()
+    ffi/__finalizer-drain()
+    let after_gc = ffi/__native-memory-free-count()
+    let freed_by_gc = after_gc - after_explicit
+
+    println("explicit:")
+    println(freed_by_explicit)
+    println("by-gc:")
+    println(freed_by_gc)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// explicit:
+// 1
+// by-gc:
+// 0
+// done

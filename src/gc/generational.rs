@@ -319,6 +319,42 @@ impl Space {
     }
 }
 
+/// Walk a young-gen Space in address order, enqueuing finalizers for any
+/// dead finalizable objects. Run after minor GC's evacuation, before the
+/// space is cleared. Live objects have their headers replaced by forwarding
+/// pointers (size field clobbered); follow the forwarding link to their
+/// old-gen copy to get the size. Dead objects retain their original headers.
+unsafe fn sweep_young_finalizers(space: &Space) {
+    if space.allocation_offset == 0 {
+        return;
+    }
+    let start = space.start as usize;
+    let end = start + space.allocation_offset;
+    let mut addr = start;
+    while addr < end {
+        let header_data = unsafe { *(addr as *const usize) };
+        if Header::is_forwarding_bit_set(header_data) {
+            let tagged_new = Header::clear_forwarding_bit(header_data);
+            let Some(new_hobj) = HeapObject::try_from_tagged(tagged_new) else {
+                break;
+            };
+            let size = new_hobj.full_size();
+            if size == 0 || !size.is_multiple_of(8) {
+                break;
+            }
+            addr += size;
+        } else {
+            let hobj = HeapObject::from_untagged(addr as *const u8);
+            unsafe { crate::gc::finalizers::maybe_enqueue_finalizer(&hobj) };
+            let size = hobj.full_size();
+            if size == 0 || !size.is_multiple_of(8) {
+                break;
+            }
+            addr += size;
+        }
+    }
+}
+
 pub struct GenerationalGC {
     young: Space,
     old: MarkAndSweep,
@@ -826,6 +862,12 @@ impl GenerationalGC {
         self.process_dirty_cards();
 
         self.copy_remaining();
+
+        // Walk young gen to find dead finalizable objects. After evacuation,
+        // live objects have their headers replaced by forwarding pointers;
+        // dead objects retain their original headers. Same pattern as
+        // compacting::sweep_finalizers — see that function for details.
+        unsafe { sweep_young_finalizers(&self.young) };
 
         self.young.clear();
 

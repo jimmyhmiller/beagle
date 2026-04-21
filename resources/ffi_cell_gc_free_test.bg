@@ -1,0 +1,32 @@
+namespace ffi_cell_gc_free_test
+
+use beagle.ffi as ffi
+use beagle.core as core
+
+fn make_and_drop() {
+    // Cells and typed arrays are finalizable: their off-heap memory is
+    // freed when they become unreachable.
+    let _c1 = ffi/cell(ffi/Type.F32, 1)
+    let _c2 = ffi/cell(ffi/Type.I64, 2)
+    let _a = ffi/array(ffi/Type.F32, 8)
+}
+
+fn main() {
+    let before = ffi/__native-memory-free-count()
+    make_and_drop()
+    core/gc()
+    ffi/__finalizer-drain()
+    let after = ffi/__native-memory-free-count()
+    let freed = after - before
+
+    if freed >= 3 {
+        println("freed-enough")
+    } else {
+        println("MISSED count was " ++ to-string(freed))
+    }
+    println("done")
+}
+
+// @beagle.core.snapshot
+// freed-enough
+// done

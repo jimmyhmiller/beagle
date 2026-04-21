@@ -1,0 +1,46 @@
+namespace ffi_forget_test
+
+use beagle.ffi as ffi
+use beagle.core as core
+
+fn main() {
+    // After forget, the GC finalizer must not free the buffer — we've
+    // handed ownership to (hypothetical) C code. Free it manually so the
+    // test doesn't actually leak, proving the whole dance works.
+    let before = ffi/__native-memory-free-count()
+
+    let buf = ffi/allocate(64)
+    ffi/set-i32(buf, 0, 99)
+    let saved_value = ffi/get-i32(buf, 0)
+    ffi/forget(buf)
+
+    // Post-forget read must throw a resumable FFIError.
+    let result = try {
+        ffi/get-i32(buf, 0)
+    } catch (e, resume) {
+        println("caught use-after-forget")
+        resume(-1)
+    }
+
+    core/gc()
+    ffi/__finalizer-drain()
+    let after = ffi/__native-memory-free-count()
+
+    println("saved-value:")
+    println(saved_value)
+    println("post-forget-read:")
+    println(result)
+    println("freed-by-gc:")
+    println(after - before)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// caught use-after-forget
+// saved-value:
+// 99
+// post-forget-read:
+// -1
+// freed-by-gc:
+// 0
+// done

@@ -1,0 +1,23 @@
+namespace ffi_use_after_free_resumable_test
+
+use beagle.ffi as ffi
+
+fn main() {
+    let buf = ffi/allocate(4)
+    ffi/set-i32(buf, 0, 42)
+    ffi/deallocate(buf)
+
+    let result = try {
+        ffi/get-i32(buf, 0)
+    } catch (e, resume) {
+        println("caught use-after-free")
+        resume(-1)
+    }
+    println(result)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// caught use-after-free
+// -1
+// done

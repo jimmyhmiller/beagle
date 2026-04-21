@@ -1,0 +1,31 @@
+namespace ffi_gc_free_test
+
+use beagle.ffi as ffi
+use beagle.core as core
+
+fn alloc_and_drop() {
+    // Buffers allocated here become unreachable when this function returns.
+    let _a = ffi/allocate(128)
+    let _b = ffi/allocate(128)
+    let _c = ffi/allocate(128)
+}
+
+fn main() {
+    let before = ffi/__native-memory-free-count()
+    alloc_and_drop()
+    core/gc()
+    ffi/__finalizer-drain()
+    let after = ffi/__native-memory-free-count()
+    let freed = after - before
+
+    if freed >= 3 {
+        println("freed-enough")
+    } else {
+        println("MISSED free count was " ++ to-string(freed))
+    }
+    println("done")
+}
+
+// @beagle.core.snapshot
+// freed-enough
+// done
