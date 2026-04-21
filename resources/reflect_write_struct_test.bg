@@ -1,0 +1,53 @@
+namespace reflect_write_struct_test
+
+use beagle.reflect as reflect
+
+struct Shape { width, height }
+
+enum Status {
+    Active,
+    Idle
+}
+
+fn main() {
+    let original_struct_src = reflect/source(Shape)
+    let original_fields = reflect/fields(Shape)
+
+    reflect/write-source(Shape, "struct Shape { width, height, depth }")
+    let after_fields = reflect/fields(Shape)
+
+    reflect/write-source(Shape, original_struct_src)
+    let restored_fields = reflect/fields(Shape)
+    let restored_struct_src = reflect/source(Shape)
+
+    let original_enum_src = reflect/source(Status)
+    let original_variants = reflect/variants(Status)
+
+    reflect/write-source(Status, "enum Status { Active, Idle, Sleeping }")
+    let after_variants = reflect/variants(Status)
+
+    reflect/write-source(Status, original_enum_src)
+    let restored_variants = reflect/variants(Status)
+    let restored_enum_src = reflect/source(Status)
+
+    println(original_fields)
+    println(after_fields)
+    println(restored_fields)
+    println(restored_struct_src == original_struct_src)
+    println(original_variants)
+    println(after_variants)
+    println(restored_variants)
+    println(restored_enum_src == original_enum_src)
+
+    "done"
+}
+
+// @beagle.core.snapshot
+// ["width", "height"]
+// ["width", "height", "depth"]
+// ["width", "height"]
+// true
+// ["Active", "Idle"]
+// ["Active", "Idle", "Sleeping"]
+// ["Active", "Idle"]
+// true

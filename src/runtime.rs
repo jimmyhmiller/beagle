@@ -5596,6 +5596,55 @@ impl Runtime {
     ///
     /// Called from threads that have a stack (e.g., main thread) to process
     /// bindings that were queued by threads without a stack (e.g., compiler thread).
+    pub fn peek_pending_heap_bindings(&self) -> Vec<(usize, usize, usize)> {
+        self.pending_heap_bindings
+            .lock()
+            .expect("Failed to lock pending_heap_bindings")
+            .clone()
+    }
+
+    /// Return the current length of the pending heap bindings queue. Used
+    /// together with `flush_pending_heap_bindings_from` to drain only the
+    /// bindings added since a given point, leaving earlier accumulated
+    /// null-placeholders (from `reserve_namespace_slot` called on the
+    /// compiler thread during file load) untouched.
+    pub fn pending_heap_bindings_len(&self) -> usize {
+        self.pending_heap_bindings
+            .lock()
+            .expect("Failed to lock pending_heap_bindings")
+            .len()
+    }
+
+    /// Flush pending heap bindings queued at index `>= start`. Bindings
+    /// below `start` are preserved in the queue for later processing.
+    ///
+    /// This is the targeted counterpart to `flush_pending_heap_bindings`,
+    /// used by `reflect/write-source` to install only the bindings its
+    /// recompile queued rather than processing the entire historical
+    /// queue, which would replay old null placeholders left over from
+    /// earlier `reserve_namespace_slot` calls and clobber live bindings.
+    pub fn flush_pending_heap_bindings_from(&mut self, stack_pointer: usize, start: usize) {
+        let pending = {
+            let mut guard = self
+                .pending_heap_bindings
+                .lock()
+                .expect("Failed to lock pending_heap_bindings");
+            if start >= guard.len() {
+                return;
+            }
+            guard.split_off(start)
+        };
+
+        for (namespace_id, slot, value) in pending {
+            if let Err(e) = self.set_heap_binding(stack_pointer, namespace_id, slot, value) {
+                eprintln!(
+                    "Warning: failed to flush heap binding (ns={}, slot={}): {}",
+                    namespace_id, slot, e
+                );
+            }
+        }
+    }
+
     pub fn flush_pending_heap_bindings(&mut self, stack_pointer: usize) {
         // Take all pending bindings (swap with empty vec to minimize lock time)
         let pending = {

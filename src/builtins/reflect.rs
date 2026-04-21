@@ -1513,26 +1513,46 @@ pub extern "C" fn reflect_write_source(
     // range. Line offset is `line_start - 1` because the fragment's own
     // first line maps to line 1 internally.
     let namespace = namespace_of(&info.full_name).unwrap_or("").to_string();
-    if let Err(e) = runtime.compile_string_with_file_context(
+    // Snapshot the pending heap-binding queue length so we only flush
+    // the entries the recompile itself queues, not accumulated cruft
+    // from earlier compiler-thread reservations (which would otherwise
+    // re-play stale null placeholders and clobber live bindings for
+    // unrelated definitions in the same namespace).
+    let pending_start = runtime.pending_heap_bindings_len();
+
+    let top_level_ptr = match runtime.compile_string_with_file_context(
         &new_text_str,
         &namespace,
         &loc.file,
         loc.byte_start,
         loc.line_start.saturating_sub(1),
     ) {
-        let msg = format!(
-            "reflect/write-source: wrote {} but re-compile failed: {}",
-            loc.file, e
-        );
-        throw_write_source_error(stack_pointer, &msg);
-    }
+        Ok(ptr) => ptr,
+        Err(e) => {
+            let msg = format!(
+                "reflect/write-source: wrote {} but re-compile failed: {}",
+                loc.file, e
+            );
+            throw_write_source_error(stack_pointer, &msg);
+        }
+    };
 
-    // The compiler thread queues namespace re-bindings when it has no
-    // stack; without flushing them on the main thread the new first-class
-    // function wrapper never makes it into the heap-side binding map, so
-    // reading `stub` after this call would still return the pre-edit
-    // wrapper pointing at the old code pointer.
-    runtime.flush_pending_heap_bindings(stack_pointer);
+    // Flush only the bindings this recompile queued. Covers the function
+    // case where `upsert_function` on the compiler thread adds the
+    // new first-class wrapper via `add_binding` and queues the heap-side
+    // update for later. Without flushing, reads of the edited name
+    // would return the pre-edit wrapper pointing at the old code.
+    runtime.flush_pending_heap_bindings_from(stack_pointer, pending_start);
+
+    // Execute the compiled top-level so struct/enum definitions update
+    // their type descriptor bindings in the namespace. Functions don't
+    // strictly require this (upsert_function already rebinds), but
+    // running it keeps the behavior uniform with `eval` and ensures the
+    // edited name resolves to the new definition everywhere.
+    if top_level_ptr != 0 {
+        let top_level: fn() -> usize = unsafe { std::mem::transmute(top_level_ptr) };
+        top_level();
+    }
 
     BuiltInTypes::construct_boolean(true) as usize
 }

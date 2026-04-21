@@ -792,17 +792,22 @@ impl Ast {
     }
 
     pub fn has_top_level(&self) -> bool {
-        // Functions need runtime initialization (heap allocation for function objects)
-        // Multi-arity functions also need runtime initialization (dispatch object)
+        // Functions and multi-arity functions need runtime initialization
+        // (heap allocation for first-class function objects / dispatch tables).
+        // Structs and enums also need runtime initialization to create their
+        // type descriptor and bind the name in the namespace; without a
+        // `__top_level` wrapper that descriptor-creation code is generated
+        // and then discarded, which breaks `reflect/write-source` on a pure
+        // struct/enum redefinition (the Struct record updates but the name
+        // still resolves to the pre-edit descriptor).
         self.nodes().iter().any(|node| {
-            matches!(node, Ast::Function { .. } | Ast::MultiArityFunction { .. })
-                || !matches!(
-                    node,
-                    Ast::Struct { .. }
-                    // | Ast::Enum { .. }
-                    | Ast::Namespace { .. }
-                    | Ast::Test { .. }
-                )
+            matches!(
+                node,
+                Ast::Function { .. }
+                    | Ast::MultiArityFunction { .. }
+                    | Ast::Struct { .. }
+                    | Ast::Enum { .. }
+            ) || !matches!(node, Ast::Namespace { .. } | Ast::Test { .. })
         })
     }
 
