@@ -285,6 +285,11 @@ pub struct MarkAndSweep {
     space: Space,
     free_list: FreeList,
     options: AllocatorOptions,
+    /// Active promotion bump region during an evacuation cycle. `Some` only
+    /// between [`begin_promotion_bump`] / [`end_promotion_bump`]; holds a
+    /// contiguous range `(offset, end)` carved out of the free list to absorb
+    /// many small promotion copies without re-walking the free list per copy.
+    promotion_bump: Option<(usize, usize)>,
 }
 
 struct PendingMark {
@@ -412,6 +417,23 @@ impl MarkAndSweep {
         // TODO: I could amortize this by copying lazily and coalescing
         // the copies together if they are continuous
 
+        // Fast path: if we're inside a promotion cycle, bump within the
+        // reserved region instead of walking the free list per object.
+        if let Some((ref mut cursor, end)) = self.promotion_bump {
+            let size = data.len();
+            debug_assert!(size.is_multiple_of(8));
+            if *cursor + size <= end {
+                let offset = *cursor;
+                *cursor += size;
+                self.space.update_highmark(offset);
+                let pointer = self.space.copy_data_to_offset(offset, data) as *const u8;
+                assert!(self.space.contains(pointer));
+                return pointer;
+            }
+            // Bump region exhausted — flush it and drop back to the free list.
+            self.retire_promotion_bump();
+        }
+
         let Some(offset) = self.free_list.allocate(data.len()) else {
             self.grow();
             return self.copy_data_to_offset(data);
@@ -420,6 +442,67 @@ impl MarkAndSweep {
         let pointer = self.space.copy_data_to_offset(offset, data) as *const u8;
         assert!(self.space.contains(pointer));
         pointer
+    }
+
+    /// Reserve the largest available free-list range as a contiguous bump
+    /// region for the evacuation that follows. Promotion copies until
+    /// [`end_promotion_bump`] will bump within it — one pointer arithmetic
+    /// per object instead of a next-fit walk.
+    pub fn begin_promotion_bump(&mut self) {
+        // At least this many bytes or we don't bother — next-fit is cheap
+        // when the reserved range is tiny.
+        const MIN_BUMP_REGION_BYTES: usize = 64 * 1024;
+
+        if self.promotion_bump.is_some() {
+            panic!("begin_promotion_bump called while a bump region is already active");
+        }
+
+        let Some((idx, entry)) = self
+            .free_list
+            .ranges
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, e)| e.size)
+            .map(|(i, e)| (i, *e))
+        else {
+            return;
+        };
+
+        if entry.size < MIN_BUMP_REGION_BYTES {
+            return;
+        }
+
+        debug_assert!(
+            entry.offset.is_multiple_of(8),
+            "free-list entry not 8-byte aligned"
+        );
+
+        self.free_list.ranges.remove(idx);
+        if self.free_list.ranges.is_empty() {
+            self.free_list.next_fit_index = 0;
+        } else {
+            self.free_list.next_fit_index = idx.min(self.free_list.ranges.len() - 1);
+        }
+
+        self.promotion_bump = Some((entry.offset, entry.end()));
+    }
+
+    /// Return any unused tail of the active bump region to the free list.
+    /// Called at the end of a minor GC cycle. No-op if there is no active
+    /// region.
+    pub fn end_promotion_bump(&mut self) {
+        self.retire_promotion_bump();
+    }
+
+    fn retire_promotion_bump(&mut self) {
+        if let Some((cursor, end)) = self.promotion_bump.take() {
+            if cursor < end {
+                self.free_list.insert(FreeListEntry {
+                    offset: cursor,
+                    size: end - cursor,
+                });
+            }
+        }
     }
 
     fn mark_from_chain(&self, gc_frame_top: usize) {
@@ -572,6 +655,7 @@ impl MarkAndSweep {
             space,
             free_list: FreeList::new(FreeListEntry { offset: 0, size }),
             options,
+            promotion_bump: None,
         }
     }
 

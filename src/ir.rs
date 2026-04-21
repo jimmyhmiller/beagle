@@ -3644,17 +3644,28 @@ impl Ir {
         let tag_a = self.get_tag(a.into());
         let tag_b = self.get_tag(b.into());
 
-        // Same tag → could be deep-equal heap object / float / etc.
-        self.jump_if(call_builtin_label, Condition::Equal, tag_a, tag_b);
-
-        // String literal ↔ HeapObject string fallback (deep): heap-side could be
-        // a String/StringSlice/ConsString. Punt to builtin for tag mismatches
-        // that involve String tag with HeapObject tag.
         let string_tag: Value = Value::RawValue(BuiltInTypes::String.get_tag() as usize);
         let heap_tag: Value = Value::RawValue(BuiltInTypes::HeapObject.get_tag() as usize);
         let int_tag: Value = Value::RawValue(BuiltInTypes::Int.get_tag() as usize);
         let float_tag: Value = Value::RawValue(BuiltInTypes::Float.get_tag() as usize);
 
+        // Same tag. Only Float and HeapObject values can be non-identity-equal
+        // (both are heap-allocated with deep semantics). For Int, Bool,
+        // Closure, Function, Null, and String-literal tags, `equal` is just
+        // pointer identity — and the identity check above already failed, so
+        // they must be non-equal.
+        let tags_differ = self.label("eq_tags_differ");
+        self.jump_if(tags_differ, Condition::NotEqual, tag_a, tag_b);
+        self.jump_if(call_builtin_label, Condition::Equal, tag_a, float_tag);
+        self.jump_if(call_builtin_label, Condition::Equal, tag_a, heap_tag);
+        self.assign(result_register, Value::False);
+        self.jump(after);
+
+        self.write_label(tags_differ);
+
+        // String literal ↔ HeapObject string fallback (deep): heap-side could be
+        // a String/StringSlice/ConsString. Punt to builtin for tag mismatches
+        // that involve String tag with HeapObject tag.
         let after_str_heap = self.label("eq_after_str_heap");
         self.jump_if(after_str_heap, Condition::NotEqual, tag_a, string_tag);
         self.jump_if(call_builtin_label, Condition::Equal, tag_b, heap_tag);

@@ -800,6 +800,11 @@ impl GenerationalGC {
         let start = std::time::Instant::now();
         usdt_probes::fire_gc_minor_start(self.gc_count);
 
+        // Reserve a contiguous bump region from old-gen's free list for the
+        // duration of this minor GC. Promotion copies bump within it rather
+        // than re-walking the free list per object.
+        self.old.begin_promotion_bump();
+
         let (mut stack_roots, mut stack_old_gen) = self.gather_stack_root_refs(gc_frame_tops);
 
         // Classify extra_roots (shadow stack handles) into young/old gen
@@ -851,6 +856,10 @@ impl GenerationalGC {
         // major-GC sweep will catch it later) or is intact (object died;
         // enqueue its finalizer here).
         self.process_young_finalizables();
+
+        // Return any unused tail of the promotion bump region to the free list
+        // before mutator allocation resumes.
+        self.old.end_promotion_bump();
 
         self.young.clear();
 
