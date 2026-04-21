@@ -2354,7 +2354,11 @@ fn finalize_off_heap(fields: &[usize]) {
 /// loaded — the struct_ids don't exist until `beagle.ffi.bg` has been parsed.
 pub fn register_ffi_finalizers(runtime: &Runtime) {
     use crate::gc::finalizers::register_finalizer;
-    for name in ["beagle.ffi/Buffer", "beagle.ffi/Cell", "beagle.ffi/TypedArray"] {
+    for name in [
+        "beagle.ffi/Buffer",
+        "beagle.ffi/Cell",
+        "beagle.ffi/TypedArray",
+    ] {
         if let Some((id, _)) = runtime.structs.get(name) {
             register_finalizer(id, finalize_off_heap);
         }
@@ -2410,9 +2414,7 @@ pub unsafe fn extract_raw_ptr(stack_pointer: usize, tagged_struct: usize) -> *mu
     let struct_id = heap_object.get_struct_id();
     let runtime = get_runtime().get_mut();
     let runtime = &*runtime;
-    let struct_name = runtime
-        .get_struct_by_id(struct_id)
-        .map(|s| s.name.clone());
+    let struct_name = runtime.get_struct_by_id(struct_id).map(|s| s.name.clone());
     let ptr = if struct_name.as_deref() == Some("beagle.ffi/Pointer") {
         let lo = BuiltInTypes::untag(heap_object.get_field(0)) as u64;
         let hi = BuiltInTypes::untag(heap_object.get_field(1)) as u64;
@@ -3015,11 +3017,7 @@ pub unsafe extern "C" fn ffi_create_array(
         // return type to a finalizable Buffer.
         let byte_size = buffer.len() * std::mem::size_of::<*mut i8>();
         let dest = native_memory::alloc_zeroed(byte_size).as_ptr();
-        std::ptr::copy_nonoverlapping(
-            buffer.as_ptr() as *const u8,
-            dest,
-            byte_size,
-        );
+        std::ptr::copy_nonoverlapping(buffer.as_ptr() as *const u8, dest, byte_size);
 
         let buffer_ptr: *mut c_void = dest as *mut c_void;
         let raw = buffer_ptr as u64;

@@ -144,7 +144,12 @@ pub unsafe extern "C" fn build_rest_array_from_locals(
         if std::env::var("BEAGLE_DEBUG_RESUME").is_ok() {
             eprintln!(
                 "[build_rest_array] sp={:#x} fp={:#x} arg_count={:#x} min_args={:#x} first_local={} first_arg={:#x}",
-                stack_pointer, frame_pointer, arg_count, min_args, first_local_index, first_arg_index
+                stack_pointer,
+                frame_pointer,
+                arg_count,
+                min_args,
+                first_local_index,
+                first_arg_index
             );
         }
     }

@@ -14,7 +14,6 @@ pub fn record_gc_chain_event(event: String) {
     });
 }
 
-
 #[cfg(debug_assertions)]
 pub fn dump_gc_chain_trace() {
     if std::env::var("BEAGLE_DEBUG_GC_CHAIN_TRACE").is_err() {
@@ -27,7 +26,6 @@ pub fn dump_gc_chain_trace() {
         }
     });
 }
-
 
 /// Called by JIT prologue AFTER arguments have been saved to locals.
 /// Links the new frame into the GC frame chain.
@@ -84,7 +82,13 @@ pub extern "C" fn gc_frame_link(frame_header_addr: usize) -> usize {
                 } else {
                     eprintln!(
                         "[gc-top-write] via=gc_frame_link header={:#x} fp={:#x} type_id={} size={} saved_fp={:#x} ret={:#x} prev={:#x}",
-                        frame_header_addr, fp, header.type_id, header.size, saved_fp, return_addr, prev
+                        frame_header_addr,
+                        fp,
+                        header.type_id,
+                        header.size,
+                        saved_fp,
+                        return_addr,
+                        prev
                     );
                 }
             }
