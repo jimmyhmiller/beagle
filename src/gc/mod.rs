@@ -103,6 +103,25 @@ pub trait Allocator {
     /// to pre-trigger GC so that subsequent allocations are GC-free.
     fn can_allocate(&self, words: usize, kind: BuiltInTypes) -> bool;
 
+    /// Returns `(alloc_ptr, alloc_end)` — the byte addresses of the
+    /// current bump-allocator frontier and its upper limit.
+    ///
+    /// This is the window the inline JIT allocator is permitted to
+    /// operate within: it may bump `alloc_ptr` up to (but not past)
+    /// `alloc_end`. When a bump would overflow, the JIT calls back into
+    /// Rust's slow path which returns an updated `(alloc_ptr, alloc_end)`
+    /// via this trait.
+    ///
+    /// Allocators without a bump-pointer fast path (the mark-and-sweep
+    /// free-list) return `(0, 0)` — the inline comparison will always
+    /// fall to the slow path for them.
+    ///
+    /// The default implementation returns `(0, 0)` so that a backend
+    /// that hasn't opted into inline allocation stays correct-by-default.
+    fn allocator_frontier(&self) -> (usize, usize) {
+        (0, 0)
+    }
+
     /// Write barrier for generational GC.
     ///
     /// Called after writing a pointer value into a heap object's field.

@@ -123,4 +123,16 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
     fn can_allocate(&self, words: usize, kind: BuiltInTypes) -> bool {
         self.alloc.can_allocate(words, kind)
     }
+
+    fn allocator_frontier(&self) -> (usize, usize) {
+        // Multi-mutator safety: when more than one thread is registered,
+        // the shared bump frontier cannot be exposed to the JIT's inline
+        // fast path — two threads bumping the same `alloc_ptr` without
+        // synchronisation would race. Return (0, 0) so callers forcing
+        // slow path take over until the thread count returns to one.
+        if self.registered_threads.load(Ordering::Acquire) != 0 {
+            return (0, 0);
+        }
+        self.alloc.allocator_frontier()
+    }
 }

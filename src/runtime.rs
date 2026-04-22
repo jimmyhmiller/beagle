@@ -4925,20 +4925,17 @@ impl Runtime {
 
         let result = self.memory.heap.try_allocate(words, kind);
 
-        match result {
+        let tagged = match result {
             Ok(AllocateAction::Allocated(value)) => {
                 assert!(value.is_aligned());
-                let value = kind.tag(value as isize);
-                Ok(value as usize)
+                Ok(kind.tag(value as isize) as usize)
             }
             Ok(AllocateAction::Gc) => {
                 self.run_gc(stack_pointer, frame_pointer);
                 let result = self.memory.heap.try_allocate(words, kind);
                 if let Ok(AllocateAction::Allocated(result)) = result {
-                    // tag
                     assert!(result.is_aligned());
-                    let result = kind.tag(result as isize);
-                    Ok(result as usize)
+                    Ok(kind.tag(result as isize) as usize)
                 } else {
                     if retries >= MAX_GROW_RETRIES {
                         return Err(format!(
@@ -4947,14 +4944,29 @@ impl Runtime {
                         ).into());
                     }
                     self.memory.heap.grow();
-                    let pointer =
-                        self.allocate_with_retries(words, stack_pointer, kind, retries + 1)?;
-                    // If we went down this path, our pointer is already tagged
-                    Ok(pointer)
+                    // Recursive retry path: the nested call refreshes the
+                    // frontier on its way out, no need for us to do it.
+                    return self.allocate_with_retries(words, stack_pointer, kind, retries + 1);
                 }
             }
             Err(e) => Err(e),
+        };
+
+        // Refresh the current thread's MutatorState with the allocator's
+        // current bump-pointer frontier. The inline JIT allocator
+        // (Commit B) will read these through the reserved mutator-state
+        // register; populating them on every slow path keeps the two
+        // views consistent. MutexAllocator returns (0, 0) when more than
+        // one mutator is registered, which disarms the future inline
+        // fast path.
+        let (alloc_ptr, alloc_end) = self.memory.heap.allocator_frontier();
+        unsafe {
+            let state = crate::runtime::current_mutator_state();
+            (*state).alloc_ptr = alloc_ptr;
+            (*state).alloc_end = alloc_end;
         }
+
+        tagged
     }
 
     /// Allocate with zeroed memory (for arrays that don't initialize all fields)

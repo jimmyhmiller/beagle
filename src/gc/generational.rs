@@ -191,6 +191,16 @@ impl Space {
         self.start as usize
     }
 
+    /// Byte address of the next free byte — the bump-pointer frontier.
+    fn frontier(&self) -> usize {
+        self.start as usize + self.allocation_offset
+    }
+
+    /// Byte address one past the last usable byte in this space.
+    fn end_address(&self) -> usize {
+        self.start as usize + self.byte_count()
+    }
+
     #[allow(unused)]
     fn copy_data_to_offset(&mut self, data: &[u8]) -> isize {
         unsafe {
@@ -583,6 +593,10 @@ impl Allocator for GenerationalGC {
             return false;
         }
         self.young.can_allocate(Word::from_word(words))
+    }
+
+    fn allocator_frontier(&self) -> (usize, usize) {
+        (self.young.frontier(), self.young.end_address())
     }
 
     /// Write barrier: record old-to-young pointers.

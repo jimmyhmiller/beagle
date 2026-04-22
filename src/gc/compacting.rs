@@ -33,6 +33,16 @@ impl Space {
         self.page_count * get_page_size()
     }
 
+    /// Byte address of the next free byte — the bump-pointer frontier.
+    fn frontier(&self) -> usize {
+        self.start as usize + self.allocation_offset
+    }
+
+    /// Byte address one past the last usable byte in this space.
+    fn end_address(&self) -> usize {
+        self.start as usize + self.byte_count()
+    }
+
     fn contains(&self, pointer: *const u8) -> bool {
         let start = self.start as usize;
         let end = start + self.byte_count();
@@ -642,5 +652,9 @@ impl Allocator for CompactingHeap {
 
     fn can_allocate(&self, words: usize, _kind: BuiltInTypes) -> bool {
         self.from_space.allocation_offset + words * 8 < self.from_space.byte_count()
+    }
+
+    fn allocator_frontier(&self) -> (usize, usize) {
+        (self.from_space.frontier(), self.from_space.end_address())
     }
 }
