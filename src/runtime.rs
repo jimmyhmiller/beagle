@@ -284,11 +284,6 @@ pub struct ThreadGlobal {
     pub handle_stack: Vec<usize>,
     /// Current top index into handle_stack (next free slot).
     pub handle_stack_top: usize,
-    /// Per-thread allocator/GC state. Box'd so its address is stable even if
-    /// ThreadGlobal is moved (though in practice ThreadGlobal is Box'd in the
-    /// thread_globals HashMap and doesn't move either). The stable address is
-    /// what lets JIT'd code hold it in a dedicated register across calls.
-    pub mutator_state: Box<MutatorState>,
 }
 
 impl ThreadGlobal {
@@ -302,7 +297,6 @@ impl ThreadGlobal {
             stack_base,
             handle_stack: vec![0; 1024],
             handle_stack_top: 0,
-            mutator_state: Box::new(MutatorState::new()),
         }
     }
 
@@ -3339,14 +3333,6 @@ pub(crate) fn cached_thread_global_ptr() -> *mut ThreadGlobal {
     CACHED_THREAD_GLOBAL.with(|c| c.get())
 }
 
-/// Clear the current thread's cached ThreadGlobal pointer. Must be called
-/// before removing this thread's entry from `thread_globals`, otherwise
-/// the cached pointer is left dangling and later reads of the MutatorState
-/// (e.g. in a JIT epilogue's gc_frame_unlink) would touch freed memory.
-pub fn clear_cached_thread_global() {
-    CACHED_THREAD_GLOBAL.with(|c| c.set(std::ptr::null_mut()));
-}
-
 /// Non-inline wrapper exposed as a stable function pointer for JIT trampolines.
 /// Emitters embed the address of this symbol as an immediate and call it with
 /// `blr` to set x28 = MutatorState pointer on Rust → Beagle boundaries.
@@ -3356,54 +3342,36 @@ pub extern "C" fn jit_load_current_mutator_state() -> *mut MutatorState {
     current_mutator_state()
 }
 
-/// Fallback MutatorState for code that runs before the current thread has
-/// been registered (runtime bootstrap paths read gc_frame_top harmlessly as 0
-/// during initialization). Once the thread is registered, the real per-thread
-/// MutatorState replaces reads/writes here.
-///
-/// This is a single static shared across threads; it must only be used before
-/// registration when all accesses are still sequential in practice.
-static mut BOOTSTRAP_MUTATOR_STATE: MutatorState = MutatorState::new();
+thread_local! {
+    /// Per-OS-thread MutatorState storage. Lazily initialized on first
+    /// access; lives until the OS thread exits (pthread destructor drops
+    /// the `Box`). Because the lifetime is tied to the OS thread — not
+    /// to Beagle's notion of "registered thread" — the pointer returned
+    /// by `current_mutator_state` is stable for every call on that
+    /// thread regardless of Beagle-level HashMap bookkeeping.
+    static OS_THREAD_MUTATOR: std::cell::OnceCell<Box<MutatorState>> =
+        const { std::cell::OnceCell::new() };
+}
 
 /// Pointer to the current thread's MutatorState.
 ///
-/// Fast path: read the already-populated `CACHED_THREAD_GLOBAL` thread-local
-/// pointer and return the address of its boxed MutatorState field.
-///
-/// Slow path (first call per thread, or before any thread is registered):
-/// fall back on the shared bootstrap slot for pre-registration calls, and
-/// lazily populate `CACHED_THREAD_GLOBAL` via a mutex lookup if the thread
-/// is already registered. Mirrors the pattern used in add_handle_root /
-/// get_handle_root.
-///
-/// The returned pointer is stable for the lifetime of the thread (MutatorState
-/// is boxed inside ThreadGlobal, which itself is boxed in the thread_globals
-/// HashMap).
+/// Lazily allocates on first access per OS thread, then returns a pointer
+/// to a `Box<MutatorState>` whose heap address is stable for the rest of
+/// the thread's lifetime. Because it's keyed on the OS thread (not on
+/// Beagle's `thread_globals` registry), every Rust↔Beagle boundary can
+/// rely on this being valid — there's no bootstrap window, no
+/// use-after-free on Beagle thread exit, no cache to invalidate.
 #[inline]
 pub fn current_mutator_state() -> *mut MutatorState {
-    let tg = cached_thread_global_ptr();
-    let tg = if tg.is_null() {
-        // Lazily look up and cache the ThreadGlobal for the current thread.
-        // This happens at most once per thread — after first call,
-        // cached_thread_global_ptr returns non-null directly.
-        crate::get_runtime().get().ensure_cached_thread_global()
-    } else {
-        tg
-    };
-    if tg.is_null() {
-        // Still null — the current thread hasn't been registered yet (we're
-        // in very early bootstrap before initialize_thread_global runs). Use
-        // the shared static bootstrap slot; all such accesses are sequential
-        // in practice.
-        &raw mut BOOTSTRAP_MUTATOR_STATE
-    } else {
-        // SAFETY: tg points to a Box'd ThreadGlobal inside thread_globals,
-        // whose storage is stable. The Box<MutatorState> field has a stable
-        // heap address; &raw mut *box yields a raw pointer to that heap
-        // slot without constructing an intermediate &mut (which would
-        // overlap with other callers and risk UB).
-        unsafe { &raw mut *(*tg).mutator_state }
-    }
+    OS_THREAD_MUTATOR.with(|cell| {
+        let boxed = cell.get_or_init(|| Box::new(MutatorState::new()));
+        // SAFETY: the `Box` is stored inside the thread_local cell which
+        // outlives every caller on this thread; its heap allocation is
+        // stable for the thread's lifetime. We hand out a mutable raw
+        // pointer because callers (JIT code, the runtime) treat the
+        // MutatorState as an interior-mutable region.
+        (&**boxed as *const MutatorState) as *mut MutatorState
+    })
 }
 
 // ============================================================================

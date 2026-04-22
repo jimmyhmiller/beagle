@@ -235,15 +235,10 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
                     .fetch_sub(1, std::sync::atomic::Ordering::Release)
                     - 1;
                 // Thread object is in our GlobalObjectBlock - cleanup happens
-                // when thread_globals entry is removed.
-                //
-                // Clear the cached pointer first: removing the entry drops the
-                // Box<ThreadGlobal> (which owns the MutatorState), so any
-                // subsequent read via CACHED_THREAD_GLOBAL would dereference
-                // freed memory. In practice the JIT epilogue of the enclosing
-                // __run_thread function will fire gc_frame_unlink right after
-                // this returns, so order matters.
-                crate::runtime::clear_cached_thread_global();
+                // when thread_globals entry is removed. MutatorState lives in
+                // per-OS-thread `thread_local!` storage that outlives this
+                // removal, so the JIT epilogue's gc_frame_unlink still sees
+                // a valid pointer after we drop the ThreadGlobal.
                 runtime
                     .memory
                     .thread_globals
