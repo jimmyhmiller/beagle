@@ -31,6 +31,7 @@ use crate::{
 
 use rand::Rng;
 use std::hint::black_box;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // Type aliases for complex function pointer types (for apply trampolines)
 #[allow(clippy::type_complexity)]
@@ -297,32 +298,35 @@ macro_rules! save_gc_context {
     }};
 }
 
-/// Read the current frame pointer register directly. ARM64 dedicates x29 as
-/// the frame pointer; AAPCS64 + Rust's default codegen on macOS keep it valid
-/// in every function with a stack frame (which any function calling this has
-/// because `#[inline(never)]` forces a real call frame). x86-64 uses rbp.
-///
-/// Used by GC to walk the stack starting from the current Rust function's
-/// frame. MUST NOT be inlined — the caller wants its own FP, and an inlined
-/// asm read would just give the inlined caller's FP after the prologue, which
-/// is fine for ARM64 but the explicit `inline(never)` keeps the contract clear
-/// across both arches.
-#[inline(never)]
+/// Cached function pointer to the `beagle.builtin/read-fp` JIT trampoline.
+/// Used by GC to walk the stack starting from the Rust caller's frame.
+/// Resolving by name was doing a linear scan over every registered function
+/// on every allocation; caching the pointer once at first use removes that
+/// cost without changing the semantics (the trampoline has no prologue, so it
+/// reads the *caller's* FP, which is the contract we need and which works
+/// uniformly across ARM64 and x86-64 debug/release). Replacing it with inline
+/// asm reading x29/rbp directly is tempting but fragile on x86-64 debug —
+/// Rust's codegen there doesn't always produce a prologue that leaves rbp
+/// pointing at our own saved FP, so a dereference returns a value one level
+/// too deep (produces SIGSEGVs in continuation-capture tests).
+static READ_FP_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+
+#[inline(always)]
 pub fn get_current_rust_frame_pointer() -> usize {
-    let fp: usize;
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags));
-    }
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack, preserves_flags));
-    }
-    // After our own prologue, x29/rbp points at our saved frame, whose first
-    // slot is the caller's saved FP and second slot is the caller's return
-    // address. The macro adds 8 to reach that return-address slot, but we want
-    // to return *our caller's* FP value so the existing math stays correct.
-    unsafe { *(fp as *const usize) }
+    let cached = READ_FP_TRAMPOLINE.load(Ordering::Relaxed);
+    let ptr = if cached != 0 {
+        cached
+    } else {
+        let fn_entry = get_runtime()
+            .get()
+            .get_function_by_name("beagle.builtin/read-fp")
+            .expect("read-fp trampoline not found");
+        let p: usize = fn_entry.pointer.into();
+        READ_FP_TRAMPOLINE.store(p, Ordering::Relaxed);
+        p
+    };
+    let read_fp: extern "C" fn() -> usize = unsafe { std::mem::transmute::<_, _>(ptr) };
+    read_fp()
 }
 
 /// Check if a value is a string-like type (string literal, heap string, string slice, or cons string)
