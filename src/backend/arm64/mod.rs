@@ -32,6 +32,10 @@ impl CodegenBackend for Arm64Backend {
     type Register = Register;
     type Instruction = ArmAsm;
 
+    fn abi(&self) -> &'static crate::abi::BeagleAbi<Self::Register> {
+        &crate::abi::arm64::ABI
+    }
+
     fn new() -> Self {
         Arm64Backend {
             inner: LowLevelArm::new(),

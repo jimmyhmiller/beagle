@@ -33,21 +33,22 @@ impl LinearScan {
     pub fn new(instructions: Vec<Instruction>, num_locals: usize) -> Self {
         let lifetimes = Self::get_register_lifetime(&instructions);
 
-        // Select physical registers based on backend
+        // Select physical registers based on backend. The ARM pool comes
+        // straight from the single-source-of-truth `BeagleAbi`; the x86
+        // pool still uses custom virtual-index remapping because RBX has
+        // raw x86 index 3 but needs virtual index 16 to avoid conflicting
+        // with arg(3).
         cfg_if::cfg_if! {
             if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
-                // x86-64: callee-saved registers
-                // We use R12-R15 (indices 12-15) and RBX (virtual index 16) because they
-                // don't conflict with argument register indices (0-5 map to RDI, RSI, RDX, RCX, R8, R9).
-                // RBX has raw x86 index 3 but we use virtual index 16 to avoid arg(3) conflict.
+                // x86-64: R12-R15 (indices 12-15) and RBX (virtual index 16).
                 let physical_registers: Vec<VirtualRegister> =
                     vec![12, 13, 14, 15, 16].into_iter().map(physical).collect();
             } else {
-                // ARM64: callee-saved registers X19-X27.
-                // X28 is reserved to hold a pointer to the current thread's
-                // MutatorState (see runtime::MutatorState). Removing it from the
-                // allocator pool ensures no generated code clobbers the slot.
-                let physical_registers: Vec<VirtualRegister> = (19..=27).map(physical).collect();
+                let physical_registers: Vec<VirtualRegister> = crate::abi::arm64::ABI
+                    .allocator_pool
+                    .iter()
+                    .map(|r| physical(r.index as usize))
+                    .collect();
             }
         }
         let max_registers = physical_registers.len();

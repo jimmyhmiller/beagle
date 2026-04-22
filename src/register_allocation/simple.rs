@@ -60,8 +60,12 @@ impl SimpleRegisterAllocator {
     ) -> Self {
         let instruction_len = instructions.len();
         let lifetimes = Self::get_register_lifetime(&instructions);
-        // ARM64: callee-saved registers X19-X27 (X28 reserved for MutatorState pointer).
-        let physical_registers: Vec<VirtualRegister> = (19..=27).map(physical).collect();
+        // ARM64: allocator pool sourced from the single ABI definition.
+        let physical_registers: Vec<VirtualRegister> = crate::abi::arm64::ABI
+            .allocator_pool
+            .iter()
+            .map(|r| physical(r.index as usize))
+            .collect();
 
         SimpleRegisterAllocator {
             lifetimes,

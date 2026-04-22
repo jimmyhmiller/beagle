@@ -64,6 +64,7 @@ mod arm;
 
 #[macro_use]
 mod trace;
+pub mod abi;
 pub mod ast;
 pub mod backend;
 mod builtins;

@@ -32,6 +32,10 @@ impl CodegenBackend for X86_64Backend {
     type Register = X86Register;
     type Instruction = X86Asm;
 
+    fn abi(&self) -> &'static crate::abi::BeagleAbi<Self::Register> {
+        &crate::abi::x86_64::ABI
+    }
+
     fn new() -> Self {
         X86_64Backend {
             inner: LowLevelX86::new(),

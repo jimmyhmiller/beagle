@@ -43,7 +43,14 @@ pub trait CodegenBackend: Sized {
     /// Register type used by this backend.
     /// For native backends (ARM64, x86-64), this is the physical register type.
     /// For IR-based backends (LLVM, Cranelift), this may be a virtual register ID.
-    type Register: Copy + Clone + std::fmt::Debug + PartialEq;
+    type Register: Copy + Clone + std::fmt::Debug + PartialEq + 'static;
+
+    /// The calling-convention roles for this backend. Exposes the
+    /// reserved-register layout (mutator-state, arg-count), the allocator
+    /// pool, and the shim-saved callee set through a single source of
+    /// truth. Consumers must read from here rather than hardcoding
+    /// register indices or recomputing pool membership inline.
+    fn abi(&self) -> &'static crate::abi::BeagleAbi<Self::Register>;
 
     /// Create a new backend instance.
     fn new() -> Self;

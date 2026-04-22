@@ -2,8 +2,7 @@ use crate::{
     builtins::debugger,
     machine_code::arm_codegen::{
         ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, SP, Size, StpGenSelector,
-        StrImmGenSelector, X0, X1, X2, X3, X4, X5, X6, X7, X9, X10, X11, X12, X16, X17, X19, X20,
-        X21, X22, X23, X24, X25, X26, X27, X28, X29, X30, ZERO_REGISTER,
+        StrImmGenSelector, X0, X10, X11, X12, X16, X17, X28, X29, X30, ZERO_REGISTER,
     },
     types::BuiltInTypes,
 };
@@ -553,15 +552,9 @@ impl Default for LowLevelArm {
 
 impl LowLevelArm {
     pub fn new() -> Self {
-        // https://github.com/swiftlang/swift/blob/716cc5cedf0b8638225bebf86bddc6a1295388f4/docs/ABI/CallingConventionSummary.rst#arm64
-        // X19-X28 are the AAPCS callee-saved registers. X28 stays in this list
-        // so the save_volatile_registers trampolines preserve it across
-        // Rust→Beagle boundaries (and so stack-pointer math that uses
-        // `canonical_volatile_registers.len()` remains 16-byte aligned). X28 is
-        // separately removed from the register-allocator pools (see
-        // `register_allocation/{linear_scan,simple}.rs`) because it's reserved
-        // to hold the per-thread MutatorState pointer.
-        let canonical_volatile_registers = vec![X19, X20, X21, X22, X23, X24, X25, X26, X27, X28];
+        // Callee-saved set (X19-X28, including the reserved X28) comes from
+        // the single ABI definition. See `src/abi/mod.rs`.
+        let canonical_volatile_registers = crate::abi::arm64::ABI.callee_saved.to_vec();
         // X9 is reserved for arg count in variadic calling convention
         let temporary_registers = vec![X10, X11, X12];
         LowLevelArm {
@@ -1144,13 +1137,14 @@ impl LowLevelArm {
     /// register; it's restored to its pre-call value via the LDP, so
     /// callers can include it in `preserve` safely.
     pub fn emit_load_mutator_state(&mut self, preserve: &[Register]) {
+        let mutator_state_reg = crate::abi::arm64::ABI.mutator_state_reg;
         debug_assert!(
             !preserve.contains(&X17),
             "X17 is used as scratch for the call; it's caller-clobbered anyway"
         );
         debug_assert!(
-            !preserve.contains(&X28),
-            "X28 is the destination of this call; preserving it is meaningless"
+            !preserve.contains(&mutator_state_reg),
+            "mutator_state_reg is the destination of this call; preserving it is meaningless"
         );
 
         // Pack into pairs. Odd count pads with XZR so SP stays 16-aligned.
@@ -1183,7 +1177,7 @@ impl LowLevelArm {
             self.instructions.push(instr);
         }
         self.instructions.push(ArmAsm::Blr { rn: X17 });
-        self.mov_reg(X28, X0);
+        self.mov_reg(mutator_state_reg, X0);
 
         for (a, b) in pairs.iter().rev() {
             self.instructions.push(ArmAsm::LdpGen {
@@ -1317,28 +1311,29 @@ impl LowLevelArm {
             .retain(|&allocated| allocated != reg);
     }
 
-    /// Mark a callee-saved register (X19-X27) as used by this function.
-    /// This is called when the register allocator assigns a physical register.
-    /// X28 is reserved for the MutatorState pointer and is never tracked here.
+    /// Mark an allocator-pool callee-saved register as used by this
+    /// function. Called when the register allocator assigns a physical
+    /// register. Registers outside the pool (like the reserved X28) are
+    /// silently ignored — they're never allocatable and don't need
+    /// per-function tracking.
+    ///
+    /// The bitmask is keyed by index *within the allocator pool*, so bit
+    /// 0 = `allocator_pool[0]`, bit 1 = `allocator_pool[1]`, etc.
     fn mark_callee_saved_used(&mut self, reg: Register) {
-        if reg.index >= 19 && reg.index <= 27 {
-            let bit = reg.index - 19;
+        let pool = crate::abi::arm64::ABI.allocator_pool;
+        if let Some(bit) = pool.iter().position(|r| r.index == reg.index) {
             self.used_callee_saved_registers |= 1 << bit;
         }
     }
 
     /// Get the list of callee-saved registers that are actually used.
     fn get_used_callee_saved_registers(&self) -> Vec<Register> {
-        let mut result = Vec::new();
-        for i in 0..9u8 {
-            if self.used_callee_saved_registers & (1 << i) != 0 {
-                result.push(Register {
-                    size: Size::S64,
-                    index: 19 + i,
-                });
-            }
-        }
-        result
+        let pool = crate::abi::arm64::ABI.allocator_pool;
+        pool.iter()
+            .enumerate()
+            .filter(|(i, _)| self.used_callee_saved_registers & (1 << i) != 0)
+            .map(|(_, r)| *r)
+            .collect()
     }
 
     /// Reset callee-saved register tracking for a new function.
@@ -1346,11 +1341,12 @@ impl LowLevelArm {
         self.used_callee_saved_registers = 0;
     }
 
-    /// Mark a callee-saved register as used by its index (19-27).
-    /// X28 is reserved for the MutatorState pointer.
+    /// Mark a callee-saved register as used by its raw index. Same
+    /// semantics as `mark_callee_saved_used`: indices outside the ABI
+    /// allocator pool are silently ignored.
     pub fn mark_callee_saved_register_used(&mut self, index: usize) {
-        if (19..=27).contains(&index) {
-            let bit = index - 19;
+        let pool = crate::abi::arm64::ABI.allocator_pool;
+        if let Some(bit) = pool.iter().position(|r| r.index as usize == index) {
             self.used_callee_saved_registers |= 1 << bit;
         }
     }
