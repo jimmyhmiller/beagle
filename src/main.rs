@@ -399,10 +399,11 @@ fn compile_trampoline(runtime: &mut Runtime) {
         } else {
             let mut lang = arm::LowLevelArm::new();
             // Shim trampoline: its frame isn't a Beagle frame, and it runs
-            // BEFORE x28 has been loaded with the MutatorState pointer, so
-            // skip the inlined gc_frame_link / gc_frame_unlink that would
-            // otherwise dereference an uninitialised x28.
-            lang.skip_gc_frame_link = true;
+            // BEFORE x28 has been loaded with the MutatorState pointer. The
+            // ShimTrampoline frame kind omits the inlined gc_frame_link /
+            // gc_frame_unlink that would otherwise dereference an
+            // uninitialised x28.
+            lang.frame_kind = arm::FrameKind::ShimTrampoline;
             // Reserve enough frame space that our store_on_stack saves for
             // X19..X28 (at FP-offsets -4..-13) live strictly above SP. If the
             // patched prologue sized the frame only around max_stack_size,
@@ -519,8 +520,8 @@ fn compile_save_volatile_registers_for(runtime: &mut Runtime, register_num: usiz
             let mut lang = arm::LowLevelArm::new();
             // Shim trampoline: like the main `trampoline`, this function's
             // frame is not a Beagle frame and it runs before x28 has been
-            // loaded — skip the inlined gc_frame_link / gc_frame_unlink.
-            lang.skip_gc_frame_link = true;
+            // loaded — omit the inlined gc_frame_link / gc_frame_unlink.
+            lang.frame_kind = arm::FrameKind::ShimTrampoline;
             lang.prelude();
 
             lang.sub_stack_pointer(
@@ -607,9 +608,9 @@ fn compile_apply_call_trampolines_arm64(runtime: &mut Runtime) {
         let function_name = format!("beagle.builtin/apply_call_{}", num_args);
 
         let mut lang = arm::LowLevelArm::new();
-        // Shim trampoline — its frame isn't a Beagle frame, so skip the
+        // Shim trampoline — its frame isn't a Beagle frame, so omit the
         // inlined gc_frame_link / gc_frame_unlink.
-        lang.skip_gc_frame_link = true;
+        lang.frame_kind = arm::FrameKind::ShimTrampoline;
 
         // Function receives: fn_ptr in X0, then arg0..argN-1 in X1..X(N)
         // For N > 7: X0-X7 have fn_ptr and args[0-6], stack has args[7+]

@@ -533,15 +533,36 @@ pub struct LowLevelArm {
     /// Number of callee-saved registers actually saved in this function's frame.
     /// Set by patch_prelude_and_epilogue().
     pub num_callee_saved: usize,
-    /// If true, `patch_prelude_and_epilogue` does NOT emit the inlined
-    /// gc_frame_link / gc_frame_unlink code. Used by the Rust↔Beagle shim
-    /// trampolines (the `trampoline` and `save_volatile_registersN` builtins)
-    /// whose frames don't hold Beagle values and which run BEFORE x28 has
-    /// been loaded with the MutatorState pointer.
-    pub skip_gc_frame_link: bool,
+    /// Which prologue/epilogue phases to emit. A full Beagle function
+    /// frame gets everything (header, GC link, zero-fill, callee-saved);
+    /// a Rust↔Beagle shim trampoline gets only stack allocation.
+    pub frame_kind: FrameKind,
     /// If this function contains `binding` expressions, the local index of the mark pointer.
     /// Encoded in the frame header's type_data lower 16 bits so get_dynamic_var can find it.
     pub mark_local_index: Option<usize>,
+}
+
+/// What kind of frame `patch_prelude_and_epilogue` should build.
+///
+/// The patcher's phases are decided by this enum rather than ad-hoc
+/// boolean flags. Adding a new frame-shape requirement is a new variant,
+/// not a new `skip_*` field — the combinations are named and documented.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameKind {
+    /// Full Beagle function frame: stack alloc, frame header at
+    /// `[FP-8]`, inlined `gc_frame_link` splicing this frame into the
+    /// per-thread GC chain, zero-fill of locals and eval-stack slots,
+    /// and callee-saved save. Assumes X28 is a valid MutatorState
+    /// pointer on entry (the caller must be a Beagle function or a
+    /// shim that just loaded it).
+    BeagleFunction,
+    /// Rust↔Beagle shim trampoline: stack alloc only. No frame header
+    /// (nothing scans the frame), no inlined GC link (the shim's frame
+    /// isn't a Beagle frame), no zero-fill (no Beagle-visible slots),
+    /// no callee-saved save (the shim body handles it manually via
+    /// `store_on_stack`). Used by the main `trampoline`,
+    /// `save_volatile_registersN`, and `apply_call_N`.
+    ShimTrampoline,
 }
 
 impl Default for LowLevelArm {
@@ -574,7 +595,7 @@ impl LowLevelArm {
             used_callee_saved_registers: 0,
             num_callee_saved: 0,
             mark_local_index: None,
-            skip_gc_frame_link: false,
+            frame_kind: FrameKind::BeagleFunction,
         }
     }
 
@@ -1667,7 +1688,7 @@ impl LowLevelArm {
             //     prev = *(X28 + 16)
             //     *(X28 + 16) = header
             //     *(FP - 16) = prev
-            if !self.skip_gc_frame_link {
+            if self.frame_kind == FrameKind::BeagleFunction {
                 alloc_instructions.push(ArmAsm::SubAddsubImm {
                     sf: 1,
                     rn: X29,
@@ -1778,7 +1799,7 @@ impl LowLevelArm {
             // Inlined gc_frame_unlink:
             //     prev = *(FP - 16)
             //     *(X28 + 16) = prev
-            if !self.skip_gc_frame_link {
+            if self.frame_kind == FrameKind::BeagleFunction {
                 dealloc_instructions.push(ArmAsm::LdurGen {
                     size: 0b11,
                     imm9: -16,
