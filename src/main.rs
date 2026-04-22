@@ -1352,8 +1352,33 @@ fn discover_test_files(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>,
 /// Parses `namespace` declarations and `use` statements from each file to build
 /// a dependency graph, then topological-sorts it. Files without dependencies
 /// (or with only stdlib deps) retain their original alphabetical order.
+/// Returns true if this file name matches a high-risk test category.
+/// The multithreaded / continuation / handler / resumable-error families
+/// exercise code paths (x28-load boundaries, shift/reset, cross-thread
+/// GC) where a single regression silently breaks a whole class of tests.
+/// Running them first surfaces failures in seconds instead of minutes.
+fn is_high_risk_test(path: &std::path::Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    name.contains("thread")
+        || name.contains("async")
+        || name.contains("continuation")
+        || name.contains("handler")
+        || name.starts_with("handle_")
+        || name.starts_with("gc_continuation")
+        || name.starts_with("gc_handler")
+        || name.starts_with("gc_shift_reset")
+        || name.starts_with("gc_frame_chain")
+        || name.starts_with("resume_")
+        || name.starts_with("resumable_")
+        || name.starts_with("exception_thread")
+        || name.starts_with("stress_")
+}
+
 fn sort_tests_by_deps(files: &mut [std::path::PathBuf]) {
-    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::collections::{BinaryHeap, HashMap, HashSet};
 
     // Build namespace→index map from each file's `namespace` declaration
     let mut ns_to_idx: HashMap<String, usize> = HashMap::new();
@@ -1405,11 +1430,24 @@ fn sort_tests_by_deps(files: &mut [std::path::PathBuf]) {
         in_deg[i] = dep_list.len();
     }
 
-    let mut queue: VecDeque<usize> = VecDeque::new();
-    // Start with files that have no dependencies (in_deg == 0), in original order
+    // Kahn's with a priority queue: when multiple files have their deps
+    // satisfied, prefer high-risk ones. This respects the topological
+    // constraint (a file never runs before a file it depends on) but
+    // surfaces regressions in the flaky / threading / continuation
+    // families first when the DAG has any slack.
+    //
+    // Priority key: (bucket, orig_index) wrapped in Reverse so the heap
+    // pops smallest first — bucket 0 = high risk, 1 = normal.
+    use std::cmp::Reverse;
+    let bucket: Vec<u8> = files
+        .iter()
+        .map(|p| if is_high_risk_test(p) { 0 } else { 1 })
+        .collect();
+
+    let mut heap: BinaryHeap<Reverse<(u8, usize)>> = BinaryHeap::new();
     for (i, &deg) in in_deg.iter().enumerate().take(n) {
         if deg == 0 {
-            queue.push_back(i);
+            heap.push(Reverse((bucket[i], i)));
         }
     }
 
@@ -1422,15 +1460,12 @@ fn sort_tests_by_deps(files: &mut [std::path::PathBuf]) {
     }
 
     let mut order: Vec<usize> = Vec::with_capacity(n);
-    while let Some(idx) = queue.pop_front() {
+    while let Some(Reverse((_, idx))) = heap.pop() {
         order.push(idx);
-        // Sort dependents to maintain stable order for ties
-        let mut next: Vec<usize> = dependents[idx].clone();
-        next.sort();
-        for dep_idx in next {
+        for &dep_idx in &dependents[idx] {
             in_deg[dep_idx] -= 1;
             if in_deg[dep_idx] == 0 {
-                queue.push_back(dep_idx);
+                heap.push(Reverse((bucket[dep_idx], dep_idx)));
             }
         }
     }
