@@ -508,8 +508,6 @@ pub struct LowLevelArm {
     pub label_index: usize,
     pub label_locations: HashMap<usize, usize>,
     pub labels: Vec<String>,
-    pub free_volatile_registers: Vec<Register>,
-    pub allocated_volatile_registers: Vec<Register>,
     pub stack_size: i32,
     pub max_stack_size: i32,
     pub max_locals: i32,
@@ -580,10 +578,8 @@ impl LowLevelArm {
             label_index: 0,
             labels: vec![],
             canonical_temporary_registers: temporary_registers.clone(),
-            free_volatile_registers: crate::abi::arm64::ABI.callee_saved.to_vec(),
             free_temporary_registers: temporary_registers,
             allocated_temporary_registers: vec![],
-            allocated_volatile_registers: vec![],
             stack_size: 0,
             max_stack_size: 0,
             max_locals: 0,
@@ -1277,19 +1273,6 @@ impl LowLevelArm {
         });
     }
 
-    pub fn volatile_register(&mut self) -> Register {
-        let next_register = self.free_volatile_registers.pop().unwrap_or_else(|| {
-            panic!(
-                "No free volatile registers! Currently allocated: {:?}",
-                self.allocated_volatile_registers
-            )
-        });
-        self.allocated_volatile_registers.push(next_register);
-        // Track that this callee-saved register is used (for AAPCS64 compliance)
-        self.mark_callee_saved_used(next_register);
-        next_register
-    }
-
     pub fn temporary_register(&mut self) -> Register {
         let next_register = self.free_temporary_registers.pop().unwrap_or_else(|| {
             panic!(
@@ -1316,32 +1299,6 @@ impl LowLevelArm {
         self.allocated_temporary_registers = vec![];
     }
 
-    pub fn free_register(&mut self, reg: Register) {
-        // TODO: Properly fix the fact that the zero
-        // register is being put in the volatile list
-        if !crate::abi::arm64::ABI.callee_saved.contains(&reg) {
-            return;
-        }
-        self.free_volatile_registers.push(reg);
-        self.allocated_volatile_registers
-            .retain(|&allocated| allocated != reg);
-    }
-
-    /// Mark an allocator-pool callee-saved register as used by this
-    /// function. Called when the register allocator assigns a physical
-    /// register. Registers outside the pool (like the reserved X28) are
-    /// silently ignored — they're never allocatable and don't need
-    /// per-function tracking.
-    ///
-    /// The bitmask is keyed by index *within the allocator pool*, so bit
-    /// 0 = `allocator_pool[0]`, bit 1 = `allocator_pool[1]`, etc.
-    fn mark_callee_saved_used(&mut self, reg: Register) {
-        let pool = crate::abi::arm64::ABI.allocator_pool;
-        if let Some(bit) = pool.iter().position(|r| r.index == reg.index) {
-            self.used_callee_saved_registers |= 1 << bit;
-        }
-    }
-
     /// Get the list of callee-saved registers that are actually used.
     fn get_used_callee_saved_registers(&self) -> Vec<Register> {
         let pool = crate::abi::arm64::ABI.allocator_pool;
@@ -1364,13 +1321,6 @@ impl LowLevelArm {
         let pool = crate::abi::arm64::ABI.allocator_pool;
         if let Some(bit) = pool.iter().position(|r| r.index as usize == index) {
             self.used_callee_saved_registers |= 1 << bit;
-        }
-    }
-
-    pub fn reserve_register(&mut self, reg: Register) {
-        self.free_volatile_registers.retain(|&free| free != reg);
-        if !self.allocated_volatile_registers.contains(&reg) {
-            self.allocated_volatile_registers.push(reg);
         }
     }
 

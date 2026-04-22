@@ -23,8 +23,6 @@ pub struct LowLevelX86 {
     pub label_locations: HashMap<usize, usize>,
     pub label_index: usize,
     pub labels: Vec<String>,
-    pub free_volatile_registers: Vec<X86Register>,
-    pub allocated_volatile_registers: Vec<X86Register>,
     pub stack_size: i32,
     pub max_stack_size: i32,
     pub max_locals: i32,
@@ -77,10 +75,8 @@ impl LowLevelX86 {
             label_index: 0,
             labels: vec![],
             canonical_temporary_registers: temporary_registers.clone(),
-            free_volatile_registers: crate::abi::x86_64::ABI.callee_saved.to_vec(),
             free_temporary_registers: temporary_registers,
             allocated_temporary_registers: vec![],
-            allocated_volatile_registers: vec![],
             stack_size: 0,
             max_stack_size: 0,
             max_locals: 0,
@@ -762,33 +758,6 @@ impl LowLevelX86 {
 
     // === Register allocation ===
 
-    pub fn volatile_register(&mut self) -> X86Register {
-        let reg = self
-            .free_volatile_registers
-            .pop()
-            .expect("No free volatile registers");
-        // Track that this callee-saved register is used (for ABI compliance)
-        self.mark_callee_saved_used(reg);
-        reg
-    }
-
-    /// Mark a callee-saved register as used by this function.
-    fn mark_callee_saved_used(&mut self, reg: X86Register) {
-        // R12-R15 and RBX are callee-saved in System V AMD64 ABI
-        // R12=12, R13=13, R14=14, R15=15, RBX has index 3
-        let bit = match reg.index {
-            12 => Some(0), // R12
-            13 => Some(1), // R13
-            14 => Some(2), // R14
-            15 => Some(3), // R15
-            3 => Some(4),  // RBX (index 3)
-            _ => None,
-        };
-        if let Some(b) = bit {
-            self.used_callee_saved_registers |= 1 << b;
-        }
-    }
-
     /// Reset callee-saved register tracking for a new function.
     pub fn reset_callee_saved_tracking(&mut self) {
         self.used_callee_saved_registers = 0;
@@ -843,22 +812,6 @@ impl LowLevelX86 {
             self.free_temporary_registers.push(register);
             self.allocated_temporary_registers
                 .retain(|r| *r != register);
-        }
-    }
-
-    pub fn free_register(&mut self, register: X86Register) {
-        if crate::abi::x86_64::ABI.callee_saved.contains(&register)
-            && !self.free_volatile_registers.contains(&register)
-        {
-            self.free_volatile_registers.push(register);
-            self.allocated_volatile_registers.retain(|r| *r != register);
-        }
-    }
-
-    pub fn reserve_register(&mut self, register: X86Register) {
-        self.free_volatile_registers.retain(|r| *r != register);
-        if !self.allocated_volatile_registers.contains(&register) {
-            self.allocated_volatile_registers.push(register);
         }
     }
 

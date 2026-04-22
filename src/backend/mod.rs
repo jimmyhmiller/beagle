@@ -82,20 +82,11 @@ pub trait CodegenBackend: Sized {
     /// ARM64: X9, x86-64: R10
     fn arg_count_reg(&self) -> Self::Register;
 
-    /// Allocate a callee-saved (volatile) register.
-    fn volatile_register(&mut self) -> Self::Register;
-
     /// Allocate a temporary (caller-saved) register.
     fn temporary_register(&mut self) -> Self::Register;
 
     /// Free a previously allocated temporary register.
     fn free_temporary_register(&mut self, register: Self::Register);
-
-    /// Free a previously allocated volatile register.
-    fn free_register(&mut self, register: Self::Register);
-
-    /// Reserve a register (mark it as in-use without allocating).
-    fn reserve_register(&mut self, register: Self::Register);
 
     /// Clear all temporary registers (mark them as free).
     fn clear_temporary_registers(&mut self);

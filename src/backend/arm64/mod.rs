@@ -74,24 +74,12 @@ impl CodegenBackend for Arm64Backend {
         crate::machine_code::arm_codegen::X9
     }
 
-    fn volatile_register(&mut self) -> Self::Register {
-        self.inner.volatile_register()
-    }
-
     fn temporary_register(&mut self) -> Self::Register {
         self.inner.temporary_register()
     }
 
     fn free_temporary_register(&mut self, register: Self::Register) {
         self.inner.free_temporary_register(register);
-    }
-
-    fn free_register(&mut self, register: Self::Register) {
-        self.inner.free_register(register);
-    }
-
-    fn reserve_register(&mut self, register: Self::Register) {
-        self.inner.reserve_register(register);
     }
 
     fn clear_temporary_registers(&mut self) {

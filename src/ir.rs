@@ -2723,11 +2723,9 @@ impl Ir {
                     let mask_register = self.value_to_register(temp2, backend);
                     backend.mov_64(mask_register, *mask as isize);
                     backend.and(dest, dest, mask_register);
-                    backend.free_register(mask_register);
                     backend.shift_left_imm(val, val, (byte_offset * 8) as i32);
                     backend.or(dest, dest, val);
                     backend.store_on_heap(ptr, dest, *offset as i32);
-                    backend.free_register(dest);
                 }
                 Instruction::HeapStoreOffsetReg(ptr, val, offset) => {
                     let ptr = self.value_to_register(ptr, backend);
