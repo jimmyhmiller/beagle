@@ -188,6 +188,78 @@ impl GlobalObjectBlock {
     }
 }
 
+/// Per-thread mutator state with a fixed `#[repr(C)]` layout so JIT'd code
+/// can address fields at known offsets from a dedicated register (future: x28).
+///
+/// Holds the hot per-thread values touched by the allocator, GC frame link,
+/// and GC context: things JIT'd prologues/epilogues and allocation sites want
+/// to read/write without going through a TLS lookup.
+///
+/// Layout is part of the ABI — the offsets below are what codegen will use.
+/// Do NOT reorder without updating any JIT sites that reference MUTATOR_STATE_*_OFFSET.
+#[repr(C)]
+pub struct MutatorState {
+    /// Next free byte in this thread's TLAB. JIT bump allocator target.
+    pub alloc_ptr: usize, // +0
+    /// One past the last usable byte in this thread's TLAB. `alloc_end == alloc_ptr`
+    /// means disarmed (slow path only), used to force all mutators into the
+    /// slow-path safepoint before GC.
+    pub alloc_end: usize, // +8
+    /// Top of the GC frame linked list for this thread. Replaces the
+    /// GC_FRAME_TOP thread_local.
+    pub gc_frame_top: usize, // +16
+    /// Beagle frame pointer saved at the last Rust-callable builtin entry.
+    /// Populated by save_gc_context!. Used by GC to find the topmost Beagle frame.
+    pub saved_frame_pointer: usize, // +24
+    /// Beagle stack pointer saved at the last Rust-callable builtin entry.
+    pub saved_stack_pointer: usize, // +32
+    /// Return address saved at the last Rust-callable builtin entry (for GC
+    /// safepoint walking and for `throw_runtime_error` unwind).
+    pub saved_gc_return_addr: usize, // +40
+    /// Base of this thread's currently-active TLAB. Preserved so a filled
+    /// TLAB can be retired back to the shared young-gen.
+    pub tlab_start: usize, // +48
+    /// Padding/reserved. Keeps the struct a multiple of 16 bytes so allocation
+    /// traffic doesn't cross cache-line boundaries oddly.
+    pub _reserved: usize, // +56
+}
+
+/// Byte offsets of `MutatorState` fields. These are ABI between MutatorState
+/// and the JIT and are referenced directly as immediates in generated code.
+#[allow(dead_code)]
+pub const MUTATOR_STATE_ALLOC_PTR_OFFSET: i32 = 0;
+#[allow(dead_code)]
+pub const MUTATOR_STATE_ALLOC_END_OFFSET: i32 = 8;
+#[allow(dead_code)]
+pub const MUTATOR_STATE_GC_FRAME_TOP_OFFSET: i32 = 16;
+#[allow(dead_code)]
+pub const MUTATOR_STATE_SAVED_FP_OFFSET: i32 = 24;
+#[allow(dead_code)]
+pub const MUTATOR_STATE_SAVED_SP_OFFSET: i32 = 32;
+#[allow(dead_code)]
+pub const MUTATOR_STATE_SAVED_RET_OFFSET: i32 = 40;
+
+impl MutatorState {
+    pub const fn new() -> Self {
+        MutatorState {
+            alloc_ptr: 0,
+            alloc_end: 0,
+            gc_frame_top: 0,
+            saved_frame_pointer: 0,
+            saved_stack_pointer: 0,
+            saved_gc_return_addr: 0,
+            tlab_start: 0,
+            _reserved: 0,
+        }
+    }
+}
+
+impl Default for MutatorState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Rust-side anchor for a thread's GlobalObject roots.
 ///
 /// This struct lives in Rust memory (NOT heap-allocated), so GC can update
@@ -212,6 +284,11 @@ pub struct ThreadGlobal {
     pub handle_stack: Vec<usize>,
     /// Current top index into handle_stack (next free slot).
     pub handle_stack_top: usize,
+    /// Per-thread allocator/GC state. Box'd so its address is stable even if
+    /// ThreadGlobal is moved (though in practice ThreadGlobal is Box'd in the
+    /// thread_globals HashMap and doesn't move either). The stable address is
+    /// what lets JIT'd code hold it in a dedicated register across calls.
+    pub mutator_state: Box<MutatorState>,
 }
 
 impl ThreadGlobal {
@@ -225,6 +302,7 @@ impl ThreadGlobal {
             stack_base,
             handle_stack: vec![0; 1024],
             handle_stack_top: 0,
+            mutator_state: Box::new(MutatorState::new()),
         }
     }
 
@@ -3259,6 +3337,73 @@ thread_local! {
 /// Returns null if the thread hasn't been initialized yet.
 pub(crate) fn cached_thread_global_ptr() -> *mut ThreadGlobal {
     CACHED_THREAD_GLOBAL.with(|c| c.get())
+}
+
+/// Clear the current thread's cached ThreadGlobal pointer. Must be called
+/// before removing this thread's entry from `thread_globals`, otherwise
+/// the cached pointer is left dangling and later reads of the MutatorState
+/// (e.g. in a JIT epilogue's gc_frame_unlink) would touch freed memory.
+pub fn clear_cached_thread_global() {
+    CACHED_THREAD_GLOBAL.with(|c| c.set(std::ptr::null_mut()));
+}
+
+/// Non-inline wrapper exposed as a stable function pointer for JIT trampolines.
+/// Emitters embed the address of this symbol as an immediate and call it with
+/// `blr` to set x28 = MutatorState pointer on Rust → Beagle boundaries.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn jit_load_current_mutator_state() -> *mut MutatorState {
+    current_mutator_state()
+}
+
+/// Fallback MutatorState for code that runs before the current thread has
+/// been registered (runtime bootstrap paths read gc_frame_top harmlessly as 0
+/// during initialization). Once the thread is registered, the real per-thread
+/// MutatorState replaces reads/writes here.
+///
+/// This is a single static shared across threads; it must only be used before
+/// registration when all accesses are still sequential in practice.
+static mut BOOTSTRAP_MUTATOR_STATE: MutatorState = MutatorState::new();
+
+/// Pointer to the current thread's MutatorState.
+///
+/// Fast path: read the already-populated `CACHED_THREAD_GLOBAL` thread-local
+/// pointer and return the address of its boxed MutatorState field.
+///
+/// Slow path (first call per thread, or before any thread is registered):
+/// fall back on the shared bootstrap slot for pre-registration calls, and
+/// lazily populate `CACHED_THREAD_GLOBAL` via a mutex lookup if the thread
+/// is already registered. Mirrors the pattern used in add_handle_root /
+/// get_handle_root.
+///
+/// The returned pointer is stable for the lifetime of the thread (MutatorState
+/// is boxed inside ThreadGlobal, which itself is boxed in the thread_globals
+/// HashMap).
+#[inline]
+pub fn current_mutator_state() -> *mut MutatorState {
+    let tg = cached_thread_global_ptr();
+    let tg = if tg.is_null() {
+        // Lazily look up and cache the ThreadGlobal for the current thread.
+        // This happens at most once per thread — after first call,
+        // cached_thread_global_ptr returns non-null directly.
+        crate::get_runtime().get().ensure_cached_thread_global()
+    } else {
+        tg
+    };
+    if tg.is_null() {
+        // Still null — the current thread hasn't been registered yet (we're
+        // in very early bootstrap before initialize_thread_global runs). Use
+        // the shared static bootstrap slot; all such accesses are sequential
+        // in practice.
+        &raw mut BOOTSTRAP_MUTATOR_STATE
+    } else {
+        // SAFETY: tg points to a Box'd ThreadGlobal inside thread_globals,
+        // whose storage is stable. The Box<MutatorState> field has a stable
+        // heap address; &raw mut *box yields a raw pointer to that heap
+        // slot without constructing an intermediate &mut (which would
+        // overlap with other callers and risk UB).
+        unsafe { &raw mut *(*tg).mutator_state }
+    }
 }
 
 // ============================================================================

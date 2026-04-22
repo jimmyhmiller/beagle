@@ -72,9 +72,8 @@
 use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 
-use crate::builtins::GC_FRAME_TOP;
 use crate::collections::{TYPE_ID_CONTINUATION, TYPE_ID_FRAME};
-use crate::runtime::Runtime;
+use crate::runtime::{Runtime, current_mutator_state};
 use crate::types::{BuiltInTypes, Header, HeapObject};
 
 // ============================================================================
@@ -1223,11 +1222,12 @@ pub unsafe extern "C" fn return_from_shift_tagged_runtime(
     // record.frame_pointer).
     let handler_header = record.frame_pointer.wrapping_sub(8);
     {
-        let mut hdr = GC_FRAME_TOP.with(|cell| cell.get());
+        let gc_top_slot: *mut usize = unsafe { &raw mut (*current_mutator_state()).gc_frame_top };
+        let mut hdr = unsafe { *gc_top_slot };
         while hdr != 0 && hdr < handler_header {
             hdr = unsafe { *((hdr.wrapping_sub(8)) as *const usize) };
         }
-        GC_FRAME_TOP.with(|cell| cell.set(hdr));
+        unsafe { *gc_top_slot = hdr };
     }
 
     if record.result_local_offset != 0 {
@@ -1290,11 +1290,12 @@ pub unsafe fn return_from_shift_runtime_inner(
     // with arbitrary data. Mirrors `return_from_shift_tagged_runtime`.
     let caller_header = new_fp.wrapping_sub(8);
     {
-        let mut hdr = GC_FRAME_TOP.with(|cell| cell.get());
+        let gc_top_slot: *mut usize = unsafe { &raw mut (*current_mutator_state()).gc_frame_top };
+        let mut hdr = unsafe { *gc_top_slot };
         while hdr != 0 && hdr < caller_header {
             hdr = unsafe { *((hdr.wrapping_sub(8)) as *const usize) };
         }
-        GC_FRAME_TOP.with(|cell| cell.set(hdr));
+        unsafe { *gc_top_slot = hdr };
     }
 
     // ARM64: use the return-jump JIT trampoline. It takes
@@ -1408,18 +1409,15 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         fn_entry.pointer.into()
     };
 
-    // Cache the raw pointer to the GC_FRAME_TOP cell's backing storage
-    // before we enter the no-call critical section. `LocalKey::with`
-    // is normally inlined to a direct TLS access on macOS arm64, but
-    // the inliner's decisions are not guaranteed — when another Rust
-    // call site uses `GC_FRAME_TOP.with` (e.g., effect-handler
-    // builtins), the trampoline's own `.with` can be emitted as an
-    // out-of-line call. That call pushes a frame below SP, straight
-    // into the `dst` region we're actively writing, and corrupts the
-    // just-copied continuation bytes. Resolving the cell's raw pointer
-    // here, while ordinary function calls are still safe, removes all
-    // `LocalKey::with` invocations from the critical section below.
-    let gc_frame_top_slot: *mut usize = GC_FRAME_TOP.with(|cell| cell.as_ptr());
+    // Cache the raw pointer to the gc_frame_top slot (now a field inside
+    // this thread's MutatorState) before we enter the no-call critical
+    // section. The slot lives in a Box'd MutatorState with a per-thread
+    // stable address, looked up via the existing CACHED_THREAD_GLOBAL
+    // thread-local. Resolving the pointer here avoids any thread-local
+    // fetch inside the critical section below, where a function call
+    // would push a frame into the `dst` region we're actively overwriting
+    // and corrupt the just-copied continuation bytes.
+    let gc_frame_top_slot: *mut usize = unsafe { &raw mut (*current_mutator_state()).gc_frame_top };
     // Snapshot the live caller-side GC chain before we overwrite it with the
     // restored continuation. The outermost restored frame must splice back to
     // this header so GC and dynamic-var walks continue into the still-live

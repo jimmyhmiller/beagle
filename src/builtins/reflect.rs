@@ -1638,9 +1638,24 @@ pub extern "C" fn reflect_write_source(
     // strictly require this (upsert_function already rebinds), but
     // running it keeps the behavior uniform with `eval` and ensures the
     // edited name resolves to the new definition everywhere.
+    //
+    // Route through `save_volatile_registers0` rather than calling
+    // `top_level_ptr` directly: the JIT prologue for `top_level` assumes
+    // x28 holds the per-thread MutatorState pointer, but Rust is free to
+    // use x28 as a callee-saved scratch register within this function,
+    // so by the time we reach this call x28 may hold a Rust-local value.
+    // The `save_volatile_registers0` shim reloads x28 from
+    // `jit_load_current_mutator_state` before branching into Beagle.
     if top_level_ptr != 0 {
-        let top_level: fn() -> usize = unsafe { std::mem::transmute(top_level_ptr) };
-        top_level();
+        let save_vr0_entry = runtime
+            .get_function_by_name("beagle.builtin/save_volatile_registers0")
+            .expect("save_volatile_registers0 trampoline not registered");
+        let save_vr0_ptr = runtime
+            .get_pointer(save_vr0_entry)
+            .expect("save_volatile_registers0 pointer not available");
+        let save_vr0: extern "C" fn(usize) -> usize =
+            unsafe { std::mem::transmute::<_, _>(save_vr0_ptr) };
+        save_vr0(top_level_ptr);
     }
 
     BuiltInTypes::construct_boolean(true) as usize

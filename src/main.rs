@@ -111,7 +111,8 @@ fn compile_arm_continuation_return_stub(runtime: &mut Runtime) {
     // ========================================================================
     {
         use crate::machine_code::arm_codegen::{
-            ArmAsm, LdrImmGenSelector, X0, X1, X2, X3, X4, X5, ZERO_REGISTER,
+            ArmAsm, LdpGenSelector, LdrImmGenSelector, StpGenSelector, X0, X1, X2, X3, X4, X5,
+            ZERO_REGISTER,
         };
         let mut lang = arm::LowLevelArm::new();
 
@@ -137,7 +138,80 @@ fn compile_arm_continuation_return_stub(runtime: &mut Runtime) {
             });
         }
 
-        // skip_restore lands here:
+        // skip_restore lands here.
+        //
+        // Unconditionally re-load x28 = current_mutator_state() before
+        // branching to Beagle code. Rationale: `return-jump` is a
+        // Rust→Beagle boundary (called by `return_from_shift_runtime_inner`
+        // and friends). The Rust caller may have used x28 internally and
+        // not bothered to restore it on the `-> !` call path; and when
+        // `callee_saved_ptr` is null we haven't restored it from an array
+        // either. The target Beagle code's inlined gc_frame_link prologue
+        // assumes x28 holds the per-thread MutatorState pointer, so we
+        // must guarantee it does.
+        //
+        // We still call through the non-inlined `jit_load_current_mutator_state`
+        // symbol; its AAPCS clobber set is x0-x18 + x30. We need x0, x1,
+        // x2 (new_sp/fp/lr), x5 (value), and x16 (jump target) to survive.
+        // Save them via pre-index STP pairs (three pairs = 48 bytes).
+        lang.instructions.push(ArmAsm::StpGen {
+            opc: 0b10,
+            imm7: -2,
+            rt2: X1,
+            rn: SP,
+            rt: X0,
+            class_selector: StpGenSelector::PreIndex,
+        });
+        lang.instructions.push(ArmAsm::StpGen {
+            opc: 0b10,
+            imm7: -2,
+            rt2: X5,
+            rn: SP,
+            rt: X2,
+            class_selector: StpGenSelector::PreIndex,
+        });
+        lang.instructions.push(ArmAsm::StpGen {
+            opc: 0b10,
+            imm7: -2,
+            rt2: ZERO_REGISTER,
+            rn: SP,
+            rt: X16,
+            class_selector: StpGenSelector::PreIndex,
+        });
+
+        let ms_fn_ptr = crate::runtime::jit_load_current_mutator_state as usize;
+        for instr in arm::LowLevelArm::mov_64_bit_num(X16, ms_fn_ptr as isize) {
+            lang.instructions.push(instr);
+        }
+        lang.instructions.push(ArmAsm::Blr { rn: X16 });
+        lang.mov_reg(X28, X0);
+
+        // Restore in reverse order.
+        lang.instructions.push(ArmAsm::LdpGen {
+            opc: 0b10,
+            imm7: 2,
+            rt2: ZERO_REGISTER,
+            rn: SP,
+            rt: X16,
+            class_selector: LdpGenSelector::PostIndex,
+        });
+        lang.instructions.push(ArmAsm::LdpGen {
+            opc: 0b10,
+            imm7: 2,
+            rt2: X5,
+            rn: SP,
+            rt: X2,
+            class_selector: LdpGenSelector::PostIndex,
+        });
+        lang.instructions.push(ArmAsm::LdpGen {
+            opc: 0b10,
+            imm7: 2,
+            rt2: X1,
+            rn: SP,
+            rt: X0,
+            class_selector: LdpGenSelector::PostIndex,
+        });
+
         // Set SP, FP, LR from arguments
         lang.mov_reg(SP, X0);
         lang.mov_reg(X29, X1);
@@ -383,12 +457,99 @@ fn compile_trampoline(runtime: &mut Runtime) {
                 .unwrap();
         } else {
             let mut lang = arm::LowLevelArm::new();
+            // Shim trampoline: its frame isn't a Beagle frame, and it runs
+            // BEFORE x28 has been loaded with the MutatorState pointer, so
+            // skip the inlined gc_frame_link / gc_frame_unlink that would
+            // otherwise dereference an uninitialised x28.
+            lang.skip_gc_frame_link = true;
+            // Reserve enough frame space that our store_on_stack saves for
+            // X19..X28 (at FP-offsets -4..-13) live strictly above SP. If the
+            // patched prologue sized the frame only around max_stack_size,
+            // the SP could be as high as FP-32 and the later call to
+            // jit_load_current_mutator_state would drop a Rust frame on top
+            // of the X25..X28 save slots, corrupting them on return.
+            lang.set_max_locals(14);
 
             lang.prelude();
 
-            // Should I store or push?
+            // Save callee-saved registers (X19-X28). X28 is included here so that
+            // Rust's original value is preserved and restored on return — we're
+            // about to overwrite X28 with the current thread's MutatorState
+            // pointer for the duration of the Beagle call.
             for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
                 lang.store_on_stack(*reg, -((i + 4_usize) as i32));
+            }
+
+            // Load X28 = current_mutator_state() so JIT'd Beagle code can
+            // address this thread's MutatorState directly. Save/restore the
+            // incoming trampoline args (X0-X4) using pre-index STP so the
+            // saved values live ABOVE the current SP — otherwise the call to
+            // jit_load_current_mutator_state would allocate its own Rust
+            // stack frame that overlaps FP-relative save slots and corrupt
+            // the args on return.
+            {
+                use crate::machine_code::arm_codegen::{
+                    ArmAsm, LdpGenSelector, StpGenSelector, X0, X1, X2, X3, X4, X16, X28,
+                    ZERO_REGISTER,
+                };
+                // Push pairs: (X0,X1), (X2,X3), (X4,XZR)   — 48 bytes, 16-aligned
+                lang.instructions.push(ArmAsm::StpGen {
+                    opc: 0b10,
+                    imm7: -2,
+                    rt2: X1,
+                    rn: SP,
+                    rt: X0,
+                    class_selector: StpGenSelector::PreIndex,
+                });
+                lang.instructions.push(ArmAsm::StpGen {
+                    opc: 0b10,
+                    imm7: -2,
+                    rt2: X3,
+                    rn: SP,
+                    rt: X2,
+                    class_selector: StpGenSelector::PreIndex,
+                });
+                lang.instructions.push(ArmAsm::StpGen {
+                    opc: 0b10,
+                    imm7: -2,
+                    rt2: ZERO_REGISTER,
+                    rn: SP,
+                    rt: X4,
+                    class_selector: StpGenSelector::PreIndex,
+                });
+
+                let ms_fn_ptr = crate::runtime::jit_load_current_mutator_state as usize;
+                for instr in arm::LowLevelArm::mov_64_bit_num(X16, ms_fn_ptr as isize) {
+                    lang.instructions.push(instr);
+                }
+                lang.instructions.push(ArmAsm::Blr { rn: X16 });
+                lang.mov_reg(X28, X0);
+
+                // Pop in reverse: (X4,XZR), (X2,X3), (X0,X1)
+                lang.instructions.push(ArmAsm::LdpGen {
+                    opc: 0b10,
+                    imm7: 2,
+                    rt2: ZERO_REGISTER,
+                    rn: SP,
+                    rt: X4,
+                    class_selector: LdpGenSelector::PostIndex,
+                });
+                lang.instructions.push(ArmAsm::LdpGen {
+                    opc: 0b10,
+                    imm7: 2,
+                    rt2: X3,
+                    rn: SP,
+                    rt: X2,
+                    class_selector: LdpGenSelector::PostIndex,
+                });
+                lang.instructions.push(ArmAsm::LdpGen {
+                    opc: 0b10,
+                    imm7: 2,
+                    rt2: X1,
+                    rn: SP,
+                    rt: X0,
+                    class_selector: LdpGenSelector::PostIndex,
+                });
             }
 
             lang.mov_reg(X10, SP);
@@ -471,12 +632,19 @@ fn compile_save_volatile_registers_for(runtime: &mut Runtime, register_num: usiz
                 )
                 .unwrap();
         } else {
-            use crate::machine_code::arm_codegen::Register;
+            use crate::machine_code::arm_codegen::{
+                ArmAsm, LdpGenSelector, Register, StpGenSelector, X0, X1, X2, X3, X4, X5, X6, X7,
+                X9, X16, X28, ZERO_REGISTER,
+            };
             let call_register = Register {
                 index: register_num as u8,
                 size: crate::machine_code::arm_codegen::Size::S64,
             };
             let mut lang = arm::LowLevelArm::new();
+            // Shim trampoline: like the main `trampoline`, this function's
+            // frame is not a Beagle frame and it runs before x28 has been
+            // loaded — skip the inlined gc_frame_link / gc_frame_unlink.
+            lang.skip_gc_frame_link = true;
             lang.prelude();
 
             lang.sub_stack_pointer(
@@ -485,6 +653,102 @@ fn compile_save_volatile_registers_for(runtime: &mut Runtime, register_num: usiz
 
             for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
                 lang.store_on_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
+            }
+
+            // Load X28 = current_mutator_state() so the Beagle call we're about
+            // to make sees the right MutatorState pointer. Uses the slow path
+            // on first call per thread, then the cached TLS pointer thereafter.
+            // We save the incoming arg registers (X0-X7 + X9) over the Rust
+            // call and restore them before invoking the target.
+            {
+                lang.instructions.push(ArmAsm::StpGen {
+                    opc: 0b10,
+                    imm7: -2,
+                    rt2: X1,
+                    rn: SP,
+                    rt: X0,
+                    class_selector: StpGenSelector::PreIndex,
+                });
+                lang.instructions.push(ArmAsm::StpGen {
+                    opc: 0b10,
+                    imm7: -2,
+                    rt2: X3,
+                    rn: SP,
+                    rt: X2,
+                    class_selector: StpGenSelector::PreIndex,
+                });
+                lang.instructions.push(ArmAsm::StpGen {
+                    opc: 0b10,
+                    imm7: -2,
+                    rt2: X5,
+                    rn: SP,
+                    rt: X4,
+                    class_selector: StpGenSelector::PreIndex,
+                });
+                lang.instructions.push(ArmAsm::StpGen {
+                    opc: 0b10,
+                    imm7: -2,
+                    rt2: X7,
+                    rn: SP,
+                    rt: X6,
+                    class_selector: StpGenSelector::PreIndex,
+                });
+                lang.instructions.push(ArmAsm::StpGen {
+                    opc: 0b10,
+                    imm7: -2,
+                    rt2: ZERO_REGISTER,
+                    rn: SP,
+                    rt: X9,
+                    class_selector: StpGenSelector::PreIndex,
+                });
+
+                let ms_fn_ptr = crate::runtime::jit_load_current_mutator_state as usize;
+                for instr in arm::LowLevelArm::mov_64_bit_num(X16, ms_fn_ptr as isize) {
+                    lang.instructions.push(instr);
+                }
+                lang.instructions.push(ArmAsm::Blr { rn: X16 });
+                lang.mov_reg(X28, X0);
+
+                lang.instructions.push(ArmAsm::LdpGen {
+                    opc: 0b10,
+                    imm7: 2,
+                    rt2: ZERO_REGISTER,
+                    rn: SP,
+                    rt: X9,
+                    class_selector: LdpGenSelector::PostIndex,
+                });
+                lang.instructions.push(ArmAsm::LdpGen {
+                    opc: 0b10,
+                    imm7: 2,
+                    rt2: X7,
+                    rn: SP,
+                    rt: X6,
+                    class_selector: LdpGenSelector::PostIndex,
+                });
+                lang.instructions.push(ArmAsm::LdpGen {
+                    opc: 0b10,
+                    imm7: 2,
+                    rt2: X5,
+                    rn: SP,
+                    rt: X4,
+                    class_selector: LdpGenSelector::PostIndex,
+                });
+                lang.instructions.push(ArmAsm::LdpGen {
+                    opc: 0b10,
+                    imm7: 2,
+                    rt2: X3,
+                    rn: SP,
+                    rt: X2,
+                    class_selector: LdpGenSelector::PostIndex,
+                });
+                lang.instructions.push(ArmAsm::LdpGen {
+                    opc: 0b10,
+                    imm7: 2,
+                    rt2: X1,
+                    rn: SP,
+                    rt: X0,
+                    class_selector: LdpGenSelector::PostIndex,
+                });
             }
 
             lang.call(call_register);
@@ -558,6 +822,10 @@ fn compile_apply_call_trampolines_arm64(runtime: &mut Runtime) {
         let function_name = format!("beagle.builtin/apply_call_{}", num_args);
 
         let mut lang = arm::LowLevelArm::new();
+        // Shim trampoline — its frame isn't a Beagle frame, so skip the
+        // inlined gc_frame_link / gc_frame_unlink. (x28 is inherited from
+        // the caller, which is Beagle code that already has it loaded.)
+        lang.skip_gc_frame_link = true;
 
         // Function receives: fn_ptr in X0, then arg0..argN-1 in X1..X(N)
         // For N > 7: X0-X7 have fn_ptr and args[0-6], stack has args[7+]

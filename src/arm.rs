@@ -2,8 +2,8 @@ use crate::{
     builtins::debugger,
     machine_code::arm_codegen::{
         ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, SP, Size, StpGenSelector,
-        StrImmGenSelector, X0, X1, X2, X3, X4, X5, X6, X7, X9, X10, X11, X12, X16, X19, X20, X21,
-        X22, X23, X24, X25, X26, X27, X28, X29, X30, ZERO_REGISTER,
+        StrImmGenSelector, X0, X1, X2, X3, X4, X5, X6, X7, X9, X10, X11, X12, X16, X17, X19, X20,
+        X21, X22, X23, X24, X25, X26, X27, X28, X29, X30, ZERO_REGISTER,
     },
     types::BuiltInTypes,
 };
@@ -527,12 +527,19 @@ pub struct LowLevelArm {
     free_temporary_registers: Vec<Register>,
     allocated_temporary_registers: Vec<Register>,
     canonical_temporary_registers: Vec<Register>,
-    /// Tracks which callee-saved registers (X19-X28) are actually used in this function.
+    /// Tracks which callee-saved registers (X19-X27) are actually used in this function.
     /// This is a bitmask where bit 0 = X19, bit 1 = X20, etc.
+    /// X28 is reserved for the MutatorState pointer and is never allocated.
     used_callee_saved_registers: u16,
     /// Number of callee-saved registers actually saved in this function's frame.
     /// Set by patch_prelude_and_epilogue().
     pub num_callee_saved: usize,
+    /// If true, `patch_prelude_and_epilogue` does NOT emit the inlined
+    /// gc_frame_link / gc_frame_unlink code. Used by the Rust↔Beagle shim
+    /// trampolines (the `trampoline` and `save_volatile_registersN` builtins)
+    /// whose frames don't hold Beagle values and which run BEFORE x28 has
+    /// been loaded with the MutatorState pointer.
+    pub skip_gc_frame_link: bool,
     /// If this function contains `binding` expressions, the local index of the mark pointer.
     /// Encoded in the frame header's type_data lower 16 bits so get_dynamic_var can find it.
     pub mark_local_index: Option<usize>,
@@ -547,6 +554,13 @@ impl Default for LowLevelArm {
 impl LowLevelArm {
     pub fn new() -> Self {
         // https://github.com/swiftlang/swift/blob/716cc5cedf0b8638225bebf86bddc6a1295388f4/docs/ABI/CallingConventionSummary.rst#arm64
+        // X19-X28 are the AAPCS callee-saved registers. X28 stays in this list
+        // so the save_volatile_registers trampolines preserve it across
+        // Rust→Beagle boundaries (and so stack-pointer math that uses
+        // `canonical_volatile_registers.len()` remains 16-byte aligned). X28 is
+        // separately removed from the register-allocator pools (see
+        // `register_allocation/{linear_scan,simple}.rs`) because it's reserved
+        // to hold the per-thread MutatorState pointer.
         let canonical_volatile_registers = vec![X19, X20, X21, X22, X23, X24, X25, X26, X27, X28];
         // X9 is reserved for arg count in variadic calling convention
         let temporary_registers = vec![X10, X11, X12];
@@ -567,6 +581,7 @@ impl LowLevelArm {
             used_callee_saved_registers: 0,
             num_callee_saved: 0,
             mark_local_index: None,
+            skip_gc_frame_link: false,
         }
     }
 
@@ -1229,10 +1244,11 @@ impl LowLevelArm {
             .retain(|&allocated| allocated != reg);
     }
 
-    /// Mark a callee-saved register (X19-X28) as used by this function.
+    /// Mark a callee-saved register (X19-X27) as used by this function.
     /// This is called when the register allocator assigns a physical register.
+    /// X28 is reserved for the MutatorState pointer and is never tracked here.
     fn mark_callee_saved_used(&mut self, reg: Register) {
-        if reg.index >= 19 && reg.index <= 28 {
+        if reg.index >= 19 && reg.index <= 27 {
             let bit = reg.index - 19;
             self.used_callee_saved_registers |= 1 << bit;
         }
@@ -1241,7 +1257,7 @@ impl LowLevelArm {
     /// Get the list of callee-saved registers that are actually used.
     fn get_used_callee_saved_registers(&self) -> Vec<Register> {
         let mut result = Vec::new();
-        for i in 0..10u8 {
+        for i in 0..9u8 {
             if self.used_callee_saved_registers & (1 << i) != 0 {
                 result.push(Register {
                     size: Size::S64,
@@ -1257,9 +1273,10 @@ impl LowLevelArm {
         self.used_callee_saved_registers = 0;
     }
 
-    /// Mark a callee-saved register as used by its index (19-28).
+    /// Mark a callee-saved register as used by its index (19-27).
+    /// X28 is reserved for the MutatorState pointer.
     pub fn mark_callee_saved_register_used(&mut self, index: usize) {
-        if (19..=28).contains(&index) {
+        if (19..=27).contains(&index) {
             let bit = index - 19;
             self.used_callee_saved_registers |= 1 << bit;
         }
@@ -1573,126 +1590,43 @@ impl LowLevelArm {
                 });
             }
 
-            // Link this frame into the GC frame chain by calling gc_frame_link.
-            // Save/restore argument registers (X0-X7, X9) around the call.
-            // Use STP/LDP pairs to save to stack below SP.
-            {
-                // Save argument registers: STP pairs push below SP
-                // X0-X1 pair
-                alloc_instructions.push(ArmAsm::StpGen {
-                    opc: 0b10, // 64-bit
-                    imm7: -2,  // pre-index offset -16
-                    rt2: X1,
-                    rn: SP,
-                    rt: X0,
-                    class_selector: StpGenSelector::PreIndex,
-                });
-                // X2-X3 pair
-                alloc_instructions.push(ArmAsm::StpGen {
-                    opc: 0b10,
-                    imm7: -2,
-                    rt2: X3,
-                    rn: SP,
-                    rt: X2,
-                    class_selector: StpGenSelector::PreIndex,
-                });
-                // X4-X5 pair
-                alloc_instructions.push(ArmAsm::StpGen {
-                    opc: 0b10,
-                    imm7: -2,
-                    rt2: X5,
-                    rn: SP,
-                    rt: X4,
-                    class_selector: StpGenSelector::PreIndex,
-                });
-                // X6-X7 pair
-                alloc_instructions.push(ArmAsm::StpGen {
-                    opc: 0b10,
-                    imm7: -2,
-                    rt2: X7,
-                    rn: SP,
-                    rt: X6,
-                    class_selector: StpGenSelector::PreIndex,
-                });
-                // X9 (arg count) - save as X9-XZR pair
-                alloc_instructions.push(ArmAsm::StpGen {
-                    opc: 0b10,
-                    imm7: -2,
-                    rt2: ZERO_REGISTER,
-                    rn: SP,
-                    rt: X9,
-                    class_selector: StpGenSelector::PreIndex,
-                });
-
-                // Set up X0 = frame_header_addr = X29 - 8
+            // Inlined gc_frame_link: splice this frame's header into the
+            // per-thread GC frame chain held at [X28, #16]
+            // (MutatorState.gc_frame_top).
+            //
+            //     header = FP - 8
+            //     prev = *(X28 + 16)
+            //     *(X28 + 16) = header
+            //     *(FP - 16) = prev
+            if !self.skip_gc_frame_link {
                 alloc_instructions.push(ArmAsm::SubAddsubImm {
                     sf: 1,
                     rn: X29,
-                    rd: X0,
+                    rd: X16,
                     imm12: 8,
                     sh: 0,
                 });
-
-                // Load gc_frame_link address into X16 and call via BLR
-                let gc_frame_link_ptr = crate::builtins::gc_frame_link as usize;
-                for instr in Self::mov_64_bit_num(X16, gc_frame_link_ptr as isize) {
-                    alloc_instructions.push(instr);
-                }
-                alloc_instructions.push(ArmAsm::Blr { rn: X16 });
-
-                // Store returned prev pointer (X0) at [X29-16]
+                alloc_instructions.push(ArmAsm::LdrImmGen {
+                    rt: X17,
+                    rn: X28,
+                    imm9: 0,
+                    imm12: 2,
+                    size: 0b11,
+                    class_selector: LdrImmGenSelector::UnsignedOffset,
+                });
+                alloc_instructions.push(ArmAsm::StrImmGen {
+                    rt: X16,
+                    rn: X28,
+                    imm9: 0,
+                    imm12: 2,
+                    size: 0b11,
+                    class_selector: StrImmGenSelector::UnsignedOffset,
+                });
                 alloc_instructions.push(ArmAsm::SturGen {
                     size: 0b11,
                     imm9: -16,
                     rn: X29,
-                    rt: X0,
-                });
-
-                // Restore argument registers in reverse order
-                // X9
-                alloc_instructions.push(ArmAsm::LdpGen {
-                    opc: 0b10,
-                    imm7: 2,
-                    rt2: ZERO_REGISTER,
-                    rn: SP,
-                    rt: X9,
-                    class_selector: LdpGenSelector::PostIndex,
-                });
-                // X6-X7
-                alloc_instructions.push(ArmAsm::LdpGen {
-                    opc: 0b10,
-                    imm7: 2,
-                    rt2: X7,
-                    rn: SP,
-                    rt: X6,
-                    class_selector: LdpGenSelector::PostIndex,
-                });
-                // X4-X5
-                alloc_instructions.push(ArmAsm::LdpGen {
-                    opc: 0b10,
-                    imm7: 2,
-                    rt2: X5,
-                    rn: SP,
-                    rt: X4,
-                    class_selector: LdpGenSelector::PostIndex,
-                });
-                // X2-X3
-                alloc_instructions.push(ArmAsm::LdpGen {
-                    opc: 0b10,
-                    imm7: 2,
-                    rt2: X3,
-                    rn: SP,
-                    rt: X2,
-                    class_selector: LdpGenSelector::PostIndex,
-                });
-                // X0-X1
-                alloc_instructions.push(ArmAsm::LdpGen {
-                    opc: 0b10,
-                    imm7: 2,
-                    rt2: X1,
-                    rn: SP,
-                    rt: X0,
-                    class_selector: LdpGenSelector::PostIndex,
+                    rt: X17,
                 });
             }
 
@@ -1772,42 +1706,23 @@ impl LowLevelArm {
             // then deallocate the stack space.
             let mut dealloc_instructions = Vec::new();
 
-            // Unlink this frame from the GC chain by calling gc_frame_unlink(prev).
-            // Save X0 (return value) around the call.
-            {
-                // Save X0 (return value) and X30 (LR) to stack
-                dealloc_instructions.push(ArmAsm::StpGen {
-                    opc: 0b10,
-                    imm7: -2, // pre-index, SP -= 16
-                    rt2: X30,
-                    rn: SP,
-                    rt: X0,
-                    class_selector: StpGenSelector::PreIndex,
-                });
-
-                // Load prev pointer from [X29-16] into X0 (first argument)
+            // Inlined gc_frame_unlink:
+            //     prev = *(FP - 16)
+            //     *(X28 + 16) = prev
+            if !self.skip_gc_frame_link {
                 dealloc_instructions.push(ArmAsm::LdurGen {
                     size: 0b11,
                     imm9: -16,
                     rn: X29,
-                    rt: X0,
+                    rt: X17,
                 });
-
-                // Load gc_frame_unlink address into X16 and call it
-                let gc_frame_unlink_ptr = crate::builtins::gc_frame_unlink as usize;
-                for instr in Self::mov_64_bit_num(X16, gc_frame_unlink_ptr as isize) {
-                    dealloc_instructions.push(instr);
-                }
-                dealloc_instructions.push(ArmAsm::Blr { rn: X16 });
-
-                // Restore X0 (return value) and X30 (LR) from stack
-                dealloc_instructions.push(ArmAsm::LdpGen {
-                    opc: 0b10,
-                    imm7: 2, // post-index, SP += 16
-                    rt2: X30,
-                    rn: SP,
-                    rt: X0,
-                    class_selector: LdpGenSelector::PostIndex,
+                dealloc_instructions.push(ArmAsm::StrImmGen {
+                    rt: X17,
+                    rn: X28,
+                    imm9: 0,
+                    imm12: 2,
+                    size: 0b11,
+                    class_selector: StrImmGenSelector::UnsignedOffset,
                 });
             }
 

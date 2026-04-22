@@ -43,8 +43,11 @@ impl LinearScan {
                 let physical_registers: Vec<VirtualRegister> =
                     vec![12, 13, 14, 15, 16].into_iter().map(physical).collect();
             } else {
-                // ARM64: callee-saved registers X19-X28
-                let physical_registers: Vec<VirtualRegister> = (19..=28).map(physical).collect();
+                // ARM64: callee-saved registers X19-X27.
+                // X28 is reserved to hold a pointer to the current thread's
+                // MutatorState (see runtime::MutatorState). Removing it from the
+                // allocator pool ensures no generated code clobbers the slot.
+                let physical_registers: Vec<VirtualRegister> = (19..=27).map(physical).collect();
             }
         }
         let max_registers = physical_registers.len();

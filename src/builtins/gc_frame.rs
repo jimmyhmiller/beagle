@@ -1,3 +1,6 @@
+// Imports from `super` are only referenced by the debug-assertion'd GC chain
+// trace paths below; release builds don't need them.
+#[cfg(debug_assertions)]
 use super::*;
 
 #[cfg(debug_assertions)]
@@ -27,24 +30,18 @@ pub fn dump_gc_chain_trace() {
     });
 }
 
-// Per-thread cached raw pointer to the GC_FRAME_TOP cell. Avoids the
-// LocalKey::with thunk on every Beagle function entry/exit (gc_frame_link /
-// gc_frame_unlink fire on every call). Safe: each thread only ever reads its
-// own slot via its own TLS.
-thread_local! {
-    static GC_FRAME_TOP_SLOT_CACHE: std::cell::Cell<*mut usize> =
-        const { std::cell::Cell::new(std::ptr::null_mut()) };
-}
-
+/// Raw pointer to this thread's `MutatorState.gc_frame_top` slot. Used on the
+/// hot function-entry/exit path to avoid a thread_local lookup per call.
+///
+/// Prior to the MutatorState migration this cached the address of a per-thread
+/// `GC_FRAME_TOP` Cell. Now the slot lives in the MutatorState struct on the
+/// heap (Box'd inside ThreadGlobal), which already has a stable per-thread
+/// address — so we just take the field address directly each time, relying on
+/// `current_mutator_state` to go through the existing `CACHED_THREAD_GLOBAL`
+/// thread_local once.
 #[inline(always)]
 fn gc_frame_top_slot() -> *mut usize {
-    let cached = GC_FRAME_TOP_SLOT_CACHE.with(|c| c.get());
-    if !cached.is_null() {
-        return cached;
-    }
-    let p = GC_FRAME_TOP.with(|cell| cell.as_ptr());
-    GC_FRAME_TOP_SLOT_CACHE.with(|c| c.set(p));
-    p
+    unsafe { &raw mut (*crate::runtime::current_mutator_state()).gc_frame_top }
 }
 
 /// Called by JIT prologue AFTER arguments have been saved to locals.
@@ -133,7 +130,7 @@ pub extern "C" fn gc_frame_unlink(prev: usize) {
     #[cfg(debug_assertions)]
     {
         if std::env::var("BEAGLE_DEBUG_GC_CHAIN_TRACE").is_ok() {
-            let current_top = GC_FRAME_TOP.with(|cell| cell.get());
+            let current_top = unsafe { *gc_frame_top_slot() };
             record_gc_chain_event(format!(
                 "gc_frame_unlink current_top={:#x} new_top={:#x}",
                 current_top, prev

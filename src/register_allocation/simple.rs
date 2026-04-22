@@ -60,7 +60,8 @@ impl SimpleRegisterAllocator {
     ) -> Self {
         let instruction_len = instructions.len();
         let lifetimes = Self::get_register_lifetime(&instructions);
-        let physical_registers: Vec<VirtualRegister> = (19..=28).map(physical).collect();
+        // ARM64: callee-saved registers X19-X27 (X28 reserved for MutatorState pointer).
+        let physical_registers: Vec<VirtualRegister> = (19..=27).map(physical).collect();
 
         SimpleRegisterAllocator {
             lifetimes,

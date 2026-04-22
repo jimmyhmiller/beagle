@@ -72,9 +72,12 @@ thread_local! {
 // (at [header_addr - 8], i.e. [FP-16]) links to the previous frame's header.
 // GC walks this chain instead of the FP chain, so captured/restored
 // continuation frames are naturally excluded/included.
+//
+// Storage lives in the per-thread MutatorState (see runtime::MutatorState).
+// The thread_local below is only for the debug GC chain trace buffer, which
+// is never touched on the hot path.
+#[cfg(debug_assertions)]
 thread_local! {
-    static GC_FRAME_TOP: Cell<usize> = const { Cell::new(0) };
-    #[cfg(debug_assertions)]
     static GC_CHAIN_TRACE: RefCell<VecDeque<String>> = const { RefCell::new(VecDeque::new()) };
 }
 
@@ -182,7 +185,7 @@ pub fn get_saved_gc_return_addr() -> usize {
 /// Get the current top of the GC frame linked list.
 /// Used by the stack walker to start walking frames.
 pub fn get_gc_frame_top() -> usize {
-    GC_FRAME_TOP.with(|cell| cell.get())
+    unsafe { (*crate::runtime::current_mutator_state()).gc_frame_top }
 }
 
 /// Set the GC frame top directly.
@@ -239,7 +242,7 @@ pub fn set_gc_frame_top(v: usize) {
             }
         }
     }
-    GC_FRAME_TOP.with(|cell| cell.set(v));
+    unsafe { (*crate::runtime::current_mutator_state()).gc_frame_top = v };
 }
 
 /// Saved GC context - used to save/restore around calls back into Beagle
