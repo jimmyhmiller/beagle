@@ -22,8 +22,23 @@ impl<Alloc: Allocator> MutexAllocator<Alloc> {
     where
         F: FnOnce(&mut Alloc) -> R,
     {
-        let _lock = self.mutex.lock().unwrap();
-        f(&mut self.alloc)
+        // Same fast-path interop as try_allocate: sync the inner allocator's
+        // frontier from the current thread's MutatorState before the caller
+        // touches it, then push the new frontier back afterwards. Without
+        // this, direct callers of `alloc.try_allocate` (e.g. runtime-internal
+        // Thread struct allocation) would hand out memory that overlaps with
+        // objects the JIT fast path already placed at a higher offset.
+        //
+        // sync_from_mutator_state / refresh_mutator_state are both no-ops
+        // when `registered_threads != 0`, matching try_allocate: in that
+        // regime the shared frontier is authoritative and MutatorState is
+        // disarmed, so we skip the lock+sync dance.
+        self.sync_from_mutator_state();
+        let lock = self.mutex.lock().unwrap();
+        let result = f(&mut self.alloc);
+        drop(lock);
+        self.refresh_mutator_state();
+        result
     }
 
     /// Inline fast-path interop: every `try_allocate*` call begins by
@@ -137,6 +152,24 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
     }
 
     fn register_thread(&mut self, _thread_id: std::thread::ThreadId) {
+        // Close the fast-path race: before we flip into multi-mutator mode,
+        // push the spawning thread's latest MutatorState.alloc_ptr into the
+        // inner allocator's frontier and then disarm the spawning thread's
+        // MutatorState. Without this, the inline fast path may have bumped
+        // `alloc_ptr` past the inner allocator's stale `allocation_offset`;
+        // once the counter is non-zero, `sync_from_mutator_state` becomes a
+        // no-op and the allocator would hand out overlapping regions.
+        //
+        // `sync_allocator_frontier` tolerates a `ms_alloc_ptr` of 0 (the
+        // MutatorState may never have been armed on this thread), so calling
+        // it unconditionally is safe.
+        let ms_alloc_ptr = unsafe { (*crate::runtime::current_mutator_state()).alloc_ptr };
+        self.alloc.sync_allocator_frontier(ms_alloc_ptr);
+        unsafe {
+            let state = crate::runtime::current_mutator_state();
+            (*state).alloc_ptr = 0;
+            (*state).alloc_end = 0;
+        }
         self.registered_threads.fetch_add(1, Ordering::AcqRel);
     }
 

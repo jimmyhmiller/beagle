@@ -2765,21 +2765,7 @@ impl AstCompiler<'_> {
                     }
                 }
 
-                let allocate = self
-                    .compiler
-                    .find_function("beagle.builtin/allocate")
-                    .unwrap();
-                let allocate = self.compiler.get_function_pointer(allocate).unwrap();
-                let allocate = self.ir.assign_new(allocate);
-
-                let size_reg = self.ir.assign_new(size);
-                let stack_pointer = self.ir.get_stack_pointer_imm(0);
-                let frame_pointer = self.ir.get_frame_pointer();
-
-                let struct_ptr = self.ir.call_builtin(
-                    allocate.into(),
-                    vec![stack_pointer, frame_pointer, size_reg.into()],
-                );
+                let struct_ptr = self.ir.allocate_static(size as u32);
 
                 let struct_pointer = self.ir.untag(struct_ptr);
                 let layout_version = self.compiler.get_struct_layout_version(struct_id);
@@ -2943,21 +2929,7 @@ impl AstCompiler<'_> {
                         self.ir.push_to_stack(reg.into());
                     }
 
-                    let allocate = self
-                        .compiler
-                        .find_function("beagle.builtin/allocate")
-                        .unwrap();
-                    let allocate = self.compiler.get_function_pointer(allocate).unwrap();
-                    let allocate = self.ir.assign_new(allocate);
-
-                    let size_reg = self.ir.assign_new(struct_size);
-                    let stack_pointer = self.ir.get_stack_pointer_imm(0);
-                    let frame_pointer = self.ir.get_frame_pointer();
-
-                    let struct_ptr = self.ir.call_builtin(
-                        allocate.into(),
-                        vec![stack_pointer, frame_pointer, size_reg.into()],
-                    );
+                    let struct_ptr = self.ir.allocate_static(struct_size as u32);
 
                     let struct_pointer = self.ir.untag(struct_ptr);
                     let layout_version = self.compiler.get_struct_layout_version(struct_id);
