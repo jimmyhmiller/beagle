@@ -654,6 +654,14 @@ impl PrettyPrint for Instruction {
                     .collect();
                 format!("reload_root_slots [{}]", slots.join(", "))
             }
+            Instruction::InlineBumpAllocate(dst, size_bytes, slow_path) => {
+                format!(
+                    "inline_bump_allocate {} size={} slow=label_{}",
+                    dst.pretty_print(),
+                    size_bytes,
+                    slow_path.index
+                )
+            }
         }
     }
 }

@@ -196,6 +196,15 @@ pub enum Instruction {
     PushPromptTag(Value, Label, Value, usize), // tag_value, abort_label, result_local (as Local), builtin_fn_ptr
     LoadLabelAddress(Value, Label), // dest, label - loads the address of a label into a register
     CaptureContinuation(Value, Label, usize, usize), // dest, resume_label, result_local_index, builtin_fn_ptr
+    /// Inline bump-pointer allocation. Lowers to `LirOp::InlineBumpAllocate`
+    /// for a fast path that bumps `MutatorState.alloc_ptr` and tags the
+    /// result as a HeapObject. On overflow it branches to `slow_path`,
+    /// where the IR is expected to have emitted the traditional call
+    /// through the `allocate` builtin followed by a jump to the
+    /// continuation. See `IrCompiler::allocate`.
+    ///
+    /// Fields: (dst, size_bytes, slow_path)
+    InlineBumpAllocate(Value, u32, Label),
     CaptureContinuationWithSaves(Value, Label, usize, usize, Vec<SavedValue>), // dest, resume_label, result_local_index, builtin_fn_ptr, saved live roots
     CaptureContinuationTagged(Value, Label, usize, usize, Value), // dest, resume_label, result_local_index, builtin_fn_ptr, tag_value
     CaptureContinuationTaggedWithSaves(Value, Label, usize, usize, Value, Vec<SavedValue>), // dest, resume_label, result_local_index, builtin_fn_ptr, tag_value, saved live roots
@@ -615,6 +624,9 @@ impl Instruction {
                 .iter()
                 .filter_map(|save| (&save.source).try_into().ok())
                 .collect(),
+            Instruction::InlineBumpAllocate(dst, _, _) => {
+                get_register!(dst)
+            }
         }
     }
 
@@ -835,6 +847,9 @@ impl Instruction {
             Instruction::ReturnFromShift(value, cont_ptr, _) => {
                 replace_register!(value, old_register, new_register);
                 replace_register!(cont_ptr, old_register, new_register);
+            }
+            Instruction::InlineBumpAllocate(dst, _, _) => {
+                replace_register!(dst, old_register, new_register);
             }
         }
     }
@@ -1074,8 +1089,7 @@ impl Ir {
             // This ensures no raw f64 values are live in GPRs across the
             // allocation call, which could cause GC to misinterpret them
             // as tagged heap pointers.
-            let size_reg = self.assign_new(1);
-            let float_pointer = self.allocate(size_reg.into());
+            let float_pointer = self.allocate_static(1);
             let float_pointer_untagged = self.untag(float_pointer);
             self.write_small_object_header(float_pointer_untagged);
             let a_untagged = self.shift_right_imm_raw(a.into(), 3);
@@ -1101,8 +1115,7 @@ impl Ir {
         // Case: a is float, b is int - convert b to float
         {
             // Allocate before float computation to avoid raw f64 in GPRs across GC safepoint
-            let size_reg = self.assign_new(1);
-            let float_pointer = self.allocate(size_reg.into());
+            let float_pointer = self.allocate_static(1);
             let float_pointer_untagged = self.untag(float_pointer);
             self.write_small_object_header(float_pointer_untagged);
             let a_untagged = self.untag(a.into());
@@ -1124,8 +1137,7 @@ impl Ir {
 
         {
             // Allocate before float computation to avoid raw f64 in GPRs across GC safepoint
-            let size_reg = self.assign_new(1);
-            let float_pointer = self.allocate(size_reg.into());
+            let float_pointer = self.allocate_static(1);
             let float_pointer_untagged = self.untag(float_pointer);
             self.write_small_object_header(float_pointer_untagged);
             let a_untagged = self.untag(a.into());
@@ -3318,6 +3330,19 @@ impl Ir {
                     backend.call_builtin(fn_ptr);
                     // Note: execution never continues past this point
                 }
+                Instruction::InlineBumpAllocate(dst, size_bytes, slow_path) => {
+                    let dst_reg = self.value_to_register(dst, backend);
+                    // The Lir's slow_path is a backend-level label index;
+                    // the IR side stores the IR-level label here, so we
+                    // translate via ir_label_to_lang_label just like
+                    // Instruction::Jump does.
+                    let slow_path_lang = *ir_label_to_lang_label.get(slow_path).unwrap();
+                    backend.lower_lir(&crate::lir::LirOp::InlineBumpAllocate {
+                        size_bytes: *size_bytes,
+                        dst: dst_reg,
+                        slow_path: slow_path_lang,
+                    });
+                }
             }
             let end_machine_code = backend.current_position();
             self.ir_to_machine_code_range.push((
@@ -3959,5 +3984,56 @@ impl Ir {
         let frame_pointer = self.get_frame_pointer();
         let f = self.assign_new(Value::Function(self.allocate_fn_pointer));
         self.call_builtin(f.into(), vec![stack_pointer, frame_pointer, size])
+    }
+
+    /// Allocate a `size_words`-word heap object with the inline bump
+    /// fast path, falling back to the `allocate` builtin on TLAB
+    /// overflow or multi-mutator disarm. Returns the
+    /// `HeapObject`-tagged pointer, matching the contract of
+    /// `allocate(size)`.
+    ///
+    /// Use this wherever the allocation size is known at IR-build time
+    /// (struct construction, small-object allocation, etc.). Dynamic
+    /// sizes and oversized allocations (> 4095 bytes including header)
+    /// fall through to `allocate` directly.
+    pub fn allocate_static(&mut self, size_words: u32) -> Value {
+        // TODO(Commit C): wire the fast path through once the register
+        // ordering / label issue in the InlineBumpAllocate flow is
+        // resolved. Today this just delegates to the builtin so the
+        // surrounding infrastructure is exercised without regressing
+        // the float arithmetic tests.
+        //
+        // The commented-out block below shows the intended fast + slow
+        // composition: the IR emits an `InlineBumpAllocate` whose ARM
+        // lowering bumps `MutatorState.alloc_ptr` through `x28` and
+        // branches to a slow-path label on TLAB overflow. The slow
+        // path calls the `allocate` builtin and writes its result
+        // into the same destination register the fast path writes,
+        // then both paths converge at `done`.
+        let size_reg = self.assign_new(Value::TaggedConstant(size_words as isize));
+        self.allocate(size_reg.into())
+
+        // Fast+slow composition, staged for follow-up debugging:
+        //
+        // let size_bytes = size_words * 8 + 8;
+        // if size_bytes > 0xFFF {
+        //     let size_reg = self.assign_new(Value::TaggedConstant(size_words as isize));
+        //     return self.allocate(size_reg.into());
+        // }
+        // let dst = self.next_register(None, true);
+        // let slow_path = self.label("alloc_slow");
+        // let done = self.label("alloc_done");
+        // self.instructions.push(Instruction::InlineBumpAllocate(
+        //     Value::Register(dst),
+        //     size_bytes,
+        //     slow_path,
+        // ));
+        // self.jump(done);
+        // self.write_label(slow_path);
+        // let size_reg = self.assign_new(Value::TaggedConstant(size_words as isize));
+        // let slow_result = self.allocate(size_reg.into());
+        // self.assign(dst, slow_result);
+        // self.write_label(done);
+        // Value::Register(dst)
     }
 }
