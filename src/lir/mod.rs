@@ -129,23 +129,46 @@ pub enum LirOp<R: 'static> {
         target: RuntimeSym,
         preserve: Vec<R>,
     },
+
+    /// Inline bump-pointer allocation fast path.
+    ///
+    /// Semantics:
+    /// 1. Bump `MutatorState.alloc_ptr` by `size_bytes` (the full
+    ///    allocation including its header).
+    /// 2. If the new frontier would exceed `MutatorState.alloc_end`,
+    ///    jump to `slow_path` without modifying anything — the slow
+    ///    path is responsible for calling the Rust `allocate` builtin
+    ///    and producing the tagged pointer in the same destination
+    ///    register.
+    /// 3. On success: tag the old `alloc_ptr` as a `HeapObject` and
+    ///    store the tagged value into `dst`. The caller is responsible
+    ///    for writing the object header — this mirrors the pattern the
+    ///    existing callers of `IrCompiler::allocate` use (they all
+    ///    follow with `write_small_object_header` or equivalent), and
+    ///    keeps the Lir primitive as narrow as possible.
+    ///
+    /// Single-mutator only: `MutatorState.alloc_end == alloc_ptr` on the
+    /// current thread (set by `MutexAllocator::allocator_frontier` when
+    /// more than one thread is registered) forces the compare to jump
+    /// to the slow path, so multi-threaded programs fall through safely
+    /// without synchronisation.
+    InlineBumpAllocate {
+        /// Total allocation size in bytes, *including* the object header.
+        /// The slow path is given the same word count the Beagle IR would
+        /// have passed to the `allocate` builtin.
+        size_bytes: u32,
+        /// Destination register that receives the tagged HeapObject
+        /// pointer on the fast path. The slow path is responsible for
+        /// writing into the same register before the continuation label.
+        dst: R,
+        /// Label the fast path jumps to when the bump would overflow.
+        /// Owning code emits the slow path (typically: call the
+        /// `allocate` builtin, write result to `dst`, fall through to
+        /// a continuation label).
+        slow_path: crate::common::Label,
+    },
     // ----- Future perf primitives --------------------------------------
     //
-    // The following variants are listed but not yet lowered. Adding them
-    // is:
-    //   1. Uncomment / add the variant.
-    //   2. Add a lowering arm in each backend's `lower_lir`.
-    //   3. Emit the op from the allocation / store / load site.
-    //
-    // They are commented rather than made `todo!()` panics so that the
-    // enum isn't artificially exhaustive before there's an implementation
-    // plan — see docs/beagle-abi-cleanup.md for the sequencing.
-    //
-    // InlineBumpAllocate {
-    //     size: usize,
-    //     dst: R,
-    //     slow_path: crate::common::Label,
-    // },
     // InlineWriteBarrier {
     //     obj: R,
     //     field_offset: u32,

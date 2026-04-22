@@ -1161,6 +1161,100 @@ impl LowLevelArm {
                     class_selector: StrImmGenSelector::UnsignedOffset,
                 });
             }
+            LirOp::InlineBumpAllocate {
+                size_bytes,
+                dst,
+                slow_path,
+            } => {
+                // Fast-path bump allocation. Follows the recipe in
+                // docs/perf-bottlenecks.md §"Bottleneck 2", minus the
+                // header write (the caller handles it — same pattern
+                // as the existing slow path where the allocator's
+                // default header is immediately overwritten by the IR
+                // `write_small_object_header` call).
+                //
+                //     ldr  dst, [x28, #ALLOC_PTR]
+                //     add  x16, dst, #size
+                //     ldr  x17, [x28, #ALLOC_END]
+                //     cmp  x16, x17
+                //     b.hi slow_path              ; overflow → slow
+                //     str  x16, [x28, #ALLOC_PTR] ; commit
+                //     lsl  x16, dst, #3
+                //     add  dst, x16, #6           ; tag as HeapObject
+                //
+                // X16/X17 are AAPCS intra-procedure-call scratch (IP0/IP1);
+                // the surrounding Beagle compiled code doesn't preserve
+                // them across any boundary we care about.
+                debug_assert!(
+                    *size_bytes <= 0xFFF,
+                    "InlineBumpAllocate with size {size_bytes} > 12-bit add imm; \
+                     caller must fall back to the slow path for larger objects"
+                );
+                debug_assert!(
+                    *dst != X16 && *dst != X17,
+                    "dst must not be X16 or X17 — those are this lowering's scratch"
+                );
+
+                // dst = alloc_ptr  (raw untagged pointer)
+                Self::lower_lir_into(
+                    out,
+                    &LirOp::LoadMutatorField {
+                        field: crate::lir::MutatorField::AllocPtr,
+                        dst: *dst,
+                    },
+                );
+                // x16 = dst + size_bytes  (proposed new frontier)
+                out.push(ArmAsm::AddAddsubImm {
+                    sf: 1,
+                    rn: *dst,
+                    rd: X16,
+                    imm12: *size_bytes as i32,
+                    sh: 0,
+                });
+                // x17 = alloc_end
+                Self::lower_lir_into(
+                    out,
+                    &LirOp::LoadMutatorField {
+                        field: crate::lir::MutatorField::AllocEnd,
+                        dst: X17,
+                    },
+                );
+                // cmp x16, x17
+                out.push(ArmAsm::SubsAddsubShift {
+                    sf: 1,
+                    rm: X17,
+                    rn: X16,
+                    rd: ZERO_REGISTER,
+                    imm6: 0,
+                    shift: 0,
+                });
+                // b.hi slow_path — label index, patched later
+                out.push(ArmAsm::BCond {
+                    imm19: slow_path.index as i32,
+                    cond: 0b1000, // HI — unsigned higher
+                });
+                // commit: alloc_ptr = x16
+                Self::lower_lir_into(
+                    out,
+                    &LirOp::StoreMutatorField {
+                        field: crate::lir::MutatorField::AllocPtr,
+                        src: X16,
+                    },
+                );
+                // Tag the pointer as a HeapObject:
+                //   dst_raw << 3 | 0b110
+                // The `| 6` is an `add #6` here because the low 3 bits of
+                // `dst_raw << 3` are guaranteed zero (the heap frontier is
+                // 8-byte aligned before the shift).
+                out.push(shift_left_imm(X16, *dst, 3));
+                out.push(ArmAsm::AddAddsubImm {
+                    sf: 1,
+                    rn: X16,
+                    rd: *dst,
+                    imm12: 0b110,
+                    sh: 0,
+                });
+            }
             LirOp::CallRuntime { target, preserve } => {
                 // Pre-index STP pairs push `preserve` below SP (XZR pads
                 // odd-length lists so SP stays 16-aligned), BLR to the
