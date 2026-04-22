@@ -2,7 +2,7 @@ use crate::{
     builtins::debugger,
     machine_code::arm_codegen::{
         ArmAsm, LdpGenSelector, LdrImmGenSelector, Register, SP, Size, StpGenSelector,
-        StrImmGenSelector, X0, X10, X11, X12, X16, X17, X28, X29, X30, ZERO_REGISTER,
+        StrImmGenSelector, X0, X10, X11, X12, X16, X17, X29, X30, ZERO_REGISTER,
     },
     types::BuiltInTypes,
 };
@@ -1579,274 +1579,262 @@ impl LowLevelArm {
         }
     }
 
+    /// Prologue phase: write the Beagle frame header at `[FP - 8]`. The
+    /// header tells the GC how many traced slots this frame has and
+    /// carries the mark-local index (lower 16 bits of `type_data`) if the
+    /// function contains `binding` expressions. Only emitted for
+    /// `FrameKind::BeagleFunction` — shim trampolines have no Beagle-visible
+    /// frame to describe.
+    fn phase_write_frame_header(&self, out: &mut Vec<ArmAsm>) {
+        let num_slots = (self.max_locals + self.max_stack_size) as usize;
+        let mark_index_bits = self.mark_local_index.unwrap_or(0) as u32;
+        let type_data = ((num_slots as u32) << 16) | (mark_index_bits & 0xFFFF);
+        let type_flags = if self.mark_local_index.is_some() {
+            crate::collections::FRAME_HAS_MARKS_FLAG
+        } else {
+            0
+        };
+        let header_value = crate::types::Header {
+            type_id: crate::collections::TYPE_ID_FRAME,
+            type_data,
+            size: num_slots as u16,
+            opaque: false,
+            marked: false,
+            large: false,
+            type_flags,
+        }
+        .to_usize();
+
+        for instr in Self::mov_64_bit_num(X11, header_value as isize) {
+            out.push(instr);
+        }
+        out.push(ArmAsm::SturGen {
+            size: 0b11,
+            imm9: -8,
+            rn: X29,
+            rt: X11,
+        });
+    }
+
+    /// Prologue phase: splice this frame into the per-thread GC frame
+    /// chain. `header = FP - 8; prev = MutatorState.gc_frame_top;
+    /// MutatorState.gc_frame_top = header; *(FP - 16) = prev`. Requires
+    /// the reserved mutator-state register to hold a valid
+    /// `MutatorState*` on entry.
+    fn phase_gc_frame_link(&self, out: &mut Vec<ArmAsm>) {
+        let ms = crate::abi::arm64::ABI.mutator_state_reg;
+        out.push(ArmAsm::SubAddsubImm {
+            sf: 1,
+            rn: X29,
+            rd: X16,
+            imm12: 8,
+            sh: 0,
+        });
+        out.push(ArmAsm::LdrImmGen {
+            rt: X17,
+            rn: ms,
+            imm9: 0,
+            imm12: 2, // scaled by 8 → byte offset 16
+            size: 0b11,
+            class_selector: LdrImmGenSelector::UnsignedOffset,
+        });
+        out.push(ArmAsm::StrImmGen {
+            rt: X16,
+            rn: ms,
+            imm9: 0,
+            imm12: 2,
+            size: 0b11,
+            class_selector: StrImmGenSelector::UnsignedOffset,
+        });
+        out.push(ArmAsm::SturGen {
+            size: 0b11,
+            imm9: -16,
+            rn: X29,
+            rt: X17,
+        });
+    }
+
+    /// Prologue phase: zero-fill the Beagle frame's local and eval-stack
+    /// slots (and any callee-saved slots below them) so the GC never
+    /// sees garbage when scanning the frame. Starts at `[FP - 24]` (just
+    /// below the frame header at `[FP - 8]` and the prev pointer at
+    /// `[FP - 16]`) and walks downward.
+    fn phase_zero_fill(&self, out: &mut Vec<ArmAsm>) {
+        let slots_to_zero = self.max_locals + self.max_stack_size;
+        if slots_to_zero <= 0 {
+            return;
+        }
+        let null_value = crate::types::BuiltInTypes::null_value() as i32;
+        out.push(ArmAsm::Movz {
+            rd: X11,
+            imm16: null_value,
+            hw: 0,
+            sf: 1,
+        });
+        out.push(ArmAsm::SubAddsubImm {
+            sf: 1,
+            rn: X29,
+            rd: X10,
+            imm12: 24,
+            sh: 0,
+        });
+        for _ in 0..slots_to_zero {
+            // str x11, [x10], #-8
+            out.push(ArmAsm::StrImmGen {
+                rt: X11,
+                rn: X10,
+                imm9: -8,
+                imm12: 0,
+                size: 0b11,
+                class_selector: StrImmGenSelector::PostIndex,
+            });
+        }
+    }
+
+    /// Prologue phase: save the callee-saved registers actually used by
+    /// this function to `[SP + i*8]`. Must run AFTER `phase_zero_fill`,
+    /// otherwise the fill would overwrite the saves.
+    fn phase_callee_saved_save(&self, out: &mut Vec<ArmAsm>, regs: &[Register]) {
+        for (i, reg) in regs.iter().enumerate() {
+            out.push(ArmAsm::StrImmGen {
+                rt: *reg,
+                rn: SP,
+                imm9: 0,
+                imm12: i as i32, // scaled by 8
+                size: 0b11,
+                class_selector: StrImmGenSelector::UnsignedOffset,
+            });
+        }
+    }
+
+    /// Epilogue phase: unlink this frame from the GC chain.
+    /// `prev = *(FP - 16); MutatorState.gc_frame_top = prev`.
+    fn phase_gc_frame_unlink(&self, out: &mut Vec<ArmAsm>) {
+        let ms = crate::abi::arm64::ABI.mutator_state_reg;
+        out.push(ArmAsm::LdurGen {
+            size: 0b11,
+            imm9: -16,
+            rn: X29,
+            rt: X17,
+        });
+        out.push(ArmAsm::StrImmGen {
+            rt: X17,
+            rn: ms,
+            imm9: 0,
+            imm12: 2,
+            size: 0b11,
+            class_selector: StrImmGenSelector::UnsignedOffset,
+        });
+    }
+
+    /// Epilogue phase: restore the callee-saved registers saved by
+    /// `phase_callee_saved_save`.
+    fn phase_callee_saved_restore(&self, out: &mut Vec<ArmAsm>, regs: &[Register]) {
+        for (i, reg) in regs.iter().enumerate() {
+            out.push(ArmAsm::LdrImmGen {
+                rt: *reg,
+                rn: SP,
+                imm9: 0,
+                imm12: i as i32,
+                size: 0b11,
+                class_selector: LdrImmGenSelector::UnsignedOffset,
+            });
+        }
+    }
+
+    /// Splice `replacement` in place of the single instruction at
+    /// `index` and shift all label locations past that index to match
+    /// the new instruction count.
+    fn splice_and_shift_labels(&mut self, index: usize, replacement: Vec<ArmAsm>) {
+        let delta = replacement.len() as isize - 1;
+        self.instructions.splice(index..=index, replacement);
+        if delta != 0 {
+            for location in self.label_locations.values_mut() {
+                if *location > index {
+                    *location = (*location as isize + delta) as usize;
+                }
+            }
+        }
+    }
+
+    /// Replace the prologue/epilogue placeholders with the actual stack
+    /// allocation, frame setup, and teardown instructions.
+    ///
+    /// Stack layout (BeagleFunction):
+    /// ```text
+    ///   [FP + 8]                   Saved LR (X30)
+    ///   [FP + 0]                   Saved FP (X29)
+    ///   [FP - 8]                   Frame header (written by phase_write_frame_header)
+    ///   [FP - 16]                  Previous gc_frame_top (written by phase_gc_frame_link)
+    ///   [FP - 24..FP - 24-N]       Locals + eval stack (zeroed by phase_zero_fill)
+    ///   [SP + (N-1)*8 .. SP]       Callee-saved spill area (phase_callee_saved_save)
+    /// ```
+    ///
+    /// Which phases run depends on `self.frame_kind`:
+    /// - `BeagleFunction`: all phases (full Beagle frame contract).
+    /// - `ShimTrampoline`: stack alloc and callee-saved save/restore
+    ///   only — no frame header, no GC link, no zero-fill.
     pub fn patch_prelude_and_epilogue(&mut self) {
-        // Get list of callee-saved registers that need to be saved
         let used_callee_saved = self.get_used_callee_saved_registers();
         let num_callee_saved = used_callee_saved.len() as u64;
         self.num_callee_saved = num_callee_saved as usize;
 
-        // Calculate total stack size: 2 for frame header (header + prev pointer) + locals + eval stack + callee-saved
+        // Frame size: 2 slots (header + prev pointer) + locals + eval stack
+        // + callee-saved, rounded up to 16-byte alignment.
         let mut max = 2 + self.max_stack_size as u64 + self.max_locals as u64 + num_callee_saved;
-        let remainder = max % 2;
-        if remainder != 0 {
+        if max % 2 != 0 {
             max += 1;
         }
-
         let stack_bytes = (max * 8) as i32;
 
-        // Find the placeholder SUB instruction in prelude (has magic value 0x1111)
-        let sub_index = self.instructions.iter().position(|inst| {
-            matches!(inst, ArmAsm::SubAddsubImm { rn, rd, imm12, .. }
-                     if *rn == SP && *rd == SP && *imm12 == 0x1111)
-        });
+        #[cfg(feature = "debug-gc")]
+        eprintln!(
+            "[GC DEBUG] patch_prelude: max_locals={}, max_stack_size={}, zeroing {} slots",
+            self.max_locals,
+            self.max_stack_size,
+            self.max_locals + self.max_stack_size
+        );
 
-        if let Some(index) = sub_index {
-            // Replace single SUB with sequence of instructions for stack allocation
-            let mut alloc_instructions = Self::generate_stack_allocation(stack_bytes);
+        // --- Prologue -------------------------------------------------
+        let sub_index = self
+            .instructions
+            .iter()
+            .position(|inst| {
+                matches!(inst, ArmAsm::SubAddsubImm { rn, rd, imm12, .. }
+                         if *rn == SP && *rd == SP && *imm12 == 0x1111)
+            })
+            .unwrap_or_else(|| {
+                unreachable!("Expected SUB placeholder instruction for stack allocation")
+            });
 
-            // Save callee-saved registers at the bottom of the stack (near SP).
-            // Stack layout:
-            //   [FP + 8]  -> Saved LR (X30)
-            //   [FP + 0]  -> Saved FP (X29)
-            //   [FP - 8]  -> Frame header (heap-object-style, type_id=37)
-            //   [FP - 16] -> Local 0
-            //   ...
-            //   [FP - N]  -> Stack slots
-            //   [SP + (num_callee_saved-1)*8] -> First saved callee-saved reg
-            //   ...
-            //   [SP]      -> Last saved callee-saved reg (or padding)
-            //
-            // NOTE: Callee-saved register saves are deferred until AFTER zeroing
-            // to prevent them from being overwritten by the zero fill.
-
-            // CRITICAL FIX: Zero out all GC-scanned frame slots to prevent GC from
-            // seeing garbage. This includes locals, eval stack, alignment padding,
-            // and callee-saved register spill slots. Callee-saved regs are
-            // overwritten immediately after with their actual values.
-            //
-            // NOTE: STUR has a 9-bit signed immediate (-256 to 255), so for large stack
-            // frames we need a different approach. We use X10 as a pointer that we decrement.
-            let null_value = crate::types::BuiltInTypes::null_value() as i32;
-            // Zero all frame slots that compiled code can keep values in:
-            // named locals plus eval-stack temporaries. Some call paths were
-            // reloading heap pointers from eval-stack slots after GC.
-            let slots_to_zero = self.max_locals + self.max_stack_size;
-
-            #[cfg(feature = "debug-gc")]
-            eprintln!(
-                "[GC DEBUG] patch_prelude: max_locals={}, max_stack_size={}, zeroing {} slots",
-                self.max_locals, self.max_stack_size, slots_to_zero
-            );
-
-            // Write frame header at [X29-8]. This is a heap-object-style header
-            // that lets GC know how many traced slots this frame has.
-            {
-                // Scan the full Beagle frame payload: named locals plus
-                // eval-stack temporaries. Generated code can keep live heap
-                // values in either region across a call that triggers GC.
-                let num_slots = (self.max_locals + self.max_stack_size) as usize;
-                // Encode mark local index in lower 16 bits of type_data if present.
-                // Upper 16 bits = num_slots (for GC/captured frame).
-                // Lower 16 bits = mark local index (for get_dynamic_var frame walk).
-                let mark_index_bits = self.mark_local_index.unwrap_or(0) as u32;
-                let type_data = ((num_slots as u32) << 16) | (mark_index_bits & 0xFFFF);
-                let type_flags = if self.mark_local_index.is_some() {
-                    crate::collections::FRAME_HAS_MARKS_FLAG
-                } else {
-                    0
-                };
-                let frame_header = crate::types::Header {
-                    type_id: crate::collections::TYPE_ID_FRAME,
-                    type_data,
-                    size: num_slots as u16,
-                    opaque: false,
-                    marked: false,
-                    large: false,
-                    type_flags,
-                };
-                let header_value = frame_header.to_usize();
-
-                // Load the 64-bit header value into X11
-                for instr in Self::mov_64_bit_num(X11, header_value as isize) {
-                    alloc_instructions.push(instr);
-                }
-
-                // Store X11 to [X29 - 8]
-                alloc_instructions.push(ArmAsm::SturGen {
-                    size: 0b11,
-                    imm9: -8,
-                    rn: X29,
-                    rt: X11,
-                });
-            }
-
-            // Inlined gc_frame_link: splice this frame's header into the
-            // per-thread GC frame chain held at [X28, #16]
-            // (MutatorState.gc_frame_top).
-            //
-            //     header = FP - 8
-            //     prev = *(X28 + 16)
-            //     *(X28 + 16) = header
-            //     *(FP - 16) = prev
-            if self.frame_kind == FrameKind::BeagleFunction {
-                alloc_instructions.push(ArmAsm::SubAddsubImm {
-                    sf: 1,
-                    rn: X29,
-                    rd: X16,
-                    imm12: 8,
-                    sh: 0,
-                });
-                alloc_instructions.push(ArmAsm::LdrImmGen {
-                    rt: X17,
-                    rn: X28,
-                    imm9: 0,
-                    imm12: 2,
-                    size: 0b11,
-                    class_selector: LdrImmGenSelector::UnsignedOffset,
-                });
-                alloc_instructions.push(ArmAsm::StrImmGen {
-                    rt: X16,
-                    rn: X28,
-                    imm9: 0,
-                    imm12: 2,
-                    size: 0b11,
-                    class_selector: StrImmGenSelector::UnsignedOffset,
-                });
-                alloc_instructions.push(ArmAsm::SturGen {
-                    size: 0b11,
-                    imm9: -16,
-                    rn: X29,
-                    rt: X17,
-                });
-            }
-
-            if slots_to_zero > 0 {
-                // Load null value into X11 (NOT X9 - that's reserved for arg count!)
-                alloc_instructions.push(ArmAsm::Movz {
-                    rd: X11,
-                    imm16: null_value,
-                    hw: 0,
-                    sf: 1,
-                });
-
-                // X10 = X29 - 24 (point to first local slot, after header at [X29-8] and prev at [X29-16])
-                alloc_instructions.push(ArmAsm::SubAddsubImm {
-                    sf: 1,
-                    rn: X29,
-                    rd: X10,
-                    imm12: 24,
-                    sh: 0,
-                });
-
-                // Store null to each slot (locals, eval stack, padding, callee-saved area),
-                // decrementing X10 after each store
-                for _ in 0..slots_to_zero {
-                    // Store X11 to [X10], then X10 = X10 - 8 (post-decrement)
-                    // Use STR with post-index: str x11, [x10], #-8
-                    alloc_instructions.push(ArmAsm::StrImmGen {
-                        rt: X11,
-                        rn: X10,
-                        imm9: -8,
-                        imm12: 0,   // Not used for post-index
-                        size: 0b11, // 64-bit
-                        class_selector: StrImmGenSelector::PostIndex,
-                    });
-                }
-            }
-
-            // Save callee-saved registers AFTER zeroing so they aren't overwritten.
-            // They are stored at increasing offsets from SP (bottom of frame).
-            for (i, reg) in used_callee_saved.iter().enumerate() {
-                // Store at [SP + i*8] using STR with unsigned offset
-                // For 64-bit STR, imm12 is scaled by 8, so imm12=i means byte offset i*8
-                alloc_instructions.push(ArmAsm::StrImmGen {
-                    rt: *reg,
-                    rn: SP,
-                    imm9: 0,
-                    imm12: i as i32,
-                    size: 0b11, // 64-bit
-                    class_selector: StrImmGenSelector::UnsignedOffset,
-                });
-            }
-
-            let delta = alloc_instructions.len() as isize - 1;
-            self.instructions.splice(index..=index, alloc_instructions);
-
-            if delta != 0 {
-                // Shift label locations that come after the insertion point
-                for location in self.label_locations.values_mut() {
-                    if *location > index {
-                        *location = (*location as isize + delta) as usize;
-                    }
-                }
-            }
-        } else {
-            unreachable!("Expected to find SUB placeholder instruction for stack allocation");
+        let mut alloc = Self::generate_stack_allocation(stack_bytes);
+        if self.frame_kind == FrameKind::BeagleFunction {
+            self.phase_write_frame_header(&mut alloc);
+            self.phase_gc_frame_link(&mut alloc);
+            self.phase_zero_fill(&mut alloc);
         }
+        self.phase_callee_saved_save(&mut alloc, &used_callee_saved);
+        self.splice_and_shift_labels(sub_index, alloc);
 
-        // Find the placeholder ADD instruction in epilogue (has magic value 0x1111)
-        // Note: We need to search again after the splice operation
-        let add_index = self.instructions.iter().rposition(|inst| {
-            matches!(inst, ArmAsm::AddAddsubImm { rn, rd, imm12, .. }
-                     if *rn == SP && *rd == SP && *imm12 == 0x1111)
-        });
+        // --- Epilogue -------------------------------------------------
+        let add_index = self
+            .instructions
+            .iter()
+            .rposition(|inst| {
+                matches!(inst, ArmAsm::AddAddsubImm { rn, rd, imm12, .. }
+                         if *rn == SP && *rd == SP && *imm12 == 0x1111)
+            })
+            .unwrap_or_else(|| {
+                unreachable!("Expected ADD placeholder instruction for stack deallocation")
+            });
 
-        if let Some(index) = add_index {
-            // Unlink this frame from the GC chain, then restore callee-saved registers,
-            // then deallocate the stack space.
-            let mut dealloc_instructions = Vec::new();
-
-            // Inlined gc_frame_unlink:
-            //     prev = *(FP - 16)
-            //     *(X28 + 16) = prev
-            if self.frame_kind == FrameKind::BeagleFunction {
-                dealloc_instructions.push(ArmAsm::LdurGen {
-                    size: 0b11,
-                    imm9: -16,
-                    rn: X29,
-                    rt: X17,
-                });
-                dealloc_instructions.push(ArmAsm::StrImmGen {
-                    rt: X17,
-                    rn: X28,
-                    imm9: 0,
-                    imm12: 2,
-                    size: 0b11,
-                    class_selector: StrImmGenSelector::UnsignedOffset,
-                });
-            }
-
-            // Restore callee-saved registers from [SP + i*8]
-            for (i, reg) in used_callee_saved.iter().enumerate() {
-                // Load from [SP + i*8] using LDR with unsigned offset
-                // For 64-bit LDR, imm12 is scaled by 8, so imm12=i means byte offset i*8
-                dealloc_instructions.push(ArmAsm::LdrImmGen {
-                    rt: *reg,
-                    rn: SP,
-                    imm9: 0,
-                    imm12: i as i32,
-                    size: 0b11, // 64-bit
-                    class_selector: LdrImmGenSelector::UnsignedOffset,
-                });
-            }
-
-            // Now add the stack deallocation instructions
-            dealloc_instructions.extend(Self::generate_stack_deallocation(stack_bytes));
-
-            let delta = dealloc_instructions.len() as isize - 1;
-            self.instructions
-                .splice(index..=index, dealloc_instructions);
-
-            if delta != 0 {
-                for location in self.label_locations.values_mut() {
-                    if *location > index {
-                        *location = (*location as isize + delta) as usize;
-                    }
-                }
-            }
-        } else {
-            unreachable!("Expected to find ADD placeholder instruction for stack deallocation");
+        let mut dealloc = Vec::new();
+        if self.frame_kind == FrameKind::BeagleFunction {
+            self.phase_gc_frame_unlink(&mut dealloc);
         }
+        self.phase_callee_saved_restore(&mut dealloc, &used_callee_saved);
+        dealloc.extend(Self::generate_stack_deallocation(stack_bytes));
+        self.splice_and_shift_labels(add_index, dealloc);
     }
 
     /// Load a 64-bit immediate value using MOVZ/MOVK sequence (up to 4 instructions)
