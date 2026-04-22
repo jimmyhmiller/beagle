@@ -1,6 +1,161 @@
 use super::*;
 use crate::save_gc_context;
 
+/// Call a JIT-compiled Beagle function from Rust, routing through the
+/// `beagle.builtin/apply_call_N` shim trampoline so the call is a proper
+/// Rust→Beagle boundary.
+///
+/// Why: Beagle function prologues assume X28 holds the current thread's
+/// MutatorState pointer (inline `gc_frame_link` addresses `[x28, #16]`).
+/// When Rust calls a Beagle function via `transmute + direct call`, X28
+/// is whatever the Rust compiler happened to leave there — X28 is AAPCS
+/// callee-saved so Rust is free to use it as a scratch inside the
+/// function. The `apply_call_N` shim reloads X28 from
+/// `jit_load_current_mutator_state` at entry, so calling *it* from Rust
+/// is safe regardless of Rust's register usage.
+///
+/// `fn_ptr` is the untagged machine-code address of the target Beagle
+/// function. `args` is the argument list the target should receive in
+/// X0..X(N-1) (the shim shuffles our argument registers into place).
+unsafe fn call_beagle_via_apply_call(runtime: &Runtime, fn_ptr: usize, args: &[usize]) -> usize {
+    use std::mem::transmute;
+
+    let shim_name = format!("beagle.builtin/apply_call_{}", args.len());
+    let shim_entry = runtime
+        .get_function_by_name(&shim_name)
+        .unwrap_or_else(|| panic!("{} trampoline not compiled", shim_name));
+    let shim_ptr = runtime
+        .get_pointer(shim_entry)
+        .unwrap_or_else(|_| panic!("{} has no code pointer", shim_name));
+    let shim_ptr = shim_ptr as usize;
+
+    // apply_call_N takes (fn_ptr, arg0, ..., argN-1).
+    unsafe {
+        match args.len() {
+            0 => {
+                let f: extern "C" fn(usize) -> usize = transmute(shim_ptr);
+                f(fn_ptr)
+            }
+            1 => {
+                let f: extern "C" fn(usize, usize) -> usize = transmute(shim_ptr);
+                f(fn_ptr, args[0])
+            }
+            2 => {
+                let f: extern "C" fn(usize, usize, usize) -> usize = transmute(shim_ptr);
+                f(fn_ptr, args[0], args[1])
+            }
+            3 => {
+                let f: extern "C" fn(usize, usize, usize, usize) -> usize = transmute(shim_ptr);
+                f(fn_ptr, args[0], args[1], args[2])
+            }
+            4 => {
+                let f: extern "C" fn(usize, usize, usize, usize, usize) -> usize =
+                    transmute(shim_ptr);
+                f(fn_ptr, args[0], args[1], args[2], args[3])
+            }
+            5 => {
+                let f: extern "C" fn(usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(shim_ptr);
+                f(fn_ptr, args[0], args[1], args[2], args[3], args[4])
+            }
+            6 => {
+                let f: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
+                    transmute(shim_ptr);
+                f(fn_ptr, args[0], args[1], args[2], args[3], args[4], args[5])
+            }
+            7 => {
+                let f: extern "C" fn(
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                ) -> usize = transmute(shim_ptr);
+                f(
+                    fn_ptr, args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+                )
+            }
+            8 => {
+                let f: extern "C" fn(
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                ) -> usize = transmute(shim_ptr);
+                f(
+                    fn_ptr, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+                )
+            }
+            9 => {
+                let f: extern "C" fn(
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                ) -> usize = transmute(shim_ptr);
+                f(
+                    fn_ptr, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+                    args[8],
+                )
+            }
+            10 => {
+                let f: extern "C" fn(
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                ) -> usize = transmute(shim_ptr);
+                f(
+                    fn_ptr, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+                    args[8], args[9],
+                )
+            }
+            11 => {
+                let f: extern "C" fn(
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                    usize,
+                ) -> usize = transmute(shim_ptr);
+                f(
+                    fn_ptr, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+                    args[8], args[9], args[10],
+                )
+            }
+            n => panic!("call_beagle_via_apply_call: {} args not supported", n),
+        }
+    }
+}
+
 pub unsafe extern "C" fn throw_error(stack_pointer: usize, frame_pointer: usize) -> ! {
     save_gc_context!(stack_pointer, frame_pointer);
     print_stack(stack_pointer);
@@ -376,166 +531,30 @@ pub unsafe extern "C" fn call_variadic_function_value(
     let rest_fields = rest_heap.get_fields_mut();
     rest_fields[..num_extra].copy_from_slice(&all_args[min_args..(num_extra + min_args)]);
 
-    // Dispatch based on (min_args, is_closure)
-    // We support min_args 0-7 which covers typical use cases
-    // SAFETY: We're transmuting function pointers to call them with the correct number of arguments.
-    // The function pointer comes from get_function_by_pointer which validates it's a known function.
-    unsafe {
-        match (min_args, is_closure_bool) {
-            (0, false) => {
-                let f: fn(usize) -> usize = transmute(untagged_fn);
-                f(rest_array)
-            }
-            (0, true) => {
-                let f: fn(usize, usize) -> usize = transmute(untagged_fn);
-                f(closure_ptr, rest_array)
-            }
-            (1, false) => {
-                let f: fn(usize, usize) -> usize = transmute(untagged_fn);
-                f(all_args[0], rest_array)
-            }
-            (1, true) => {
-                let f: fn(usize, usize, usize) -> usize = transmute(untagged_fn);
-                f(closure_ptr, all_args[0], rest_array)
-            }
-            (2, false) => {
-                let f: fn(usize, usize, usize) -> usize = transmute(untagged_fn);
-                f(all_args[0], all_args[1], rest_array)
-            }
-            (2, true) => {
-                let f: fn(usize, usize, usize, usize) -> usize = transmute(untagged_fn);
-                f(closure_ptr, all_args[0], all_args[1], rest_array)
-            }
-            (3, false) => {
-                let f: fn(usize, usize, usize, usize) -> usize = transmute(untagged_fn);
-                f(all_args[0], all_args[1], all_args[2], rest_array)
-            }
-            (3, true) => {
-                let f: fn(usize, usize, usize, usize, usize) -> usize = transmute(untagged_fn);
-                f(
-                    closure_ptr,
-                    all_args[0],
-                    all_args[1],
-                    all_args[2],
-                    rest_array,
-                )
-            }
-            (4, false) => {
-                let f: fn(usize, usize, usize, usize, usize) -> usize = transmute(untagged_fn);
-                f(
-                    all_args[0],
-                    all_args[1],
-                    all_args[2],
-                    all_args[3],
-                    rest_array,
-                )
-            }
-            (4, true) => {
-                let f: fn(usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(untagged_fn);
-                f(
-                    closure_ptr,
-                    all_args[0],
-                    all_args[1],
-                    all_args[2],
-                    all_args[3],
-                    rest_array,
-                )
-            }
-            (5, false) => {
-                let f: fn(usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(untagged_fn);
-                f(
-                    all_args[0],
-                    all_args[1],
-                    all_args[2],
-                    all_args[3],
-                    all_args[4],
-                    rest_array,
-                )
-            }
-            (5, true) => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(untagged_fn);
-                f(
-                    closure_ptr,
-                    all_args[0],
-                    all_args[1],
-                    all_args[2],
-                    all_args[3],
-                    all_args[4],
-                    rest_array,
-                )
-            }
-            (6, false) => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(untagged_fn);
-                f(
-                    all_args[0],
-                    all_args[1],
-                    all_args[2],
-                    all_args[3],
-                    all_args[4],
-                    all_args[5],
-                    rest_array,
-                )
-            }
-            (6, true) => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(untagged_fn);
-                f(
-                    closure_ptr,
-                    all_args[0],
-                    all_args[1],
-                    all_args[2],
-                    all_args[3],
-                    all_args[4],
-                    all_args[5],
-                    rest_array,
-                )
-            }
-            (7, false) => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(untagged_fn);
-                f(
-                    all_args[0],
-                    all_args[1],
-                    all_args[2],
-                    all_args[3],
-                    all_args[4],
-                    all_args[5],
-                    all_args[6],
-                    rest_array,
-                )
-            }
-            (7, true) => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(untagged_fn);
-                f(
-                    closure_ptr,
-                    all_args[0],
-                    all_args[1],
-                    all_args[2],
-                    all_args[3],
-                    all_args[4],
-                    all_args[5],
-                    all_args[6],
-                    rest_array,
-                )
-            }
-            _ => {
-                throw_runtime_error(
-                    stack_pointer,
-                    "ArgumentError",
-                    format!(
-                        "Unsupported min_args value {} for variadic function call (max supported: 7). \
-                        Consider reducing the number of required parameters.",
-                        min_args
-                    ),
-                );
-            }
+    // Dispatch: call the target with (optionally closure_ptr,)
+    // all_args[0..min_args], rest_array. The apply_call_N shim loads X28,
+    // tags the arg count in X9, and shuffles argument registers, so this
+    // Rust→Beagle boundary doesn't depend on Rust preserving X28.
+    if min_args > 7 {
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "ArgumentError",
+                format!(
+                    "Unsupported min_args value {} for variadic function call (max supported: 7). \
+                    Consider reducing the number of required parameters.",
+                    min_args
+                ),
+            );
         }
     }
+    let mut call_args: Vec<usize> = Vec::with_capacity(min_args + 2);
+    if is_closure_bool {
+        call_args.push(closure_ptr);
+    }
+    call_args.extend_from_slice(&all_args[..min_args]);
+    call_args.push(rest_array);
+    unsafe { call_beagle_via_apply_call(runtime, untagged_fn as usize, &call_args) }
 }
 
 /// Apply a function to an array of arguments.
@@ -1093,6 +1112,10 @@ pub unsafe fn call_trampoline_with_closure(
 
 /// Helper function to call a function pointer with the given arguments.
 /// Handles both regular functions and closures (closure_ptr prepended as first arg).
+///
+/// Routes the call through the `apply_call_N` shim (which loads X28 from
+/// the current MutatorState on entry), so Rust is not required to have
+/// preserved X28 by the time this is invoked.
 #[inline(always)]
 pub unsafe fn call_with_args(
     fn_ptr: *const u8,
@@ -1101,176 +1124,26 @@ pub unsafe fn call_with_args(
     is_closure: bool,
     closure_ptr: usize,
 ) -> usize {
-    // SAFETY: We're transmuting function pointers to call them with the correct number of arguments.
-    // The function pointer comes from a known function in the runtime.
-    unsafe {
-        match (arg_count, is_closure) {
-            (0, false) => {
-                let f: fn() -> usize = transmute(fn_ptr);
-                f()
-            }
-            (0, true) => {
-                let f: fn(usize) -> usize = transmute(fn_ptr);
-                f(closure_ptr)
-            }
-            (1, false) => {
-                let f: fn(usize) -> usize = transmute(fn_ptr);
-                f(args[0])
-            }
-            (1, true) => {
-                let f: fn(usize, usize) -> usize = transmute(fn_ptr);
-                f(closure_ptr, args[0])
-            }
-            (2, false) => {
-                let f: fn(usize, usize) -> usize = transmute(fn_ptr);
-                f(args[0], args[1])
-            }
-            (2, true) => {
-                let f: fn(usize, usize, usize) -> usize = transmute(fn_ptr);
-                f(closure_ptr, args[0], args[1])
-            }
-            (3, false) => {
-                let f: fn(usize, usize, usize) -> usize = transmute(fn_ptr);
-                f(args[0], args[1], args[2])
-            }
-            (3, true) => {
-                let f: fn(usize, usize, usize, usize) -> usize = transmute(fn_ptr);
-                f(closure_ptr, args[0], args[1], args[2])
-            }
-            (4, false) => {
-                let f: fn(usize, usize, usize, usize) -> usize = transmute(fn_ptr);
-                f(args[0], args[1], args[2], args[3])
-            }
-            (4, true) => {
-                let f: fn(usize, usize, usize, usize, usize) -> usize = transmute(fn_ptr);
-                f(closure_ptr, args[0], args[1], args[2], args[3])
-            }
-            (5, false) => {
-                let f: fn(usize, usize, usize, usize, usize) -> usize = transmute(fn_ptr);
-                f(args[0], args[1], args[2], args[3], args[4])
-            }
-            (5, true) => {
-                let f: fn(usize, usize, usize, usize, usize, usize) -> usize = transmute(fn_ptr);
-                f(closure_ptr, args[0], args[1], args[2], args[3], args[4])
-            }
-            (6, false) => {
-                let f: fn(usize, usize, usize, usize, usize, usize) -> usize = transmute(fn_ptr);
-                f(args[0], args[1], args[2], args[3], args[4], args[5])
-            }
-            (6, true) => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(fn_ptr);
-                f(
-                    closure_ptr,
-                    args[0],
-                    args[1],
-                    args[2],
-                    args[3],
-                    args[4],
-                    args[5],
-                )
-            }
-            (7, false) => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(fn_ptr);
-                f(
-                    args[0], args[1], args[2], args[3], args[4], args[5], args[6],
-                )
-            }
-            (7, true) => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(fn_ptr);
-                f(
-                    closure_ptr,
-                    args[0],
-                    args[1],
-                    args[2],
-                    args[3],
-                    args[4],
-                    args[5],
-                    args[6],
-                )
-            }
-            (8, false) => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(fn_ptr);
-                f(
-                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
-                )
-            }
-            (8, true) => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(fn_ptr);
-                f(
-                    closure_ptr,
-                    args[0],
-                    args[1],
-                    args[2],
-                    args[3],
-                    args[4],
-                    args[5],
-                    args[6],
-                    args[7],
-                )
-            }
-            (9, false) => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(fn_ptr);
-                f(
-                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8],
-                )
-            }
-            (9, true) => {
-                let f: TrampolineFn10 = transmute(fn_ptr);
-                f(
-                    closure_ptr,
-                    args[0],
-                    args[1],
-                    args[2],
-                    args[3],
-                    args[4],
-                    args[5],
-                    args[6],
-                    args[7],
-                    args[8],
-                )
-            }
-            (10, false) => {
-                let f: TrampolineFn10 = transmute(fn_ptr);
-                f(
-                    args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
-                    args[8], args[9],
-                )
-            }
-            (10, true) => {
-                let f: TrampolineFn11 = transmute(fn_ptr);
-                f(
-                    closure_ptr,
-                    args[0],
-                    args[1],
-                    args[2],
-                    args[3],
-                    args[4],
-                    args[5],
-                    args[6],
-                    args[7],
-                    args[8],
-                    args[9],
-                )
-            }
-            _ => {
-                let sp = get_saved_stack_pointer();
-                throw_runtime_error(
-                    sp,
-                    "ArgumentError",
-                    format!(
-                        "apply: too many arguments ({}), max supported is 10",
-                        arg_count
-                    ),
-                );
-            }
+    if arg_count > 10 {
+        let sp = get_saved_stack_pointer();
+        unsafe {
+            throw_runtime_error(
+                sp,
+                "ArgumentError",
+                format!(
+                    "apply: too many arguments ({}), max supported is 10",
+                    arg_count
+                ),
+            );
         }
     }
+    let runtime = get_runtime().get();
+    let mut call_args: Vec<usize> = Vec::with_capacity(arg_count + 1);
+    if is_closure {
+        call_args.push(closure_ptr);
+    }
+    call_args.extend_from_slice(&args[..arg_count]);
+    unsafe { call_beagle_via_apply_call(runtime, fn_ptr as usize, &call_args) }
 }
 
 pub unsafe fn call_fn_0(runtime: &Runtime, function_name: &str) -> usize {
