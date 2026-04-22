@@ -513,7 +513,6 @@ pub struct LowLevelArm {
     pub stack_size: i32,
     pub max_stack_size: i32,
     pub max_locals: i32,
-    pub canonical_volatile_registers: Vec<Register>,
     // The goal right now is that everytime we
     // make a "built-in" call, we keep a map
     // of code offset to max stack value at a point.
@@ -573,9 +572,6 @@ impl Default for LowLevelArm {
 
 impl LowLevelArm {
     pub fn new() -> Self {
-        // Callee-saved set (X19-X28, including the reserved X28) comes from
-        // the single ABI definition. See `src/abi/mod.rs`.
-        let canonical_volatile_registers = crate::abi::arm64::ABI.callee_saved.to_vec();
         // X9 is reserved for arg count in variadic calling convention
         let temporary_registers = vec![X10, X11, X12];
         LowLevelArm {
@@ -583,9 +579,8 @@ impl LowLevelArm {
             label_locations: HashMap::new(),
             label_index: 0,
             labels: vec![],
-            canonical_volatile_registers: canonical_volatile_registers.clone(),
             canonical_temporary_registers: temporary_registers.clone(),
-            free_volatile_registers: canonical_volatile_registers,
+            free_volatile_registers: crate::abi::arm64::ABI.callee_saved.to_vec(),
             free_temporary_registers: temporary_registers,
             allocated_temporary_registers: vec![],
             allocated_volatile_registers: vec![],
@@ -1324,7 +1319,7 @@ impl LowLevelArm {
     pub fn free_register(&mut self, reg: Register) {
         // TODO: Properly fix the fact that the zero
         // register is being put in the volatile list
-        if !self.canonical_volatile_registers.contains(&reg) {
+        if !crate::abi::arm64::ABI.callee_saved.contains(&reg) {
             return;
         }
         self.free_volatile_registers.push(reg);

@@ -542,7 +542,7 @@ impl CodegenBackend for Arm64Backend {
     }
 
     fn get_volatile_register(&self, index: usize) -> Self::Register {
-        self.inner.canonical_volatile_registers[index]
+        crate::abi::arm64::ABI.callee_saved[index]
     }
 
     fn register_label_name(&mut self, name: &str) {

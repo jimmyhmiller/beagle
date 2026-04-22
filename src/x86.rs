@@ -23,7 +23,6 @@ pub struct LowLevelX86 {
     pub label_locations: HashMap<usize, usize>,
     pub label_index: usize,
     pub labels: Vec<String>,
-    pub canonical_volatile_registers: Vec<X86Register>,
     pub free_volatile_registers: Vec<X86Register>,
     pub allocated_volatile_registers: Vec<X86Register>,
     pub stack_size: i32,
@@ -70,7 +69,6 @@ impl LowLevelX86 {
         // because during call setup, we first set the argument registers, then load the function
         // pointer into a temp. If an arg register is used as the function temp, it clobbers
         // the argument we just set.
-        let canonical_volatile_registers = vec![R12, R13, R14, R15, RBX];
         let temporary_registers = vec![R10, R11, RAX];
 
         LowLevelX86 {
@@ -78,9 +76,8 @@ impl LowLevelX86 {
             label_locations: HashMap::new(),
             label_index: 0,
             labels: vec![],
-            canonical_volatile_registers: canonical_volatile_registers.clone(),
             canonical_temporary_registers: temporary_registers.clone(),
-            free_volatile_registers: canonical_volatile_registers,
+            free_volatile_registers: crate::abi::x86_64::ABI.callee_saved.to_vec(),
             free_temporary_registers: temporary_registers,
             allocated_temporary_registers: vec![],
             allocated_volatile_registers: vec![],
@@ -850,7 +847,7 @@ impl LowLevelX86 {
     }
 
     pub fn free_register(&mut self, register: X86Register) {
-        if self.canonical_volatile_registers.contains(&register)
+        if crate::abi::x86_64::ABI.callee_saved.contains(&register)
             && !self.free_volatile_registers.contains(&register)
         {
             self.free_volatile_registers.push(register);

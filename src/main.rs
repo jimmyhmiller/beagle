@@ -418,7 +418,7 @@ fn compile_trampoline(runtime: &mut Runtime) {
             // Rust's original value is preserved and restored on return — we're
             // about to overwrite X28 with the current thread's MutatorState
             // pointer for the duration of the Beagle call.
-            for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
+            for (i, reg) in crate::abi::arm64::ABI.callee_saved.iter().enumerate() {
                 lang.store_on_stack(*reg, -((i + 4_usize) as i32));
             }
 
@@ -446,13 +446,7 @@ fn compile_trampoline(runtime: &mut Runtime) {
 
             lang.pop_from_stack_indexed(X10, 0);
             lang.mov_reg(SP, X10);
-            for (i, reg) in lang
-                .canonical_volatile_registers
-                .clone()
-                .iter()
-                .enumerate()
-                .rev()
-            {
+            for (i, reg) in crate::abi::arm64::ABI.callee_saved.iter().enumerate().rev() {
                 lang.load_from_stack(*reg, -((i + 4_usize) as i32));
             }
             lang.epilogue();
@@ -482,19 +476,19 @@ fn compile_save_volatile_registers_for(runtime: &mut Runtime, register_num: usiz
 
             // We store volatile registers at local offsets 3-6, so need max_locals >= 7
             // (store_local at offset n stores at [RBP - (n+1)*8])
-            let num_volatile = lang.canonical_volatile_registers.len();
-            let max_offset = num_volatile + PADDING_FOR_ALIGNMENT as usize;
+            let callee_saved = crate::abi::x86_64::ABI.callee_saved;
+            let max_offset = callee_saved.len() + PADDING_FOR_ALIGNMENT as usize;
             lang.set_max_locals(max_offset + 1);
 
             lang.prelude();
 
-            for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
+            for (i, reg) in callee_saved.iter().enumerate() {
                 lang.store_local(*reg, (i + PADDING_FOR_ALIGNMENT as usize + 1) as i32);
             }
 
             lang.call(call_register);
 
-            for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
+            for (i, reg) in callee_saved.iter().enumerate() {
                 lang.load_local(*reg, (i + PADDING_FOR_ALIGNMENT as usize + 1) as i32);
             }
 
@@ -524,11 +518,12 @@ fn compile_save_volatile_registers_for(runtime: &mut Runtime, register_num: usiz
             lang.frame_kind = arm::FrameKind::ShimTrampoline;
             lang.prelude();
 
+            let callee_saved = crate::abi::arm64::ABI.callee_saved;
             lang.sub_stack_pointer(
-                (lang.canonical_volatile_registers.len() + PADDING_FOR_ALIGNMENT as usize) as i32,
+                (callee_saved.len() + PADDING_FOR_ALIGNMENT as usize) as i32,
             );
 
-            for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
+            for (i, reg) in callee_saved.iter().enumerate() {
                 lang.store_on_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
             }
 
@@ -539,12 +534,12 @@ fn compile_save_volatile_registers_for(runtime: &mut Runtime, register_num: usiz
 
             lang.call(call_register);
 
-            for (i, reg) in lang.canonical_volatile_registers.clone().iter().enumerate() {
+            for (i, reg) in callee_saved.iter().enumerate() {
                 lang.load_from_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
             }
 
             lang.add_stack_pointer(
-                (lang.canonical_volatile_registers.len() + PADDING_FOR_ALIGNMENT as usize) as i32,
+                (callee_saved.len() + PADDING_FOR_ALIGNMENT as usize) as i32,
             );
 
             lang.epilogue();
