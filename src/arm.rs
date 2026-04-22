@@ -1124,6 +1124,79 @@ impl LowLevelArm {
         self.call(register);
     }
 
+    /// Emit code that leaves `X28 = current_mutator_state()` and preserves
+    /// every register in `preserve` across the call.
+    ///
+    /// Use this at every Rust→Beagle boundary. Beagle function prologues
+    /// assume X28 holds the per-thread MutatorState pointer (it's addressed
+    /// at a fixed offset by the inlined gc_frame_link), but X28 is only an
+    /// AAPCS callee-saved register — Rust may have used it as a scratch by
+    /// the time it calls back into Beagle. Emitting this right before the
+    /// branch into Beagle guarantees a valid value.
+    ///
+    /// Implementation: pre-index STP pairs push `preserve` below SP (16-byte
+    /// aligned; odd-length lists are padded with XZR), BLR to
+    /// `jit_load_current_mutator_state`, `mov x28, x0`, then post-index LDP
+    /// pairs restore in reverse. X17 is used as the call-target scratch, so
+    /// `preserve` must not contain X17 (it's caller-clobbered by AAPCS anyway
+    /// so callers shouldn't expect it to survive). X28 is the destination,
+    /// so preserving it would be meaningless. X0 is the Rust call's return
+    /// register; it's restored to its pre-call value via the LDP, so
+    /// callers can include it in `preserve` safely.
+    pub fn emit_load_mutator_state(&mut self, preserve: &[Register]) {
+        debug_assert!(
+            !preserve.contains(&X17),
+            "X17 is used as scratch for the call; it's caller-clobbered anyway"
+        );
+        debug_assert!(
+            !preserve.contains(&X28),
+            "X28 is the destination of this call; preserving it is meaningless"
+        );
+
+        // Pack into pairs. Odd count pads with XZR so SP stays 16-aligned.
+        let mut pairs: Vec<(Register, Register)> = Vec::with_capacity(preserve.len().div_ceil(2));
+        let mut i = 0;
+        while i < preserve.len() {
+            let a = preserve[i];
+            let b = if i + 1 < preserve.len() {
+                preserve[i + 1]
+            } else {
+                ZERO_REGISTER
+            };
+            pairs.push((a, b));
+            i += 2;
+        }
+
+        for (a, b) in &pairs {
+            self.instructions.push(ArmAsm::StpGen {
+                opc: 0b10,
+                imm7: -2,
+                rt2: *b,
+                rn: SP,
+                rt: *a,
+                class_selector: StpGenSelector::PreIndex,
+            });
+        }
+
+        let ms_fn_ptr = crate::runtime::jit_load_current_mutator_state as usize;
+        for instr in Self::mov_64_bit_num(X17, ms_fn_ptr as isize) {
+            self.instructions.push(instr);
+        }
+        self.instructions.push(ArmAsm::Blr { rn: X17 });
+        self.mov_reg(X28, X0);
+
+        for (a, b) in pairs.iter().rev() {
+            self.instructions.push(ArmAsm::LdpGen {
+                opc: 0b10,
+                imm7: 2,
+                rt2: *b,
+                rn: SP,
+                rt: *a,
+                class_selector: LdpGenSelector::PostIndex,
+            });
+        }
+    }
+
     pub fn recurse(&mut self, label: Label) {
         self.instructions.push(branch_with_link(label.index as i32));
     }
