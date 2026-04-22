@@ -608,8 +608,7 @@ fn compile_apply_call_trampolines_arm64(runtime: &mut Runtime) {
 
         let mut lang = arm::LowLevelArm::new();
         // Shim trampoline — its frame isn't a Beagle frame, so skip the
-        // inlined gc_frame_link / gc_frame_unlink. (x28 is inherited from
-        // the caller, which is Beagle code that already has it loaded.)
+        // inlined gc_frame_link / gc_frame_unlink.
         lang.skip_gc_frame_link = true;
 
         // Function receives: fn_ptr in X0, then arg0..argN-1 in X1..X(N)
@@ -625,6 +624,32 @@ fn compile_apply_call_trampolines_arm64(runtime: &mut Runtime) {
         // 3. Load our stack args into X7 and push extras for target
 
         lang.prelude();
+
+        // Load x28 = current MutatorState. Historically apply_call was
+        // only invoked from Beagle, where x28 was already valid — but
+        // it's also reachable from Rust builtins (apply_function and
+        // friends in src/builtins/apply.rs) via direct fn-pointer calls,
+        // and Rust is free to clobber x28 internally by AAPCS rules. By
+        // reloading x28 here the shim becomes safe for both callers at
+        // the cost of one TLS fetch per apply_call.
+        //
+        // Preserve the incoming register args (X0 = fn_ptr + X1..X7 = up
+        // to 7 args). Stack args at [FP+16..] are safe — we don't touch
+        // SP/FP during the call.
+        {
+            use crate::machine_code::arm_codegen::{X1, X2, X3, X4, X5, X6, X7};
+            let preserve: &[_] = match num_args {
+                0 => &[X0],
+                1 => &[X0, X1],
+                2 => &[X0, X1, X2],
+                3 => &[X0, X1, X2, X3],
+                4 => &[X0, X1, X2, X3, X4],
+                5 => &[X0, X1, X2, X3, X4, X5],
+                6 => &[X0, X1, X2, X3, X4, X5, X6],
+                _ => &[X0, X1, X2, X3, X4, X5, X6, X7],
+            };
+            lang.emit_load_mutator_state(preserve);
+        }
 
         // Save fn_ptr from X0 to X10 before we shuffle args
         lang.mov_reg(X10, X0);
