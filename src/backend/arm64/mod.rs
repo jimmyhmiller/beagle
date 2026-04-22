@@ -36,6 +36,10 @@ impl CodegenBackend for Arm64Backend {
         &crate::abi::arm64::ABI
     }
 
+    fn lower_lir(&mut self, op: &crate::lir::LirOp<Self::Register>) {
+        self.inner.lower_lir(op);
+    }
+
     fn new() -> Self {
         Arm64Backend {
             inner: LowLevelArm::new(),

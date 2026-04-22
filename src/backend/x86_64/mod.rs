@@ -36,6 +36,18 @@ impl CodegenBackend for X86_64Backend {
         &crate::abi::x86_64::ABI
     }
 
+    fn lower_lir(&mut self, op: &crate::lir::LirOp<Self::Register>) {
+        // x86-64 hasn't adopted the reserved mutator-state register model
+        // (no inline gc_frame_link, no x28-equivalent). When it does, this
+        // should mirror the ARM lowering: MOV through the System V arg
+        // scratch register, RCX/R11 for the call-target scratch, etc.
+        let _ = op;
+        todo!(
+            "x86-64 backend: Lir lowering not implemented. The x86 path \
+             still uses the thread-local slow path for MutatorState access."
+        )
+    }
+
     fn new() -> Self {
         X86_64Backend {
             inner: LowLevelX86::new(),

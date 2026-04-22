@@ -73,6 +73,7 @@ pub mod common;
 mod compiler;
 mod gc;
 pub mod ir;
+pub mod lir;
 pub mod machine_code;
 pub mod mmap_utils;
 pub mod native_memory;

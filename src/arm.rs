@@ -1129,6 +1129,110 @@ impl LowLevelArm {
         self.call(register);
     }
 
+    /// Lower a single Lir op to ARM64 instructions, appending to `out`.
+    /// Stateless with respect to `self`'s `instructions` buffer so the
+    /// prologue/epilogue phase helpers can lower into their own staging
+    /// vector. See `src/lir/mod.rs` for op semantics.
+    pub fn lower_lir_into(out: &mut Vec<ArmAsm>, op: &crate::lir::LirOp<Register>) {
+        use crate::lir::LirOp;
+        let mutator_state_reg = crate::abi::arm64::ABI.mutator_state_reg;
+        match op {
+            LirOp::LoadMutatorField { field, dst } => {
+                // `ldr dst, [x28, #byte_offset]`. UnsignedOffset-class
+                // `ldr` uses imm12 scaled by 8 for 64-bit loads.
+                let imm12 = field.byte_offset() / 8;
+                out.push(ArmAsm::LdrImmGen {
+                    rt: *dst,
+                    rn: mutator_state_reg,
+                    imm9: 0,
+                    imm12,
+                    size: 0b11,
+                    class_selector: LdrImmGenSelector::UnsignedOffset,
+                });
+            }
+            LirOp::StoreMutatorField { field, src } => {
+                let imm12 = field.byte_offset() / 8;
+                out.push(ArmAsm::StrImmGen {
+                    rt: *src,
+                    rn: mutator_state_reg,
+                    imm9: 0,
+                    imm12,
+                    size: 0b11,
+                    class_selector: StrImmGenSelector::UnsignedOffset,
+                });
+            }
+            LirOp::CallRuntime { target, preserve } => {
+                // Pre-index STP pairs push `preserve` below SP (XZR pads
+                // odd-length lists so SP stays 16-aligned), BLR to the
+                // target symbol, post-index LDP pairs restore in reverse.
+                // X17 is the call-target scratch so callers may keep X16
+                // in `preserve`.
+                debug_assert!(
+                    !preserve.contains(&X17),
+                    "X17 is caller-clobbered scratch; preserving it is meaningless"
+                );
+                debug_assert!(
+                    !preserve.contains(&mutator_state_reg),
+                    "mutator_state_reg is the destination; preserving it is meaningless"
+                );
+
+                let mut pairs: Vec<(Register, Register)> =
+                    Vec::with_capacity(preserve.len().div_ceil(2));
+                let mut i = 0;
+                while i < preserve.len() {
+                    let a = preserve[i];
+                    let b = if i + 1 < preserve.len() {
+                        preserve[i + 1]
+                    } else {
+                        ZERO_REGISTER
+                    };
+                    pairs.push((a, b));
+                    i += 2;
+                }
+
+                for (a, b) in &pairs {
+                    out.push(ArmAsm::StpGen {
+                        opc: 0b10,
+                        imm7: -2,
+                        rt2: *b,
+                        rn: SP,
+                        rt: *a,
+                        class_selector: StpGenSelector::PreIndex,
+                    });
+                }
+
+                for instr in Self::mov_64_bit_num(X17, target.addr() as isize) {
+                    out.push(instr);
+                }
+                out.push(ArmAsm::Blr { rn: X17 });
+
+                // The only runtime sym today returns the MutatorState
+                // pointer in X0; route it into the reserved register.
+                // Future CallRuntime targets that don't produce a
+                // MutatorState will need a richer protocol (e.g., a
+                // `result_dst` field on the op).
+                out.push(mov_reg(mutator_state_reg, X0));
+
+                for (a, b) in pairs.iter().rev() {
+                    out.push(ArmAsm::LdpGen {
+                        opc: 0b10,
+                        imm7: 2,
+                        rt2: *b,
+                        rn: SP,
+                        rt: *a,
+                        class_selector: LdpGenSelector::PostIndex,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Convenience: lower a Lir op directly into this backend's
+    /// instruction buffer. Used by the `CodegenBackend` trait impl.
+    pub fn lower_lir(&mut self, op: &crate::lir::LirOp<Register>) {
+        Self::lower_lir_into(&mut self.instructions, op);
+    }
+
     /// Emit code that leaves `X28 = current_mutator_state()` and preserves
     /// every register in `preserve` across the call.
     ///
@@ -1149,58 +1253,11 @@ impl LowLevelArm {
     /// register; it's restored to its pre-call value via the LDP, so
     /// callers can include it in `preserve` safely.
     pub fn emit_load_mutator_state(&mut self, preserve: &[Register]) {
-        let mutator_state_reg = crate::abi::arm64::ABI.mutator_state_reg;
-        debug_assert!(
-            !preserve.contains(&X17),
-            "X17 is used as scratch for the call; it's caller-clobbered anyway"
-        );
-        debug_assert!(
-            !preserve.contains(&mutator_state_reg),
-            "mutator_state_reg is the destination of this call; preserving it is meaningless"
-        );
-
-        // Pack into pairs. Odd count pads with XZR so SP stays 16-aligned.
-        let mut pairs: Vec<(Register, Register)> = Vec::with_capacity(preserve.len().div_ceil(2));
-        let mut i = 0;
-        while i < preserve.len() {
-            let a = preserve[i];
-            let b = if i + 1 < preserve.len() {
-                preserve[i + 1]
-            } else {
-                ZERO_REGISTER
-            };
-            pairs.push((a, b));
-            i += 2;
-        }
-
-        for (a, b) in &pairs {
-            self.instructions.push(ArmAsm::StpGen {
-                opc: 0b10,
-                imm7: -2,
-                rt2: *b,
-                rn: SP,
-                rt: *a,
-                class_selector: StpGenSelector::PreIndex,
-            });
-        }
-
-        let ms_fn_ptr = crate::runtime::jit_load_current_mutator_state as usize;
-        for instr in Self::mov_64_bit_num(X17, ms_fn_ptr as isize) {
-            self.instructions.push(instr);
-        }
-        self.instructions.push(ArmAsm::Blr { rn: X17 });
-        self.mov_reg(mutator_state_reg, X0);
-
-        for (a, b) in pairs.iter().rev() {
-            self.instructions.push(ArmAsm::LdpGen {
-                opc: 0b10,
-                imm7: 2,
-                rt2: *b,
-                rn: SP,
-                rt: *a,
-                class_selector: LdpGenSelector::PostIndex,
-            });
-        }
+        use crate::lir::{LirOp, RuntimeSym};
+        self.lower_lir(&LirOp::CallRuntime {
+            target: RuntimeSym::LoadMutatorState,
+            preserve: preserve.to_vec(),
+        });
     }
 
     pub fn recurse(&mut self, label: Label) {
@@ -1567,7 +1624,8 @@ impl LowLevelArm {
     /// the reserved mutator-state register to hold a valid
     /// `MutatorState*` on entry.
     fn phase_gc_frame_link(&self, out: &mut Vec<ArmAsm>) {
-        let ms = crate::abi::arm64::ABI.mutator_state_reg;
+        use crate::lir::{LirOp, MutatorField};
+        // header = FP - 8 (into X16)
         out.push(ArmAsm::SubAddsubImm {
             sf: 1,
             rn: X29,
@@ -1575,22 +1633,23 @@ impl LowLevelArm {
             imm12: 8,
             sh: 0,
         });
-        out.push(ArmAsm::LdrImmGen {
-            rt: X17,
-            rn: ms,
-            imm9: 0,
-            imm12: 2, // scaled by 8 → byte offset 16
-            size: 0b11,
-            class_selector: LdrImmGenSelector::UnsignedOffset,
-        });
-        out.push(ArmAsm::StrImmGen {
-            rt: X16,
-            rn: ms,
-            imm9: 0,
-            imm12: 2,
-            size: 0b11,
-            class_selector: StrImmGenSelector::UnsignedOffset,
-        });
+        // prev = MutatorState.gc_frame_top
+        Self::lower_lir_into(
+            out,
+            &LirOp::LoadMutatorField {
+                field: MutatorField::GcFrameTop,
+                dst: X17,
+            },
+        );
+        // MutatorState.gc_frame_top = header
+        Self::lower_lir_into(
+            out,
+            &LirOp::StoreMutatorField {
+                field: MutatorField::GcFrameTop,
+                src: X16,
+            },
+        );
+        // *(FP - 16) = prev
         out.push(ArmAsm::SturGen {
             size: 0b11,
             imm9: -16,
@@ -1655,21 +1714,22 @@ impl LowLevelArm {
     /// Epilogue phase: unlink this frame from the GC chain.
     /// `prev = *(FP - 16); MutatorState.gc_frame_top = prev`.
     fn phase_gc_frame_unlink(&self, out: &mut Vec<ArmAsm>) {
-        let ms = crate::abi::arm64::ABI.mutator_state_reg;
+        use crate::lir::{LirOp, MutatorField};
+        // prev = *(FP - 16)
         out.push(ArmAsm::LdurGen {
             size: 0b11,
             imm9: -16,
             rn: X29,
             rt: X17,
         });
-        out.push(ArmAsm::StrImmGen {
-            rt: X17,
-            rn: ms,
-            imm9: 0,
-            imm12: 2,
-            size: 0b11,
-            class_selector: StrImmGenSelector::UnsignedOffset,
-        });
+        // MutatorState.gc_frame_top = prev
+        Self::lower_lir_into(
+            out,
+            &LirOp::StoreMutatorField {
+                field: MutatorField::GcFrameTop,
+                src: X17,
+            },
+        );
     }
 
     /// Epilogue phase: restore the callee-saved registers saved by

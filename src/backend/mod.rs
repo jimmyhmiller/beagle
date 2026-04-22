@@ -52,6 +52,14 @@ pub trait CodegenBackend: Sized {
     /// register indices or recomputing pool membership inline.
     fn abi(&self) -> &'static crate::abi::BeagleAbi<Self::Register>;
 
+    /// Lower one `LirOp` to machine instructions appended to this
+    /// backend's instruction buffer. The op enum's documentation spells
+    /// out semantics; each backend translates those semantics into its
+    /// architecture-specific sequence. Backends are free to `todo!()`
+    /// ops they haven't implemented yet — the caller must not emit an
+    /// unsupported op for the target architecture.
+    fn lower_lir(&mut self, op: &crate::lir::LirOp<Self::Register>);
+
     /// Create a new backend instance.
     fn new() -> Self;
 
