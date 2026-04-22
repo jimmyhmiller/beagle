@@ -41,12 +41,13 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         bytes: usize,
         kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-        // Single-threaded fast path: skip the pthread_mutex when only one
-        // thread is registered. The lock exists to serialize allocator state
-        // across mutators; with one mutator there is no contention and the
-        // lock is pure overhead. Profiling showed pthread_mutex_lock/unlock
-        // accounting for ~10% of CPU on the binary-tree benchmark.
-        if self.registered_threads.load(Ordering::Acquire) <= 1 {
+        // Single-threaded fast path: skip the pthread_mutex when there are no
+        // registered child threads. `register_thread` is only called for spawned
+        // threads; the main thread is never counted, so `registered_threads == 0`
+        // means only the main thread is live and there is no contention.
+        // Checking `<= 1` is wrong: count=1 means main + one child = two mutators
+        // both racing on the lock-free path.
+        if self.registered_threads.load(Ordering::Acquire) == 0 {
             return self.alloc.try_allocate(bytes, kind);
         }
         let lock = self.mutex.lock().unwrap();
@@ -60,7 +61,7 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         words: usize,
         kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>> {
-        if self.registered_threads.load(Ordering::Acquire) <= 1 {
+        if self.registered_threads.load(Ordering::Acquire) == 0 {
             return self.alloc.try_allocate_zeroed(words, kind);
         }
         let lock = self.mutex.lock().unwrap();
