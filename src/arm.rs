@@ -1163,6 +1163,7 @@ impl LowLevelArm {
             }
             LirOp::InlineBumpAllocate {
                 size_bytes,
+                header,
                 dst,
                 slow_path,
             } => {
@@ -1241,6 +1242,18 @@ impl LowLevelArm {
                         src: X16,
                     },
                 );
+                // Write the object header at [dst]. X17 is free again.
+                for instr in Self::mov_64_bit_num(X17, *header as isize) {
+                    out.push(instr);
+                }
+                out.push(ArmAsm::StrImmGen {
+                    rt: X17,
+                    rn: *dst,
+                    imm9: 0,
+                    imm12: 0,
+                    size: 0b11,
+                    class_selector: StrImmGenSelector::UnsignedOffset,
+                });
                 // Tag the pointer as a HeapObject:
                 //   dst_raw << 3 | 0b110
                 // The `| 6` is an `add #6` here because the low 3 bits of

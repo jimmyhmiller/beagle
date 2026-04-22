@@ -25,6 +25,50 @@ impl<Alloc: Allocator> MutexAllocator<Alloc> {
         let _lock = self.mutex.lock().unwrap();
         f(&mut self.alloc)
     }
+
+    /// Inline fast-path interop: every `try_allocate*` call begins by
+    /// syncing the inner allocator's bump frontier from the current
+    /// thread's `MutatorState.alloc_ptr`, because the JIT inline fast
+    /// path has been bumping that pointer without telling the inner
+    /// allocator. Without this sync, slow-path allocations would happen
+    /// at the inner allocator's stale offset and overlap with fast-path
+    /// allocations.
+    ///
+    /// A `MutatorState.alloc_ptr` of 0 (bootstrap, or disarmed via
+    /// multi-mutator registration) is handled as a no-op by the inner
+    /// allocator's `sync_allocator_frontier`.
+    fn sync_from_mutator_state(&mut self) {
+        // Multi-mutator safety: when more than one thread is registered,
+        // the inline fast path is disarmed (alloc_end = alloc_ptr in
+        // every MutatorState) and the shared allocator frontier is
+        // authoritative. Syncing from any one thread's stale
+        // MutatorState would clobber progress made by the others.
+        if self.registered_threads.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        let ms_alloc_ptr = unsafe { (*crate::runtime::current_mutator_state()).alloc_ptr };
+        self.alloc.sync_allocator_frontier(ms_alloc_ptr);
+    }
+
+    /// Inline fast-path interop: after every `try_allocate*` call,
+    /// push the inner allocator's new frontier back to the current
+    /// thread's `MutatorState.alloc_ptr`/`alloc_end`, so subsequent
+    /// JIT inline fast-path reads see the up-to-date window.
+    fn refresh_mutator_state(&mut self) {
+        // Multi-mutator safety: when more than one thread is registered,
+        // do not expose the shared frontier to the inline fast path —
+        // two threads would race on the bump. Write (0, 0) to disarm.
+        let (alloc_ptr, alloc_end) = if self.registered_threads.load(Ordering::Acquire) == 0 {
+            self.alloc.allocator_frontier()
+        } else {
+            (0, 0)
+        };
+        unsafe {
+            let state = crate::runtime::current_mutator_state();
+            (*state).alloc_ptr = alloc_ptr;
+            (*state).alloc_end = alloc_end;
+        }
+    }
 }
 
 impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
@@ -48,7 +92,10 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         // Checking `<= 1` is wrong: count=1 means main + one child = two mutators
         // both racing on the lock-free path.
         if self.registered_threads.load(Ordering::Acquire) == 0 {
-            return self.alloc.try_allocate(bytes, kind);
+            self.sync_from_mutator_state();
+            let result = self.alloc.try_allocate(bytes, kind);
+            self.refresh_mutator_state();
+            return result;
         }
         let lock = self.mutex.lock().unwrap();
         let result = self.alloc.try_allocate(bytes, kind);
@@ -62,7 +109,10 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         kind: BuiltInTypes,
     ) -> Result<AllocateAction, Box<dyn Error>> {
         if self.registered_threads.load(Ordering::Acquire) == 0 {
-            return self.alloc.try_allocate_zeroed(words, kind);
+            self.sync_from_mutator_state();
+            let result = self.alloc.try_allocate_zeroed(words, kind);
+            self.refresh_mutator_state();
+            return result;
         }
         let lock = self.mutex.lock().unwrap();
         let result = self.alloc.try_allocate_zeroed(words, kind);
@@ -134,5 +184,9 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
             return (0, 0);
         }
         self.alloc.allocator_frontier()
+    }
+
+    fn sync_allocator_frontier(&mut self, alloc_ptr: usize) {
+        self.alloc.sync_allocator_frontier(alloc_ptr);
     }
 }

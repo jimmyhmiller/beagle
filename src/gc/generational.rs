@@ -599,6 +599,14 @@ impl Allocator for GenerationalGC {
         (self.young.frontier(), self.young.end_address())
     }
 
+    fn sync_allocator_frontier(&mut self, alloc_ptr: usize) {
+        let base = self.young.base_address();
+        let end = self.young.end_address();
+        if alloc_ptr >= base && alloc_ptr <= end {
+            self.young.allocation_offset = alloc_ptr - base;
+        }
+    }
+
     /// Write barrier: record old-to-young pointers.
     ///
     /// Called after writing a pointer into a heap object. If the object is in

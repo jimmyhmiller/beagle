@@ -122,6 +122,18 @@ pub trait Allocator {
         (0, 0)
     }
 
+    /// Sync the allocator's internal frontier to the supplied
+    /// `alloc_ptr` — used by the Rust slow path to absorb JIT-side
+    /// bumps that happened before the slow-path entry. The slow path
+    /// would otherwise allocate from a stale offset and overlap with
+    /// fast-path allocations.
+    ///
+    /// If `alloc_ptr` isn't within this allocator's bump region
+    /// (e.g., `alloc_ptr == 0` on the first allocation), the call is
+    /// a no-op. The default implementation does nothing so that
+    /// non-bump-pointer allocators stay correct.
+    fn sync_allocator_frontier(&mut self, _alloc_ptr: usize) {}
+
     /// Write barrier for generational GC.
     ///
     /// Called after writing a pointer value into a heap object's field.

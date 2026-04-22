@@ -197,14 +197,14 @@ pub enum Instruction {
     LoadLabelAddress(Value, Label), // dest, label - loads the address of a label into a register
     CaptureContinuation(Value, Label, usize, usize), // dest, resume_label, result_local_index, builtin_fn_ptr
     /// Inline bump-pointer allocation. Lowers to `LirOp::InlineBumpAllocate`
-    /// for a fast path that bumps `MutatorState.alloc_ptr` and tags the
-    /// result as a HeapObject. On overflow it branches to `slow_path`,
-    /// where the IR is expected to have emitted the traditional call
-    /// through the `allocate` builtin followed by a jump to the
-    /// continuation. See `IrCompiler::allocate`.
+    /// for a fast path that bumps `MutatorState.alloc_ptr`, writes a
+    /// default object header, and tags the result as a HeapObject. On
+    /// overflow it branches to `slow_path`, where the IR is expected to
+    /// have emitted the traditional call through the `allocate` builtin
+    /// followed by a jump to the continuation. See `IrCompiler::allocate_static`.
     ///
-    /// Fields: (dst, size_bytes, slow_path)
-    InlineBumpAllocate(Value, u32, Label),
+    /// Fields: (dst, size_bytes, header, slow_path)
+    InlineBumpAllocate(Value, u32, u64, Label),
     CaptureContinuationWithSaves(Value, Label, usize, usize, Vec<SavedValue>), // dest, resume_label, result_local_index, builtin_fn_ptr, saved live roots
     CaptureContinuationTagged(Value, Label, usize, usize, Value), // dest, resume_label, result_local_index, builtin_fn_ptr, tag_value
     CaptureContinuationTaggedWithSaves(Value, Label, usize, usize, Value, Vec<SavedValue>), // dest, resume_label, result_local_index, builtin_fn_ptr, tag_value, saved live roots
@@ -624,7 +624,7 @@ impl Instruction {
                 .iter()
                 .filter_map(|save| (&save.source).try_into().ok())
                 .collect(),
-            Instruction::InlineBumpAllocate(dst, _, _) => {
+            Instruction::InlineBumpAllocate(dst, _, _, _) => {
                 get_register!(dst)
             }
         }
@@ -848,7 +848,7 @@ impl Instruction {
                 replace_register!(value, old_register, new_register);
                 replace_register!(cont_ptr, old_register, new_register);
             }
-            Instruction::InlineBumpAllocate(dst, _, _) => {
+            Instruction::InlineBumpAllocate(dst, _, _, _) => {
                 replace_register!(dst, old_register, new_register);
             }
         }
@@ -3330,7 +3330,7 @@ impl Ir {
                     backend.call_builtin(fn_ptr);
                     // Note: execution never continues past this point
                 }
-                Instruction::InlineBumpAllocate(dst, size_bytes, slow_path) => {
+                Instruction::InlineBumpAllocate(dst, size_bytes, header, slow_path) => {
                     let dst_reg = self.value_to_register(dst, backend);
                     // The Lir's slow_path is a backend-level label index;
                     // the IR side stores the IR-level label here, so we
@@ -3339,6 +3339,7 @@ impl Ir {
                     let slow_path_lang = *ir_label_to_lang_label.get(slow_path).unwrap();
                     backend.lower_lir(&crate::lir::LirOp::InlineBumpAllocate {
                         size_bytes: *size_bytes,
+                        header: *header,
                         dst: dst_reg,
                         slow_path: slow_path_lang,
                     });
@@ -3997,43 +3998,40 @@ impl Ir {
     /// sizes and oversized allocations (> 4095 bytes including header)
     /// fall through to `allocate` directly.
     pub fn allocate_static(&mut self, size_words: u32) -> Value {
-        // TODO(Commit C): wire the fast path through once the register
-        // ordering / label issue in the InlineBumpAllocate flow is
-        // resolved. Today this just delegates to the builtin so the
-        // surrounding infrastructure is exercised without regressing
-        // the float arithmetic tests.
-        //
-        // The commented-out block below shows the intended fast + slow
-        // composition: the IR emits an `InlineBumpAllocate` whose ARM
-        // lowering bumps `MutatorState.alloc_ptr` through `x28` and
-        // branches to a slow-path label on TLAB overflow. The slow
-        // path calls the `allocate` builtin and writes its result
-        // into the same destination register the fast path writes,
-        // then both paths converge at `done`.
+        let size_bytes = size_words * 8 + 8;
+        if size_bytes > 0xFFF {
+            let size_reg = self.assign_new(Value::TaggedConstant(size_words as isize));
+            return self.allocate(size_reg.into());
+        }
+        // Default header mirroring what `Space::write_object` writes in
+        // the slow path — type_id=0, size=words, no flags. Masked
+        // follow-up writes (`write_struct_id_with_version`) rely on
+        // the size field being correct.
+        let default_header = crate::types::Header {
+            type_id: 0,
+            type_data: 0,
+            size: size_words as u16,
+            opaque: false,
+            marked: false,
+            large: false,
+            type_flags: 0,
+        }
+        .to_usize() as u64;
+        let dst = self.next_register(None, true);
+        let slow_path = self.label("alloc_slow");
+        let done = self.label("alloc_done");
+        self.instructions.push(Instruction::InlineBumpAllocate(
+            Value::Register(dst),
+            size_bytes,
+            default_header,
+            slow_path,
+        ));
+        self.jump(done);
+        self.write_label(slow_path);
         let size_reg = self.assign_new(Value::TaggedConstant(size_words as isize));
-        self.allocate(size_reg.into())
-
-        // Fast+slow composition, staged for follow-up debugging:
-        //
-        // let size_bytes = size_words * 8 + 8;
-        // if size_bytes > 0xFFF {
-        //     let size_reg = self.assign_new(Value::TaggedConstant(size_words as isize));
-        //     return self.allocate(size_reg.into());
-        // }
-        // let dst = self.next_register(None, true);
-        // let slow_path = self.label("alloc_slow");
-        // let done = self.label("alloc_done");
-        // self.instructions.push(Instruction::InlineBumpAllocate(
-        //     Value::Register(dst),
-        //     size_bytes,
-        //     slow_path,
-        // ));
-        // self.jump(done);
-        // self.write_label(slow_path);
-        // let size_reg = self.assign_new(Value::TaggedConstant(size_words as isize));
-        // let slow_result = self.allocate(size_reg.into());
-        // self.assign(dst, slow_result);
-        // self.write_label(done);
-        // Value::Register(dst)
+        let slow_result = self.allocate(size_reg.into());
+        self.assign(dst, slow_result);
+        self.write_label(done);
+        Value::Register(dst)
     }
 }

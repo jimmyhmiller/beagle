@@ -4952,20 +4952,6 @@ impl Runtime {
             Err(e) => Err(e),
         };
 
-        // Refresh the current thread's MutatorState with the allocator's
-        // current bump-pointer frontier. The inline JIT allocator
-        // (Commit B) will read these through the reserved mutator-state
-        // register; populating them on every slow path keeps the two
-        // views consistent. MutexAllocator returns (0, 0) when more than
-        // one mutator is registered, which disarms the future inline
-        // fast path.
-        let (alloc_ptr, alloc_end) = self.memory.heap.allocator_frontier();
-        unsafe {
-            let state = crate::runtime::current_mutator_state();
-            (*state).alloc_ptr = alloc_ptr;
-            (*state).alloc_end = alloc_end;
-        }
-
         tagged
     }
 
@@ -5253,11 +5239,28 @@ impl Runtime {
     /// With frame pointers enabled, we just read the current FP and walk from there.
     fn run_gc(&mut self, _stack_pointer: usize, frame_pointer: usize) {
         self.gc_impl(frame_pointer);
+        // GC may have cleared / compacted the young gen. Refresh the
+        // current thread's MutatorState so the next try_allocate's
+        // sync_from_mutator_state doesn't clobber the post-GC frontier
+        // by reading a pre-GC value.
+        let (alloc_ptr, alloc_end) = self.memory.heap.allocator_frontier();
+        unsafe {
+            let state = crate::runtime::current_mutator_state();
+            (*state).alloc_ptr = alloc_ptr;
+            (*state).alloc_end = alloc_end;
+        }
     }
 
     pub fn gc_impl(&mut self, frame_pointer: usize) {
         // Save the frame pointer so that any nested __pause calls use the correct address.
         crate::builtins::save_frame_pointer(frame_pointer);
+
+        // Before GC can walk the heap, absorb any JIT-side bumps that
+        // haven't flowed back to the allocator yet. Afterward the GC
+        // may reset the frontier (young-gen clear after minor GC), so
+        // refresh MutatorState with the post-GC frontier.
+        let ms_alloc_ptr = unsafe { (*crate::runtime::current_mutator_state()).alloc_ptr };
+        self.memory.heap.sync_allocator_frontier(ms_alloc_ptr);
 
         #[cfg(debug_assertions)]
         let gc_probe_enabled = std::env::var("BEAGLE_DEBUG_GC_CALLER_SLOT0_FILE").ok();
@@ -5521,6 +5524,16 @@ impl Runtime {
         thread_state.clear();
 
         drop(locked);
+
+        // GC may have reset the young-gen frontier (minor collection
+        // clears the space). Refresh MutatorState so subsequent JIT
+        // fast-path allocations see the new window.
+        let (alloc_ptr, alloc_end) = self.memory.heap.allocator_frontier();
+        unsafe {
+            let state = crate::runtime::current_mutator_state();
+            (*state).alloc_ptr = alloc_ptr;
+            (*state).alloc_end = alloc_end;
+        }
     }
 
     pub fn register_temporary_root(&mut self, root: usize) -> usize {

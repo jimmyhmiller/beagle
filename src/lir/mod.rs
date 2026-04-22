@@ -157,6 +157,13 @@ pub enum LirOp<R: 'static> {
         /// The slow path is given the same word count the Beagle IR would
         /// have passed to the `allocate` builtin.
         size_bytes: u32,
+        /// Raw 64-bit header value to store at the allocated address on
+        /// success. The slow path's `allocate` builtin writes its own
+        /// default header (via the allocator's `write_header`); the fast
+        /// path mirrors that write so masked follow-up writes (like
+        /// `write_struct_id_with_version`, which only overwrites the
+        /// type_id bytes) see a valid size field.
+        header: u64,
         /// Destination register that receives the tagged HeapObject
         /// pointer on the fast path. The slow path is responsible for
         /// writing into the same register before the continuation label.
