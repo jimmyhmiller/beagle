@@ -1,6 +1,54 @@
 use super::*;
 use crate::save_gc_context;
 
+/// Maximum arity we dispatch to JIT shims with. The shim we dispatch to
+/// has a narrower declared signature, but the Rust→Beagle ABI lets the
+/// caller pass extra trailing params the callee ignores: register args
+/// beyond what the callee reads are noise in caller-owned registers,
+/// and stack args beyond the callee's declared count sit in
+/// caller-owned stack slots the callee never touches. This lets us use
+/// ONE `transmute + call` site instead of a 12-arm match per call-kind.
+///
+/// The current max is dictated by `call_beagle_via_apply_call`
+/// (fn_ptr + up to 11 target args) and the variadic / closure
+/// trampolines below (fn_ptr + closure + up to 9 target args).
+const SHIM_MAX_PARAMS: usize = 12;
+
+/// Universal-arity dispatch to a JIT shim. `params` holds the exact
+/// values the shim's declared signature expects, in order; unused
+/// trailing slots must be zero (the shim won't read them, but keeping
+/// them well-defined makes this function safe to inspect in a
+/// debugger).
+///
+/// Replaces three parallel 10–12-arm transmute matches that previously
+/// lived here. The bug that motivated the shim refactor —
+/// `apply_call_N` missing its callee-saved save — was partly a
+/// consequence of those matches hand-rolling the same pattern in three
+/// places; reducing this to one call site removes the drift vector on
+/// the Rust side as well.
+#[inline(always)]
+unsafe fn call_shim_padded(shim_ptr: usize, params: [usize; SHIM_MAX_PARAMS]) -> usize {
+    type ShimFn = extern "C" fn(
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+    ) -> usize;
+    let f: ShimFn = unsafe { std::mem::transmute(shim_ptr) };
+    f(
+        params[0], params[1], params[2], params[3], params[4], params[5], params[6], params[7],
+        params[8], params[9], params[10], params[11],
+    )
+}
+
 /// Call a JIT-compiled Beagle function from Rust, routing through the
 /// `beagle.builtin/apply_call_N` shim trampoline so the call is a proper
 /// Rust→Beagle boundary.
@@ -18,7 +66,12 @@ use crate::save_gc_context;
 /// function. `args` is the argument list the target should receive in
 /// X0..X(N-1) (the shim shuffles our argument registers into place).
 unsafe fn call_beagle_via_apply_call(runtime: &Runtime, fn_ptr: usize, args: &[usize]) -> usize {
-    use std::mem::transmute;
+    assert!(
+        args.len() + 1 <= SHIM_MAX_PARAMS,
+        "call_beagle_via_apply_call: {} args exceeds SHIM_MAX_PARAMS-1 = {}",
+        args.len(),
+        SHIM_MAX_PARAMS - 1
+    );
 
     let shim_name = format!("beagle.builtin/apply_call_{}", args.len());
     let shim_entry = runtime
@@ -26,134 +79,16 @@ unsafe fn call_beagle_via_apply_call(runtime: &Runtime, fn_ptr: usize, args: &[u
         .unwrap_or_else(|| panic!("{} trampoline not compiled", shim_name));
     let shim_ptr = runtime
         .get_pointer(shim_entry)
-        .unwrap_or_else(|_| panic!("{} has no code pointer", shim_name));
-    let shim_ptr = shim_ptr as usize;
+        .unwrap_or_else(|_| panic!("{} has no code pointer", shim_name))
+        as usize;
 
-    // apply_call_N takes (fn_ptr, arg0, ..., argN-1).
-    unsafe {
-        match args.len() {
-            0 => {
-                let f: extern "C" fn(usize) -> usize = transmute(shim_ptr);
-                f(fn_ptr)
-            }
-            1 => {
-                let f: extern "C" fn(usize, usize) -> usize = transmute(shim_ptr);
-                f(fn_ptr, args[0])
-            }
-            2 => {
-                let f: extern "C" fn(usize, usize, usize) -> usize = transmute(shim_ptr);
-                f(fn_ptr, args[0], args[1])
-            }
-            3 => {
-                let f: extern "C" fn(usize, usize, usize, usize) -> usize = transmute(shim_ptr);
-                f(fn_ptr, args[0], args[1], args[2])
-            }
-            4 => {
-                let f: extern "C" fn(usize, usize, usize, usize, usize) -> usize =
-                    transmute(shim_ptr);
-                f(fn_ptr, args[0], args[1], args[2], args[3])
-            }
-            5 => {
-                let f: extern "C" fn(usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(shim_ptr);
-                f(fn_ptr, args[0], args[1], args[2], args[3], args[4])
-            }
-            6 => {
-                let f: extern "C" fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(shim_ptr);
-                f(fn_ptr, args[0], args[1], args[2], args[3], args[4], args[5])
-            }
-            7 => {
-                let f: extern "C" fn(
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                ) -> usize = transmute(shim_ptr);
-                f(
-                    fn_ptr, args[0], args[1], args[2], args[3], args[4], args[5], args[6],
-                )
-            }
-            8 => {
-                let f: extern "C" fn(
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                ) -> usize = transmute(shim_ptr);
-                f(
-                    fn_ptr, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
-                )
-            }
-            9 => {
-                let f: extern "C" fn(
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                ) -> usize = transmute(shim_ptr);
-                f(
-                    fn_ptr, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
-                    args[8],
-                )
-            }
-            10 => {
-                let f: extern "C" fn(
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                ) -> usize = transmute(shim_ptr);
-                f(
-                    fn_ptr, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
-                    args[8], args[9],
-                )
-            }
-            11 => {
-                let f: extern "C" fn(
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                    usize,
-                ) -> usize = transmute(shim_ptr);
-                f(
-                    fn_ptr, args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
-                    args[8], args[9], args[10],
-                )
-            }
-            n => panic!("call_beagle_via_apply_call: {} args not supported", n),
-        }
+    // Shim signature: apply_call_N(fn_ptr, arg0, ..., argN-1).
+    let mut params = [0usize; SHIM_MAX_PARAMS];
+    params[0] = fn_ptr;
+    for (i, a) in args.iter().enumerate() {
+        params[i + 1] = *a;
     }
+    unsafe { call_shim_padded(shim_ptr, params) }
 }
 
 pub unsafe extern "C" fn throw_error(stack_pointer: usize, frame_pointer: usize) -> ! {
@@ -865,120 +800,26 @@ pub unsafe fn call_trampoline(
     args: &[usize],
     arg_count: usize,
 ) -> usize {
-    // Dispatch based on arg count
-    unsafe {
-        match arg_count {
-            0 => {
-                let f: fn(usize) -> usize = transmute(trampoline_ptr);
-                f(fn_ptr as usize)
-            }
-            1 => {
-                let f: fn(usize, usize) -> usize = transmute(trampoline_ptr);
-                f(fn_ptr as usize, args[0])
-            }
-            2 => {
-                let f: fn(usize, usize, usize) -> usize = transmute(trampoline_ptr);
-                f(fn_ptr as usize, args[0], args[1])
-            }
-            3 => {
-                let f: fn(usize, usize, usize, usize) -> usize = transmute(trampoline_ptr);
-                f(fn_ptr as usize, args[0], args[1], args[2])
-            }
-            4 => {
-                let f: fn(usize, usize, usize, usize, usize) -> usize = transmute(trampoline_ptr);
-                f(fn_ptr as usize, args[0], args[1], args[2], args[3])
-            }
-            5 => {
-                let f: fn(usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(trampoline_ptr);
-                f(fn_ptr as usize, args[0], args[1], args[2], args[3], args[4])
-            }
-            6 => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(trampoline_ptr);
-                f(
-                    fn_ptr as usize,
-                    args[0],
-                    args[1],
-                    args[2],
-                    args[3],
-                    args[4],
-                    args[5],
-                )
-            }
-            7 => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(trampoline_ptr);
-                f(
-                    fn_ptr as usize,
-                    args[0],
-                    args[1],
-                    args[2],
-                    args[3],
-                    args[4],
-                    args[5],
-                    args[6],
-                )
-            }
-            8 => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(trampoline_ptr);
-                f(
-                    fn_ptr as usize,
-                    args[0],
-                    args[1],
-                    args[2],
-                    args[3],
-                    args[4],
-                    args[5],
-                    args[6],
-                    args[7],
-                )
-            }
-            9 => {
-                let f: TrampolineFn10 = transmute(trampoline_ptr);
-                f(
-                    fn_ptr as usize,
-                    args[0],
-                    args[1],
-                    args[2],
-                    args[3],
-                    args[4],
-                    args[5],
-                    args[6],
-                    args[7],
-                    args[8],
-                )
-            }
-            10 => {
-                let f: TrampolineFn11 = transmute(trampoline_ptr);
-                f(
-                    fn_ptr as usize,
-                    args[0],
-                    args[1],
-                    args[2],
-                    args[3],
-                    args[4],
-                    args[5],
-                    args[6],
-                    args[7],
-                    args[8],
-                    args[9],
-                )
-            }
-            _ => {
-                let sp = get_saved_stack_pointer();
-                throw_runtime_error(
-                    sp,
-                    "ArgumentError",
-                    format!(
-                        "apply: too many arguments ({}), max supported is 10",
-                        arg_count
-                    ),
-                );
-            }
+    if arg_count + 1 > SHIM_MAX_PARAMS {
+        let sp = get_saved_stack_pointer();
+        unsafe {
+            throw_runtime_error(
+                sp,
+                "ArgumentError",
+                format!(
+                    "apply: too many arguments ({}), max supported is {}",
+                    arg_count,
+                    SHIM_MAX_PARAMS - 1
+                ),
+            );
         }
     }
+    let mut params = [0usize; SHIM_MAX_PARAMS];
+    params[0] = fn_ptr as usize;
+    for (i, a) in args.iter().take(arg_count).enumerate() {
+        params[i + 1] = *a;
+    }
+    unsafe { call_shim_padded(trampoline_ptr as usize, params) }
 }
 
 /// Call a trampoline with closure pointer prepended.
@@ -991,123 +832,27 @@ pub unsafe fn call_trampoline_with_closure(
     args: &[usize],
     arg_count: usize,
 ) -> usize {
-    // Dispatch based on arg count (closure is prepended, so effective count is arg_count + 1)
-    unsafe {
-        match arg_count {
-            0 => {
-                let f: fn(usize, usize) -> usize = transmute(trampoline_ptr);
-                f(fn_ptr as usize, closure_ptr)
-            }
-            1 => {
-                let f: fn(usize, usize, usize) -> usize = transmute(trampoline_ptr);
-                f(fn_ptr as usize, closure_ptr, args[0])
-            }
-            2 => {
-                let f: fn(usize, usize, usize, usize) -> usize = transmute(trampoline_ptr);
-                f(fn_ptr as usize, closure_ptr, args[0], args[1])
-            }
-            3 => {
-                let f: fn(usize, usize, usize, usize, usize) -> usize = transmute(trampoline_ptr);
-                f(fn_ptr as usize, closure_ptr, args[0], args[1], args[2])
-            }
-            4 => {
-                let f: fn(usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(trampoline_ptr);
-                f(
-                    fn_ptr as usize,
-                    closure_ptr,
-                    args[0],
-                    args[1],
-                    args[2],
-                    args[3],
-                )
-            }
-            5 => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(trampoline_ptr);
-                f(
-                    fn_ptr as usize,
-                    closure_ptr,
-                    args[0],
-                    args[1],
-                    args[2],
-                    args[3],
-                    args[4],
-                )
-            }
-            6 => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(trampoline_ptr);
-                f(
-                    fn_ptr as usize,
-                    closure_ptr,
-                    args[0],
-                    args[1],
-                    args[2],
-                    args[3],
-                    args[4],
-                    args[5],
-                )
-            }
-            7 => {
-                let f: fn(usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize =
-                    transmute(trampoline_ptr);
-                f(
-                    fn_ptr as usize,
-                    closure_ptr,
-                    args[0],
-                    args[1],
-                    args[2],
-                    args[3],
-                    args[4],
-                    args[5],
-                    args[6],
-                )
-            }
-            8 => {
-                let f: TrampolineFn10 = transmute(trampoline_ptr);
-                f(
-                    fn_ptr as usize,
-                    closure_ptr,
-                    args[0],
-                    args[1],
-                    args[2],
-                    args[3],
-                    args[4],
-                    args[5],
-                    args[6],
-                    args[7],
-                )
-            }
-            9 => {
-                let f: TrampolineFn11 = transmute(trampoline_ptr);
-                f(
-                    fn_ptr as usize,
-                    closure_ptr,
-                    args[0],
-                    args[1],
-                    args[2],
-                    args[3],
-                    args[4],
-                    args[5],
-                    args[6],
-                    args[7],
-                    args[8],
-                )
-            }
-            _ => {
-                let sp = get_saved_stack_pointer();
-                throw_runtime_error(
-                    sp,
-                    "ArgumentError",
-                    format!(
-                        "apply: too many arguments ({}) for closure, max supported is 9",
-                        arg_count
-                    ),
-                );
-            }
+    if arg_count + 2 > SHIM_MAX_PARAMS {
+        let sp = get_saved_stack_pointer();
+        unsafe {
+            throw_runtime_error(
+                sp,
+                "ArgumentError",
+                format!(
+                    "apply: too many arguments ({}) for closure, max supported is {}",
+                    arg_count,
+                    SHIM_MAX_PARAMS - 2
+                ),
+            );
         }
     }
+    let mut params = [0usize; SHIM_MAX_PARAMS];
+    params[0] = fn_ptr as usize;
+    params[1] = closure_ptr;
+    for (i, a) in args.iter().take(arg_count).enumerate() {
+        params[i + 2] = *a;
+    }
+    unsafe { call_shim_padded(trampoline_ptr as usize, params) }
 }
 
 /// Helper function to call a function pointer with the given arguments.

@@ -533,7 +533,16 @@ pub struct LowLevelArm {
     /// Which prologue/epilogue phases to emit. A full Beagle function
     /// frame gets everything (header, GC link, zero-fill, callee-saved);
     /// a Rust↔Beagle shim trampoline gets only stack allocation.
-    pub frame_kind: FrameKind,
+    ///
+    /// Private so the only way to get a `ShimTrampoline` frame is via
+    /// `new_shim_trampoline` — which also records `shim_preserve`. The
+    /// two fields have to agree, so we bottleneck them through one
+    /// constructor.
+    frame_kind: FrameKind,
+    /// Registers live on shim entry that must survive the mutator-state
+    /// reload emitted by `prelude()` when `frame_kind = ShimTrampoline`.
+    /// Required for shim frames; unused otherwise.
+    shim_preserve: Option<Vec<Register>>,
     /// If this function contains `binding` expressions, the local index of the mark pointer.
     /// Encoded in the frame header's type_data lower 16 bits so get_dynamic_var can find it.
     pub mark_local_index: Option<usize>,
@@ -587,7 +596,42 @@ impl LowLevelArm {
             num_callee_saved: 0,
             mark_local_index: None,
             frame_kind: FrameKind::BeagleFunction,
+            shim_preserve: None,
         }
+    }
+
+    /// Construct a builder for a Rust↔Beagle shim trampoline.
+    ///
+    /// Shim trampolines wrap a Rust→Beagle call: a Rust caller invokes
+    /// the shim, the shim loads X28 with the current MutatorState,
+    /// shuffles/inspects args, branches into a Beagle target, and
+    /// returns to Rust. For that to be ABI-legal (AAPCS) the shim MUST:
+    ///   1. Preserve X19–X28 for the Rust caller (X28 is trashed when
+    ///      we reload it from `jit_load_current_mutator_state`; any of
+    ///      X19–X27 can be clobbered by the Beagle target's register
+    ///      allocator without the target's prologue saving them).
+    ///   2. Run the mutator-state reload before branching into Beagle,
+    ///      preserving any arg registers the shim still needs.
+    ///   3. Not splice itself into the GC frame chain (its frame isn't
+    ///      a Beagle frame and isn't scanned).
+    ///
+    /// This constructor bakes (1), (2), (3) into `prelude()` and
+    /// `epilogue()` — the shim author writes only the body. Previously
+    /// each shim hand-rolled the save/restore with its own offset
+    /// scheme and `apply_call_N` shipped without any of it, causing
+    /// SIGABRT on apply_test.bg under release. Forcing the
+    /// preserve-list through a constructor makes it impossible to set
+    /// `frame_kind = ShimTrampoline` without also scheduling the save.
+    ///
+    /// `preserve` lists registers live on shim entry that the body
+    /// needs back after the mutator-state reload — typically the
+    /// incoming argument registers. Must not contain X17 (scratch) or
+    /// X28 (destination of the reload).
+    pub fn new_shim_trampoline(preserve: &[Register]) -> Self {
+        let mut arm = Self::new();
+        arm.frame_kind = FrameKind::ShimTrampoline;
+        arm.shim_preserve = Some(preserve.to_vec());
+        arm
     }
 
     pub fn increment_stack_size(&mut self, size: i32) {
@@ -609,9 +653,23 @@ impl LowLevelArm {
             imm12: 0x1111, // Magic placeholder value
             sh: 0,
         });
+
+        // Shim-trampoline frames auto-save the full AAPCS callee-saved
+        // set and load X28 = MutatorState here, so body code between
+        // prelude/epilogue is just shim-specific argument shuffling and
+        // the target call. See `new_shim_trampoline` for the contract.
+        if self.frame_kind == FrameKind::ShimTrampoline {
+            self.emit_shim_boundary_save();
+        }
     }
 
     pub fn epilogue(&mut self) {
+        // Shim-trampoline frames restore X19–X28 before teardown; see
+        // the matching save in `prelude()`.
+        if self.frame_kind == FrameKind::ShimTrampoline {
+            self.emit_shim_boundary_restore();
+        }
+
         // Add placeholder ADD instruction - will be replaced in patch_prelude_and_epilogue()
         self.instructions.push(ArmAsm::AddAddsubImm {
             sf: SP.sf(),
@@ -621,6 +679,43 @@ impl LowLevelArm {
             sh: 0,
         });
         self.load_pair(X29, X30, SP, 2);
+    }
+
+    /// Prologue phase for shim trampolines: save the full AAPCS
+    /// callee-saved set (X19–X28) to FP-relative slots and load
+    /// X28 = current MutatorState. Invoked automatically by
+    /// `prelude()` on `ShimTrampoline` frames.
+    fn emit_shim_boundary_save(&mut self) {
+        let callee_saved = crate::abi::arm64::ABI.callee_saved;
+        // Reserve enough locals that the patched prologue's SUB SP
+        // makes room for the spill area AND so that push_to_stack /
+        // push_to_end_of_stack emitted in the shim body land below our
+        // save slots. `set_max_locals` is idempotent in the "at least"
+        // sense — it never shrinks — so a shim that also has its own
+        // locals won't be clobbered if it called `set_max_locals` first.
+        if (self.max_locals as usize) < callee_saved.len() {
+            self.set_max_locals(callee_saved.len());
+        }
+        for (i, reg) in callee_saved.iter().enumerate() {
+            // Saves at FP-24, FP-32, ..., FP-96 (for 10 callee-saveds).
+            // Just below the 2-slot header region at FP..FP-16.
+            self.store_on_stack(*reg, -((i as i32) + Self::FRAME_HEADER_WORDS + 1));
+        }
+        let preserve = self
+            .shim_preserve
+            .clone()
+            .expect("ShimTrampoline frame missing shim_preserve; use new_shim_trampoline");
+        self.emit_load_mutator_state(&preserve);
+    }
+
+    /// Epilogue phase for shim trampolines: restore X19–X28 from the
+    /// spill slots reserved in `emit_shim_boundary_save`. Invoked
+    /// automatically by `epilogue()` on `ShimTrampoline` frames.
+    fn emit_shim_boundary_restore(&mut self) {
+        let callee_saved = crate::abi::arm64::ABI.callee_saved;
+        for (i, reg) in callee_saved.iter().enumerate() {
+            self.load_from_stack(*reg, -((i as i32) + Self::FRAME_HEADER_WORDS + 1));
+        }
     }
 
     pub fn get_label_index(&mut self) -> usize {

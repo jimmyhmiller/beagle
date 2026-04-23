@@ -343,8 +343,6 @@ impl<T: Encode + Decode<()>> Serialize for T {
     }
 }
 
-const PADDING_FOR_ALIGNMENT: i64 = 2;
-
 fn compile_trampoline(runtime: &mut Runtime) {
     cfg_if::cfg_if! {
         if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
@@ -398,38 +396,15 @@ fn compile_trampoline(runtime: &mut Runtime) {
                 .add_function_mark_executable("trampoline".to_string(), &lang.compile_to_bytes(), 0, 3)
                 .unwrap();
         } else {
-            let mut lang = arm::LowLevelArm::new();
-            // Shim trampoline: its frame isn't a Beagle frame, and it runs
-            // BEFORE x28 has been loaded with the MutatorState pointer. The
-            // ShimTrampoline frame kind omits the inlined gc_frame_link /
-            // gc_frame_unlink that would otherwise dereference an
-            // uninitialised x28.
-            lang.frame_kind = arm::FrameKind::ShimTrampoline;
-            // Reserve enough frame space that our store_on_stack saves for
-            // X19..X28 (at FP-offsets -4..-13) live strictly above SP. If the
-            // patched prologue sized the frame only around max_stack_size,
-            // the SP could be as high as FP-32 and the later call to
-            // jit_load_current_mutator_state would drop a Rust frame on top
-            // of the X25..X28 save slots, corrupting them on return.
-            lang.set_max_locals(14);
-
-            lang.prelude();
-
-            // Save callee-saved registers (X19-X28). X28 is included here so that
-            // Rust's original value is preserved and restored on return — we're
-            // about to overwrite X28 with the current thread's MutatorState
-            // pointer for the duration of the Beagle call.
-            for (i, reg) in crate::abi::arm64::ABI.callee_saved.iter().enumerate() {
-                lang.store_on_stack(*reg, -((i + 4_usize) as i32));
-            }
-
-            // Load X28 = current_mutator_state() so JIT'd Beagle code can
-            // address this thread's MutatorState directly. The trampoline's
-            // incoming args (X0-X4) are preserved across the Rust call.
-            {
+            // Shim trampoline. `new_shim_trampoline` bakes in the
+            // callee-saved save/restore and X28 reload — `prelude()`
+            // and `epilogue()` emit them automatically. Incoming args
+            // X0-X4 are preserved across the mutator-state reload.
+            let mut lang = {
                 use crate::machine_code::arm_codegen::{X0, X1, X2, X3, X4};
-                lang.emit_load_mutator_state(&[X0, X1, X2, X3, X4]);
-            }
+                arm::LowLevelArm::new_shim_trampoline(&[X0, X1, X2, X3, X4])
+            };
+            lang.prelude();
 
             lang.mov_reg(X10, SP);
             lang.mov_reg(SP, X0);
@@ -447,9 +422,6 @@ fn compile_trampoline(runtime: &mut Runtime) {
 
             lang.pop_from_stack_indexed(X10, 0);
             lang.mov_reg(SP, X10);
-            for (i, reg) in crate::abi::arm64::ABI.callee_saved.iter().enumerate().rev() {
-                lang.load_from_stack(*reg, -((i + 4_usize) as i32));
-            }
             lang.epilogue();
             lang.ret();
 
@@ -470,29 +442,17 @@ fn compile_save_volatile_registers_for(runtime: &mut Runtime, register_num: usiz
 
     cfg_if::cfg_if! {
         if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
-            let mut lang = x86::LowLevelX86::new();
+            // Shim trampoline. `new_shim_trampoline` tells the patcher
+            // to skip the Beagle-specific phases and save the full SysV
+            // AMD64 callee-saved set (R12-R15, RBX) automatically in
+            // prelude/epilogue.
+            let mut lang = x86::LowLevelX86::new_shim_trampoline();
             // Use lang.arg() to get correct argument register for x86-64 ABI
             // On x86-64, arg(n) maps to: RDI, RSI, RDX, RCX, R8, R9 (not sequential indices!)
             let call_register = lang.arg(register_num as u8);
 
-            // We store volatile registers at local offsets 3-6, so need max_locals >= 7
-            // (store_local at offset n stores at [RBP - (n+1)*8])
-            let callee_saved = crate::abi::x86_64::ABI.callee_saved;
-            let max_offset = callee_saved.len() + PADDING_FOR_ALIGNMENT as usize;
-            lang.set_max_locals(max_offset + 1);
-
             lang.prelude();
-
-            for (i, reg) in callee_saved.iter().enumerate() {
-                lang.store_local(*reg, (i + PADDING_FOR_ALIGNMENT as usize + 1) as i32);
-            }
-
             lang.call(call_register);
-
-            for (i, reg) in callee_saved.iter().enumerate() {
-                lang.load_local(*reg, (i + PADDING_FOR_ALIGNMENT as usize + 1) as i32);
-            }
-
             lang.epilogue();
             lang.ret();
 
@@ -512,36 +472,15 @@ fn compile_save_volatile_registers_for(runtime: &mut Runtime, register_num: usiz
                 index: register_num as u8,
                 size: crate::machine_code::arm_codegen::Size::S64,
             };
-            let mut lang = arm::LowLevelArm::new();
-            // Shim trampoline: like the main `trampoline`, this function's
-            // frame is not a Beagle frame and it runs before x28 has been
-            // loaded — omit the inlined gc_frame_link / gc_frame_unlink.
-            lang.frame_kind = arm::FrameKind::ShimTrampoline;
+            // Shim trampoline. `prelude()` and `epilogue()` emit the
+            // callee-saved save/restore + X28 reload automatically.
+            // The incoming variadic arg set (X0-X7 + X9) is preserved
+            // across the mutator-state reload.
+            let mut lang =
+                arm::LowLevelArm::new_shim_trampoline(&[X0, X1, X2, X3, X4, X5, X6, X7, X9]);
             lang.prelude();
 
-            let callee_saved = crate::abi::arm64::ABI.callee_saved;
-            lang.sub_stack_pointer(
-                (callee_saved.len() + PADDING_FOR_ALIGNMENT as usize) as i32,
-            );
-
-            for (i, reg) in callee_saved.iter().enumerate() {
-                lang.store_on_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
-            }
-
-            // Load X28 = current_mutator_state() so the Beagle call we're about
-            // to make sees the right MutatorState pointer. The incoming
-            // variadic arg set (X0-X7 + X9) is preserved across the Rust call.
-            lang.emit_load_mutator_state(&[X0, X1, X2, X3, X4, X5, X6, X7, X9]);
-
             lang.call(call_register);
-
-            for (i, reg) in callee_saved.iter().enumerate() {
-                lang.load_from_stack(*reg, -((i + PADDING_FOR_ALIGNMENT as usize + 1) as i32));
-            }
-
-            lang.add_stack_pointer(
-                (callee_saved.len() + PADDING_FOR_ALIGNMENT as usize) as i32,
-            );
 
             lang.epilogue();
             lang.ret();
@@ -603,11 +542,6 @@ fn compile_apply_call_trampolines_arm64(runtime: &mut Runtime) {
     for num_args in 0..=16 {
         let function_name = format!("beagle.builtin/apply_call_{}", num_args);
 
-        let mut lang = arm::LowLevelArm::new();
-        // Shim trampoline — its frame isn't a Beagle frame, so omit the
-        // inlined gc_frame_link / gc_frame_unlink.
-        lang.frame_kind = arm::FrameKind::ShimTrampoline;
-
         // Function receives: fn_ptr in X0, then arg0..argN-1 in X1..X(N)
         // For N > 7: X0-X7 have fn_ptr and args[0-6], stack has args[7+]
         //
@@ -620,20 +554,12 @@ fn compile_apply_call_trampolines_arm64(runtime: &mut Runtime) {
         // 2. Shuffle X1-X7 -> X0-X6
         // 3. Load our stack args into X7 and push extras for target
 
-        lang.prelude();
-
-        // Load x28 = current MutatorState. Historically apply_call was
-        // only invoked from Beagle, where x28 was already valid — but
-        // it's also reachable from Rust builtins (apply_function and
-        // friends in src/builtins/apply.rs) via direct fn-pointer calls,
-        // and Rust is free to clobber x28 internally by AAPCS rules. By
-        // reloading x28 here the shim becomes safe for both callers at
-        // the cost of one TLS fetch per apply_call.
-        //
-        // Preserve the incoming register args (X0 = fn_ptr + X1..X7 = up
-        // to 7 args). Stack args at [FP+16..] are safe — we don't touch
-        // SP/FP during the call.
-        {
+        // Shim trampoline. `prelude()`/`epilogue()` auto-save X19-X28
+        // and load X28 = MutatorState. The incoming register args
+        // (X0 = fn_ptr, X1..X7 = up to 7 args) are preserved across the
+        // mutator-state reload; stack args at [FP+16..] are safe
+        // because we don't touch SP/FP during that call.
+        let mut lang = {
             use crate::machine_code::arm_codegen::{X1, X2, X3, X4, X5, X6, X7};
             let preserve: &[_] = match num_args {
                 0 => &[X0],
@@ -645,8 +571,9 @@ fn compile_apply_call_trampolines_arm64(runtime: &mut Runtime) {
                 6 => &[X0, X1, X2, X3, X4, X5, X6],
                 _ => &[X0, X1, X2, X3, X4, X5, X6, X7],
             };
-            lang.emit_load_mutator_state(preserve);
-        }
+            arm::LowLevelArm::new_shim_trampoline(preserve)
+        };
+        lang.prelude();
 
         // Save fn_ptr from X0 to X10 before we shuffle args
         lang.mov_reg(X10, X0);
@@ -687,7 +614,8 @@ fn compile_apply_call_trampolines_arm64(runtime: &mut Runtime) {
         // Call the function via X10
         lang.call(X10);
 
-        // No stack cleanup needed - push_to_end_of_stack uses pre-allocated frame space
+        // No stack cleanup needed for push_to_end_of_stack — it uses
+        // pre-allocated frame space (tracked via max_stack_size).
 
         lang.epilogue();
         lang.ret();
@@ -720,8 +648,6 @@ fn compile_apply_call_trampolines_x86_64(runtime: &mut Runtime) {
     for num_args in 0..=16 {
         let function_name = format!("beagle.builtin/apply_call_{}", num_args);
 
-        let mut lang = x86::LowLevelX86::new();
-
         // Function receives: fn_ptr in RDI, then arg0..argN-1 in RSI, RDX, RCX, R8, R9, stack...
         // Our stack args start at [RBP+16] (after push RBP; mov RBP, RSP)
         // arg5 = [RBP+16], arg6 = [RBP+24], arg7 = [RBP+32], etc.
@@ -737,12 +663,15 @@ fn compile_apply_call_trampolines_x86_64(runtime: &mut Runtime) {
         // 4. Load arg5 from our stack into R9 (if num_args >= 6)
         // 5. Call via R11
 
-        // Standard prologue
-        lang.instructions.push(X86Asm::Push { reg: RBP });
-        lang.instructions.push(X86Asm::MovRR {
-            dest: RBP,
-            src: RSP,
-        });
+        // Shim trampoline. `new_shim_trampoline` routes this function
+        // through the ShimTrampoline frame kind so `prelude()` /
+        // `epilogue()` auto-save the full SysV AMD64 callee-saved set
+        // (R12-R15, RBX). Without this, the target Beagle function's
+        // register allocator could clobber any of those while they hold
+        // live Rust values — the ARM64 sibling of this bug is what
+        // surfaced on apply_test.bg.
+        let mut lang = x86::LowLevelX86::new_shim_trampoline();
+        lang.prelude();
 
         // Save fn_ptr from RDI to R11 before we shuffle args
         lang.mov_reg(R11, RDI);
@@ -812,8 +741,7 @@ fn compile_apply_call_trampolines_x86_64(runtime: &mut Runtime) {
             });
         }
 
-        // Epilogue
-        lang.instructions.push(X86Asm::Pop { reg: RBP });
+        lang.epilogue();
         lang.ret();
 
         runtime

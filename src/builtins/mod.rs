@@ -33,14 +33,6 @@ use rand::Rng;
 use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-// Type aliases for complex function pointer types (for apply trampolines)
-#[allow(clippy::type_complexity)]
-type TrampolineFn10 =
-    fn(usize, usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
-#[allow(clippy::type_complexity)]
-type TrampolineFn11 =
-    fn(usize, usize, usize, usize, usize, usize, usize, usize, usize, usize, usize) -> usize;
-
 // Thread-local storage for the frame pointer, stack pointer, and gc return
 // address at builtin entry. Set by builtins that receive frame_pointer from
 // Beagle code; read by `gc()` when triggered internally (e.g., during

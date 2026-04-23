@@ -36,6 +36,31 @@ pub struct LowLevelX86 {
     /// Number of callee-saved registers actually saved in this function's frame.
     /// Set by patch_prelude_and_epilogue().
     pub num_callee_saved: usize,
+    /// Which prologue/epilogue phases `patch_prelude_and_epilogue` should
+    /// emit. Private so the only way to get a `ShimTrampoline` frame is
+    /// via `new_shim_trampoline`. Mirrors the same concept in
+    /// `src/arm.rs`.
+    frame_kind: FrameKind,
+}
+
+/// What kind of frame `patch_prelude_and_epilogue` should build on x86-64.
+///
+/// Mirrors `arm::FrameKind` — a full Beagle function frame gets the
+/// header, GC link, zero-fill, and `used_callee_saved` save; a shim
+/// trampoline for the Rust↔Beagle boundary gets only the full AAPCS
+/// callee-saved spill (so the Rust caller's live state survives the
+/// Beagle call). See `new_shim_trampoline`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameKind {
+    /// Full Beagle function frame: stack alloc, frame header at
+    /// `[RBP-8]`, `gc_frame_link` call splicing this frame into the
+    /// per-thread GC chain, zero-fill of locals and eval-stack slots,
+    /// and used-callee-saved save.
+    BeagleFunction,
+    /// Rust↔Beagle shim trampoline: stack alloc plus full AAPCS
+    /// callee-saved save (R12-R15, RBX). No frame header, no GC link,
+    /// no zero-fill (nothing scans the frame).
+    ShimTrampoline,
 }
 
 impl Default for LowLevelX86 {
@@ -83,7 +108,30 @@ impl LowLevelX86 {
             current_function_name: None,
             used_callee_saved_registers: 0,
             num_callee_saved: 0,
+            frame_kind: FrameKind::BeagleFunction,
         }
+    }
+
+    /// Construct a builder for a Rust↔Beagle shim trampoline. See the
+    /// sister method on `arm::LowLevelArm` for the full rationale — the
+    /// contract is the same on x86-64.
+    ///
+    /// `patch_prelude_and_epilogue` on a shim-trampoline frame skips
+    /// the Beagle-specific phases (frame header write, `gc_frame_link`,
+    /// zero-fill) and instead saves the full SysV AMD64 callee-saved
+    /// set (R12, R13, R14, R15, RBX) so the Rust caller's live state
+    /// survives the call into Beagle. `prelude()`/`epilogue()` callers
+    /// don't need to do anything special — the save/restore happens
+    /// inside the patcher.
+    ///
+    /// Unlike the ARM64 version there is no `preserve` list because
+    /// x86-64 doesn't reload a dedicated MutatorState register in the
+    /// shim prologue — it still uses the thread-local slow path for
+    /// `current_mutator_state()`.
+    pub fn new_shim_trampoline() -> Self {
+        let mut me = Self::new();
+        me.frame_kind = FrameKind::ShimTrampoline;
+        me
     }
 
     pub fn set_function_name(&mut self, name: &str) {
@@ -1197,8 +1245,18 @@ impl LowLevelX86 {
     }
 
     fn patch_prelude_and_epilogue(&mut self) {
-        // Get callee-saved registers that need to be saved
-        let used_callee_saved = self.get_used_callee_saved_registers();
+        // For BeagleFunction frames the register allocator declares
+        // exactly which callee-saveds it touched; we save only those.
+        // For ShimTrampoline frames we save the FULL AAPCS callee-saved
+        // set so the Rust caller's live state survives — the Beagle
+        // target is free to clobber any of them via its own register
+        // allocator, and the shim body itself may use them as scratch.
+        let is_shim = matches!(self.frame_kind, FrameKind::ShimTrampoline);
+        let used_callee_saved: Vec<X86Register> = if is_shim {
+            crate::abi::x86_64::ABI.callee_saved.to_vec()
+        } else {
+            self.get_used_callee_saved_registers()
+        };
         let num_callee_saved = used_callee_saved.len();
         self.num_callee_saved = num_callee_saved;
 
@@ -1231,6 +1289,73 @@ impl LowLevelX86 {
                 self.instructions[..=index].iter().map(|i| i.size()).sum();
 
             let mut inserted_instructions = Vec::new();
+
+            // ShimTrampoline frames skip the Beagle-specific phases
+            // (frame header / gc_frame_link / zero_fill) — their frames
+            // are not Beagle frames and aren't scanned by the GC.
+            if is_shim {
+                // Save the full ABI callee-saved set at [RSP + i*8]
+                // (bottom of the frame, above any push_to_end_of_stack
+                // writes which track via max_stack_size and land below).
+                for (i, reg) in used_callee_saved.iter().enumerate() {
+                    inserted_instructions.push(X86Asm::MovMR {
+                        base: RSP,
+                        offset: (i * 8) as i32,
+                        src: *reg,
+                    });
+                }
+
+                // Splice prologue inserts now — skip the Beagle phases
+                // (header / gc_frame_link / zero_fill) by jumping past
+                // the rest of the prologue-insert block. We do that by
+                // inserting + shifting + returning early for is_shim.
+                let num_inserted = inserted_instructions.len();
+                for (i, instr) in inserted_instructions.into_iter().enumerate() {
+                    self.instructions.insert(index + 1 + i, instr);
+                }
+                if num_inserted > 0 {
+                    for location in self.label_locations.values_mut() {
+                        if *location > index {
+                            *location += num_inserted;
+                        }
+                    }
+                }
+
+                // Now handle the epilogue: for shims we skip
+                // gc_frame_unlink too, and restore the full callee-saved
+                // set. Re-find the ADD placeholder (indices may have
+                // shifted due to our insertion above).
+                let add_index = self.instructions.iter().rposition(|instr| {
+                    matches!(instr, X86Asm::AddRI { dest, imm } if *dest == RSP && *imm == 0x1111_1111_u32 as i32)
+                });
+                if let Some(add_idx) = add_index {
+                    let mut epilogue_insert = Vec::new();
+                    for (i, reg) in used_callee_saved.iter().enumerate() {
+                        epilogue_insert.push(X86Asm::MovRM {
+                            dest: *reg,
+                            base: RSP,
+                            offset: (i * 8) as i32,
+                        });
+                    }
+                    let n_epi = epilogue_insert.len();
+                    for (i, instr) in epilogue_insert.into_iter().enumerate() {
+                        self.instructions.insert(add_idx + i, instr);
+                    }
+                    let new_add_index = add_idx + n_epi;
+                    self.instructions[new_add_index] = X86Asm::AddRI {
+                        dest: RSP,
+                        imm: aligned_size,
+                    };
+                    if n_epi > 0 {
+                        for location in self.label_locations.values_mut() {
+                            if *location > add_idx {
+                                *location += n_epi;
+                            }
+                        }
+                    }
+                }
+                return;
+            }
 
             // Write frame header at [RBP-8]. This is a heap-object-style header
             // that lets GC know how many traced slots this frame has.
