@@ -71,6 +71,18 @@ impl StackWalker {
                 );
             }
 
+            // Validate header_addr is a plausible readable stack pointer
+            // before dereferencing. A corrupted prev pointer tends to be
+            // a tagged Beagle value (low bits set) or a wildly large
+            // address; either way we'd SIGSEGV on the read below. Surface
+            // something the user can act on instead of a raw SEGV.
+            if !header_addr.is_multiple_of(8) {
+                panic!(
+                    "BUG: unaligned GC frame header address {:#x} — chain starting at {:#x} is corrupt (frames_seen={})",
+                    header_addr, gc_frame_top, frames_seen
+                );
+            }
+
             // Read frame header
             let header_value = unsafe { *(header_addr as *const usize) };
             let header = Header::from_usize(header_value);

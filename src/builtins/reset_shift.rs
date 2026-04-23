@@ -1594,25 +1594,60 @@ unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target:
     }
 
     let copy_end = dst + seg_size;
+    // Walk the FP chain linking the Beagle GC-prev chain through the
+    // copied segment. The captured FP chain can interleave Beagle
+    // frames with Rust frames (every `perform`/`eval` call goes
+    // through a Rust extern, and save_volatile_registersN etc add
+    // more), so we must SKIP non-Beagle frames when picking each
+    // Beagle frame's gc-prev: a Rust frame's `[FP-16]` slot isn't a
+    // gc-prev pointer, and linking a Beagle frame's prev at a Rust
+    // frame's header_addr causes `walk_stack_roots` to dereference
+    // garbage later.
+    //
+    // For each Beagle frame in the chain, find the next BEAGLE parent
+    // (skipping intervening Rust frames) and write its header as the
+    // prev. If no Beagle parent exists inside the segment, use
+    // `caller_gc_header` (the chain top captured at trampoline entry).
+    let is_beagle_frame_header = |header_addr: usize| -> bool {
+        if header_addr < dst || header_addr >= copy_end {
+            return false;
+        }
+        let hdr = unsafe { *(header_addr as *const usize) };
+        // Header's high byte is type_id (see Header::to_usize).
+        (hdr >> 56) as u8 == crate::collections::TYPE_ID_FRAME
+    };
     let mut fp = dst + innermost_offset;
     loop {
         let header_addr = fp.wrapping_sub(8);
         if header_addr < dst || header_addr >= copy_end {
             break;
         }
-        let saved_fp = unsafe { *(fp as *const usize) };
-        let parent_header = saved_fp.wrapping_sub(8);
+        let is_beagle = is_beagle_frame_header(header_addr);
+        let mut parent_fp = unsafe { *(fp as *const usize) };
+        let mut parent_header = parent_fp.wrapping_sub(8);
+        // Skip non-Beagle parents so the prev points to the next
+        // BEAGLE frame up (or out-of-segment, in which case we fall
+        // back to caller_gc_header).
+        while parent_header >= dst
+            && parent_header < copy_end
+            && !is_beagle_frame_header(parent_header)
+        {
+            parent_fp = unsafe { *(parent_fp as *const usize) };
+            parent_header = parent_fp.wrapping_sub(8);
+        }
         let parent_in_range = parent_header >= dst && parent_header < copy_end;
         let prev_val = if parent_in_range {
             parent_header
         } else {
             caller_gc_header
         };
-        unsafe { *((header_addr - 8) as *mut usize) = prev_val };
+        if is_beagle {
+            unsafe { *((header_addr - 8) as *mut usize) = prev_val };
+        }
         if !parent_in_range {
             break;
         }
-        fp = saved_fp;
+        fp = parent_fp;
     }
 
     let innermost_fp_in_dst = dst + innermost_offset;
@@ -1624,24 +1659,20 @@ unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target:
 
     unsafe { *gc_frame_top_slot = innermost_fp_in_dst - 8 };
 
-    // Always stash a per-resume prompt-tag record and redirect the
-    // outermost body frame's `ret` target to the pop-and-return stub.
+    // Tagged resume: stash a per-resume prompt-tag record for nested
+    // performs in the resumed body, and redirect the outermost body
+    // frame's `ret` target to the stub that pops this record. Both
+    // the stub path (body returns naturally) and the tagged-abort
+    // path (`return_from_shift_tagged` finds this record) end up at
+    // `saved_caller_lr` — i.e., right after the handler's `bl
+    // resume`.
     //
-    // Previously the overlap-based dst placement made the body's
-    // natural epilogue land SP at exactly the invoker's SP, so for
-    // untagged resumes a direct `ret` to `saved_caller_lr` sufficed.
-    // With dst now below the trampoline's frame that identity no
-    // longer holds: the body's final SP = `dst + outermost_offset +
-    // 16`, NOT `trampoline_fp + 16`. Routing every resume through
-    // the stub makes SP restoration explicit (the stub longjmps to
-    // the recorded `post_overlay_sp`), independent of where `dst`
-    // lives.
-    //
-    // For tagged resumes the record doubles as the target of
-    // `return_from_shift_tagged` (matching by `cont_tag`). For
-    // untagged resumes `cont_tag` is 0, which nothing searches for,
-    // so the record is only ever consumed by the stub.
-    {
+    // Untagged resumes skip this: the overlap-based dst placement
+    // (dst + outermost_offset = trampoline_fp) makes the body's
+    // natural epilogue land SP at the invoker's exact SP via `ldp
+    // x29, x30, [sp], #16; ret`, so an untagged continuation doesn't
+    // need a stub to restore SP.
+    if cont_tag != 0 {
         let runtime = crate::get_runtime().get();
         runtime.push_prompt_tag(
             cont_tag,
