@@ -3998,40 +3998,56 @@ impl Ir {
     /// sizes and oversized allocations (> 4095 bytes including header)
     /// fall through to `allocate` directly.
     pub fn allocate_static(&mut self, size_words: u32) -> Value {
-        let size_bytes = size_words * 8 + 8;
-        if size_bytes > 0xFFF {
+        // The inline bump-allocate fast path is ARM64-only right now —
+        // `LirOp::InlineBumpAllocate` lowering is unimplemented on x86-64
+        // (`src/backend/x86_64/mod.rs::lower_lir`). Fall through to the
+        // regular `allocate` builtin on x86 so the shared frontend can
+        // keep calling `allocate_static` uniformly.
+        #[cfg(any(
+            feature = "backend-x86-64",
+            all(target_arch = "x86_64", not(feature = "backend-arm64"))
+        ))]
+        {
             let size_reg = self.assign_new(Value::TaggedConstant(size_words as isize));
             return self.allocate(size_reg.into());
         }
-        // Default header mirroring what `Space::write_object` writes in
-        // the slow path — type_id=0, size=words, no flags. Masked
-        // follow-up writes (`write_struct_id_with_version`) rely on
-        // the size field being correct.
-        let default_header = crate::types::Header {
-            type_id: 0,
-            type_data: 0,
-            size: size_words as u16,
-            opaque: false,
-            marked: false,
-            large: false,
-            type_flags: 0,
+        #[allow(unreachable_code)]
+        {
+            let size_bytes = size_words * 8 + 8;
+            if size_bytes > 0xFFF {
+                let size_reg = self.assign_new(Value::TaggedConstant(size_words as isize));
+                return self.allocate(size_reg.into());
+            }
+            // Default header mirroring what `Space::write_object` writes in
+            // the slow path — type_id=0, size=words, no flags. Masked
+            // follow-up writes (`write_struct_id_with_version`) rely on
+            // the size field being correct.
+            let default_header = crate::types::Header {
+                type_id: 0,
+                type_data: 0,
+                size: size_words as u16,
+                opaque: false,
+                marked: false,
+                large: false,
+                type_flags: 0,
+            }
+            .to_usize() as u64;
+            let dst = self.next_register(None, true);
+            let slow_path = self.label("alloc_slow");
+            let done = self.label("alloc_done");
+            self.instructions.push(Instruction::InlineBumpAllocate(
+                Value::Register(dst),
+                size_bytes,
+                default_header,
+                slow_path,
+            ));
+            self.jump(done);
+            self.write_label(slow_path);
+            let size_reg = self.assign_new(Value::TaggedConstant(size_words as isize));
+            let slow_result = self.allocate(size_reg.into());
+            self.assign(dst, slow_result);
+            self.write_label(done);
+            Value::Register(dst)
         }
-        .to_usize() as u64;
-        let dst = self.next_register(None, true);
-        let slow_path = self.label("alloc_slow");
-        let done = self.label("alloc_done");
-        self.instructions.push(Instruction::InlineBumpAllocate(
-            Value::Register(dst),
-            size_bytes,
-            default_header,
-            slow_path,
-        ));
-        self.jump(done);
-        self.write_label(slow_path);
-        let size_reg = self.assign_new(Value::TaggedConstant(size_words as isize));
-        let slow_result = self.allocate(size_reg.into());
-        self.assign(dst, slow_result);
-        self.write_label(done);
-        Value::Register(dst)
     }
 }

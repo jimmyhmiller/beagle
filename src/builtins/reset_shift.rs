@@ -92,7 +92,17 @@ struct ContinuationRestorePlan {
     seg_base: usize,
     seg_size: usize,
     dst: usize,
-    copy_size: usize,
+    /// Offset within `dst` (and the source segment) of the outermost
+    /// frame's saved-FP slot. Saved-LR slot is at `outermost_offset +
+    /// 8`. The restore phase copies the full `seg_size` bytes and then
+    /// patches these two slots to the invoker's FP/LR — rather than
+    /// relying on the old overlap trick where the copy landed on top
+    /// of the trampoline's own frame so those slots were "already
+    /// correct" by coincidence. That trick was fragile under debug
+    /// builds: Rust's compiler temporaries and spills into the
+    /// overlapping region clobbered the just-written frame before the
+    /// noreturn `return_jump`.
+    outermost_offset: usize,
     innermost_offset: usize,
     result_local_offset: isize,
     caller_gc_header: usize,
@@ -105,12 +115,6 @@ struct ContinuationRestorePlan {
     /// push so nested performs in the resumed body capture against this
     /// resume boundary instead of the outer handle's record.
     cont_tag: u64,
-    /// Address of the slot at `[trampoline_fp + 8]` — the outermost
-    /// body frame's saved-LR slot after teleport. Tagged resumes
-    /// overwrite this with `pop_top_tag_and_return_stub` so a normal
-    /// body return goes through the stub, which pops the per-resume
-    /// record and longjmps to the original LR captured below.
-    saved_lr_slot: *mut usize,
     /// The trampoline's invoker FP, snapshotted from
     /// `[trampoline_fp + 0]` before the body bytes overlay anything.
     /// Stored on the per-resume prompt-tag record as the FP to restore
@@ -121,10 +125,10 @@ struct ContinuationRestorePlan {
     /// handler's `bl resume`; the per-resume record's `link_register`
     /// captures it so the stub (or a tagged abort) can longjmp here.
     saved_caller_lr: usize,
-    /// SP value to record in the per-resume prompt-tag record. This is
-    /// `trampoline_fp + 16` — the SP that exists after the outermost
-    /// body frame's epilogue (`ldp x29, x30, [sp], #16; ret`) runs.
-    /// Tagged returns longjmp to this SP so the resumed-handler's
+    /// SP value to record in the per-resume prompt-tag record. The SP
+    /// that exists after the outermost body frame's epilogue (`ldp
+    /// x29, x30, [sp], #16; ret`) runs — i.e. `dst + outermost_offset
+    /// + 16`. Tagged returns longjmp to this SP so the resumed-handler's
     /// stack shape matches "resume just returned normally."
     post_overlay_sp: usize,
     /// Tagged heap pointer to the continuation's captured side-state
@@ -1385,19 +1389,33 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     let resume_address = cont.resume_address();
     let result_local_offset = cont.result_local();
 
-    // Read the trampoline's own FP via `read-fp` — a 2-instruction
-    // Beagle-side JIT trampoline that returns x29. This function call
-    // pushes a frame below trampoline's SP; that frame is popped
-    // before we return here, so it doesn't touch any memory we care
-    // about.
-    let trampoline_fp = {
+    // Read the trampoline's own SP + FP via `read-sp-fp` — a JIT
+    // trampoline that returns SP in X0 (RAX) and FP in X1 (RDX) per
+    // the standard 2-register struct-return ABI. We need BOTH: FP
+    // for the invoker-FP/LR snapshot (at [FP, FP+8]) and SP to place
+    // the restored-segment copy strictly below Rust's current stack
+    // so Rust's spills and temporaries can't clobber it.
+    //
+    // Use a `#[repr(C)]` struct rather than a `(usize, usize)` tuple
+    // because Rust's tuple layout is intentionally unspecified under
+    // extern "C" (`improper_ctypes_definitions` warning), even though
+    // it happens to match today.
+    #[repr(C)]
+    struct SpFp {
+        sp: usize,
+        fp: usize,
+    }
+    let SpFp {
+        sp: trampoline_sp,
+        fp: trampoline_fp,
+    } = {
         let runtime = crate::get_runtime().get();
         let fn_entry = runtime
-            .get_function_by_name("beagle.builtin/read-fp")
-            .expect("read-fp trampoline not found");
-        let read_fp: extern "C" fn() -> usize =
+            .get_function_by_name("beagle.builtin/read-sp-fp")
+            .expect("read-sp-fp trampoline not found");
+        let read_sp_fp: extern "C" fn() -> SpFp =
             unsafe { std::mem::transmute::<_, _>(fn_entry.pointer) };
-        read_fp()
+        read_sp_fp()
     };
     // Read return-jump's pointer here, before we start writing dst,
     // so that the final call doesn't need any function lookups.
@@ -1424,28 +1442,41 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     // stack below the teleport boundary.
     let caller_gc_header = unsafe { *gc_frame_top_slot };
 
-    // Destination placement: outermost_fp_in_dst must equal trampoline_fp.
-    //   outermost_fp_in_dst = dst + outermost_offset
-    //   => dst = trampoline_fp - outermost_offset
+    // Destination placement: land the outermost body frame on top of
+    // the trampoline's own frame. `dst + outermost_offset =
+    // trampoline_fp`. This reuses the existing stack rather than
+    // growing it per-resume — critical for tight-loop effect-handler
+    // workloads (see `continuation_stack_stress_test`).
     //
-    // copy_size = outermost_offset. We do NOT copy the bottom 16
-    // bytes (the outermost frame's saved FP+LR pair). Those slots at
-    // [trampoline_fp, trampoline_fp+16) already hold the invoker's
-    // FP and LR (written by the trampoline's own prologue), which is
-    // exactly what the outermost frame's saved FP/LR need to be.
+    // The old concern that compiler temporaries could clobber the
+    // copy is addressed by:
+    //   1. doing all the post-copy bookkeeping on the
+    //      `CONTINUATION_SCRATCH_STACK` (via `stack-switch`), so
+    //      Rust's compiler spills land there, not on the main stack;
+    //   2. the pop-and-return stub (pushed below) replacing the
+    //      outermost frame's saved-LR, so SP restoration goes
+    //      through an explicit longjmp rather than relying on the
+    //      body's natural epilogue leaving SP at the invoker's SP.
+    //      This works regardless of where `dst` lives.
     let dst = trampoline_fp - outermost_offset;
-    let copy_size = outermost_offset;
+    let _ = trampoline_sp;
 
-    // Snapshot the trampoline's invoker FP/LR (= the values our prologue
-    // wrote into [trampoline_fp + 0/8]) before they get overlaid as the
-    // outermost body frame's saved FP/LR. For a tagged resume, these are
-    // the values we'll record on the per-resume prompt-tag record so a
-    // body return (via the stub) or a nested abort (via
-    // return_from_shift_tagged) can longjmp back to "right after the
-    // handler's bl resume."
-    let saved_lr_slot = (trampoline_fp + 8) as *mut usize;
+    // Snapshot the trampoline's invoker FP/LR (the values its prologue
+    // wrote to [trampoline_fp + 0/8]). After the full-segment copy we
+    // patch the outermost frame's saved-FP/LR slots in `dst` with
+    // these, so a normal body return lands back at the invoker. For a
+    // tagged resume these are also recorded on the per-resume
+    // prompt-tag record so a stub return or nested abort can longjmp
+    // back to "right after the handler's bl resume."
     let saved_caller_fp = unsafe { *(trampoline_fp as *const usize) };
-    let saved_caller_lr = unsafe { *saved_lr_slot };
+    let saved_caller_lr = unsafe { *((trampoline_fp + 8) as *const usize) };
+    // post_overlay_sp = the invoker's SP at the exact moment of
+    // `bl resume` (before the trampoline's own prologue moved SP).
+    // Tagged-abort longjmps restore THIS SP so the handler continues
+    // as though resume just returned normally. In the old overlapping
+    // design this was coincidentally equal to `dst + outermost_offset
+    // + 16`; that identity no longer holds now that the copy lives
+    // below the trampoline's frame, so compute it directly.
     let post_overlay_sp = trampoline_fp + 16;
     let cont_tag = cont.tag();
     // Raw tagged pointer — not a GC root. Invariant: no GC-heap
@@ -1461,7 +1492,7 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         seg_base,
         seg_size,
         dst,
-        copy_size,
+        outermost_offset,
         innermost_offset,
         result_local_offset,
         caller_gc_header,
@@ -1470,7 +1501,6 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         return_jump_ptr,
         gc_frame_top_slot,
         cont_tag,
-        saved_lr_slot,
         saved_caller_fp,
         saved_caller_lr,
         post_overlay_sp,
@@ -1508,7 +1538,7 @@ unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target:
         seg_base,
         seg_size,
         dst,
-        copy_size,
+        outermost_offset,
         innermost_offset,
         result_local_offset,
         caller_gc_header,
@@ -1517,20 +1547,40 @@ unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target:
         return_jump_ptr,
         gc_frame_top_slot,
         cont_tag,
-        saved_lr_slot,
         saved_caller_fp,
         saved_caller_lr,
         post_overlay_sp,
         side_state_ptr,
     } = plan;
 
+    // Copy the FULL segment — including the outermost frame's
+    // saved-FP/LR slots at [outermost_offset, outermost_offset+16).
+    // The captured values there are the ORIGINAL stack addresses,
+    // meaningless now; we overwrite them below with the trampoline's
+    // invoker FP/LR so a normal body return lands at the correct
+    // invoker frame.
     let mut i = 0usize;
-    while i < copy_size {
+    while i < seg_size {
         let src_word = unsafe { *((seg_base + i) as *const usize) };
         unsafe { *((dst + i) as *mut usize) = src_word };
         i += 8;
     }
 
+    // Patch the outermost frame's saved-FP/LR so outgoing returns
+    // link back to the invoker. For tagged resumes the saved-LR is
+    // further rewritten below to the pop-tag stub.
+    let outermost_fp_slot = (dst + outermost_offset) as *mut usize;
+    let saved_lr_slot = (dst + outermost_offset + 8) as *mut usize;
+    unsafe {
+        *outermost_fp_slot = saved_caller_fp;
+        *saved_lr_slot = saved_caller_lr;
+    }
+
+    // Walk saved-FP chain from innermost outward, replacing each
+    // segment-relative offset with its absolute address in `dst`.
+    // Stops when it encounters the outermost frame's slot, which now
+    // holds `saved_caller_fp` (an out-of-segment absolute address,
+    // guaranteed >= seg_size).
     let mut fp = dst + innermost_offset;
     loop {
         let saved_slot = fp as *mut usize;
@@ -1543,7 +1593,7 @@ unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target:
         fp = absolute;
     }
 
-    let copy_end = dst + copy_size;
+    let copy_end = dst + seg_size;
     let mut fp = dst + innermost_offset;
     loop {
         let header_addr = fp.wrapping_sub(8);
@@ -1574,14 +1624,24 @@ unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target:
 
     unsafe { *gc_frame_top_slot = innermost_fp_in_dst - 8 };
 
-    // Tagged resume: stash a per-resume prompt-tag record for nested
-    // performs in the resumed body, and redirect the outermost body
-    // frame's `ret` target to the stub that pops this record. Both
-    // the stub path (body returns naturally) and the tagged-abort
-    // path (`return_from_shift_tagged` finds this record) end up at
-    // `saved_caller_lr` — i.e., right after the handler's `bl
-    // resume`. Untagged plain-shift continuations skip this.
-    if cont_tag != 0 {
+    // Always stash a per-resume prompt-tag record and redirect the
+    // outermost body frame's `ret` target to the pop-and-return stub.
+    //
+    // Previously the overlap-based dst placement made the body's
+    // natural epilogue land SP at exactly the invoker's SP, so for
+    // untagged resumes a direct `ret` to `saved_caller_lr` sufficed.
+    // With dst now below the trampoline's frame that identity no
+    // longer holds: the body's final SP = `dst + outermost_offset +
+    // 16`, NOT `trampoline_fp + 16`. Routing every resume through
+    // the stub makes SP restoration explicit (the stub longjmps to
+    // the recorded `post_overlay_sp`), independent of where `dst`
+    // lives.
+    //
+    // For tagged resumes the record doubles as the target of
+    // `return_from_shift_tagged` (matching by `cont_tag`). For
+    // untagged resumes `cont_tag` is 0, which nothing searches for,
+    // so the record is only ever consumed by the stub.
+    {
         let runtime = crate::get_runtime().get();
         runtime.push_prompt_tag(
             cont_tag,

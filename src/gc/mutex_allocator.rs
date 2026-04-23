@@ -136,15 +136,29 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
     }
 
     fn gc(&mut self, gc_frame_tops: &[usize], extra_roots: &[(*mut usize, usize)]) {
+        // Sync before GC so moving collectors (compacting's Cheney)
+        // see every fast-path-allocated object when iterating from_space
+        // to sweep finalizers or compute the live frontier. Without this
+        // `from_space.allocation_offset` is stale, the fast-path region
+        // goes unwalked, and objects there can be left in the old space
+        // while roots reference post-swap-to-space addresses.
+        self.sync_from_mutator_state();
         let lock = self.mutex.lock().unwrap();
         self.alloc.gc(gc_frame_tops, extra_roots);
-        drop(lock)
+        drop(lock);
+        // Refresh after GC: compacting swaps from/to spaces, so the old
+        // MutatorState.alloc_ptr is now a dangling pointer into the
+        // cleared to-space. Re-expose the new inner frontier so the
+        // next fast-path bump lands in the current from-space.
+        self.refresh_mutator_state();
     }
 
     fn grow(&mut self) {
+        self.sync_from_mutator_state();
         let lock = self.mutex.lock().unwrap();
         self.alloc.grow();
-        drop(lock)
+        drop(lock);
+        self.refresh_mutator_state();
     }
 
     fn get_allocation_options(&self) -> AllocatorOptions {

@@ -60,12 +60,23 @@ impl SimpleRegisterAllocator {
     ) -> Self {
         let instruction_len = instructions.len();
         let lifetimes = Self::get_register_lifetime(&instructions);
-        // ARM64: allocator pool sourced from the single ABI definition.
-        let physical_registers: Vec<VirtualRegister> = crate::abi::arm64::ABI
-            .allocator_pool
-            .iter()
-            .map(|r| physical(r.index as usize))
-            .collect();
+        // Allocator pool sourced from the single per-architecture ABI
+        // definition. Matches the pattern in `linear_scan.rs`.
+        cfg_if::cfg_if! {
+            if #[cfg(any(feature = "backend-x86-64", all(target_arch = "x86_64", not(feature = "backend-arm64"))))] {
+                let physical_registers: Vec<VirtualRegister> = crate::abi::x86_64::ABI
+                    .allocator_pool
+                    .iter()
+                    .map(|r| physical(r.index as usize))
+                    .collect();
+            } else {
+                let physical_registers: Vec<VirtualRegister> = crate::abi::arm64::ABI
+                    .allocator_pool
+                    .iter()
+                    .map(|r| physical(r.index as usize))
+                    .collect();
+            }
+        }
 
         SimpleRegisterAllocator {
             lifetimes,

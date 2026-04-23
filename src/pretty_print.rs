@@ -18,6 +18,40 @@ pub trait PrettyPrint {
     fn pretty_print(&self) -> String;
 }
 
+/// Mnemonic for an ARM64 4-bit condition code (BCond / CSET / etc).
+///
+/// The IR's `Condition` enum only names the 6 codes the compiler emits
+/// from comparison expressions, but ARM64 supports all 16. Backend
+/// lowerings (e.g. `InlineBumpAllocate` emits `b.hi` with `cond =
+/// 0b1000`) drop raw codes into the instruction stream; rendering them
+/// needs to cover the full table or debug builds panic trying to print
+/// their own IR.
+#[cfg(not(any(
+    feature = "backend-x86-64",
+    all(target_arch = "x86_64", not(feature = "backend-arm64"))
+)))]
+fn arm_cond_mnemonic(cond: i32) -> &'static str {
+    match cond {
+        0b0000 => "eq",
+        0b0001 => "ne",
+        0b0010 => "cs",
+        0b0011 => "cc",
+        0b0100 => "mi",
+        0b0101 => "pl",
+        0b0110 => "vs",
+        0b0111 => "vc",
+        0b1000 => "hi",
+        0b1001 => "ls",
+        0b1010 => "ge",
+        0b1011 => "lt",
+        0b1100 => "gt",
+        0b1101 => "le",
+        0b1110 => "al",
+        0b1111 => "nv",
+        _ => "??",
+    }
+}
+
 impl PrettyPrint for Value {
     fn pretty_print(&self) -> String {
         match self {
@@ -873,11 +907,17 @@ impl PrettyPrint for ArmAsm {
                 )
             }
             ArmAsm::BCond { imm19, cond } => {
-                if *cond == 14 {
+                // ARM64 supports all 16 condition codes (0-15); our IR's
+                // `Condition` enum only names the 6 we compile from `<`,
+                // `<=`, etc. Backend lowerings like InlineBumpAllocate
+                // emit raw codes (e.g. HI = 0b1000) that aren't in the
+                // enum. Map directly to mnemonics so pretty_print never
+                // panics on a legitimately-encoded instruction.
+                let mnemonic = arm_cond_mnemonic(*cond);
+                if *cond == 0b1110 {
                     return format!("b 0x{:x}", imm19);
                 }
-                let condition = Condition::arm_condition_from_i32(*cond);
-                format!("b{} 0x{:x}", condition.pretty_print(), imm19)
+                format!("b.{} 0x{:x}", mnemonic, imm19)
             }
             ArmAsm::Bl { imm26 } => {
                 format!("bl 0x{:x}", imm26)
@@ -922,8 +962,9 @@ impl PrettyPrint for ArmAsm {
                 format!("cmp {}, {}", rn.pretty_print(), rm.pretty_print())
             }
             ArmAsm::CsetCsinc { sf: _, cond, rd } => {
-                let condition = Condition::arm_condition_from_i32(*cond);
-                format!("cset {}, {}", rd.pretty_print(), condition.pretty_print())
+                // Same rationale as BCond above — support all 16 cond
+                // codes, not just the ones the IR's Condition enum names.
+                format!("cset {}, {}", rd.pretty_print(), arm_cond_mnemonic(*cond))
             }
             ArmAsm::Ldar { size, rn, rt } => {
                 if *size != 0b11 {

@@ -423,8 +423,22 @@ pub extern "C" fn eval(stack_pointer: usize, frame_pointer: usize, code: usize) 
     if result == 0 {
         return BuiltInTypes::null_value() as usize;
     }
-    let f: fn() -> usize = unsafe { transmute(result) };
-    f()
+    // Route the call through the apply_call_0 shim so X28 (MutatorState)
+    // is guaranteed valid on Beagle-side entry. Direct `transmute + call`
+    // relies on Rust preserving X28, but Rust is free to use callee-saved
+    // registers as scratch while `eval` executes — in debug builds it
+    // often does, and the Beagle prologue's inline gc_frame_link then
+    // dereferences garbage via [x28, #16] and faults. Same bug class as
+    // the apply_call_N fix. Surfaced as SIGBUS in resumable_eval_test.
+    let runtime = get_runtime().get();
+    let shim_entry = runtime
+        .get_function_by_name("beagle.builtin/apply_call_0")
+        .expect("apply_call_0 trampoline not compiled");
+    let shim_ptr = runtime
+        .get_pointer(shim_entry)
+        .expect("apply_call_0 has no code pointer") as usize;
+    let shim: extern "C" fn(usize) -> usize = unsafe { transmute(shim_ptr) };
+    shim(result as usize)
 }
 
 pub extern "C" fn eval_in_ns(

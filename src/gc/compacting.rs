@@ -651,10 +651,49 @@ impl Allocator for CompactingHeap {
     }
 
     fn can_allocate(&self, words: usize, _kind: BuiltInTypes) -> bool {
-        self.from_space.allocation_offset + words * 8 < self.from_space.byte_count()
+        // Account for the JIT inline fast path's frontier. The fast
+        // path bumps `MutatorState.alloc_ptr` without updating
+        // `from_space.allocation_offset`, so checking only the inner
+        // offset lies: it can report "yes, room for N words" when the
+        // actual frontier is already near `end_address()`. Callers like
+        // `ensure_space_for`/`allocate_no_gc` then skip the GC and the
+        // subsequent sync-inside-try_allocate discovers the real
+        // frontier too late, panicking with
+        // "ensure_space_for was not called or underestimated".
+        let base = self.from_space.start as usize;
+        let inner_frontier = base + self.from_space.allocation_offset;
+        let ms_alloc_ptr = unsafe { (*crate::runtime::current_mutator_state()).alloc_ptr };
+        let frontier = if ms_alloc_ptr >= base
+            && ms_alloc_ptr <= self.from_space.end_address()
+            && ms_alloc_ptr > inner_frontier
+        {
+            ms_alloc_ptr
+        } else {
+            inner_frontier
+        };
+        frontier + words * 8 < self.from_space.end_address()
     }
 
     fn allocator_frontier(&self) -> (usize, usize) {
         (self.from_space.frontier(), self.from_space.end_address())
+    }
+
+    /// Adopt the JIT inline fast path's frontier into the inner
+    /// bump pointer so subsequent slow-path allocations don't hand out
+    /// memory already occupied by fast-path objects.
+    ///
+    /// Without this override, the `Allocator` trait's default is a
+    /// no-op, and the first slow-path allocation after the fast path
+    /// has bumped `MutatorState.alloc_ptr` lands on top of a live
+    /// fast-path object — typically surfacing as a bogus type id on
+    /// the next field access (e.g. stdlib init crashing with
+    /// "Field 'String' does not exist on SystemError.ThreadError").
+    /// Matches `generational::sync_allocator_frontier`.
+    fn sync_allocator_frontier(&mut self, alloc_ptr: usize) {
+        let base = self.from_space.start as usize;
+        let end = self.from_space.end_address();
+        if alloc_ptr >= base && alloc_ptr <= end {
+            self.from_space.allocation_offset = alloc_ptr - base;
+        }
     }
 }
