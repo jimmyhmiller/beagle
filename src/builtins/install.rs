@@ -2305,6 +2305,14 @@ impl Runtime {
             "Persist an edited definition back to its source file and re-register it in the runtime.\n\nReads the file at the definition's on-disk location, verifies the bytes still match what was loaded (aborting if the file drifted), splices `new-text` in at the recorded byte range, writes the file, and re-compiles the new text in the definition's namespace so subsequent `reflect/source` returns it. Byte ranges of other definitions in the same file are shifted to account for the length change.\n\nThrows a runtime error (kind `write-source`) when the value has no on-disk origin, the file has drifted, I/O fails, or the new text doesn't parse. Returns `true` on success.\n\nExamples:\n  (reflect/write-source greet \"fn greet(name) { println(\\\"hi \\\" ++ name) }\")",
         )?;
 
+        self.add_builtin_with_doc(
+            "beagle.reflect/persist",
+            reflect_persist as *const u8,
+            true,
+            &["namespace", "text"],
+            "Persist one or more top-level definitions to disk, dispatching each as an update or an append.\n\nParses `text` to discover top-level fn/struct/enum definitions. For each def, if `namespace/<name>` already has an on-disk location, it is spliced in place (drift-checked against the stored source text first); otherwise the fragment is appended to the namespace's source file. All drift checks run up-front, so either every update succeeds or nothing is written.\n\nReturns a vector of maps `[{:name, :action}]` where `:action` is `\"updated\"` or `\"appended\"`. Throws on parse failure, drift, I/O error, or compile error.\n\nExamples:\n  (reflect/persist \"my.module\" \"fn greet(name) { println(\\\"hi \\\" ++ name) }\")\n  ; => [{:name \"my.module/greet\" :action \"appended\"}]",
+        )?;
+
         // ============================================================================
         // JSON Serialization builtins
         // ============================================================================

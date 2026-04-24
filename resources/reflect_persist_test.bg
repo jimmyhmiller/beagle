@@ -1,0 +1,37 @@
+namespace reflect_persist_test
+
+use beagle.reflect as reflect
+
+fn seed() { 1 }
+
+fn main() {
+    // seed() already exists on disk → persist should dispatch it to
+    // the update path. This exercises persist end-to-end (parse,
+    // resolve, drift-check, splice, recompile) while staying
+    // idempotent: we write back the original text at the end.
+
+    let original_source = reflect/source(seed)
+
+    let r1 = reflect/persist(
+        "reflect_persist_test",
+        "fn seed() { 2 }")
+    println(r1[0][:name])
+    println(r1[0][:action])
+    println(seed())
+
+    let r2 = reflect/persist(
+        "reflect_persist_test",
+        original_source)
+    println(r2[0][:action])
+    println(seed())
+
+    println("end")
+}
+
+// @beagle.core.snapshot
+// reflect_persist_test/seed
+// updated
+// 2
+// updated
+// 1
+// end

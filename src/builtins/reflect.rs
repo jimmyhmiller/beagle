@@ -1523,71 +1523,67 @@ pub extern "C" fn reflect_write_source(
             );
         }
     };
-    let Some(loc) = info.disk_location.clone() else {
-        throw_write_source_error(
-            stack_pointer,
-            "reflect/write-source: definition has no on-disk origin (eval/REPL defs cannot be persisted)",
-        );
-    };
-    let Some(original_source) = info.source_text.clone() else {
-        throw_write_source_error(
-            stack_pointer,
-            "reflect/write-source: definition has no stored source text to verify against",
-        );
-    };
 
     let new_text_str = runtime.get_string(stack_pointer, new_text);
 
-    // Read current file bytes.
-    let file_contents = match std::fs::read_to_string(&loc.file) {
-        Ok(s) => s,
-        Err(e) => {
-            let msg = format!("reflect/write-source: failed to read {}: {}", loc.file, e);
-            throw_write_source_error(stack_pointer, &msg);
+    match perform_splice(runtime, stack_pointer, &info, &new_text_str) {
+        Ok(()) => BuiltInTypes::construct_boolean(true) as usize,
+        Err(msg) => {
+            throw_write_source_error(stack_pointer, &format!("reflect/write-source: {}", msg));
         }
-    };
+    }
+}
 
-    // Bounds + integrity check. If the file was edited outside the runtime
-    // between load and now, we refuse rather than silently stomping.
+/// Execute the full "edit an existing disk-resident definition" sequence:
+/// verify the file hasn't drifted, splice the new text into the file,
+/// shift subsequent byte ranges, patch the record's location, recompile
+/// the fragment with file context, flush queued heap bindings, and run
+/// the resulting top-level. Shared by `reflect/write-source` and
+/// `reflect/persist` so both paths use identical semantics.
+fn perform_splice(
+    runtime: &mut Runtime,
+    stack_pointer: usize,
+    info: &DefinitionInfo,
+    new_text: &str,
+) -> Result<(), String> {
+    let loc = info.disk_location.clone().ok_or_else(|| {
+        "definition has no on-disk origin (eval/REPL defs cannot be persisted)".to_string()
+    })?;
+    let original_source = info
+        .source_text
+        .clone()
+        .ok_or_else(|| "definition has no stored source text to verify against".to_string())?;
+
+    let file_contents = std::fs::read_to_string(&loc.file)
+        .map_err(|e| format!("failed to read {}: {}", loc.file, e))?;
+
     if loc.byte_end > file_contents.len() || loc.byte_start > loc.byte_end {
-        throw_write_source_error(
-            stack_pointer,
-            "reflect/write-source: stored byte range is out of bounds for the current file",
-        );
+        return Err("stored byte range is out of bounds for the current file".to_string());
     }
     let current_slice = &file_contents[loc.byte_start..loc.byte_end];
     if current_slice != original_source {
-        throw_write_source_error(
-            stack_pointer,
-            "reflect/write-source: file contents have changed since this definition was loaded (re-load and retry)",
-        );
+        return Err(format!(
+            "file `{}` has changed since `{}` was loaded (re-load and retry)",
+            loc.file, info.full_name
+        ));
     }
 
-    // Splice.
     let mut new_contents =
-        String::with_capacity(file_contents.len() - original_source.len() + new_text_str.len());
+        String::with_capacity(file_contents.len() - original_source.len() + new_text.len());
     new_contents.push_str(&file_contents[..loc.byte_start]);
-    new_contents.push_str(&new_text_str);
+    new_contents.push_str(new_text);
     new_contents.push_str(&file_contents[loc.byte_end..]);
 
-    if let Err(e) = std::fs::write(&loc.file, &new_contents) {
-        let msg = format!("reflect/write-source: failed to write {}: {}", loc.file, e);
-        throw_write_source_error(stack_pointer, &msg);
-    }
+    std::fs::write(&loc.file, &new_contents)
+        .map_err(|e| format!("failed to write {}: {}", loc.file, e))?;
 
-    // Shift subsequent definitions in the same file. `delta` is the
-    // signed length change; earlier defs are untouched, later ones slide
-    // by exactly this amount.
     let old_len = loc.byte_end - loc.byte_start;
-    let new_len = new_text_str.len();
+    let new_len = new_text.len();
     let delta = new_len as isize - old_len as isize;
     shift_byte_ranges_after(runtime, &loc.file, loc.byte_end, delta);
 
-    // The record we're about to overwrite in compile doesn't know its new
-    // end yet — patch its range up-front so the compiler's upsert
-    // (which leaves disk_location sticky) doesn't revert our patch.
     let new_byte_end = loc.byte_start + new_len;
-    let new_line_end = loc.line_start + new_text_str.matches('\n').count();
+    let new_line_end = loc.line_start + new_text.matches('\n').count();
     let patched_loc = DiskLocation {
         file: loc.file.clone(),
         byte_start: loc.byte_start,
@@ -1597,55 +1593,104 @@ pub extern "C" fn reflect_write_source(
     };
     patch_disk_location(runtime, &info.full_name, patched_loc);
 
-    // Recompile the edited text in the target namespace with file context
-    // so the new definition's disk_location points at the updated byte
-    // range. Line offset is `line_start - 1` because the fragment's own
-    // first line maps to line 1 internally.
     let namespace = namespace_of(&info.full_name).unwrap_or("").to_string();
-    // Snapshot the pending heap-binding queue length so we only flush
-    // the entries the recompile itself queues, not accumulated cruft
-    // from earlier compiler-thread reservations (which would otherwise
-    // re-play stale null placeholders and clobber live bindings for
-    // unrelated definitions in the same namespace).
-    let pending_start = runtime.pending_heap_bindings_len();
-
-    let top_level_ptr = match runtime.compile_string_with_file_context(
-        &new_text_str,
+    recompile_fragment_and_run(
+        runtime,
+        stack_pointer,
+        new_text,
         &namespace,
         &loc.file,
         loc.byte_start,
         loc.line_start.saturating_sub(1),
-    ) {
-        Ok(ptr) => ptr,
-        Err(e) => {
-            let msg = format!(
-                "reflect/write-source: wrote {} but re-compile failed: {}",
-                loc.file, e
-            );
-            throw_write_source_error(stack_pointer, &msg);
-        }
-    };
+    )
+    .map_err(|e| format!("wrote {} but re-compile failed: {}", loc.file, e))
+}
 
-    // Flush only the bindings this recompile queued. Covers the function
-    // case where `upsert_function` on the compiler thread adds the
-    // new first-class wrapper via `add_binding` and queues the heap-side
-    // update for later. Without flushing, reads of the edited name
-    // would return the pre-edit wrapper pointing at the old code.
+/// Append `new_text` to the end of `file` (with a blank line separator
+/// so the appended def doesn't run into whatever trailed the file),
+/// then compile the fragment with file context so its `disk_location`
+/// matches its new position on disk. Used by `reflect/persist` for
+/// top-level defs that don't yet exist on disk.
+fn perform_append(
+    runtime: &mut Runtime,
+    stack_pointer: usize,
+    namespace: &str,
+    file: &str,
+    new_text: &str,
+) -> Result<(), String> {
+    let file_contents =
+        std::fs::read_to_string(file).map_err(|e| format!("failed to read {}: {}", file, e))?;
+
+    // Ensure the appended fragment starts on its own line, with a blank
+    // line separator from any prior content. Compute `separator` so that
+    // the final file ends with at least "\n\n" before the fragment, but
+    // we don't stack extra newlines if the file already ends with them.
+    let trailing_newlines = file_contents
+        .bytes()
+        .rev()
+        .take_while(|b| *b == b'\n')
+        .count();
+    let needed = 2usize.saturating_sub(trailing_newlines);
+    let separator: String = "\n".repeat(if file_contents.is_empty() { 0 } else { needed });
+
+    // Count lines already in the file so the fragment's line numbers
+    // align with its real position. A file ending in "\n" has one more
+    // logical "next line" than the raw newline count implies.
+    let existing_line_count = file_contents.matches('\n').count();
+    let separator_line_count = separator.matches('\n').count();
+    let fragment_byte_offset = file_contents.len() + separator.len();
+    let fragment_line_offset = existing_line_count + separator_line_count;
+
+    let mut new_contents =
+        String::with_capacity(file_contents.len() + separator.len() + new_text.len());
+    new_contents.push_str(&file_contents);
+    new_contents.push_str(&separator);
+    new_contents.push_str(new_text);
+
+    std::fs::write(file, &new_contents).map_err(|e| format!("failed to write {}: {}", file, e))?;
+
+    recompile_fragment_and_run(
+        runtime,
+        stack_pointer,
+        new_text,
+        namespace,
+        file,
+        fragment_byte_offset,
+        fragment_line_offset,
+    )
+    .map_err(|e| format!("wrote {} but re-compile failed: {}", file, e))
+}
+
+/// Recompile a single top-level fragment with file context, flush any
+/// heap-binding updates queued by the recompile, and run the resulting
+/// top-level. Extracted from the splice path so the append path can
+/// reuse the identical tail sequence.
+///
+/// The top-level is entered through `save_volatile_registers0` because
+/// the JIT prologue for `top_level` expects x28 to hold the per-thread
+/// MutatorState pointer, and Rust is free to clobber x28 within this
+/// function — the trampoline reloads it before branching into JIT code.
+fn recompile_fragment_and_run(
+    runtime: &mut Runtime,
+    stack_pointer: usize,
+    fragment: &str,
+    namespace: &str,
+    file: &str,
+    byte_offset: usize,
+    line_offset: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pending_start = runtime.pending_heap_bindings_len();
+
+    let top_level_ptr = runtime.compile_string_with_file_context(
+        fragment,
+        namespace,
+        file,
+        byte_offset,
+        line_offset,
+    )?;
+
     runtime.flush_pending_heap_bindings_from(stack_pointer, pending_start);
 
-    // Execute the compiled top-level so struct/enum definitions update
-    // their type descriptor bindings in the namespace. Functions don't
-    // strictly require this (upsert_function already rebinds), but
-    // running it keeps the behavior uniform with `eval` and ensures the
-    // edited name resolves to the new definition everywhere.
-    //
-    // Route through `save_volatile_registers0` rather than calling
-    // `top_level_ptr` directly: the JIT prologue for `top_level` assumes
-    // x28 holds the per-thread MutatorState pointer, but Rust is free to
-    // use x28 as a callee-saved scratch register within this function,
-    // so by the time we reach this call x28 may hold a Rust-local value.
-    // The `save_volatile_registers0` shim reloads x28 from
-    // `jit_load_current_mutator_state` before branching into Beagle.
     if top_level_ptr != 0 {
         let save_vr0_entry = runtime
             .get_function_by_name("beagle.builtin/save_volatile_registers0")
@@ -1657,8 +1702,375 @@ pub extern "C" fn reflect_write_source(
             unsafe { std::mem::transmute::<_, _>(save_vr0_ptr) };
         save_vr0(top_level_ptr);
     }
+    Ok(())
+}
 
-    BuiltInTypes::construct_boolean(true) as usize
+/// One top-level definition discovered inside the `text` argument of
+/// `reflect/persist`: its unqualified name and the exact byte slice
+/// that defines it (what will later be recompiled as a fragment).
+struct PersistDef {
+    name: String,
+    fragment: String,
+}
+
+/// Pre-parse the `text` argument of `reflect/persist` to discover the
+/// fn/struct/enum defs it contains and slice out each one's source text.
+/// Skips `namespace` directives and any non-definition top-level
+/// elements (the recompile step only handles fn/struct/enum).
+fn extract_persist_defs(text: &str) -> Result<Vec<PersistDef>, String> {
+    use crate::ast::Ast;
+    use crate::parser::Parser;
+
+    let mut parser = Parser::new("<persist>".to_string(), text.to_string())
+        .map_err(|e| format!("parse error: {}", e))?;
+    let ast = parser.parse().map_err(|e| format!("parse error: {}", e))?;
+    let ranges = parser.get_definition_byte_ranges();
+
+    let elements = match ast {
+        Ast::Program { elements, .. } => elements,
+        other => vec![other],
+    };
+
+    let mut defs = Vec::new();
+    for el in elements {
+        let (name, token_range) = match &el {
+            Ast::Function {
+                name: Some(n),
+                token_range,
+                ..
+            } => (n.clone(), *token_range),
+            Ast::Struct {
+                name, token_range, ..
+            } => (name.clone(), *token_range),
+            Ast::Enum {
+                name, token_range, ..
+            } => (name.clone(), *token_range),
+            _ => continue,
+        };
+        let (byte_start, byte_end) = ranges
+            .get(&(token_range.start, token_range.end))
+            .copied()
+            .ok_or_else(|| format!("no byte range recorded for `{}`", name))?;
+        if byte_end > text.len() || byte_start > byte_end {
+            return Err(format!("byte range for `{}` is out of bounds", name));
+        }
+        defs.push(PersistDef {
+            name,
+            fragment: text[byte_start..byte_end].to_string(),
+        });
+    }
+    Ok(defs)
+}
+
+/// Find any on-disk file that hosts a definition in `namespace`. Used
+/// by `reflect/persist` to decide where to append brand-new defs. The
+/// "one file per namespace" assumption holds in practice even though
+/// it isn't enforced — if the namespace spans multiple files, the
+/// first hit wins.
+fn find_any_file_for_namespace(runtime: &Runtime, namespace: &str) -> Option<String> {
+    let prefix = format!("{}/", namespace);
+    if let Some(f) = runtime
+        .functions
+        .iter()
+        .find(|f| f.name.starts_with(&prefix) && f.disk_location.is_some())
+    {
+        return f.disk_location.as_ref().map(|l| l.file.clone());
+    }
+    if let Some(s) = runtime
+        .structs
+        .iter()
+        .find(|s| s.name.starts_with(&prefix) && s.disk_location.is_some())
+    {
+        return s.disk_location.as_ref().map(|l| l.file.clone());
+    }
+    if let Some(e) = runtime
+        .enums
+        .iter()
+        .find(|e| e.name.starts_with(&prefix) && e.disk_location.is_some())
+    {
+        return e.disk_location.as_ref().map(|l| l.file.clone());
+    }
+    if let Some(b) = runtime
+        .bindings
+        .iter()
+        .find(|b| b.name.starts_with(&prefix) && b.disk_location.is_some())
+    {
+        return b.disk_location.as_ref().map(|l| l.file.clone());
+    }
+    None
+}
+
+/// reflect/persist(namespace, text) - Persist one or more definitions
+/// to disk, routing each to a splice or append path based on whether
+/// it already exists in `namespace`.
+///
+/// Parses `text` to discover top-level fn/struct/enum defs. For each:
+///   - if `namespace/<name>` has an on-disk location → splice path
+///     (drift-check, write, shift trailing byte ranges, recompile).
+///   - else → append path (append to the namespace's file, recompile
+///     at the new byte offset).
+///
+/// All splice drift checks run up-front — if any fails, nothing is
+/// written. After that, defs are processed in their textual order so
+/// later defs see the runtime state left by earlier ones.
+///
+/// Returns a vector of maps `[{:name, :action}]` where `:action` is
+/// `"updated"` or `"appended"`. Throws on parse failure, drift
+/// failure, I/O failure, or compile failure of any fragment.
+pub extern "C" fn reflect_persist(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    namespace_val: usize,
+    text_val: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    let namespace = runtime.get_string(stack_pointer, namespace_val);
+    let text = runtime.get_string(stack_pointer, text_val);
+
+    let defs = match extract_persist_defs(&text) {
+        Ok(d) => d,
+        Err(e) => throw_persist_error(stack_pointer, &format!("reflect/persist: {}", e)),
+    };
+    if defs.is_empty() {
+        throw_persist_error(
+            stack_pointer,
+            "reflect/persist: no top-level fn/struct/enum definitions in text",
+        );
+    }
+
+    enum Classified {
+        Splice {
+            full_name: String,
+            info: DefinitionInfo,
+            fragment: String,
+        },
+        Append {
+            full_name: String,
+            fragment: String,
+        },
+    }
+
+    let mut classified: Vec<Classified> = Vec::with_capacity(defs.len());
+    let mut splice_file: Option<String> = None;
+    for def in defs {
+        let full_name = format!("{}/{}", namespace, def.name);
+        let info = resolve_by_name(runtime, &full_name);
+        match info {
+            Some(info) if info.disk_location.is_some() => {
+                if splice_file.is_none() {
+                    splice_file = info.disk_location.as_ref().map(|l| l.file.clone());
+                }
+                classified.push(Classified::Splice {
+                    full_name,
+                    info,
+                    fragment: def.fragment,
+                });
+            }
+            _ => {
+                classified.push(Classified::Append {
+                    full_name,
+                    fragment: def.fragment,
+                });
+            }
+        }
+    }
+
+    let has_appends = classified
+        .iter()
+        .any(|c| matches!(c, Classified::Append { .. }));
+    let append_file = if has_appends {
+        let f = splice_file
+            .clone()
+            .or_else(|| find_any_file_for_namespace(runtime, &namespace));
+        match f {
+            Some(f) => Some(f),
+            None => throw_persist_error(
+                stack_pointer,
+                &format!(
+                    "reflect/persist: namespace `{}` has no on-disk origin; cannot append new definitions",
+                    namespace
+                ),
+            ),
+        }
+    } else {
+        None
+    };
+
+    // Up-front drift check for every splice entry. If any fails we
+    // abort before touching disk. We group by file and read once per
+    // file so a multi-def persist against a single file reads that
+    // file exactly once for the drift phase.
+    use std::collections::HashMap;
+    let mut file_cache: HashMap<String, String> = HashMap::new();
+    for c in &classified {
+        if let Classified::Splice {
+            info, full_name, ..
+        } = c
+        {
+            let loc = info.disk_location.as_ref().expect("classified as splice");
+            let original = info.source_text.as_deref().unwrap_or("");
+            let contents = match file_cache.get(&loc.file) {
+                Some(s) => s,
+                None => {
+                    let s = match std::fs::read_to_string(&loc.file) {
+                        Ok(s) => s,
+                        Err(e) => throw_persist_error(
+                            stack_pointer,
+                            &format!("reflect/persist: failed to read {}: {}", loc.file, e),
+                        ),
+                    };
+                    file_cache.entry(loc.file.clone()).or_insert(s)
+                }
+            };
+            if loc.byte_end > contents.len() || loc.byte_start > loc.byte_end {
+                throw_persist_error(
+                    stack_pointer,
+                    &format!(
+                        "reflect/persist: byte range for `{}` is out of bounds in {}",
+                        full_name, loc.file
+                    ),
+                );
+            }
+            if &contents[loc.byte_start..loc.byte_end] != original {
+                throw_persist_error(
+                    stack_pointer,
+                    &format!(
+                        "reflect/persist: file `{}` has changed since `{}` was loaded (re-load and retry)",
+                        loc.file, full_name
+                    ),
+                );
+            }
+        }
+    }
+    drop(file_cache);
+
+    // Process defs in textual order. Per-def splice/append already
+    // handles its own file I/O + recompile; we just dispatch.
+    let mut results: Vec<(String, &'static str)> = Vec::with_capacity(classified.len());
+    for c in classified {
+        match c {
+            Classified::Splice {
+                full_name,
+                info,
+                fragment,
+            } => {
+                if let Err(e) = perform_splice(runtime, stack_pointer, &info, &fragment) {
+                    throw_persist_error(
+                        stack_pointer,
+                        &format!("reflect/persist: updating `{}`: {}", full_name, e),
+                    );
+                }
+                results.push((full_name, "updated"));
+            }
+            Classified::Append {
+                full_name,
+                fragment,
+            } => {
+                let file = append_file
+                    .as_ref()
+                    .expect("append_file resolved when has_appends");
+                if let Err(e) = perform_append(runtime, stack_pointer, &namespace, file, &fragment)
+                {
+                    throw_persist_error(
+                        stack_pointer,
+                        &format!("reflect/persist: appending `{}`: {}", full_name, e),
+                    );
+                }
+                results.push((full_name, "appended"));
+            }
+        }
+    }
+
+    build_persist_result(runtime, stack_pointer, &results)
+        .unwrap_or(BuiltInTypes::null_value() as usize)
+}
+
+/// Build the `[{:name, :action}]` return value for `reflect/persist`
+/// as a PersistentVec of PersistentMaps, mirroring the GC-safe handle
+/// pattern used by `reflect_namespace_info`.
+fn build_persist_result(
+    runtime: &mut Runtime,
+    stack_pointer: usize,
+    results: &[(String, &'static str)],
+) -> Option<usize> {
+    use crate::collections::{GcHandle, HandleScope, PersistentMap, PersistentVec};
+
+    let mut scope = HandleScope::new(runtime, stack_pointer);
+    let tg_ptr = crate::runtime::cached_thread_global_ptr();
+
+    let vec = PersistentVec::empty(scope.runtime(), stack_pointer).ok()?;
+    let vec_h = scope.alloc(vec.as_tagged());
+
+    for (name, action) in results {
+        let map = PersistentMap::empty(scope.runtime(), stack_pointer).ok()?;
+        let map_h = scope.alloc(map.as_tagged());
+
+        // :name
+        let name_key = scope
+            .runtime()
+            .intern_keyword(stack_pointer, "name".to_string())
+            .ok()?;
+        let name_key_h = scope.alloc(name_key);
+        let name_val = scope
+            .runtime()
+            .allocate_string(stack_pointer, name.clone())
+            .ok()?
+            .into();
+        let name_val_h = scope.alloc(name_val);
+        let map_after_name = PersistentMap::assoc(
+            scope.runtime(),
+            stack_pointer,
+            map_h.get(),
+            name_key_h.get(),
+            name_val_h.get(),
+        )
+        .ok()?;
+        let tg = unsafe { &mut *tg_ptr };
+        tg.handle_stack[map_h.slot()] = map_after_name.as_tagged();
+
+        // :action
+        let action_key = scope
+            .runtime()
+            .intern_keyword(stack_pointer, "action".to_string())
+            .ok()?;
+        let action_key_h = scope.alloc(action_key);
+        let action_val = scope
+            .runtime()
+            .allocate_string(stack_pointer, action.to_string())
+            .ok()?
+            .into();
+        let action_val_h = scope.alloc(action_val);
+        let map_after_action = PersistentMap::assoc(
+            scope.runtime(),
+            stack_pointer,
+            map_h.get(),
+            action_key_h.get(),
+            action_val_h.get(),
+        )
+        .ok()?;
+        let tg = unsafe { &mut *tg_ptr };
+        tg.handle_stack[map_h.slot()] = map_after_action.as_tagged();
+
+        // push map into vec
+        let current_vec = GcHandle::from_tagged(vec_h.get());
+        let new_vec =
+            PersistentVec::push(scope.runtime(), stack_pointer, current_vec, map_h.get()).ok()?;
+        let tg = unsafe { &mut *tg_ptr };
+        tg.handle_stack[vec_h.slot()] = new_vec.as_tagged();
+    }
+
+    Some(vec_h.get())
+}
+
+/// Raise a runtime error from `reflect/persist`. Mirrors
+/// `throw_write_source_error` but tags the message with the persist
+/// path so users can distinguish the two sources in stack traces.
+fn throw_persist_error(stack_pointer: usize, message: &str) -> ! {
+    unsafe {
+        crate::builtins::throw_runtime_error(stack_pointer, "RuntimeError", message.to_string())
+    }
 }
 
 /// Thin wrapper around `throw_runtime_error` that fills in the
