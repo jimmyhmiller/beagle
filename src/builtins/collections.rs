@@ -1,5 +1,8 @@
 use super::*;
-use crate::collections::{GcHandle, MutableMap, PersistentMap, PersistentSet, PersistentVec};
+use crate::collections::{
+    GcHandle, HandleScope, MutableMap, PersistentMap, PersistentSet, PersistentVec,
+    TYPE_ID_RAW_ARRAY,
+};
 use crate::save_gc_context;
 
 /// Create an empty persistent vector
@@ -104,6 +107,125 @@ pub unsafe extern "C" fn rust_vec_assoc(
             );
         },
     }
+}
+
+/// Copy a persistent vector's elements into a freshly-allocated raw mutable
+/// array (type_id = 1). Used as the first step of sort — the algorithm runs
+/// in place on the array, then `array-to-vec` rebuilds a persistent vector.
+/// Signature: (stack_pointer, frame_pointer, vec_ptr) -> tagged_ptr (array)
+pub unsafe extern "C" fn rust_vec_to_array(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    vec_ptr: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    if !BuiltInTypes::is_heap_pointer(vec_ptr) {
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                "vec-to-array: expected a persistent vector".to_string(),
+            );
+        }
+    }
+
+    let vec = GcHandle::from_tagged(vec_ptr);
+    let count = PersistentVec::count(vec);
+
+    let mut scope = HandleScope::new(runtime, stack_pointer);
+    let vec_h = scope.alloc(vec_ptr);
+
+    let array_h = match scope.allocate_typed_zeroed(count, TYPE_ID_RAW_ARRAY) {
+        Ok(h) => h,
+        Err(e) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                format!("Failed to allocate array for vec-to-array: {}", e),
+            );
+        },
+    };
+
+    for i in 0..count {
+        let vec = GcHandle::from_tagged(vec_h.get());
+        let value = PersistentVec::get(vec, i);
+        let array = array_h.to_gc_handle();
+        array.set_field_with_barrier(scope.runtime(), i, value);
+    }
+
+    array_h.to_gc_handle().as_tagged()
+}
+
+/// Build a new PersistentVec from the first `len` elements of a raw mutable
+/// array (type_id = 1). Counterpart to `vec-to-array` — the sort writes sorted
+/// elements into the array and this rebuilds an immutable vector from them.
+/// Signature: (stack_pointer, frame_pointer, array_ptr, len) -> tagged_ptr (vec)
+pub unsafe extern "C" fn rust_array_to_vec(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    array_ptr: usize,
+    len: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    if !BuiltInTypes::is_heap_pointer(array_ptr) {
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                "array-to-vec: expected a raw array".to_string(),
+            );
+        }
+    }
+    if BuiltInTypes::get_kind(len) != BuiltInTypes::Int {
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                "array-to-vec: len must be an integer".to_string(),
+            );
+        }
+    }
+    let len = BuiltInTypes::untag(len);
+
+    let mut scope = HandleScope::new(runtime, stack_pointer);
+    let array_h = scope.alloc(array_ptr);
+
+    let empty = match PersistentVec::empty(scope.runtime(), stack_pointer) {
+        Ok(h) => h,
+        Err(e) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                format!("Failed to create empty vec in array-to-vec: {}", e),
+            );
+        },
+    };
+    let vec_h = scope.alloc(empty.as_tagged());
+
+    for i in 0..len {
+        let array = array_h.to_gc_handle();
+        let value = array.get_field(i);
+        let current_vec = GcHandle::from_tagged(vec_h.get());
+        let new_vec = match PersistentVec::push(scope.runtime(), stack_pointer, current_vec, value)
+        {
+            Ok(h) => h,
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    format!("Failed to push in array-to-vec: {}", e),
+                );
+            },
+        };
+        let tg = unsafe { &mut *crate::runtime::cached_thread_global_ptr() };
+        tg.handle_stack[vec_h.slot()] = new_vec.as_tagged();
+    }
+
+    vec_h.get()
 }
 
 // ========== Map builtins ==========

@@ -1,0 +1,103 @@
+namespace sort_timsort_test
+
+// Build [k mod 7, k mod 7, ...] over 0..n so small values repeat many times —
+// exercises stability and the equal-key paths in both merge-lo and merge-hi.
+fn mod-seq(n) {
+    let mut out = []
+    let mut i = 0
+    while i < n {
+        out = push(out, i - (i / 7) * 7)
+        i = i + 1
+    }
+    out
+}
+
+fn range-vec(lo, hi) {
+    let mut out = []
+    let mut i = lo
+    while i < hi {
+        out = push(out, i)
+        i = i + 1
+    }
+    out
+}
+
+fn reversed-range(lo, hi) {
+    let mut out = []
+    let mut i = hi - 1
+    while i >= lo {
+        out = push(out, i)
+        i = i - 1
+    }
+    out
+}
+
+// Deterministic pseudo-random sequence in [0, 1000). LCG, ok for test input.
+fn lcg-seq(n, seed) {
+    let mut out = []
+    let mut s = seed
+    let mut i = 0
+    while i < n {
+        s = (s * 1103515245 + 12345) - ((s * 1103515245 + 12345) / 2147483648) * 2147483648
+        out = push(out, s - (s / 1000) * 1000)
+        i = i + 1
+    }
+    out
+}
+
+// Assert sorted ascending and same length as input.
+fn check-sorted(label, input) {
+    let sorted = sort(input)
+    let n = count(sorted)
+    if n != count(input) {
+        println(label, "FAIL length", count(input), "->", n)
+    } else {
+        let mut ok = true
+        let mut i = 1
+        while i < n {
+            if get(sorted, i) < get(sorted, i - 1) {
+                ok = false
+            }
+            i = i + 1
+        }
+        if ok { println(label, "ok") } else { println(label, "FAIL not sorted:", sorted) }
+    }
+}
+
+fn main() {
+    // Small — binary-insertion path.
+    check-sorted("small-random", [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5])
+    check-sorted("small-sorted", range-vec(0, 20))
+    check-sorted("small-reversed", reversed-range(0, 20))
+    check-sorted("small-equal", mod-seq(20))
+
+    // Large — full Timsort path (n >= 64).
+    check-sorted("large-sorted", range-vec(0, 500))
+    check-sorted("large-reversed", reversed-range(0, 500))
+    check-sorted("large-equal-keys", mod-seq(500))
+    check-sorted("large-random-a", lcg-seq(500, 42))
+    check-sorted("large-random-b", lcg-seq(1000, 123))
+
+    // sort-by
+    let by-len = sort-by(["bb", "a", "cccc", "ddd"], fn(s) { length(s) })
+    println("sort-by-len:", by-len)
+
+    // Stability: sort pairs [key, tag] by key; original order of equal keys
+    // must be preserved. Input alternates tag 0/1 per key.
+    let pairs = [[2, 0], [1, 0], [2, 1], [1, 1], [3, 0], [1, 2]]
+    let by-first = sort-by(pairs, fn(p) { get(p, 0) })
+    println("stable:", by-first)
+}
+
+// @beagle.core.snapshot
+// small-random ok
+// small-sorted ok
+// small-reversed ok
+// small-equal ok
+// large-sorted ok
+// large-reversed ok
+// large-equal-keys ok
+// large-random-a ok
+// large-random-b ok
+// sort-by-len: ["a", "bb", "ddd", "cccc"]
+// stable: [[1, 0], [1, 1], [1, 2], [2, 0], [2, 1], [3, 0]]

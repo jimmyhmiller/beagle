@@ -2378,6 +2378,22 @@ impl Runtime {
             "Return a new vector with the value at index replaced.\n\nExamples:\n  (vec-assoc [1 2 3] 1 99)  ; => [1 99 3]",
         )?;
 
+        self.add_builtin_with_doc(
+            "beagle.collections/vec-to-array",
+            rust_vec_to_array as *const u8,
+            true,
+            &["vec"],
+            "Copy the vector's elements into a fresh raw mutable array. Used by sort — mutate in place, then rebuild a vector via array-to-vec.",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.collections/array-to-vec",
+            rust_array_to_vec as *const u8,
+            true,
+            &["array", "len"],
+            "Build a persistent vector from the first `len` elements of a raw array. Counterpart to vec-to-array.",
+        )?;
+
         // ============================================================================
         // Persistent Map (HAMT-based immutable hash map)
         // ============================================================================

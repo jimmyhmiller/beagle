@@ -1821,108 +1821,313 @@ fn dedupe(coll) {
 }
 
 // ============================================================================
-// Sorting Functions
+// Sorting Functions (Timsort)
 // ============================================================================
+//
+// Stable, adaptive O(n log n) sort. Operates on a raw mutable array copy of
+// the input vector, then rebuilds an immutable vector from the result.
+// Galloping mode is omitted — everything else (natural run detection,
+// minrun-extended binary insertion, stack-invariant merges) matches the
+// classic Timsort algorithm.
 
-// Helper: insert elem into sorted vector at correct position
-fn insert-sorted(sorted, elem) {
-    let mut s = seq(sorted)
-    let mut before = []
-    let mut inserted = false
-    let mut result = []
+// Allocate a raw mutable array (type_id = 1) filled with null. primitive/write-field
+// emits a write barrier, so this array can safely hold heap pointers across GCs.
+fn tim-allocate-array(size) {
+    let a = builtin/allocate(size)
+    builtin/fill-object-fields(a, null)
+    primitive/write-type-id(a, 1)
+    a
+}
 
-    while s != null && inserted == false {
-        let current = first(s)
-        if elem < current {
-            // Insert elem here, then add rest
-            result = concat(before, [elem])
-            // Add remaining elements
-            while s != null {
-                result = push(result, first(s))
-                s = next(s)
+// Reverse arr[lo..=hi] in place.
+fn tim-reverse(arr, lo, hi) {
+    let mut l = lo
+    let mut h = hi
+    while l < h {
+        let tmp = primitive/read-field(arr, l)
+        primitive/write-field(arr, l, primitive/read-field(arr, h))
+        primitive/write-field(arr, h, tmp)
+        l = l + 1
+        h = h - 1
+    }
+    null
+}
+
+// Scan a natural run starting at `start`. Strictly-descending runs are
+// reversed in place — using strict less (not less-or-equal) when detecting
+// descending keeps equal-keyed elements from being flipped, preserving stability.
+fn tim-count-run-and-make-ascending(arr, start, n, less) {
+    if start + 1 >= n {
+        1
+    } else {
+        let first-val = primitive/read-field(arr, start)
+        let second-val = primitive/read-field(arr, start + 1)
+        let mut runhi = start + 2
+        if less(second-val, first-val) {
+            while runhi < n && less(primitive/read-field(arr, runhi), primitive/read-field(arr, runhi - 1)) {
+                runhi = runhi + 1
             }
-            inserted = true
+            tim-reverse(arr, start, runhi - 1)
         } else {
-            before = push(before, current)
-            s = next(s)
+            while runhi < n && less(primitive/read-field(arr, runhi), primitive/read-field(arr, runhi - 1)) == false {
+                runhi = runhi + 1
+            }
+        }
+        runhi - start
+    }
+}
+
+// Binary-insertion sort arr[lo..hi], with arr[lo..start] already sorted.
+// Strict-less in the binary search puts the pivot after any equal elements,
+// preserving stability.
+fn tim-binary-insertion-sort(arr, lo, hi, start, less) {
+    let mut s = if start <= lo { lo + 1 } else { start }
+    while s < hi {
+        let pivot = primitive/read-field(arr, s)
+        let mut left = lo
+        let mut right = s
+        while left < right {
+            let mid = left + (right - left) / 2
+            if less(pivot, primitive/read-field(arr, mid)) {
+                right = mid
+            } else {
+                left = mid + 1
+            }
+        }
+        let mut i = s
+        while i > left {
+            primitive/write-field(arr, i, primitive/read-field(arr, i - 1))
+            i = i - 1
+        }
+        primitive/write-field(arr, left, pivot)
+        s = s + 1
+    }
+    null
+}
+
+// Timsort minrun: pick a value in [32, 64) so that n / minrun is just below
+// a power of two (keeps the merge tree balanced). Implemented without bitwise
+// ops because Beagle has none — (m - (m/2)*2) is m mod 2.
+fn tim-calc-min-run(n) {
+    let mut r = 0
+    let mut m = n
+    while m >= 64 {
+        if m - (m / 2) * 2 == 1 {
+            r = 1
+        }
+        m = m / 2
+    }
+    m + r
+}
+
+// Merge adjacent runs arr[base1..base1+len1] and arr[base2..base2+len2],
+// where base2 == base1 + len1. Copy the smaller side into temp to bound
+// scratch usage.
+fn tim-merge(arr, temp, base1, len1, base2, len2, less) {
+    if len1 <= len2 {
+        tim-merge-lo(arr, temp, base1, len1, base2, len2, less)
+    } else {
+        tim-merge-hi(arr, temp, base1, len1, base2, len2, less)
+    }
+}
+
+// Left run copied to temp, merge forward. On ties prefer temp (left) so
+// equal-keyed elements keep their original relative order.
+fn tim-merge-lo(arr, temp, base1, len1, base2, len2, less) {
+    let mut i = 0
+    while i < len1 {
+        primitive/write-field(temp, i, primitive/read-field(arr, base1 + i))
+        i = i + 1
+    }
+    let mut dest = base1
+    let mut ti = 0
+    let mut ai = base2
+    let a-end = base2 + len2
+    while ti < len1 && ai < a-end {
+        let t-val = primitive/read-field(temp, ti)
+        let a-val = primitive/read-field(arr, ai)
+        if less(a-val, t-val) {
+            primitive/write-field(arr, dest, a-val)
+            ai = ai + 1
+        } else {
+            primitive/write-field(arr, dest, t-val)
+            ti = ti + 1
+        }
+        dest = dest + 1
+    }
+    // If right drained first, its leftover tail is already in place at arr[ai..a-end].
+    while ti < len1 {
+        primitive/write-field(arr, dest, primitive/read-field(temp, ti))
+        ti = ti + 1
+        dest = dest + 1
+    }
+    null
+}
+
+// Right run copied to temp, merge backward. On ties prefer temp (right) —
+// writing it at the higher dest keeps it after any equal left-run elements.
+fn tim-merge-hi(arr, temp, base1, len1, base2, len2, less) {
+    let mut i = 0
+    while i < len2 {
+        primitive/write-field(temp, i, primitive/read-field(arr, base2 + i))
+        i = i + 1
+    }
+    let mut dest = base2 + len2 - 1
+    let mut ti = len2 - 1
+    let mut ai = base1 + len1 - 1
+    while ti >= 0 && ai >= base1 {
+        let t-val = primitive/read-field(temp, ti)
+        let a-val = primitive/read-field(arr, ai)
+        if less(t-val, a-val) {
+            primitive/write-field(arr, dest, a-val)
+            ai = ai - 1
+        } else {
+            primitive/write-field(arr, dest, t-val)
+            ti = ti - 1
+        }
+        dest = dest - 1
+    }
+    while ti >= 0 {
+        primitive/write-field(arr, dest, primitive/read-field(temp, ti))
+        ti = ti - 1
+        dest = dest - 1
+    }
+    null
+}
+
+// Merge runs at stack[i] and stack[i+1], compacting the stack down by one.
+// Returns the new stack size.
+fn tim-merge-at(arr, temp, stack-base, stack-len, stack-size, i, less) {
+    let base1 = primitive/read-field(stack-base, i)
+    let len1 = primitive/read-field(stack-len, i)
+    let base2 = primitive/read-field(stack-base, i + 1)
+    let len2 = primitive/read-field(stack-len, i + 1)
+    tim-merge(arr, temp, base1, len1, base2, len2, less)
+    primitive/write-field(stack-len, i, len1 + len2)
+    // If we merged the middle of the top three, shift the topmost down by one.
+    if i == stack-size - 3 {
+        primitive/write-field(stack-base, i + 1, primitive/read-field(stack-base, i + 2))
+        primitive/write-field(stack-len, i + 1, primitive/read-field(stack-len, i + 2))
+    }
+    stack-size - 1
+}
+
+// Maintain Timsort's modern (CPython 3.6.2+) stack invariant for the top runs
+// A, B, C (C on top):
+//   A > B + C   AND   B > C
+// If violated, merge B with whichever neighbor is smaller until balanced.
+fn tim-merge-collapse(arr, temp, stack-base, stack-len, stack-size, less) {
+    let mut size = stack-size
+    let mut done = false
+    while size > 1 && done == false {
+        let n = size - 2
+        if n >= 1 && primitive/read-field(stack-len, n - 1) <= primitive/read-field(stack-len, n) + primitive/read-field(stack-len, n + 1) {
+            if primitive/read-field(stack-len, n - 1) < primitive/read-field(stack-len, n + 1) {
+                size = tim-merge-at(arr, temp, stack-base, stack-len, size, n - 1, less)
+            } else {
+                size = tim-merge-at(arr, temp, stack-base, stack-len, size, n, less)
+            }
+        } else {
+            if primitive/read-field(stack-len, n) <= primitive/read-field(stack-len, n + 1) {
+                size = tim-merge-at(arr, temp, stack-base, stack-len, size, n, less)
+            } else {
+                done = true
+            }
         }
     }
+    size
+}
 
-    if inserted == false {
-        // elem is largest, append at end
-        result = push(before, elem)
+// Final sweep at end of sort: merge every remaining pending run.
+fn tim-merge-force-collapse(arr, temp, stack-base, stack-len, stack-size, less) {
+    let mut size = stack-size
+    while size > 1 {
+        let mut n = size - 2
+        if n > 0 && primitive/read-field(stack-len, n - 1) < primitive/read-field(stack-len, n + 1) {
+            n = n - 1
+        }
+        size = tim-merge-at(arr, temp, stack-base, stack-len, size, n, less)
     }
+    null
+}
 
-    result
+// Sort a raw array in place using Timsort (no galloping).
+fn tim-sort-array(arr, n, less) {
+    if n < 2 {
+        null
+    } else {
+        if n < 64 {
+            // Too small for run-detection overhead to pay off.
+            tim-binary-insertion-sort(arr, 0, n, 0, less)
+        } else {
+            let min-run = tim-calc-min-run(n)
+            let temp = tim-allocate-array(n)
+            // 85 entries bound the pending-run stack for any n up to 2^63 under
+            // the merge-collapse invariant with minrun >= 32.
+            let stack-base = tim-allocate-array(85)
+            let stack-len = tim-allocate-array(85)
+            let mut stack-size = 0
+            let mut i = 0
+            while i < n {
+                let run-base = i
+                let mut run-len = tim-count-run-and-make-ascending(arr, i, n, less)
+                if run-len < min-run {
+                    let force = if n - i < min-run { n - i } else { min-run }
+                    tim-binary-insertion-sort(arr, run-base, run-base + force, run-len, less)
+                    run-len = force
+                }
+                primitive/write-field(stack-base, stack-size, run-base)
+                primitive/write-field(stack-len, stack-size, run-len)
+                stack-size = stack-size + 1
+                stack-size = tim-merge-collapse(arr, temp, stack-base, stack-len, stack-size, less)
+                i = run-base + run-len
+            }
+            tim-merge-force-collapse(arr, temp, stack-base, stack-len, stack-size, less)
+        }
+    }
+}
+
+/// Sort a collection with a user-provided `less` comparator.
+///
+/// `less(a, b)` must return true when `a` should come before `b`. Stable and
+/// O(n log n) via Timsort; O(n) on already-sorted or reverse-sorted input.
+fn sort-with(coll, less) {
+    let vec = if instance-of(coll, PersistentVector) {
+        coll
+    } else {
+        reduce(coll, [], fn(acc, x) { push(acc, x) })
+    }
+    let n = rust-coll/vec-count(vec)
+    if n < 2 {
+        vec
+    } else {
+        let arr = rust-coll/vec-to-array(vec)
+        tim-sort-array(arr, n, less)
+        rust-coll/array-to-vec(arr, n)
+    }
 }
 
 /// Sort a collection in ascending order.
 ///
-/// Elements must be comparable. Uses insertion sort.
+/// Stable O(n log n) Timsort; runs in O(n) on already-sorted or reverse-sorted
+/// input. Elements must be comparable with `<`.
 ///
 /// Examples:
-///   (sort [3 1 4 1 5])  ; => [1 1 3 4 5]
+///   sort([3, 1, 4, 1, 5])  // => [1, 1, 3, 4, 5]
 fn sort(coll) {
-    let mut s = seq(coll)
-    let mut sorted = []
-    while s != null {
-        let elem = first(s)
-        sorted = insert-sorted(sorted, elem)
-        s = next(s)
-    }
-    sorted
-}
-
-// Helper: insert elem into sorted vector by key at correct position
-fn insert-sorted-by(sorted, elem, elem-key, key-fn) {
-    let mut s = seq(sorted)
-    let mut before = []
-    let mut inserted = false
-    let mut result = []
-
-    while s != null && inserted == false {
-        let current = first(s)
-        let current-key = key-fn(current)
-        if elem-key < current-key {
-            // Insert elem here, then add rest
-            result = concat(before, [elem])
-            // Add remaining elements
-            while s != null {
-                result = push(result, first(s))
-                s = next(s)
-            }
-            inserted = true
-        } else {
-            before = push(before, current)
-            s = next(s)
-        }
-    }
-
-    if inserted == false {
-        // elem is largest, append at end
-        result = push(before, elem)
-    }
-
-    result
+    sort-with(coll, fn(a, b) { a < b })
 }
 
 /// Sort a collection by a key function.
 ///
-/// Elements are ordered by comparing (f elem) values.
+/// Elements are ordered by comparing `f(elem)` values. `f` is invoked on every
+/// comparison — wrap in `memoize` if it's expensive and you have many ties.
 ///
 /// Examples:
-///   (sort-by [{:name "bob" :age 30} {:name "alice" :age 25}] fn(x) { x.age })
-///   ; => [{:name "alice" :age 25} {:name "bob" :age 30}]
+///   sort-by([{ name: "bob", age: 30 }, { name: "alice", age: 25 }], fn(x) { x.age })
+///   // => [{ name: "alice", age: 25 }, { name: "bob", age: 30 }]
 fn sort-by(coll, f) {
-    let mut s = seq(coll)
-    let mut sorted = []
-    while s != null {
-        let elem = first(s)
-        let elem-key = f(elem)
-        sorted = insert-sorted-by(sorted, elem, elem-key, f)
-        s = next(s)
-    }
-    sorted
+    sort-with(coll, fn(a, b) { f(a) < f(b) })
 }
 
 // ============================================================================
