@@ -113,15 +113,6 @@ impl Runtime {
             3,
         )?;
 
-        // allocate_float now takes (stack_pointer, frame_pointer, size)
-        self.add_builtin_function_with_fp(
-            "beagle.builtin/allocate-float",
-            allocate_float as *const u8,
-            true,
-            true,
-            3,
-        )?;
-
         self.add_builtin_function(
             "beagle.builtin/fill-object-fields",
             fill_object_fields as *const u8,

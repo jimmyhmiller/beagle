@@ -67,24 +67,3 @@ pub extern "C" fn allocate_zeroed(
     debug_assert!(BuiltInTypes::untag(result).is_multiple_of(8));
     result
 }
-
-pub extern "C" fn allocate_float(stack_pointer: usize, frame_pointer: usize, size: usize) -> usize {
-    save_gc_context!(stack_pointer, frame_pointer);
-    let runtime = get_runtime().get_mut();
-    let value = BuiltInTypes::untag(size);
-
-    let result = match runtime.allocate(value, stack_pointer, BuiltInTypes::Float) {
-        Ok(ptr) => ptr,
-        Err(_) => unsafe {
-            throw_runtime_error(
-                stack_pointer,
-                "AllocationError",
-                "Failed to allocate float - out of memory".to_string(),
-            );
-        },
-    };
-
-    debug_assert!(BuiltInTypes::get_kind(result) == BuiltInTypes::Float);
-    debug_assert!(BuiltInTypes::untag(result).is_multiple_of(8));
-    result
-}

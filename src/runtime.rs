@@ -4127,6 +4127,9 @@ pub struct Runtime {
     /// Struct ID for the built-in Function struct (beagle.core/Function).
     /// Function objects are regular HeapObject structs with this struct_id.
     pub function_struct_id: usize,
+    /// Immortal region for compile-time constants (float literals, etc.).
+    /// GCs skip it automatically — pointers here fall outside every heap.
+    pub eternal_space: crate::eternal::EternalSpace,
 }
 
 /// A stack segment for the Chez Scheme-style segmented stack.
@@ -4221,6 +4224,9 @@ impl Runtime {
             event_loops: EventLoopRegistry::new(),
             callbacks: Vec::new(),
             function_struct_id: 0, // Will be set by register_function_struct()
+            eternal_space: crate::eternal::EternalSpace::new(
+                1024 * 1024, // 1 MB, ~64k unique float literals at 16 bytes each
+            ),
         };
         // Initialize main thread's per-thread data (exception handlers, etc.)
         init_per_thread_data();

@@ -3520,28 +3520,26 @@ impl AstCompiler<'_> {
             }
             Ast::IntegerLiteral(n, _) => Ok(Value::TaggedConstant(n as isize)),
             Ast::FloatLiteral(n, _) => {
-                // floats are heap allocated
-                // Sadly I have to do this to avoid loss of percision
-                let allocate = self
-                    .compiler
-                    .find_function("beagle.builtin/allocate-float")
-                    .unwrap();
-                let allocate = self.compiler.get_function_pointer(allocate).unwrap();
-                let allocate = self.ir.assign_new(allocate);
-
-                let size_reg = self.ir.assign_new(1);
-                let stack_pointer = self.ir.get_stack_pointer_imm(0);
-                let frame_pointer = self.ir.get_frame_pointer();
-
-                let float_pointer = self.ir.call_builtin(
-                    allocate.into(),
-                    vec![stack_pointer, frame_pointer, size_reg.into()],
-                );
-
+                // Try to intern the literal into the eternal region and emit
+                // the tagged pointer as a compile-time constant. The eternal
+                // region is outside every GC's heap, so marking/tracing/
+                // compaction skip it.
+                //
+                // If the region is exhausted, fall back to an inline heap
+                // allocation at each use site — correct but allocates every
+                // time the literal is evaluated.
+                let bits = n.parse::<f64>().unwrap().to_bits();
+                if let Some(tagged) = crate::get_runtime()
+                    .get_mut()
+                    .eternal_space
+                    .intern_float(bits)
+                {
+                    return Ok(Value::RawValue(tagged));
+                }
+                let float_pointer = self.ir.allocate_static(1);
                 let float_pointer = self.ir.untag(float_pointer);
                 self.ir.write_small_object_header(float_pointer);
                 self.ir.write_float_literal(float_pointer, n);
-
                 Ok(self.ir.tag(float_pointer, BuiltInTypes::Float.get_tag()))
             }
             Ast::Identifier(name, _) => {

@@ -522,7 +522,11 @@ impl MarkAndSweep {
         while let Some(pending) = to_mark.pop() {
             let untagged = BuiltInTypes::untag(pending.object_ptr);
             if untagged == 0 || !self.contains(untagged as *const u8) {
-                panic!("mark_from_chain queued pointer outside old space");
+                // Not an old-gen object — could be an eternal constant
+                // (float literal, etc.), a young-gen pointer that's already
+                // been promoted by the generational driver, or conservative
+                // stack garbage. Nothing for this collector to do.
+                continue;
             }
             let object = HeapObject::from_tagged(pending.object_ptr);
             if object.marked() {
@@ -552,7 +556,9 @@ impl MarkAndSweep {
         while let Some(pending) = to_mark.pop() {
             let untagged = BuiltInTypes::untag(pending.object_ptr);
             if untagged == 0 || !self.contains(untagged as *const u8) {
-                panic!("mark_extra_roots queued pointer outside old space");
+                // See comment in mark_from_chain — eternal constants and
+                // already-promoted young-gen pointers reach here legitimately.
+                continue;
             }
             let object = HeapObject::from_tagged(pending.object_ptr);
             if object.marked() {

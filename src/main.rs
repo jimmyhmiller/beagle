@@ -71,6 +71,7 @@ mod builtins;
 mod code_memory;
 pub mod common;
 mod compiler;
+mod eternal;
 mod gc;
 pub mod ir;
 pub mod lir;
