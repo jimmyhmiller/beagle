@@ -1,5 +1,6 @@
 use core::panic;
 use ir::{Ir, Value, VirtualRegister};
+use serde::Serialize;
 use std::{collections::HashMap, hash::Hash};
 
 use crate::{
@@ -26,7 +27,7 @@ type CompileResult = Result<
     CompileError,
 >;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct TokenRange {
     pub start: usize,
     pub end: usize,
@@ -39,7 +40,8 @@ impl TokenRange {
 }
 
 /// Part of a string interpolation - either a literal string or an expression to evaluate
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(tag = "kind", content = "value")]
 pub enum StringInterpolationPart {
     Literal(String),
     Expression(Box<Ast>),
@@ -171,7 +173,8 @@ fn references_variable(body: &[Ast], name: &str) -> bool {
     body.iter().any(|ast| check(ast, name))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(tag = "kind", content = "args")]
 pub enum Ast {
     Program {
         elements: Vec<Ast>,
@@ -525,7 +528,7 @@ pub enum Ast {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct MatchArm {
     pub pattern: Pattern,
     pub guard: Option<Box<Ast>>,
@@ -533,7 +536,8 @@ pub struct MatchArm {
     pub token_range: TokenRange,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(tag = "kind")]
 pub enum Pattern {
     /// Binds a value to an identifier: `x`, `foo`
     Identifier {
@@ -626,7 +630,7 @@ impl Pattern {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct FieldPattern {
     pub field_name: String,
     pub binding_name: Option<String>,
@@ -634,7 +638,8 @@ pub struct FieldPattern {
 }
 
 /// The key type for map destructuring patterns
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(tag = "kind", content = "value")]
 pub enum MapKey {
     /// Keyword key: `{ name }` or `{ name: binding }` - looks up `:name`
     Keyword(String),
@@ -643,7 +648,7 @@ pub enum MapKey {
 }
 
 /// A field pattern for map destructuring
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct MapFieldPattern {
     pub key: MapKey,
     pub binding_name: String,
@@ -652,7 +657,7 @@ pub struct MapFieldPattern {
 
 /// Represents a single arity case in a multi-arity function.
 /// e.g., `(x, y) => x + y` in `fn foo { () => 0 (x, y) => x + y }`
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct ArityCase {
     pub args: Vec<Pattern>,
     pub rest_param: Option<String>,
@@ -1269,7 +1274,7 @@ impl AstCompiler<'_> {
                 }
 
                 // Handle rest parameter - build from raw arguments using uniform calling convention
-                if let Some(rest_name) = rest_param {
+                if let Some(rest_name) = rest_param.clone() {
                     let rest_array = if let Some((arg_count_local, saved_arg_locals)) =
                         variadic_saved_args
                     {
@@ -1428,6 +1433,49 @@ impl AstCompiler<'_> {
                     .clone()
                     .map(|name| self.compiler.current_namespace_name() + "/" + &name);
 
+                if let Some(ref fn_name) = full_function_name {
+                    let dump = &self.compiler.dump;
+                    if dump.should_emit(crate::dump::Stage::Ast, fn_name) {
+                        let ast_node = Ast::Function {
+                            name: name.clone(),
+                            args: args.clone(),
+                            rest_param: rest_param.clone(),
+                            body: body.clone(),
+                            token_range: token_range.clone(),
+                            docstring: docstring.clone(),
+                        };
+                        let byte_span = self
+                            .token_byte_spans
+                            .get(token_range.start)
+                            .zip(self.token_byte_spans.get(token_range.end))
+                            .map(|((s, _), (_, e))| (*s, *e));
+                        let line_span = self
+                            .token_line_column_map
+                            .get(token_range.start)
+                            .zip(self.token_line_column_map.get(token_range.end))
+                            .map(|((sl, _), (el, _))| (*sl, *el));
+                        let arg_name_list: Vec<String> = args
+                            .iter()
+                            .flat_map(|p| p.binding_names())
+                            .collect();
+                        dump.emit(
+                            crate::dump::Stage::Ast,
+                            fn_name,
+                            serde_json::json!({
+                                "file": self.file_name,
+                                "args": arg_name_list,
+                                "rest_param": rest_param.clone(),
+                                "is_variadic": rest_param.is_some(),
+                                "docstring": docstring.clone(),
+                                "token_range": token_range.clone(),
+                                "byte_span": byte_span,
+                                "line_span": line_span,
+                                "ast": ast_node,
+                            }),
+                        );
+                    }
+                }
+
                 let continuation_gc_locals = self.ir.num_locals;
                 let debug_name = if let Some(full_name) = full_function_name.clone() {
                     full_name
@@ -1445,26 +1493,9 @@ impl AstCompiler<'_> {
                     format!("<anonymous>{}", source_loc)
                 };
                 self.ir.debug_name = Some(debug_name);
-                let mut backend = self.ir.compile(backend, error_fn_pointer);
+                let dump = self.compiler.dump.clone();
+                let mut backend = self.ir.compile(backend, error_fn_pointer, &dump);
                 let token_map = self.ir.ir_range_to_token_range.clone();
-
-                #[cfg(debug_assertions)]
-                {
-                    if let Some(filter) = std::env::var("BEAGLE_DEBUG_IR_FILTER").ok()
-                        && full_function_name
-                            .as_deref()
-                            .map(|function_name| function_name.contains(&filter))
-                            .unwrap_or(true)
-                    {
-                        eprintln!(
-                            "[ir_dump] function={}",
-                            full_function_name.as_deref().unwrap_or("<anonymous>")
-                        );
-                        for instruction in self.ir.instructions.iter() {
-                            eprintln!("{}", instruction.pretty_print());
-                        }
-                    }
-                }
 
                 // Extract argument names from patterns for reflection
                 let arg_names: Vec<String> = args.iter()

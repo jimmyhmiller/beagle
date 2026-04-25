@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use bincode::{Decode, Encode};
+use serde::Serialize;
 
 use crate::ast::IRRange;
 use crate::backend::CodegenBackend;
@@ -20,7 +21,7 @@ use crate::pretty_print::PrettyPrint;
 use crate::register_allocation::linear_scan::LinearScan;
 use crate::types::BuiltInTypes;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Encode, Decode)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Encode, Decode, Serialize)]
 pub enum Condition {
     LessThanOrEqual,
     LessThan,
@@ -30,7 +31,8 @@ pub enum Condition {
     GreaterThanOrEqual,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Encode, Decode)]
+#[derive(Debug, Copy, Clone, PartialEq, Encode, Decode, Serialize)]
+#[serde(tag = "kind", content = "args")]
 pub enum Value {
     Register(VirtualRegister),
     Spill(VirtualRegister, usize),
@@ -57,13 +59,13 @@ impl Value {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Serialize)]
 pub struct SavedValue {
     pub source: Value,
     pub local: usize,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Encode, Decode)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Encode, Decode, Serialize)]
 pub struct VirtualRegister {
     pub argument: Option<usize>,
     pub index: usize,
@@ -115,7 +117,8 @@ pub struct StringValue {
     pub str: String,
 }
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Encode, Decode, Serialize)]
+#[serde(tag = "kind", content = "args")]
 pub enum Instruction {
     Sub(Value, Value, Value, Label),
     AddInt(Value, Value, Value),
@@ -1650,55 +1653,42 @@ impl Ir {
             .insert(self.instructions.len(), label.index);
     }
 
-    pub fn compile<B: CodegenBackend>(&mut self, mut backend: B, _error_fn_pointer: usize) -> B {
+    pub fn compile<B: CodegenBackend>(
+        &mut self,
+        mut backend: B,
+        _error_fn_pointer: usize,
+        dump: &crate::dump::DumpConfig,
+    ) -> B {
         debug_assert!(!self.ir_range_to_token_range.is_empty());
 
         // backend.breakpoint();
 
+        let function_name = self.debug_name.as_deref().unwrap_or("<anonymous>");
+
+        if dump.should_emit(crate::dump::Stage::IrPre, function_name) {
+            dump.emit(
+                crate::dump::Stage::IrPre,
+                function_name,
+                self.dump_instructions_payload(&self.instructions),
+            );
+        }
+
         let mut linear_scan = LinearScan::new(self.instructions.clone(), self.num_locals);
         linear_scan.allocate();
-        #[cfg(debug_assertions)]
-        {
-            if std::env::var("BEAGLE_DEBUG_ROOT_SLOTS").is_ok() {
-                eprintln!(
-                    "[root-slots] function={} pre_num_locals={} post_stack_slot={} instructions={}",
-                    self.debug_name.as_deref().unwrap_or("<anonymous>"),
-                    self.num_locals,
-                    linear_scan.stack_slot,
-                    linear_scan.instructions.len()
-                );
-                let mut entries: Vec<_> = linear_scan
-                    .root_slots
-                    .iter()
-                    .map(|(reg, slot)| {
-                        let lifetime = linear_scan.lifetimes.get(reg).copied().unwrap_or((0, 0));
-                        (
-                            *slot,
-                            reg.index,
-                            reg.argument,
-                            reg.is_physical,
-                            lifetime.0,
-                            lifetime.1,
-                        )
-                    })
-                    .collect();
-                entries.sort();
-                for (slot, reg_index, argument, is_physical, start, end) in entries {
-                    eprintln!(
-                        "[root-slot] slot={} reg={} arg={:?} physical={} lifetime={}..{}",
-                        slot, reg_index, argument, is_physical, start, end
-                    );
-                }
-            }
-            if std::env::var("BEAGLE_DEBUG_POST_ALLOC_IR").is_ok() {
-                eprintln!(
-                    "[post-alloc-ir] function={}",
-                    self.debug_name.as_deref().unwrap_or("<anonymous>")
-                );
-                for (index, instruction) in linear_scan.instructions.iter().enumerate() {
-                    eprintln!("{:04}: {}", index, instruction.pretty_print());
-                }
-            }
+
+        if dump.should_emit(crate::dump::Stage::IrPost, function_name) {
+            dump.emit(
+                crate::dump::Stage::IrPost,
+                function_name,
+                self.dump_instructions_payload(&linear_scan.instructions),
+            );
+        }
+        if dump.should_emit(crate::dump::Stage::Regalloc, function_name) {
+            dump.emit(
+                crate::dump::Stage::Regalloc,
+                function_name,
+                Self::dump_regalloc_payload(&linear_scan),
+            );
         }
 
         self.instructions = linear_scan.instructions.clone();
@@ -4049,5 +4039,88 @@ impl Ir {
             self.write_label(done);
             Value::Register(dst)
         }
+    }
+
+    fn dump_instructions_payload(&self, instructions: &[Instruction]) -> serde_json::Value {
+        let labels: Vec<serde_json::Value> = self
+            .label_locations
+            .iter()
+            .map(|(at, label_index)| {
+                let name = self
+                    .label_names
+                    .get(*label_index)
+                    .cloned()
+                    .unwrap_or_default();
+                serde_json::json!({
+                    "label": label_index,
+                    "name": name,
+                    "instruction_index": at,
+                })
+            })
+            .collect();
+        let instructions_json: Vec<serde_json::Value> = instructions
+            .iter()
+            .enumerate()
+            .map(|(idx, ins)| {
+                let mut value = serde_json::to_value(ins).unwrap_or(serde_json::Value::Null);
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("index".to_string(), serde_json::json!(idx));
+                    obj.insert("text".to_string(), serde_json::json!(ins.pretty_print()));
+                }
+                value
+            })
+            .collect();
+        serde_json::json!({
+            "num_locals": self.num_locals,
+            "instructions": instructions_json,
+            "labels": labels,
+        })
+    }
+
+    fn dump_regalloc_payload(scan: &LinearScan) -> serde_json::Value {
+        let mut allocations: Vec<serde_json::Value> = scan
+            .allocated_registers
+            .iter()
+            .map(|(vreg, phys)| {
+                let lifetime = scan.lifetimes.get(vreg).copied().unwrap_or((0, 0));
+                serde_json::json!({
+                    "virtual": vreg,
+                    "physical": phys,
+                    "lifetime_start": lifetime.0,
+                    "lifetime_end": lifetime.1,
+                })
+            })
+            .collect();
+        allocations.sort_by(|a, b| {
+            a["lifetime_start"]
+                .as_u64()
+                .unwrap_or(0)
+                .cmp(&b["lifetime_start"].as_u64().unwrap_or(0))
+        });
+        let mut root_slots: Vec<serde_json::Value> = scan
+            .root_slots
+            .iter()
+            .map(|(reg, slot)| {
+                let lifetime = scan.lifetimes.get(reg).copied().unwrap_or((0, 0));
+                serde_json::json!({
+                    "slot": slot,
+                    "register": reg,
+                    "lifetime_start": lifetime.0,
+                    "lifetime_end": lifetime.1,
+                })
+            })
+            .collect();
+        root_slots.sort_by(|a, b| {
+            a["slot"]
+                .as_u64()
+                .unwrap_or(0)
+                .cmp(&b["slot"].as_u64().unwrap_or(0))
+        });
+        serde_json::json!({
+            "stack_slots": scan.stack_slot,
+            "max_registers": scan.max_registers,
+            "allocations": allocations,
+            "root_slots": root_slots,
+        })
     }
 }

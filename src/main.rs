@@ -71,6 +71,7 @@ mod builtins;
 mod code_memory;
 pub mod common;
 mod compiler;
+pub mod dump;
 mod eternal;
 mod gc;
 pub mod ir;
@@ -996,6 +997,7 @@ pub struct CommandLineArguments {
     print_builtin_calls: bool,
     update_snapshots: bool,
     include_paths: Vec<String>,
+    pub dump: std::sync::Arc<crate::dump::DumpConfig>,
 }
 
 fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Error>> {
@@ -1158,6 +1160,16 @@ struct RunArgs {
     /// Additional directories to search for source files
     #[clap(short = 'I', long = "include")]
     include: Vec<String>,
+    /// Dump compiler stages to a JSONL file. Comma-separated list of stages or `all`.
+    /// Stages: ast, ir-pre, ir-post, regalloc, asm.
+    #[clap(long, value_name = "STAGES")]
+    dump: Option<String>,
+    /// Regex on fully-qualified function name (`namespace/name`) to limit dump output.
+    #[clap(long = "dump-filter", value_name = "REGEX")]
+    dump_filter: Option<String>,
+    /// Output path for the dump (defaults to `beagle-dump.jsonl` in the current directory).
+    #[clap(long = "dump-out", value_name = "PATH")]
+    dump_out: Option<std::path::PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1196,6 +1208,7 @@ impl CommandLineArguments {
             print_builtin_calls: false,
             update_snapshots: false,
             include_paths: vec![],
+            dump: crate::dump::DumpConfig::disabled(),
         }
     }
 
@@ -1216,10 +1229,23 @@ impl CommandLineArguments {
             print_builtin_calls: false,
             update_snapshots: false,
             include_paths: vec![],
+            dump: crate::dump::DumpConfig::disabled(),
         }
     }
 
     fn from_run_args(run_args: RunArgs) -> Self {
+        let dump = match run_args.dump.as_deref() {
+            Some(spec) => crate::dump::DumpConfig::from_args(
+                spec,
+                run_args.dump_filter.as_deref(),
+                run_args.dump_out.as_deref(),
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }),
+            None => crate::dump::DumpConfig::disabled(),
+        };
         Self {
             program: Some(run_args.file),
             program_args: run_args.args,
@@ -1236,6 +1262,7 @@ impl CommandLineArguments {
             print_builtin_calls: run_args.print_builtin_calls,
             update_snapshots: run_args.update_snapshots,
             include_paths: run_args.include,
+            dump,
         }
     }
 }

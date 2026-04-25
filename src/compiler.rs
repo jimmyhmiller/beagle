@@ -363,6 +363,8 @@ pub struct Compiler {
     deferred_updates: Vec<DeferredFunctionUpdate>,
     /// Default value expressions for struct fields: fully_qualified_name -> [(field_index, default_ast)]
     pub struct_defaults: HashMap<String, Vec<(usize, Ast)>>,
+    /// Structured-dump sink. Always present; a no-op when `--dump` is absent.
+    pub dump: std::sync::Arc<crate::dump::DumpConfig>,
 }
 
 impl Compiler {
@@ -860,7 +862,9 @@ impl Compiler {
             })?;
 
             ir.ir_range_to_token_range = token_map.clone();
-            let mut backend = ir.compile(backend, error_fn_pointer);
+            ir.debug_name = Some(top_level_name.clone());
+            let dump = self.dump.clone();
+            let mut backend = ir.compile(backend, error_fn_pointer, &dump);
             let _token_map = ir.ir_range_to_token_range.clone();
             let max_locals = backend.max_locals() as usize;
             let _function_pointer = self.upsert_function(
@@ -1316,6 +1320,21 @@ impl Compiler {
         );
         let code = backend.compile_to_bytes();
         let pointer = self.add_code(&code)?;
+
+        if let Some(name) = function_name {
+            if self.dump.should_emit(crate::dump::Stage::Asm, name) {
+                let disasm = crate::dump::disassemble_machine_code(&code, pointer as u64);
+                self.dump.emit(
+                    crate::dump::Stage::Asm,
+                    name,
+                    serde_json::json!({
+                        "address": format!("0x{:x}", pointer as u64),
+                        "size": code.len(),
+                        "instructions": disasm,
+                    }),
+                );
+            }
+        }
 
         if self.defer_function_installs {
             // Batch mode: compile code but defer the jump table update.
@@ -1787,6 +1806,7 @@ impl CompilerThread {
                 defer_function_installs: false,
                 deferred_updates: Vec::new(),
                 struct_defaults: HashMap::new(),
+                dump: command_line_arguments.dump.clone(),
             },
             channel,
         })

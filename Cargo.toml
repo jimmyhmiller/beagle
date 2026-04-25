@@ -48,15 +48,17 @@ backend-cranelift = []
 debug-gc = []
 trace = []
 debug-continuation-gc = []
-heap-dump = ["serde"]
+heap-dump = []
 
 [dependencies.serde]
 version = "1.0"
 features = ["derive"]
-optional = true
 
 [dependencies.serde_json]
 version = "1.0"
+
+[dependencies.capstone]
+version = "0.13"
 
 [[bin]]
 name = "heap_explorer"
