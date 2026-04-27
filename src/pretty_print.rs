@@ -72,12 +72,6 @@ impl PrettyPrint for Value {
     }
 }
 
-impl PrettyPrint for crate::ir::SavedValue {
-    fn pretty_print(&self) -> String {
-        format!("{} -> local_{}", self.source.pretty_print(), self.local)
-    }
-}
-
 impl PrettyPrint for VirtualRegister {
     fn pretty_print(&self) -> String {
         match self {
@@ -110,17 +104,6 @@ impl PrettyPrint for VirtualRegister {
 }
 
 impl PrettyPrint for Vec<Value> {
-    fn pretty_print(&self) -> String {
-        let mut result = String::new();
-        for value in self {
-            result.push_str(&value.pretty_print());
-            result.push_str(", ");
-        }
-        result
-    }
-}
-
-impl PrettyPrint for Vec<crate::ir::SavedValue> {
     fn pretty_print(&self) -> String {
         let mut result = String::new();
         for value in self {
@@ -186,14 +169,6 @@ impl PrettyPrint for Instruction {
             }
             Instruction::Recurse(value, vec) => {
                 format!("recurse {}, {}", value.pretty_print(), vec.pretty_print())
-            }
-            Instruction::RecurseWithSaves(value, vec, saves) => {
-                format!(
-                    "recurse_with_saves {}, {}, {}",
-                    value.pretty_print(),
-                    vec.pretty_print(),
-                    saves.pretty_print()
-                )
             }
             Instruction::TailRecurse(value, vec) => {
                 format!(
@@ -263,15 +238,6 @@ impl PrettyPrint for Instruction {
                     value.pretty_print(),
                     value1.pretty_print(),
                     vec.pretty_print()
-                )
-            }
-            Instruction::CallWithSaves(value, value1, vec, _, saves) => {
-                format!(
-                    "{} <- call_with_saves {}, {}, {}",
-                    value.pretty_print(),
-                    value1.pretty_print(),
-                    vec.pretty_print(),
-                    saves.pretty_print()
                 )
             }
             Instruction::HeapLoad(value, value1, _) => {
@@ -609,15 +575,6 @@ impl PrettyPrint for Instruction {
                     local_index
                 )
             }
-            Instruction::CaptureContinuationWithSaves(dest, label, local_index, _, saves) => {
-                format!(
-                    "capture_continuation_with_saves {}, label_{}, local_{}, {}",
-                    dest.pretty_print(),
-                    label.index,
-                    local_index,
-                    saves.pretty_print()
-                )
-            }
             Instruction::CaptureContinuationTagged(dest, label, local_index, _, tag) => {
                 format!(
                     "capture_continuation_tagged {}, label_{}, local_{}, {}",
@@ -625,23 +582,6 @@ impl PrettyPrint for Instruction {
                     label.index,
                     local_index,
                     tag.pretty_print()
-                )
-            }
-            Instruction::CaptureContinuationTaggedWithSaves(
-                dest,
-                label,
-                local_index,
-                _,
-                tag,
-                saves,
-            ) => {
-                format!(
-                    "capture_continuation_tagged_with_saves {}, label_{}, local_{}, {}, {}",
-                    dest.pretty_print(),
-                    label.index,
-                    local_index,
-                    tag.pretty_print(),
-                    saves.pretty_print()
                 )
             }
             Instruction::PerformEffect(handler, enum_type, op_value, label, local_index, _) => {
@@ -654,25 +594,6 @@ impl PrettyPrint for Instruction {
                     local_index
                 )
             }
-            Instruction::PerformEffectWithSaves(
-                handler,
-                enum_type,
-                op_value,
-                label,
-                local_index,
-                _,
-                saves,
-            ) => {
-                format!(
-                    "perform_effect_with_saves {}, {}, {}, label_{}, local_{}, {}",
-                    handler.pretty_print(),
-                    enum_type.pretty_print(),
-                    op_value.pretty_print(),
-                    label.index,
-                    local_index,
-                    saves.pretty_print()
-                )
-            }
             Instruction::ReturnFromShift(value, cont_ptr, _) => {
                 format!(
                     "return_from_shift {}, {}",
@@ -681,13 +602,6 @@ impl PrettyPrint for Instruction {
                 )
             }
             Instruction::RecordGcSafepoint => "record_gc_safepoint".to_string(),
-            Instruction::ReloadRootSlots(saves) => {
-                let slots: Vec<String> = saves
-                    .iter()
-                    .map(|s| format!("{} <- local[{}]", s.source.pretty_print(), s.local))
-                    .collect();
-                format!("reload_root_slots [{}]", slots.join(", "))
-            }
             Instruction::InlineBumpAllocate(dst, size_bytes, header, slow_path) => {
                 format!(
                     "inline_bump_allocate {} size={} header={:#x} slow=label_{}",

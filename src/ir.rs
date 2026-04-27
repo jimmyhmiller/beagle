@@ -59,12 +59,6 @@ impl Value {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Encode, Decode, Serialize)]
-pub struct SavedValue {
-    pub source: Value,
-    pub local: usize,
-}
-
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Encode, Decode, Serialize)]
 pub struct VirtualRegister {
     pub argument: Option<usize>,
@@ -127,7 +121,6 @@ pub enum Instruction {
     Modulo(Value, Value, Value, Label),
     Assign(Value, Value),
     Recurse(Value, Vec<Value>),
-    RecurseWithSaves(Value, Vec<Value>, Vec<SavedValue>),
     TailRecurse(Value, Vec<Value>),
     JumpIf(Label, Condition, Value, Value),
     Jump(Label),
@@ -141,7 +134,6 @@ pub enum Instruction {
     LoadConstant(Value, Value),
     // bool is builtin?
     Call(Value, Value, Vec<Value>, bool),
-    CallWithSaves(Value, Value, Vec<Value>, bool, Vec<SavedValue>),
     HeapLoad(Value, Value, i32),
     HeapLoadReg(Value, Value, Value),
     HeapStore(Value, Value),
@@ -208,14 +200,10 @@ pub enum Instruction {
     ///
     /// Fields: (dst, size_bytes, header, slow_path)
     InlineBumpAllocate(Value, u32, u64, Label),
-    CaptureContinuationWithSaves(Value, Label, usize, usize, Vec<SavedValue>), // dest, resume_label, result_local_index, builtin_fn_ptr, saved live roots
     CaptureContinuationTagged(Value, Label, usize, usize, Value), // dest, resume_label, result_local_index, builtin_fn_ptr, tag_value
-    CaptureContinuationTaggedWithSaves(Value, Label, usize, usize, Value, Vec<SavedValue>), // dest, resume_label, result_local_index, builtin_fn_ptr, tag_value, saved live roots
     PerformEffect(Value, Value, Value, Label, usize, usize), // handler, enum_type, op_value, resume_label, result_local_index, builtin_fn_ptr
-    PerformEffectWithSaves(Value, Value, Value, Label, usize, usize, Vec<SavedValue>), // handler, enum_type, op_value, resume_label, result_local_index, builtin_fn_ptr, saved live roots
     ReturnFromShift(Value, Value, usize), // value, cont_ptr, builtin_fn_ptr - calls return_from_shift with current SP/FP
     RecordGcSafepoint, // Record a GC safepoint at the current position (for continuation resume points)
-    ReloadRootSlots(Vec<SavedValue>), // Reload live registers from root slots at continuation resume points
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -400,19 +388,6 @@ impl Instruction {
                 }
                 result
             }
-            Instruction::RecurseWithSaves(a, args, saves) => {
-                let mut result: Vec<VirtualRegister> =
-                    args.iter().filter_map(|arg| get_registers!(arg)).collect();
-                for save in saves {
-                    if let Ok(register) = (&save.source).try_into() {
-                        result.push(register);
-                    }
-                }
-                if let Ok(register) = a.try_into() {
-                    result.push(register);
-                }
-                result
-            }
             Instruction::TailRecurse(a, args) => {
                 let mut result: Vec<VirtualRegister> =
                     args.iter().filter_map(|arg| get_registers!(arg)).collect();
@@ -424,22 +399,6 @@ impl Instruction {
             Instruction::Call(a, b, args, _) => {
                 let mut result: Vec<VirtualRegister> =
                     args.iter().filter_map(|arg| get_registers!(arg)).collect();
-                if let Ok(register) = a.try_into() {
-                    result.push(register);
-                }
-                if let Ok(register) = b.try_into() {
-                    result.push(register);
-                }
-                result
-            }
-            Instruction::CallWithSaves(a, b, args, _, saves) => {
-                let mut result: Vec<VirtualRegister> =
-                    args.iter().filter_map(|arg| get_registers!(arg)).collect();
-                for save in saves {
-                    if let Ok(register) = (&save.source).try_into() {
-                        result.push(register);
-                    }
-                }
                 if let Ok(register) = a.try_into() {
                     result.push(register);
                 }
@@ -587,46 +546,15 @@ impl Instruction {
             Instruction::CaptureContinuation(dest, _, _, _) => {
                 get_register!(dest)
             }
-            Instruction::CaptureContinuationWithSaves(dest, _, _, _, saves) => {
-                let mut result: Vec<VirtualRegister> = get_register!(dest);
-                for save in saves {
-                    if let Ok(register) = (&save.source).try_into() {
-                        result.push(register);
-                    }
-                }
-                result
-            }
             Instruction::CaptureContinuationTagged(dest, _, _, _, tag) => {
                 get_registers!(dest, tag)
-            }
-            Instruction::CaptureContinuationTaggedWithSaves(dest, _, _, _, tag, saves) => {
-                let mut result: Vec<VirtualRegister> = get_registers!(dest, tag);
-                for save in saves {
-                    if let Ok(register) = (&save.source).try_into() {
-                        result.push(register);
-                    }
-                }
-                result
             }
             Instruction::PerformEffect(handler, enum_type, op_value, _, _, _) => {
                 get_registers!(handler, enum_type, op_value)
             }
-            Instruction::PerformEffectWithSaves(handler, enum_type, op_value, _, _, _, saves) => {
-                let mut result: Vec<VirtualRegister> = get_registers!(handler, enum_type, op_value);
-                for save in saves {
-                    if let Ok(register) = (&save.source).try_into() {
-                        result.push(register);
-                    }
-                }
-                result
-            }
             Instruction::ReturnFromShift(value, cont_ptr, _) => {
                 get_registers!(value, cont_ptr)
             }
-            Instruction::ReloadRootSlots(saves) => saves
-                .iter()
-                .filter_map(|save| (&save.source).try_into().ok())
-                .collect(),
             Instruction::InlineBumpAllocate(dst, _, _, _) => {
                 get_register!(dst)
             }
@@ -720,15 +648,6 @@ impl Instruction {
                     replace_register!(value, old_register, new_register);
                 }
             }
-            Instruction::RecurseWithSaves(value, vec, saves) => {
-                replace_register!(value, old_register, new_register);
-                for value in vec {
-                    replace_register!(value, old_register, new_register);
-                }
-                for save in saves {
-                    replace_register!(&mut save.source, old_register, new_register);
-                }
-            }
             Instruction::TailRecurse(value, vec) => {
                 replace_register!(value, old_register, new_register);
                 for value in vec {
@@ -743,31 +662,7 @@ impl Instruction {
                 }
             }
 
-            Instruction::CallWithSaves(value, value1, vec, _, saves) => {
-                replace_register!(value, old_register, new_register);
-                replace_register!(value1, old_register, new_register);
-                for value in vec {
-                    replace_register!(value, old_register, new_register);
-                }
-                for save in saves {
-                    if let Value::Register(register) = save.source
-                        && register == old_register
-                    {
-                        save.source = new_register;
-                    }
-                }
-            }
-
             Instruction::Jump(_) | Instruction::Breakpoint | Instruction::RecordGcSafepoint => {}
-            Instruction::ReloadRootSlots(saves) => {
-                for save in saves {
-                    if let Value::Register(register) = save.source
-                        && register == old_register
-                    {
-                        save.source = new_register;
-                    }
-                }
-            }
             Instruction::PushExceptionHandler(_, value, _) => {
                 replace_register!(value, old_register, new_register);
             }
@@ -805,47 +700,14 @@ impl Instruction {
             Instruction::CaptureContinuation(dest, _, _, _) => {
                 replace_register!(dest, old_register, new_register);
             }
-            Instruction::CaptureContinuationWithSaves(dest, _, _, _, saves) => {
-                replace_register!(dest, old_register, new_register);
-                for save in saves {
-                    if let Value::Register(register) = save.source
-                        && register == old_register
-                    {
-                        save.source = new_register;
-                    }
-                }
-            }
             Instruction::CaptureContinuationTagged(dest, _, _, _, tag) => {
                 replace_register!(dest, old_register, new_register);
                 replace_register!(tag, old_register, new_register);
-            }
-            Instruction::CaptureContinuationTaggedWithSaves(dest, _, _, _, tag, saves) => {
-                replace_register!(dest, old_register, new_register);
-                replace_register!(tag, old_register, new_register);
-                for save in saves {
-                    if let Value::Register(register) = save.source
-                        && register == old_register
-                    {
-                        save.source = new_register;
-                    }
-                }
             }
             Instruction::PerformEffect(handler, enum_type, op_value, _, _, _) => {
                 replace_register!(handler, old_register, new_register);
                 replace_register!(enum_type, old_register, new_register);
                 replace_register!(op_value, old_register, new_register);
-            }
-            Instruction::PerformEffectWithSaves(handler, enum_type, op_value, _, _, _, saves) => {
-                replace_register!(handler, old_register, new_register);
-                replace_register!(enum_type, old_register, new_register);
-                replace_register!(op_value, old_register, new_register);
-                for save in saves {
-                    if let Value::Register(register) = save.source
-                        && register == old_register
-                    {
-                        save.source = new_register;
-                    }
-                }
             }
             Instruction::ReturnFromShift(value, cont_ptr, _) => {
                 replace_register!(value, old_register, new_register);
@@ -1833,48 +1695,11 @@ impl Ir {
             ir_label_to_lang_label.insert(**label, new_label);
         }
 
-        // Build a map from resume labels to their saved registers. When we
-        // encounter these labels during codegen, we emit reload instructions
-        // so that registers are restored from root slots after continuation resume.
-        let mut resume_label_saves: HashMap<Label, Vec<SavedValue>> = HashMap::new();
-        for instruction in self.instructions.iter() {
-            match instruction {
-                Instruction::CaptureContinuationWithSaves(_, label, _, _, saves)
-                    if !saves.is_empty() =>
-                {
-                    resume_label_saves.insert(*label, saves.clone());
-                }
-                Instruction::CaptureContinuationTaggedWithSaves(_, label, _, _, _, saves)
-                    if !saves.is_empty() =>
-                {
-                    resume_label_saves.insert(*label, saves.clone());
-                }
-                Instruction::PerformEffectWithSaves(_, _, _, label, _, _, saves)
-                    if !saves.is_empty() =>
-                {
-                    resume_label_saves.insert(*label, saves.clone());
-                }
-                _ => {}
-            }
-        }
-
         for (index, instruction) in self.instructions.iter().enumerate() {
             let start_machine_code = backend.current_position();
             let label = self.label_locations.get(&index);
             if let Some(label) = label {
                 backend.write_label(ir_label_to_lang_label[&self.labels[*label]]);
-                // At continuation resume labels, reload live registers from
-                // their root slots. The stack segment was restored with
-                // GC-updated values in the root slots.
-                if let Some(saves) = resume_label_saves.get(&self.labels[*label]) {
-                    let null_reg = self.value_to_register(&Value::Null, backend);
-                    for save in saves.iter().rev() {
-                        let save_reg = self.value_to_register(&save.source, backend);
-                        backend.load_local(save_reg, save.local as i32);
-                        backend.store_local(null_reg, save.local as i32);
-                    }
-                    backend.free_temporary_register(null_reg);
-                }
             }
             backend.clear_temporary_registers();
             // println!("instruction {:?}", instruction);
@@ -1885,12 +1710,6 @@ impl Ir {
                 Instruction::RecordGcSafepoint => {
                     // No-op: stack maps have been removed; GC scans all root
                     // slots in the frame header instead.
-                }
-                Instruction::ReloadRootSlots(_) => {
-                    // Reloads are emitted at the label site (above) rather than
-                    // here, because the label write happens before the instruction
-                    // match. This arm is a no-op — the instruction exists only to
-                    // satisfy exhaustive matching.
                 }
                 Instruction::Label(_) => {}
                 Instruction::ExtendLifeTime(_) => {}
@@ -2334,47 +2153,6 @@ impl Ir {
                     backend.mov_reg(dest, backend.ret_reg());
                     self.store_spill(dest, dest_spill, backend);
                 }
-                Instruction::RecurseWithSaves(dest, args, saves) => {
-                    // Save registers to their root slots (frame locals)
-                    for save in saves.iter() {
-                        let save_reg = self.value_to_register(&save.source, backend);
-                        backend.store_local(save_reg, save.local as i32);
-                    }
-
-                    // Set up arguments
-                    let num_arg_regs = backend.num_arg_registers();
-                    for (arg_index, arg) in args.iter().enumerate().rev() {
-                        let arg = self.value_to_register(arg, backend);
-                        if arg_index < num_arg_regs {
-                            backend.mov_reg(backend.arg(arg_index as u8), arg);
-                        } else {
-                            // Recurse uses a different formula because it's a jump, not a call
-                            backend.push_to_end_of_stack(
-                                arg,
-                                (arg_index as i32) - (num_arg_regs as i32 - 1),
-                            );
-                        }
-                    }
-
-                    // Set arg_count for uniform variadic calling convention
-                    let arg_count_tagged = (args.len() << BuiltInTypes::tag_size()) as isize;
-                    backend.mov_64(backend.arg_count_reg(), arg_count_tagged);
-
-                    backend.recurse(before_prelude);
-                    let dest_spill = self.dest_spill(dest);
-                    let dest = self.value_to_register(dest, backend);
-                    backend.mov_reg(dest, backend.ret_reg());
-                    self.store_spill(dest, dest_spill, backend);
-
-                    // Restore saved registers from their root slots
-                    let null_reg = self.value_to_register(&Value::Null, backend);
-                    for save in saves.iter().rev() {
-                        let save_reg = self.value_to_register(&save.source, backend);
-                        backend.load_local(save_reg, save.local as i32);
-                        backend.store_local(null_reg, save.local as i32);
-                    }
-                    backend.free_temporary_register(null_reg);
-                }
                 Instruction::TailRecurse(dest, args) => {
                     let num_arg_regs = backend.num_arg_registers();
                     for (arg_index, arg) in args.iter().enumerate().rev() {
@@ -2400,7 +2178,6 @@ impl Ir {
                     self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::Call(dest, function, args, builtin) => {
-                    // TODO: I think I should never hit this with how my register allocator works
                     let num_arg_regs = backend.num_arg_registers();
 
                     for (arg_index, arg) in args.iter().enumerate().rev() {
@@ -2409,11 +2186,13 @@ impl Ir {
                         if arg_index < num_arg_regs {
                             backend.mov_reg(backend.arg(arg_index as u8), arg_reg);
                         } else {
+                            // Stack args at [RSP + (arg_index - num_arg_regs)*8]
                             backend.push_to_end_of_stack(
                                 arg_reg,
-                                (arg_index as i32) - (num_arg_regs as i32 - 1),
+                                (arg_index as i32) - num_arg_regs as i32,
                             );
                         }
+                        backend.free_temporary_register(arg_reg);
                     }
                     // TODO: I am not actually checking any tags here
                     // or unmasking or anything. Just straight up calling it
@@ -2443,113 +2222,6 @@ impl Ir {
                     };
                     backend.mov_reg(dest_reg, backend.ret_reg());
                     self.store_spill(dest_reg, dest_spill, backend);
-                    if matches!(dest, Value::Spill(_, _)) {
-                        backend.free_temporary_register(dest_reg);
-                    }
-                }
-                Instruction::CallWithSaves(dest, function, args, builtin, saves) => {
-                    // Check if function is in a register that will be saved
-                    let function_in_save = if let Value::Register(reg) = function {
-                        saves.iter().any(|save| {
-                            if let Value::Register(save_reg) = save.source {
-                                save_reg.index == reg.index
-                            } else {
-                                false
-                            }
-                        })
-                    } else {
-                        false
-                    };
-
-                    // If function is in a register that will be saved,
-                    // we need to capture it BEFORE saving
-                    let pre_captured_function = if function_in_save {
-                        let function_reg = self.value_to_register(function, backend);
-                        let temp = backend.temporary_register();
-                        backend.mov_reg(temp, function_reg);
-                        Some(temp)
-                    } else {
-                        None
-                    };
-
-                    // Save registers that are live across the call into frame locals
-                    // so they are part of the GC-traced root set.
-                    let mut null_save_reg = None;
-                    for save in saves.iter() {
-                        let save_reg = if matches!(save.source, Value::Null) {
-                            *null_save_reg.get_or_insert_with(|| {
-                                self.value_to_register(&Value::Null, backend)
-                            })
-                        } else {
-                            self.value_to_register(&save.source, backend)
-                        };
-                        backend.store_local(save_reg, save.local as i32);
-                    }
-                    if let Some(reg) = null_save_reg {
-                        backend.free_temporary_register(reg);
-                    }
-
-                    // Set up arguments
-                    let num_arg_regs = backend.num_arg_registers();
-                    for (arg_index, arg) in args.iter().enumerate().rev() {
-                        let arg_reg = self.value_to_register(arg, backend);
-                        if arg_index < num_arg_regs {
-                            backend.mov_reg(backend.arg(arg_index as u8), arg_reg);
-                        } else {
-                            // Stack args at [RSP + (arg_index - num_arg_regs)*8]
-                            // NO adjustment for saves because saves don't change RSP
-                            backend.push_to_end_of_stack(
-                                arg_reg,
-                                (arg_index as i32) - num_arg_regs as i32,
-                            );
-                        }
-                        backend.free_temporary_register(arg_reg);
-                    }
-
-                    // Get function pointer
-                    let call_target = if let Some(temp) = pre_captured_function {
-                        temp
-                    } else {
-                        self.value_to_register(function, backend)
-                    };
-
-                    // Untag function pointer and call
-                    backend.shift_right_imm(call_target, call_target, BuiltInTypes::tag_size());
-
-                    // Set arg_count for uniform variadic calling convention
-                    let arg_count_tagged = (args.len() << BuiltInTypes::tag_size()) as isize;
-                    backend.mov_64(backend.arg_count_reg(), arg_count_tagged);
-
-                    if *builtin {
-                        backend.call_builtin(call_target);
-                    } else {
-                        backend.call(call_target);
-                    }
-                    backend.free_temporary_register(call_target);
-
-                    let result_reg = backend.temporary_register();
-                    backend.mov_reg(result_reg, backend.ret_reg());
-
-                    // Restore saved registers from their tracked local slots.
-                    let null_reg = self.value_to_register(&Value::Null, backend);
-                    for save in saves.iter().rev() {
-                        if matches!(save.source, Value::Register(_)) {
-                            let save_reg = self.value_to_register(&save.source, backend);
-                            backend.load_local(save_reg, save.local as i32);
-                        }
-                        backend.store_local(null_reg, save.local as i32);
-                    }
-                    backend.free_temporary_register(null_reg);
-
-                    let dest_spill = self.dest_spill(dest);
-                    let dest_reg = match dest {
-                        Value::Register(register) => backend.register_from_index(register.index),
-                        Value::Spill(_, _) => backend.temporary_register(),
-                        _ => panic!("Unexpected dest type for call: {:?}", dest),
-                    };
-                    backend.mov_reg(dest_reg, result_reg);
-                    self.store_spill(dest_reg, dest_spill, backend);
-                    backend.free_temporary_register(result_reg);
                     if matches!(dest, Value::Spill(_, _)) {
                         backend.free_temporary_register(dest_reg);
                     }
@@ -3040,65 +2712,6 @@ impl Ir {
                     let dest_reg = match dest {
                         Value::Register(register) => backend.register_from_index(register.index),
                         Value::Spill(_, _) => backend.temporary_register(),
-                        _ => panic!(
-                            "Unexpected dest type for CaptureContinuationWithSaves: {:?}",
-                            dest
-                        ),
-                    };
-                    backend.mov_reg(dest_reg, backend.ret_reg());
-                    self.store_spill(dest_reg, dest_spill, backend);
-                    if matches!(dest, Value::Spill(_, _)) {
-                        backend.free_temporary_register(dest_reg);
-                    }
-                }
-                Instruction::CaptureContinuationWithSaves(
-                    dest,
-                    resume_label,
-                    result_local_index,
-                    builtin_fn,
-                    saves,
-                ) => {
-                    // Save registers to their root slots (frame locals) so they
-                    // survive GC and are part of the captured stack segment.
-                    for save in saves.iter() {
-                        let save_reg = self.value_to_register(&save.source, backend);
-                        backend.store_local(save_reg, save.local as i32);
-                    }
-
-                    // Arguments: (stack_pointer, frame_pointer, resume_address, result_local_offset)
-
-                    // Pass the real machine stack pointer. Continuation resume
-                    // restores native execution state, so the saved SP must be
-                    // the hardware SP, not a logical eval-stack position.
-                    backend.get_stack_pointer_imm(backend.arg(0), 0);
-
-                    // Get current frame pointer into arg 1
-                    backend.mov_reg(backend.arg(1), backend.frame_pointer());
-
-                    // Load address of resume label into arg 2
-                    let resume_backend_label = ir_label_to_lang_label.get(resume_label).unwrap();
-                    backend.load_label_address(backend.arg(2), *resume_backend_label);
-
-                    // Load result_local byte offset into arg 3 (as signed value)
-                    let local_offset = backend.get_local_byte_offset(*result_local_index);
-                    backend.mov_64(backend.arg(3), local_offset);
-
-                    // Pass null for saved_regs_ptr — registers are already
-                    // stored in root slots by the save loop above.
-                    let saved_regs_ptr = backend.temporary_register();
-                    backend.mov_64(saved_regs_ptr, 0);
-                    backend.mov_reg(backend.arg(4), saved_regs_ptr);
-                    backend.free_temporary_register(saved_regs_ptr);
-
-                    // Call the builtin
-                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
-                    backend.call_builtin(fn_ptr);
-
-                    // Store result in dest
-                    let dest_spill = self.dest_spill(dest);
-                    let dest_reg = match dest {
-                        Value::Register(register) => backend.register_from_index(register.index),
-                        Value::Spill(_, _) => backend.temporary_register(),
                         _ => panic!("Unexpected dest type for CaptureContinuation: {:?}", dest),
                     };
                     backend.mov_reg(dest_reg, backend.ret_reg());
@@ -3106,17 +2719,6 @@ impl Ir {
                     if matches!(dest, Value::Spill(_, _)) {
                         backend.free_temporary_register(dest_reg);
                     }
-
-                    // Restore saved registers from their root slots.
-                    // On the initial capture path, GC may have moved objects
-                    // during the builtin call — root slots were updated by GC.
-                    let null_reg = self.value_to_register(&Value::Null, backend);
-                    for save in saves.iter().rev() {
-                        let save_reg = self.value_to_register(&save.source, backend);
-                        backend.load_local(save_reg, save.local as i32);
-                        backend.store_local(null_reg, save.local as i32);
-                    }
-                    backend.free_temporary_register(null_reg);
                 }
                 Instruction::CaptureContinuationTagged(
                     dest,
@@ -3159,60 +2761,6 @@ impl Ir {
                         backend.free_temporary_register(dest_reg);
                     }
                 }
-                Instruction::CaptureContinuationTaggedWithSaves(
-                    dest,
-                    resume_label,
-                    result_local_index,
-                    builtin_fn,
-                    tag_value,
-                    saves,
-                ) => {
-                    // Save live registers to their GC root slots so the
-                    // captured segment (and any GC during the builtin)
-                    // see consistent values.
-                    for save in saves.iter() {
-                        let save_reg = self.value_to_register(&save.source, backend);
-                        backend.store_local(save_reg, save.local as i32);
-                    }
-
-                    backend.get_stack_pointer_imm(backend.arg(0), 0);
-                    backend.mov_reg(backend.arg(1), backend.frame_pointer());
-
-                    let resume_backend_label = ir_label_to_lang_label.get(resume_label).unwrap();
-                    backend.load_label_address(backend.arg(2), *resume_backend_label);
-
-                    let local_offset = backend.get_local_byte_offset(*result_local_index);
-                    backend.mov_64(backend.arg(3), local_offset);
-
-                    let tag_reg = self.value_to_register(tag_value, backend);
-                    backend.mov_reg(backend.arg(4), tag_reg);
-
-                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
-                    backend.call_builtin(fn_ptr);
-
-                    let dest_spill = self.dest_spill(dest);
-                    let dest_reg = match dest {
-                        Value::Register(register) => backend.register_from_index(register.index),
-                        Value::Spill(_, _) => backend.temporary_register(),
-                        _ => panic!(
-                            "Unexpected dest type for CaptureContinuationTaggedWithSaves: {:?}",
-                            dest
-                        ),
-                    };
-                    backend.mov_reg(dest_reg, backend.ret_reg());
-                    self.store_spill(dest_reg, dest_spill, backend);
-                    if matches!(dest, Value::Spill(_, _)) {
-                        backend.free_temporary_register(dest_reg);
-                    }
-
-                    let null_reg = self.value_to_register(&Value::Null, backend);
-                    for save in saves.iter().rev() {
-                        let save_reg = self.value_to_register(&save.source, backend);
-                        backend.load_local(save_reg, save.local as i32);
-                        backend.store_local(null_reg, save.local as i32);
-                    }
-                    backend.free_temporary_register(null_reg);
-                }
                 Instruction::PerformEffect(
                     handler,
                     enum_type,
@@ -3238,53 +2786,6 @@ impl Ir {
                     let local_offset = backend.get_local_byte_offset(*result_local_index);
                     backend.mov_64(backend.arg(5), local_offset);
 
-                    let saved_regs_ptr = backend.temporary_register();
-                    backend.mov_64(saved_regs_ptr, 0);
-                    if backend.num_arg_registers() > 6 {
-                        backend.mov_reg(backend.arg(6), saved_regs_ptr);
-                    } else {
-                        backend.push_to_end_of_stack(saved_regs_ptr, 0);
-                    }
-                    backend.free_temporary_register(saved_regs_ptr);
-
-                    let fn_ptr = self.value_to_register(&Value::RawValue(*builtin_fn), backend);
-                    backend.call_builtin(fn_ptr);
-                }
-                Instruction::PerformEffectWithSaves(
-                    handler,
-                    enum_type,
-                    op_value,
-                    resume_label,
-                    result_local_index,
-                    builtin_fn,
-                    saves,
-                ) => {
-                    // Save registers to their root slots (frame locals) so they
-                    // survive GC and are part of the captured stack segment.
-                    for save in saves.iter() {
-                        let save_reg = self.value_to_register(&save.source, backend);
-                        backend.store_local(save_reg, save.local as i32);
-                    }
-
-                    backend.get_stack_pointer_imm(backend.arg(0), 0);
-                    backend.mov_reg(backend.arg(1), backend.frame_pointer());
-
-                    let _ = handler;
-
-                    let enum_type_reg = self.value_to_register(enum_type, backend);
-                    backend.mov_reg(backend.arg(2), enum_type_reg);
-
-                    let op_reg = self.value_to_register(op_value, backend);
-                    backend.mov_reg(backend.arg(3), op_reg);
-
-                    let resume_backend_label = ir_label_to_lang_label.get(resume_label).unwrap();
-                    backend.load_label_address(backend.arg(4), *resume_backend_label);
-
-                    let local_offset = backend.get_local_byte_offset(*result_local_index);
-                    backend.mov_64(backend.arg(5), local_offset);
-
-                    // Pass null for saved_regs_ptr — registers are already
-                    // stored in root slots by the save loop above.
                     let saved_regs_ptr = backend.temporary_register();
                     backend.mov_64(saved_regs_ptr, 0);
                     if backend.num_arg_registers() > 6 {
@@ -3466,9 +2967,7 @@ impl Ir {
     /// Tag-aware variant of `capture_continuation`. The runtime uses the
     /// tag to locate the matching prompt-tag record (pushed by the
     /// enclosing `handle`) and captures bytes from the current SP up to
-    /// that record's `stack_pointer`. The linear-scan allocator rewrites
-    /// this to `CaptureContinuationTaggedWithSaves` so live registers
-    /// flush to their root slots before the builtin call.
+    /// that record's `stack_pointer`.
     pub fn capture_continuation_tagged(
         &mut self,
         resume_label: Label,

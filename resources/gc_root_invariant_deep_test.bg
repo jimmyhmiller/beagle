@@ -1,0 +1,62 @@
+namespace gc_root_invariant_deep_test
+// gc-always
+
+use beagle.collections as collections
+
+struct Box { value }
+
+fn b(x) { Box { value: x } }
+
+fn id(x) { x }
+
+// Closure over a heap value, called via CallExpr.  The closure object
+// itself is a heap value held in a register before args are evaluated.
+fn closure_with_alloc_args() {
+    let make_adder = fn(c) {
+        fn(x, y) { x.value + y.value + c.value }
+    }
+    let f = make_adder(b(100))
+    let r = f(b(20), b(3))
+    println(r)
+}
+
+// Doubly nested call args: f(g(h(i())), g(h(i())))
+fn deeply_nested_args() {
+    let r = id(id(id(id(b(42))))).value
+    println(r)
+}
+
+// Calls in indexing position
+fn calls_in_index() {
+    let arr = collections/vec()
+    let arr = collections/vec-push(arr, b(10))
+    let arr = collections/vec-push(arr, b(20))
+    let arr = collections/vec-push(arr, b(30))
+    let r = arr[id(1)].value + arr[id(2)].value
+    println(r)
+}
+
+// Recursive function whose result must survive a sibling call.
+fn fib(n) {
+    if n <= 1 { b(n) } else { b(fib(n - 1).value + fib(n - 2).value) }
+}
+
+fn fib_test() {
+    let r = fib(15)
+    println(r.value)
+}
+
+fn main() {
+    closure_with_alloc_args()
+    deeply_nested_args()
+    calls_in_index()
+    fib_test()
+    println("done")
+}
+
+// @beagle.core.snapshot
+// 123
+// 42
+// 50
+// 610
+// done

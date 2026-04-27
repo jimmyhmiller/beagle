@@ -3229,8 +3229,7 @@ impl AstCompiler<'_> {
                 Ok(result.into())
             }
             Ast::IndexOperator { array, index, .. } => {
-                let array = self.call_compile(array.as_ref())?;
-                let index = self.call_compile(index.as_ref())?;
+                let (array, index) = self.compile_binop_operands(array.as_ref(), index.as_ref())?;
                 let array = self.ir.assign_new(array);
                 let index = self.ir.assign_new(index);
                 self.call("beagle.core/get", vec![array.into(), index.into()])
@@ -3306,80 +3305,47 @@ impl AstCompiler<'_> {
                 Ok(result_reg.into())
             }
             Ast::Add { left, right, .. } => {
-                self.not_tail_position();
-                let left = self.call_compile(&left)?;
-                self.not_tail_position();
-                let right = self.call_compile(&right)?;
+                let (left, right) = self.compile_binop_operands(&left, &right)?;
                 Ok(self.ir.add_any(left, right))
             }
             Ast::Sub { left, right, .. } => {
-                self.not_tail_position();
-                let left = self.call_compile(&left)?;
-                self.not_tail_position();
-                let right = self.call_compile(&right)?;
+                let (left, right) = self.compile_binop_operands(&left, &right)?;
                 Ok(self.ir.sub_any(left, right))
             }
             Ast::Mul { left, right, .. } => {
-                self.not_tail_position();
-                let left = self.call_compile(&left)?;
-                self.not_tail_position();
-                let right = self.call_compile(&right)?;
+                let (left, right) = self.compile_binop_operands(&left, &right)?;
                 Ok(self.ir.mul_any(left, right))
             }
             Ast::Div { left, right, .. } => {
-                self.not_tail_position();
-                let left = self.call_compile(&left)?;
-                self.not_tail_position();
-                let right = self.call_compile(&right)?;
+                let (left, right) = self.compile_binop_operands(&left, &right)?;
                 Ok(self.ir.div_any(left, right))
             }
             Ast::Modulo { left, right, .. } => {
-                self.not_tail_position();
-                let left = self.call_compile(&left)?;
-                self.not_tail_position();
-                let right = self.call_compile(&right)?;
+                let (left, right) = self.compile_binop_operands(&left, &right)?;
                 Ok(self.ir.modulo_any(left, right))
             }
             Ast::ShiftLeft { left, right, .. } => {
-                self.not_tail_position();
-                let left = self.call_compile(&left)?;
-                self.not_tail_position();
-                let right = self.call_compile(&right)?;
+                let (left, right) = self.compile_binop_operands(&left, &right)?;
                 Ok(self.ir.shift_left(left, right))
             }
             Ast::ShiftRight { left, right, .. } => {
-                self.not_tail_position();
-                let left = self.call_compile(&left)?;
-                self.not_tail_position();
-                let right = self.call_compile(&right)?;
+                let (left, right) = self.compile_binop_operands(&left, &right)?;
                 Ok(self.ir.shift_right(left, right))
             }
             Ast::ShiftRightZero { left, right, .. } => {
-                self.not_tail_position();
-                let left = self.call_compile(&left)?;
-                self.not_tail_position();
-                let right = self.call_compile(&right)?;
+                let (left, right) = self.compile_binop_operands(&left, &right)?;
                 Ok(self.ir.shift_right_zero(left, right))
             }
             Ast::BitWiseAnd { left, right, .. } => {
-                self.not_tail_position();
-                let left = self.call_compile(&left)?;
-                self.not_tail_position();
-                let right = self.call_compile(&right)?;
+                let (left, right) = self.compile_binop_operands(&left, &right)?;
                 Ok(self.ir.bitwise_and(left, right))
             }
             Ast::BitWiseOr { left, right, .. } => {
-                self.not_tail_position();
-                let left = self.call_compile(&left)?;
-                self.not_tail_position();
-                let right = self.call_compile(&right)?;
+                let (left, right) = self.compile_binop_operands(&left, &right)?;
                 Ok(self.ir.bitwise_or(left, right))
             }
             Ast::BitWiseXor { left, right, .. } => {
-                self.not_tail_position();
-                let left = self.call_compile(&left)?;
-                self.not_tail_position();
-                let right = self.call_compile(&right)?;
+                let (left, right) = self.compile_binop_operands(&left, &right)?;
                 Ok(self.ir.bitwise_xor(left, right))
             }
             Ast::Recurse { args, .. } | Ast::TailRecurse { args, .. } => {
@@ -3481,20 +3447,20 @@ impl AstCompiler<'_> {
                     return self.compile_macro_like_primitive(name, args);
                 }
 
-                let mut args_vec: Vec<Value> = Vec::new();
+                // Spill each evaluated arg to a local before evaluating the
+                // next, so any heap-pointer args stay visible to GC if a
+                // later arg evaluation triggers a collection.
                 for arg in args.iter() {
                     self.not_tail_position();
                     let value = self.call_compile(&Box::new(arg.clone()))?;
-                    let value = match value {
-                        Value::Register(_) => value,
-                        _ => {
-                            let reg = self.ir.volatile_register();
-                            self.ir.assign(reg, value);
-                            reg.into()
-                        }
-                    };
-                    args_vec.push(value);
+                    let reg = self.ir.assign_new(value);
+                    self.ir.push_to_stack(reg.into());
                 }
+                let mut args_vec: Vec<Value> = Vec::with_capacity(args.len());
+                for _ in 0..args.len() {
+                    args_vec.push(self.ir.pop_from_stack());
+                }
+                args_vec.reverse();
                 let args = args_vec;
 
                 // TODO: Should the arguments be evaluated first?
@@ -3526,25 +3492,29 @@ impl AstCompiler<'_> {
                 }
             }
             Ast::CallExpr { callee, args, .. } => {
-                // Compile the callee expression to get the function value
+                // Compile the callee expression to get the function value.
+                // Spill it to a local before evaluating args, since it may
+                // be a heap-allocated closure that needs to survive GC
+                // during arg evaluation.
                 self.not_tail_position();
                 let callee_value = self.call_compile(callee.as_ref())?;
+                let callee_reg = self.ir.assign_new(callee_value);
+                self.ir.push_to_stack(callee_reg.into());
 
-                // Compile arguments
-                let mut args_vec: Vec<Value> = Vec::new();
+                // Compile arguments, pushing each to the local stack so heap
+                // pointers stay GC-visible across subsequent arg evaluations.
                 for arg in args.iter() {
                     self.not_tail_position();
                     let value = self.call_compile(arg)?;
-                    let value = match value {
-                        Value::Register(_) => value,
-                        _ => {
-                            let reg = self.ir.volatile_register();
-                            self.ir.assign(reg, value);
-                            reg.into()
-                        }
-                    };
-                    args_vec.push(value);
+                    let reg = self.ir.assign_new(value);
+                    self.ir.push_to_stack(reg.into());
                 }
+                let mut args_vec: Vec<Value> = Vec::with_capacity(args.len());
+                for _ in 0..args.len() {
+                    args_vec.push(self.ir.pop_from_stack());
+                }
+                args_vec.reverse();
+                let callee_value = self.ir.pop_from_stack();
 
                 // Use the value-based closure call
                 Ok(self.compile_closure_call_from_value(callee_value, args_vec))
@@ -4994,6 +4964,26 @@ impl AstCompiler<'_> {
                 Ok(result)
             }
         }
+    }
+
+    /// Compile two operands of a binary expression so heap values produced by
+    /// the left side stay rooted in a frame local while the right side is
+    /// evaluated. Without this, a continuation capture or GC-triggering call
+    /// in the right side would leave the left's register stale.
+    fn compile_binop_operands(
+        &mut self,
+        left: &Ast,
+        right: &Ast,
+    ) -> Result<(Value, Value), CompileError> {
+        self.not_tail_position();
+        let left_val = self.call_compile(&Box::new(left.clone()))?;
+        let left_reg = self.ir.assign_new(left_val);
+        self.ir.push_to_stack(left_reg.into());
+        self.not_tail_position();
+        let right_val = self.call_compile(&Box::new(right.clone()))?;
+        let right_reg = self.ir.assign_new(right_val);
+        let left_val = self.ir.pop_from_stack();
+        Ok((left_val, right_reg.into()))
     }
 
     fn call(&mut self, name: &str, mut args: Vec<Value>) -> Result<Value, CompileError> {

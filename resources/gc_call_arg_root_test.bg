@@ -1,0 +1,20 @@
+namespace gc_call_arg_root_test
+// gc-always
+
+struct Box { value }
+
+fn id2(a, b) {
+    a.value + b.value
+}
+
+fn make_box(x) {
+    Box { value: x }
+}
+
+fn main() {
+    let r = id2(make_box(10), make_box(32))
+    println(r)
+}
+
+// @beagle.core.snapshot
+// 42

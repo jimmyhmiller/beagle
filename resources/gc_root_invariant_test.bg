@@ -1,0 +1,73 @@
+namespace gc_root_invariant_test
+// gc-always
+
+use beagle.primitive as primitive
+
+struct Box { value }
+
+fn b(x) { Box { value: x } }
+
+fn add4(a, b, c, d) { a.value + b.value + c.value + d.value }
+
+fn deep(n) {
+    if n == 0 {
+        b(1)
+    } else {
+        b(deep(n - 1).value + 1)
+    }
+}
+
+fn nested_call_args() {
+    // f(g(h()), g(h()), ...) — every arg allocates and could trigger GC
+    let r = add4(b(1), b(10), b(100), b(1000))
+    println(r)
+}
+
+fn deep_recursion() {
+    let r = deep(20)
+    println(r.value)
+}
+
+fn binop_chain() {
+    // Long arithmetic chain, each operand allocates a box and reads .value.
+    // Without LHS spill, intermediate sums in registers are clobbered by
+    // RHS-side allocations under compacting GC.
+    let r = b(1).value + b(2).value + b(3).value + b(4).value + b(5).value
+          + b(6).value + b(7).value + b(8).value + b(9).value + b(10).value
+    println(r)
+}
+
+fn mixed_ops() {
+    // Mix shifts, bitwise and arithmetic with allocations between operands.
+    let a = b(48).value
+    let bv = b(15).value
+    let r = (a >> 2) | (bv & 7) | (b(64).value >> 1)
+    println(r)
+}
+
+fn shift_inside_arith() {
+    // Continuation capture inside an arithmetic expression: the LHS must
+    // be rooted in a local across the shift so resume can read it back.
+    let r = reset {
+        let lhs = b(100)
+        lhs.value + shift(fn(k) { k(b(7).value) }) + b(1).value
+    }
+    println(r)
+}
+
+fn main() {
+    nested_call_args()
+    deep_recursion()
+    binop_chain()
+    mixed_ops()
+    shift_inside_arith()
+    println("done")
+}
+
+// @beagle.core.snapshot
+// 1111
+// 21
+// 55
+// 47
+// 108
+// done

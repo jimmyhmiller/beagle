@@ -75,8 +75,9 @@ impl LowLevelX86 {
         //
         // We use R12-R15 and RBX as "value storage" registers for the linear scan allocator.
         // Per System V AMD64 ABI, these are callee-saved, but we DON'T save them
-        // in prologue/epilogue. Instead, the CallWithSaves mechanism explicitly
-        // pushes/pops values that need to survive across function calls.
+        // in prologue/epilogue. Instead, the AST→IR layer pushes any value that
+        // could survive a call/continuation capture into a named local before
+        // the boundary, so the GC and continuation resume both see it in the frame.
         //
         // Note: RBX has raw index 3 but uses virtual index 16 to avoid arg(3) conflict.
         //

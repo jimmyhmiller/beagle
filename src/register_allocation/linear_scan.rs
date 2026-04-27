@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use std::collections::{BTreeMap, HashMap};
 
-use crate::ir::{Instruction, SavedValue, Value, VirtualRegister};
+use crate::ir::{Instruction, Value, VirtualRegister};
 
 pub struct LinearScan {
     pub lifetimes: HashMap<VirtualRegister, (usize, usize)>,
@@ -17,7 +17,6 @@ pub struct LinearScan {
     pub root_slots: HashMap<VirtualRegister, usize>,
     free_root_slots: Vec<usize>,
     next_root_slot: usize,
-    root_slot_base: usize,
 }
 
 fn physical(index: usize) -> VirtualRegister {
@@ -64,7 +63,6 @@ impl LinearScan {
             root_slots: HashMap::new(),
             free_root_slots: Vec::new(),
             next_root_slot: num_locals,
-            root_slot_base: num_locals,
         }
     }
 
@@ -113,8 +111,8 @@ impl LinearScan {
 
     pub fn allocate(&mut self) {
         // Assign root slots first — every virtual register gets a frame slot
-        // with reuse for non-overlapping lifetimes. Spills and call saves
-        // use these slots instead of allocating fresh ones.
+        // with reuse for non-overlapping lifetimes. Spills use these slots
+        // instead of allocating fresh ones.
         self.assign_root_slots();
 
         let mut intervals = self
@@ -154,8 +152,7 @@ impl LinearScan {
         }
         self.replace_spilled_registers_with_spill();
         self.replace_virtual_with_allocated();
-        self.replace_calls_with_call_with_save();
-        // Frame size is determined by root slots — all spills and saves use root slot indices
+        // Frame size is determined by root slots — spills use root slot indices.
         self.stack_slot = self.next_root_slot;
     }
 
@@ -285,185 +282,6 @@ impl LinearScan {
                 }
             }
         }
-    }
-
-    fn replace_calls_with_call_with_save(&mut self) {
-        for i in 0..self.instructions.len() {
-            let instruction = self.instructions[i].clone();
-            if let Instruction::Call(dest, f, args, builtin) = &instruction {
-                // println!("{}", instruction.pretty_print());
-                // We want to get all ranges that are valid at this point
-                // if they are not spilled (meaning there isn't an entry in location)
-                // we want to add them to the list of saves
-                let mut saves = Vec::new();
-                let mut live_root_slots = std::collections::HashSet::new();
-                let live_ranges: Vec<(VirtualRegister, usize, usize)> = self
-                    .lifetimes
-                    .iter()
-                    .map(|(register, (start, end))| (*register, *start, *end))
-                    .collect();
-                for (original_register, start, end) in live_ranges {
-                    // Keep any root slot whose interval covers the call instruction
-                    // itself. Spilled args/function values may be read while setting
-                    // up the call even if they are dead immediately after it.
-                    if start <= i && end >= i {
-                        let root_slot = *self.root_slots.get(&original_register).unwrap();
-                        live_root_slots.insert(root_slot);
-                    }
-                    // *end > i: register is used after the call (at instruction i+1 or later)
-                    if start < i && end > i && !self.location.contains_key(&original_register) {
-                        let register = self.allocated_registers.get(&original_register).unwrap();
-                        // We save ALL registers that are live across calls, including callee-saved.
-                        // While the ABI guarantees callee-saved registers are preserved by the callee,
-                        // our GC needs to be able to find and update heap pointers during collection.
-                        // If a register holds a heap pointer and GC runs during the call, the object
-                        // may be moved. By saving to the stack, GC can scan and update the pointer.
-                        if let Value::Register(dest) = dest
-                            && dest == register
-                        {
-                            continue;
-                        }
-                        saves.push(SavedValue {
-                            source: Value::Register(*register),
-                            local: *self.root_slots.get(&original_register).unwrap(),
-                        });
-                    }
-                }
-                for dead_slot in self.root_slot_base..self.next_root_slot {
-                    if !live_root_slots.contains(&dead_slot) {
-                        saves.push(SavedValue {
-                            source: Value::Null,
-                            local: dead_slot,
-                        });
-                    }
-                }
-                self.instructions[i] =
-                    Instruction::CallWithSaves(*dest, *f, args.clone(), *builtin, saves);
-            } else if let Instruction::CaptureContinuation(dest, label, local_index, builtin) =
-                &instruction
-            {
-                let mut saves = Vec::new();
-                let live_ranges: Vec<(VirtualRegister, usize, usize)> = self
-                    .lifetimes
-                    .iter()
-                    .map(|(register, (start, end))| (*register, *start, *end))
-                    .collect();
-                for (original_register, start, end) in live_ranges {
-                    if start < i && end > i && !self.location.contains_key(&original_register) {
-                        let register = self.allocated_registers.get(&original_register).unwrap();
-                        if let Value::Register(dest) = dest
-                            && dest == register
-                        {
-                            continue;
-                        }
-                        saves.push(SavedValue {
-                            source: Value::Register(*register),
-                            local: *self.root_slots.get(&original_register).unwrap(),
-                        });
-                    }
-                }
-                self.instructions[i] = Instruction::CaptureContinuationWithSaves(
-                    *dest,
-                    *label,
-                    *local_index,
-                    *builtin,
-                    saves,
-                );
-            } else if let Instruction::CaptureContinuationTagged(
-                dest,
-                label,
-                local_index,
-                builtin,
-                tag,
-            ) = &instruction
-            {
-                let mut saves = Vec::new();
-                let live_ranges: Vec<(VirtualRegister, usize, usize)> = self
-                    .lifetimes
-                    .iter()
-                    .map(|(register, (start, end))| (*register, *start, *end))
-                    .collect();
-                for (original_register, start, end) in live_ranges {
-                    if start < i && end > i && !self.location.contains_key(&original_register) {
-                        let register = self.allocated_registers.get(&original_register).unwrap();
-                        if let Value::Register(dest) = dest
-                            && dest == register
-                        {
-                            continue;
-                        }
-                        saves.push(SavedValue {
-                            source: Value::Register(*register),
-                            local: *self.root_slots.get(&original_register).unwrap(),
-                        });
-                    }
-                }
-                self.instructions[i] = Instruction::CaptureContinuationTaggedWithSaves(
-                    *dest,
-                    *label,
-                    *local_index,
-                    *builtin,
-                    *tag,
-                    saves,
-                );
-            } else if let Instruction::PerformEffect(
-                handler,
-                enum_type,
-                op_value,
-                label,
-                local_index,
-                builtin,
-            ) = &instruction
-            {
-                let mut saves = Vec::new();
-                let live_ranges: Vec<(VirtualRegister, usize, usize)> = self
-                    .lifetimes
-                    .iter()
-                    .map(|(register, (start, end))| (*register, *start, *end))
-                    .collect();
-                for (original_register, start, end) in live_ranges {
-                    if start < i && end > i && !self.location.contains_key(&original_register) {
-                        let register = self.allocated_registers.get(&original_register).unwrap();
-                        saves.push(SavedValue {
-                            source: Value::Register(*register),
-                            local: *self.root_slots.get(&original_register).unwrap(),
-                        });
-                    }
-                }
-                self.instructions[i] = Instruction::PerformEffectWithSaves(
-                    *handler,
-                    *enum_type,
-                    *op_value,
-                    *label,
-                    *local_index,
-                    *builtin,
-                    saves,
-                );
-            } else if let Instruction::Recurse(dest, args) = &instruction {
-                let mut saves = Vec::new();
-                for (original_register, (start, end)) in self.lifetimes.iter() {
-                    // *end > i: register is used after the call (at instruction i+1 or later)
-                    if *start < i && *end > i && !self.location.contains_key(original_register) {
-                        let register = self.allocated_registers.get(original_register).unwrap();
-                        // Save all live registers across recursive calls for GC safety
-                        if let Value::Register(dest) = dest
-                            && dest == register
-                        {
-                            continue;
-                        }
-                        saves.push(SavedValue {
-                            source: Value::Register(*register),
-                            local: *self.root_slots.get(original_register).unwrap(),
-                        });
-                    }
-                }
-                self.instructions[i] = Instruction::RecurseWithSaves(*dest, args.clone(), saves);
-            }
-        }
-
-        // Note: ReloadRootSlots at resume points is handled in compile_instructions
-        // (ir.rs) by looking up the resume label from CaptureContinuationWithSaves
-        // and PerformEffectWithSaves instructions. We don't insert instructions here
-        // because that would invalidate label_locations indices.
     }
 }
 
@@ -1011,157 +829,8 @@ fn test_extreme_interleaved_lifetimes() {
 
 // ============================================================
 // Root slot integration tests — verifying that allocate() uses
-// root slots for spills and call saves, reducing frame size
+// root slots for spills, reducing frame size
 // ============================================================
-
-#[test]
-fn test_call_saves_reuse_root_slots() {
-    // A register live across multiple calls should use the SAME root slot
-    // for all saves, not a fresh slot per call site.
-    //
-    // Old behavior: 3 calls × 1 live register = 3 save slots
-    // New behavior: 1 root slot reused across all 3 calls
-    //
-    //   0: Assign(r0, 42)           — r0 live [0, 7]
-    //   1: Assign(func, 99)         — func register for calls
-    //   2: Call(c0, func, [])       — r0 live, saved to root slot
-    //   3: Call(c1, func, [])       — r0 live, saved to SAME root slot
-    //   4: Call(c2, func, [])       — r0 live, saved to SAME root slot
-    //   5: AddInt(result, r0, c2)   — r0 finally consumed
-    //   6: Ret(result)
-    use crate::ir::Ir;
-
-    let mut ir = Ir::new(0);
-    let r0 = ir.assign_new(42);
-    let func = ir.assign_new(99);
-    let _c0 = ir.call(Value::Register(func), vec![]);
-    let _c1 = ir.call(Value::Register(func), vec![]);
-    let c2 = ir.call(Value::Register(func), vec![]);
-    let result = ir.add_int(r0, c2);
-    ir.ret(result);
-
-    let mut ls = LinearScan::new(ir.instructions.clone(), 0);
-    ls.allocate();
-
-    // With root slots: each register gets one slot, reused across all call saves.
-    // r0, func, c0, c1, c2, result — but not all live simultaneously.
-    // The key metric: stack_slot should be much less than
-    // what 3 calls × 2 live registers (r0 + func) = 6 separate save slots would need.
-    //
-    // Count the actual SavedValue locals in the WithSaves instructions to verify reuse.
-    let mut save_locals: Vec<usize> = Vec::new();
-    for inst in &ls.instructions {
-        if let Instruction::CallWithSaves(_, _, _, _, saves) = inst {
-            for save in saves {
-                save_locals.push(save.local);
-            }
-        }
-    }
-
-    // Multiple calls should reuse the same locals (root slots)
-    let unique_locals: std::collections::HashSet<usize> = save_locals.iter().copied().collect();
-    assert!(
-        unique_locals.len() < save_locals.len(),
-        "root slots should be reused across calls: {} unique locals for {} total saves",
-        unique_locals.len(),
-        save_locals.len()
-    );
-}
-
-#[test]
-fn test_many_calls_same_live_set_constant_slots() {
-    // 10 calls with the same 2 registers live across all of them.
-    // Old: 10 calls × 2 saves = 20 save slots
-    // New: 2 root slots reused across all 10 calls
-    use crate::ir::Ir;
-
-    let mut ir = Ir::new(0);
-    let r0 = ir.assign_new(42);
-    let r1 = ir.assign_new(99);
-    let func = ir.assign_new_force(Value::TaggedConstant(1));
-    for _ in 0..10 {
-        let _ = ir.call(Value::Register(func), vec![]);
-    }
-    let sum = ir.add_int(r0, r1);
-    ir.ret(sum);
-
-    let mut ls = LinearScan::new(ir.instructions.clone(), 0);
-    ls.allocate();
-
-    // Collect all save locals across all WithSaves instructions
-    let mut all_save_locals: Vec<usize> = Vec::new();
-    for inst in &ls.instructions {
-        if let Instruction::CallWithSaves(_, _, _, _, saves) = inst {
-            for save in saves {
-                all_save_locals.push(save.local);
-            }
-        }
-    }
-
-    let unique_locals: std::collections::HashSet<usize> = all_save_locals.iter().copied().collect();
-
-    // Old behavior would have ~20 unique locals (one per save per call).
-    // New behavior: only as many unique locals as there are simultaneously-live registers.
-    assert!(
-        unique_locals.len() <= 5,
-        "10 calls with same live set should reuse a small number of root slots, got {} unique (from {} total saves)",
-        unique_locals.len(),
-        all_save_locals.len()
-    );
-
-    // Total saves should be much larger than unique slots (proving reuse)
-    assert!(
-        all_save_locals.len() > unique_locals.len() * 2,
-        "should have many total saves ({}) reusing few slots ({})",
-        all_save_locals.len(),
-        unique_locals.len()
-    );
-}
-
-#[test]
-fn test_stack_slot_smaller_with_root_slots() {
-    // Directly verify that stack_slot (frame size) is smaller than it would be
-    // without root slot reuse. We do this by counting how many new_stack_location()
-    // calls the old approach would have made.
-    //
-    // Setup: 3 registers live across 5 calls.
-    // Old: 5 calls × 3 saves = 15 save slots → stack_slot >= 15
-    // New: 3 root slots → stack_slot = max simultaneously live ≈ 6-8
-    use crate::ir::Ir;
-
-    let mut ir = Ir::new(0);
-    let r0 = ir.assign_new(1);
-    let r1 = ir.assign_new(2);
-    let r2 = ir.assign_new(3);
-    let func = ir.assign_new_force(Value::TaggedConstant(0));
-    for _ in 0..5 {
-        let _ = ir.call(Value::Register(func), vec![]);
-    }
-    let s1 = ir.add_int(r0, r1);
-    let s2 = ir.add_int(s1, r2);
-    ir.ret(s2);
-
-    let mut ls = LinearScan::new(ir.instructions.clone(), 0);
-    ls.allocate();
-
-    // Count what the old approach would have allocated:
-    // each call saves ~3-4 live registers, 5 calls = 15-20 save slots
-    let mut total_saves = 0;
-    for inst in &ls.instructions {
-        if let Instruction::CallWithSaves(_, _, _, _, saves) = inst {
-            total_saves += saves.len();
-        }
-    }
-
-    // stack_slot should be much less than total_saves
-    // (root slots reuse means we only need max-simultaneous-live slots)
-    assert!(
-        ls.stack_slot < total_saves,
-        "frame size ({}) should be less than total saves without reuse ({})",
-        ls.stack_slot,
-        total_saves,
-    );
-}
 
 #[test]
 fn test_example() {
