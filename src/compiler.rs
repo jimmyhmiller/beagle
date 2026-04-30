@@ -1235,6 +1235,14 @@ impl Compiler {
         runtime.reserve_namespace_slot(name)
     }
 
+    /// Stable absolute address of the binding cell for `(namespace_id, slot)`.
+    /// The compiler bakes this into emitted code so a namespace-variable
+    /// read is a single load instruction instead of a runtime call.
+    pub fn binding_cell_address(&self, namespace_id: usize, slot: usize) -> Option<usize> {
+        let runtime = get_runtime().get_mut();
+        runtime.binding_cell_address(namespace_id, slot)
+    }
+
     pub fn find_binding(&self, namespace_id: usize, name: &str) -> Option<usize> {
         let runtime = get_runtime().get_mut();
         runtime.find_binding(namespace_id, name)

@@ -177,33 +177,19 @@ pub unsafe extern "C" fn uninstall_continuation_mark(
 }
 
 pub unsafe extern "C" fn update_binding(
-    stack_pointer: usize,
-    frame_pointer: usize,
+    _stack_pointer: usize,
+    _frame_pointer: usize,
     namespace_slot: usize,
     value: usize,
 ) -> usize {
-    save_gc_context!(stack_pointer, frame_pointer);
     print_call_builtin(get_runtime().get(), "update_binding");
     let runtime = get_runtime().get_mut();
     let namespace_slot = BuiltInTypes::untag(namespace_slot);
     let namespace_id = runtime.current_namespace_id();
 
-    // Root the value so GC can update it if objects move during allocation
-    let value_root_id = runtime.register_temporary_root(value);
-
-    // Re-read from the root before the map update so we never pass a stale
-    // pre-GC pointer into the heap binding machinery.
-    let value = runtime.peek_temporary_root(value_root_id);
-
-    // Store binding in heap-based PersistentMap (no namespace_roots tracking needed!)
-    if let Err(e) = runtime.set_heap_binding(stack_pointer, namespace_id, namespace_slot, value) {
-        eprintln!("Error in update_binding: {}", e);
-    }
-
-    // Re-read value from root in case GC moved it
-    let value = runtime.unregister_temporary_root(value_root_id);
-
-    // Also update the Rust-side HashMap for backwards compatibility during migration
+    // Cells are the authoritative store. Writing one is a single 8-byte
+    // store into a stable mmap region — no allocation, no GC trigger,
+    // so we don't need to save the GC context or root the value.
     runtime.update_binding(namespace_id, namespace_slot, value);
 
     BuiltInTypes::null_value() as usize
@@ -233,27 +219,15 @@ pub unsafe extern "C" fn store_function_binding(
         ("<unknown>".to_string(), 0)
     };
 
-    // Create a function object
+    // `create_function_value` allocates; the cell scan during a GC
+    // triggered by that allocation will see the slot's previous value
+    // (whatever is currently there), which is fine — we just haven't
+    // installed the new function yet. Once the value is back, a single
+    // cell store publishes it.
     let fn_obj = runtime
         .create_function_value(stack_pointer, fn_ptr, &name, arity)
         .expect("Failed to create function value");
 
-    // Root the value so GC can update it if objects move during allocation
-    let value_root_id = runtime.register_temporary_root(fn_obj);
-
-    // Re-read from the root before the map update so we never pass a stale
-    // pre-GC pointer into the heap binding machinery.
-    let fn_obj = runtime.peek_temporary_root(value_root_id);
-
-    // Store binding in heap-based PersistentMap
-    if let Err(e) = runtime.set_heap_binding(stack_pointer, namespace_id, namespace_slot, fn_obj) {
-        eprintln!("Error in store_function_binding: {}", e);
-    }
-
-    // Re-read value from root in case GC moved it
-    let fn_obj = runtime.unregister_temporary_root(value_root_id);
-
-    // Also update the Rust-side HashMap
     runtime.update_binding(namespace_id, namespace_slot, fn_obj);
 
     BuiltInTypes::null_value() as usize
@@ -261,22 +235,14 @@ pub unsafe extern "C" fn store_function_binding(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn get_binding(namespace: usize, slot: usize) -> usize {
-    let runtime = get_runtime().get_mut();
+    // The JIT compiles namespace-variable reads to a direct load from
+    // the binding's cell address, so this builtin is no longer on the
+    // hot path. It still serves a few internal callers (reflection,
+    // type lookups), so it remains for compatibility — but it just
+    // forwards to the Runtime's cell read.
+    let runtime = get_runtime().get();
     let namespace = BuiltInTypes::untag(namespace);
     let slot = BuiltInTypes::untag(slot);
-
-    // TODO: Flush pending bindings at a safer point (not during get_binding)
-    // For now, rely on HashMap fallback for bindings added by compiler thread
-    // let stack_pointer = get_current_stack_pointer();
-    // runtime.flush_pending_heap_bindings(stack_pointer);
-
-    // Try heap-based PersistentMap first
-    let result = runtime.get_heap_binding(namespace, slot);
-    if result != BuiltInTypes::null_value() as usize {
-        return result;
-    }
-
-    // Fall back to Rust-side HashMap during migration
     runtime.get_binding(namespace, slot)
 }
 

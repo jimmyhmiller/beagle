@@ -1679,8 +1679,6 @@ fn recompile_fragment_and_run(
     byte_offset: usize,
     line_offset: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let pending_start = runtime.pending_heap_bindings_len();
-
     let top_level_ptr = runtime.compile_string_with_file_context(
         fragment,
         namespace,
@@ -1688,8 +1686,6 @@ fn recompile_fragment_and_run(
         byte_offset,
         line_offset,
     )?;
-
-    runtime.flush_pending_heap_bindings_from(stack_pointer, pending_start);
 
     if top_level_ptr != 0 {
         let save_vr0_entry = runtime

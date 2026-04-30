@@ -72,6 +72,7 @@ mod code_memory;
 pub mod common;
 mod compiler;
 pub mod dump;
+mod binding_space;
 mod eternal;
 mod gc;
 pub mod ir;
@@ -1904,7 +1905,6 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime.set_pause_atom_ptr(pause_atom_ptr);
 
     runtime.initialize_thread_global()?;
-    runtime.initialize_namespaces()?;
     runtime.register_function_struct();
     runtime.install_builtins()?;
 
@@ -2073,9 +2073,6 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     // Initialize GlobalObject for main thread before any heap allocations that use roots
     runtime.initialize_thread_global()?;
-
-    // Initialize the namespaces atom in GlobalObject slot 0
-    runtime.initialize_namespaces()?;
 
     runtime.register_function_struct();
     runtime.install_builtins()?;

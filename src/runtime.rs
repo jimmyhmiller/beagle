@@ -62,17 +62,13 @@ pub const GLOBAL_BLOCK_FREE_SLOT: usize = 0b111; // Same as BuiltInTypes::null_v
 // Reserved GlobalObject slots for runtime infrastructure
 // ============================================================================
 
-/// Reserved slot index for the namespaces atom.
-/// This slot holds an Atom containing a PersistentMap of namespace bindings.
-pub const GLOBAL_SLOT_NAMESPACES: usize = 0;
-
 /// Reserved slot index for the current thread's Thread object.
 /// Each thread stores its own Thread object here so GC can keep it alive.
-pub const GLOBAL_SLOT_THREAD: usize = 1;
+pub const GLOBAL_SLOT_THREAD: usize = 0;
 
 /// Number of reserved slots at the start of the first GlobalObjectBlock.
 /// These slots are not available for general-purpose roots via add_root().
-pub const GLOBAL_RESERVED_SLOTS: usize = 2;
+pub const GLOBAL_RESERVED_SLOTS: usize = 1;
 
 /// Wrapper for accessing a GlobalObjectBlock on the heap.
 ///
@@ -463,19 +459,6 @@ impl ThreadGlobal {
         true
     }
 
-    /// Get the namespaces atom from slot 0.
-    /// Returns the tagged pointer to the Atom, or null if not initialized.
-    #[inline]
-    pub fn get_namespaces_atom(&self) -> usize {
-        self.get_root(GLOBAL_SLOT_NAMESPACES)
-    }
-
-    /// Set the namespaces atom in slot 0.
-    /// The value should be a tagged pointer to an Atom containing a PersistentMap.
-    #[inline]
-    pub fn set_namespaces_atom(&self, atom_ptr: usize) {
-        self.set_root(GLOBAL_SLOT_NAMESPACES, atom_ptr);
-    }
 }
 
 /// Iterator over GlobalObjectBlocks in a ThreadGlobal
@@ -2956,7 +2939,13 @@ impl Default for EventLoopRegistry {
 struct Namespace {
     name: String,
     ids: Vec<String>,
-    bindings: HashMap<String, usize>,
+    /// Stable address of each binding's storage cell, parallel to `ids`.
+    /// `cell_addrs[i]` is the absolute address of the 8-byte slot that
+    /// holds the current value for the binding named `ids[i]`. Allocated
+    /// from `NamespaceManager::binding_space`; never moves after reservation.
+    /// The cell is the authoritative store — read directly by JIT-emitted
+    /// code, scanned in place by the GC, and updated on every assignment.
+    cell_addrs: Vec<usize>,
     #[allow(unused)]
     aliases: HashMap<String, usize>,
 }
@@ -3394,11 +3383,6 @@ pub struct Memory {
     pub thread_globals: Mutex<HashMap<ThreadId, Box<ThreadGlobal>>>,
     #[allow(unused)]
     command_line_arguments: CommandLineArguments,
-    /// Temporary storage for namespace binding values during GC.
-    /// Provides stable pointers for copying GCs (like generational GC).
-    /// Values are copied here before GC, GC updates them in place, then they're
-    /// copied back to namespace HashMaps after GC.
-    namespace_root_storage: Vec<usize>,
 }
 
 impl Memory {
@@ -3557,10 +3541,12 @@ impl Memory {
     }
 
     /// Convenience method for Runtime to trigger GC using Memory's own thread_globals.
-    /// Collects shadow stack roots and head_block roots from all threads and passes them to the GC.
-    /// namespace_roots: Additional GC roots from namespace bindings (passed from Runtime)
-    /// Returns updated namespace root values after GC (for copying collectors)
-    pub fn run_gc(&mut self, gc_frame_tops: &[usize], namespace_roots: &[usize]) -> Vec<usize> {
+    /// Collects shadow stack roots, head_block roots, and binding cells
+    /// from all threads and passes them to the GC. Cells are passed by
+    /// `*mut usize`; the GC reads each cell, traces, and writes the
+    /// forwarded value back through the same address — no snapshot or
+    /// restore step is required because cell addresses never move.
+    pub fn run_gc(&mut self, gc_frame_tops: &[usize], binding_cells: &[*mut usize]) {
         // Collect shadow stack entries and head_block roots from all threads as extra GC roots.
         // Safety: world is stopped during GC, so no thread modifies handle_stack.
         let mut extra_roots: Vec<(*mut usize, usize)> = {
@@ -3585,19 +3571,15 @@ impl Memory {
             }
             roots
         };
-        // Store namespace roots in a Vec to provide stable pointers during GC
-        // This is required for copying collectors (like generational GC) that need to
-        // update pointers when objects move.
-        self.namespace_root_storage.clear();
-        self.namespace_root_storage
-            .extend_from_slice(namespace_roots);
 
-        // Add pointers to namespace roots in our storage
-        for i in 0..self.namespace_root_storage.len() {
-            let value = self.namespace_root_storage[i];
+        // Binding cells live in a stable mmap region (BindingSpace).
+        // Each cell's address never moves, so we can hand the cell
+        // pointer to the GC directly and let it update the value in
+        // place.
+        for &cell in binding_cells {
+            let value = unsafe { *cell };
             if BuiltInTypes::is_heap_pointer(value) {
-                let slot_addr = &mut self.namespace_root_storage[i] as *mut usize;
-                extra_roots.push((slot_addr, value));
+                extra_roots.push((cell, value));
             }
         }
 
@@ -3614,9 +3596,6 @@ impl Memory {
                 }
             }
         }
-
-        // Return updated values (GC may have moved objects for copying collectors)
-        self.namespace_root_storage.clone()
     }
 }
 
@@ -3728,6 +3707,10 @@ struct NamespaceManager {
     namespace_names: HashMap<String, usize>,
     id_to_name: HashMap<usize, String>,
     current_namespace: usize,
+    /// Backing storage for every binding cell across all namespaces.
+    /// Resizable, append-only mmap region. Addresses are stable so the JIT
+    /// can bake them in as immediates.
+    binding_space: crate::binding_space::BindingSpace,
 }
 
 impl NamespaceManager {
@@ -3736,12 +3719,13 @@ impl NamespaceManager {
             namespaces: vec![Mutex::new(Namespace {
                 name: "global".to_string(),
                 ids: vec![],
-                bindings: HashMap::new(),
+                cell_addrs: vec![],
                 aliases: HashMap::new(),
             })],
             namespace_names: HashMap::new(),
             id_to_name: HashMap::new(),
             current_namespace: 0,
+            binding_space: crate::binding_space::BindingSpace::new(),
         };
         s.add_namespace("beagle.primitive");
         s.add_namespace("beagle.builtin");
@@ -3765,7 +3749,7 @@ impl NamespaceManager {
         self.namespaces.push(Mutex::new(Namespace {
             name: name.to_string(),
             ids: vec![],
-            bindings: HashMap::new(),
+            cell_addrs: vec![],
             aliases: HashMap::new(),
         }));
         let id = self.namespaces.len() - 1;
@@ -3803,22 +3787,57 @@ impl NamespaceManager {
             .get_current_namespace()
             .lock()
             .expect("Failed to lock namespace in add_binding - this is a fatal error");
-        if namespace.bindings.contains_key(name) {
-            // Only overwrite if the new value is non-null OR the existing value is null
-            // This prevents reserve_namespace_slot from overwriting real values with null
-            let existing = *namespace.bindings.get(name).unwrap();
+        if let Some(slot) = namespace.ids.iter().position(|n| n == name) {
+            // Only overwrite if the new value is non-null OR the existing value is null.
+            // This prevents `reserve_namespace_slot` from clobbering real values
+            // with the placeholder null when a name is reserved more than once.
+            let cell = namespace.cell_addrs[slot];
+            let existing = unsafe { *(cell as *const usize) };
             let is_null = pointer == BuiltInTypes::null_value() as usize;
             let existing_is_null = existing == BuiltInTypes::null_value() as usize;
             if !is_null || existing_is_null {
-                namespace.bindings.insert(name.to_string(), pointer);
+                unsafe {
+                    *(cell as *mut usize) = pointer;
+                }
             }
-            return namespace.ids.iter().position(|n| n == name).expect(
-                "Binding exists in map but not in ids vec - this is a fatal internal error",
-            );
+            return slot;
         }
-        namespace.bindings.insert(name.to_string(), pointer);
         namespace.ids.push(name.to_string());
+        let cell = self.binding_space.reserve();
+        unsafe {
+            *(cell as *mut usize) = pointer;
+        }
+        namespace.cell_addrs.push(cell);
+        debug_assert_eq!(namespace.ids.len(), namespace.cell_addrs.len());
         namespace.ids.len() - 1
+    }
+
+    /// Absolute address of the storage cell for `(namespace_id, slot)`, or
+    /// `None` if either index is out of range. The address is stable —
+    /// the compiler bakes it in as an immediate so loads/stores compile to
+    /// a single instruction with no runtime indirection.
+    fn cell_address(&self, namespace_id: usize, slot: usize) -> Option<usize> {
+        let ns = self.namespaces.get(namespace_id)?;
+        let ns = ns.lock().ok()?;
+        ns.cell_addrs.get(slot).copied()
+    }
+
+    /// Collect every reserved binding cell as a `*mut usize`. Used by the
+    /// GC root-scan path; the GC reads each cell, traces, and writes the
+    /// forwarded pointer back through the same address.
+    fn collect_binding_cells(&self) -> Vec<*mut usize> {
+        let mut out = Vec::with_capacity(self.binding_space.cell_count());
+        self.binding_space.for_each_cell(|p| out.push(p));
+        out
+    }
+
+    /// Reserve a fresh cell unrelated to any namespace slot. The address is
+    /// stable forever, the cell is initialised to null, and it's traced as
+    /// a GC root via the same mechanism as namespace bindings. Used for
+    /// keyword interning, which needs identical guarantees but doesn't fit
+    /// the slot-per-name model.
+    fn reserve_cell(&self) -> usize {
+        self.binding_space.reserve()
     }
 
     #[allow(unused)]
@@ -4079,7 +4098,13 @@ pub struct Runtime {
     /// Indexed by byte value. Avoids heap allocation for single-char string returns.
     pub ascii_char_cache: [usize; 128],
     pub keyword_constants: Vec<StringValue>,
-    pub keyword_heap_ptrs: Vec<Option<usize>>,
+    /// Parallel to `keyword_constants`: each entry holds the stable cell
+    /// address that stores the interned heap pointer for that keyword.
+    /// The cell is allocated once when the keyword text is first seen,
+    /// never moves, and is scanned as a GC root through `BindingSpace`.
+    /// `0` means "not yet interned" (cell hasn't been reserved); a tagged
+    /// `null_value` in the cell means "reserved but not allocated yet".
+    pub keyword_cells: Vec<usize>,
     pub diagnostic_store: Arc<Mutex<crate::compiler::DiagnosticStore>>,
     // TODO: Do I need anything more than
     // namespace manager? Shouldn't these functions
@@ -4100,12 +4125,6 @@ pub struct Runtime {
     pub prompt_id_counter: AtomicUsize,
     // Global default uncaught exception handler (Beagle function pointer)
     pub default_exception_handler_fn: Option<usize>,
-    // Namespace ID for keyword GC roots
-    keyword_namespace: usize,
-    /// Queue of pending binding updates for PersistentMap.
-    /// Used when bindings are added from threads without a Beagle stack (e.g., compiler thread).
-    /// Format: (namespace_id, slot, value)
-    pending_heap_bindings: Mutex<Vec<(usize, usize, usize)>>,
     /// Mapping from enum variant struct_id to enum name
     /// Used by effect handlers to determine which handler to call for a `perform` value
     pub variant_to_enum: HashMap<usize, String>,
@@ -4181,7 +4200,6 @@ impl Runtime {
                 threads: vec![std::thread::current()],
                 command_line_arguments,
                 thread_globals: Mutex::new(HashMap::new()),
-                namespace_root_storage: Vec::new(),
             },
             libraries: vec![],
             is_paused: AtomicUsize::new(0),
@@ -4203,7 +4221,7 @@ impl Runtime {
             string_constants: vec![],
             ascii_char_cache: [0; 128],
             keyword_constants: vec![],
-            keyword_heap_ptrs: vec![],
+            keyword_cells: vec![],
             jump_table_reserved,
             jump_table_pages: vec![],
             jump_table_base_ptr,
@@ -4216,8 +4234,6 @@ impl Runtime {
             diagnostic_store: Arc::new(Mutex::new(crate::compiler::DiagnosticStore::new())),
             prompt_id_counter: AtomicUsize::new(1),
             default_exception_handler_fn: None,
-            keyword_namespace: 0, // Will be set when first keyword is allocated
-            pending_heap_bindings: Mutex::new(Vec::new()),
             variant_to_enum: HashMap::new(),
             compiled_regexes: Vec::new(),
             future_wait_set: FutureWaitSet::new(),
@@ -4784,13 +4800,15 @@ impl Runtime {
         Ok(pointer)
     }
 
-    /// Intern a keyword: check if it exists, otherwise allocate and register as GC root
+    /// Intern a keyword: same text always returns the same heap pointer.
+    /// Each unique text gets a single binding cell; the cell holds the
+    /// canonical heap pointer and is traced as a GC root, so the keyword
+    /// survives collection and the address it returns remains valid.
     pub fn intern_keyword(
         &mut self,
         stack_pointer: usize,
         keyword_text: String,
     ) -> Result<usize, Box<dyn Error>> {
-        // First check if this keyword text already has an index
         let index = if let Some(idx) = self
             .keyword_constants
             .iter()
@@ -4798,54 +4816,32 @@ impl Runtime {
         {
             idx
         } else {
-            // Add new keyword to the constants table
+            let cell = self.namespaces.reserve_cell();
             self.keyword_constants.push(StringValue {
                 str: keyword_text.clone(),
             });
-            self.keyword_heap_ptrs.push(None);
+            self.keyword_cells.push(cell);
+            debug_assert_eq!(self.keyword_constants.len(), self.keyword_cells.len());
             self.keyword_constants.len() - 1
         };
 
-        // Ensure keyword namespace exists
-        if self.keyword_namespace == 0 {
-            self.keyword_namespace = self.namespaces.add_namespace("beagle.internal.keywords");
+        let cell = self.keyword_cells[index];
+        let existing = unsafe { *(cell as *const usize) };
+        if existing != BuiltInTypes::null_value() as usize {
+            return Ok(existing);
         }
 
-        // Check heap-based PersistentMap first (survives GC relocation)
-        let heap_ptr = self.get_heap_binding(self.keyword_namespace, index);
-        if heap_ptr != BuiltInTypes::null_value() as usize {
-            return Ok(heap_ptr);
-        }
-
-        // Check Rust-side cache (may be stale after GC but try it as fallback)
-        if let Some(ptr) = self.keyword_heap_ptrs[index] {
-            // Store in heap-based map for future lookups
-            if let Err(e) = self.set_heap_binding(stack_pointer, self.keyword_namespace, index, ptr)
-            {
-                eprintln!("Warning: failed to set heap binding for keyword: {}", e);
-            }
-            return Ok(ptr);
-        }
-
-        // Allocate the keyword
+        // First sight of this keyword's value: allocate and publish through
+        // the cell. The allocation may trigger GC, which can move the
+        // freshly-allocated keyword — but the cell itself is in BindingSpace
+        // (outside the moving heap) and is treated as a root, so a single
+        // store of the post-allocation pointer is correct.
         let ptr = self
             .allocate_keyword_raw(stack_pointer, keyword_text)?
             .into();
-
-        // Store in heap-based PersistentMap (survives GC)
-        // NOTE: set_heap_binding may trigger GC during PersistentMap::assoc,
-        // which could move the keyword. We must re-read the correct pointer afterward.
-        if let Err(e) = self.set_heap_binding(stack_pointer, self.keyword_namespace, index, ptr) {
-            eprintln!("Warning: failed to set heap binding for keyword: {}", e);
+        unsafe {
+            *(cell as *mut usize) = ptr;
         }
-
-        // Re-read the keyword pointer from heap binding.
-        // This is critical because GC may have moved the keyword during set_heap_binding.
-        let ptr = self.get_heap_binding(self.keyword_namespace, index);
-
-        // Also cache in Rust-side vec (may become stale but faster first lookup)
-        self.keyword_heap_ptrs[index] = Some(ptr);
-
         Ok(ptr)
     }
 
@@ -5335,34 +5331,14 @@ impl Runtime {
             let gc_frame_top = crate::builtins::get_gc_frame_top();
             let gc_frame_tops = vec![gc_frame_top];
 
-            // Collect namespace bindings as GC roots
-            // IMPORTANT: Namespace bindings are NOT in a heap-based PersistentMap despite
-            // what old comments said. They're in HashMap<String, usize> and must be
-            // explicitly passed as GC roots to prevent dynamic variables from being collected.
-            let mut namespace_roots: Vec<usize> = Vec::new();
-            let mut namespace_keys: Vec<Vec<String>> = Vec::new();
-            for ns_mutex in &self.namespaces.namespaces {
-                let ns = ns_mutex.lock().expect("Failed to lock namespace for GC");
-                let keys: Vec<String> = ns.bindings.keys().cloned().collect();
-                let values: Vec<usize> = ns.bindings.values().copied().collect();
-                namespace_keys.push(keys);
-                namespace_roots.extend(values);
-            }
+            // Stable cell pointers from BindingSpace. Cells are the
+            // authoritative store for namespace bindings; the GC reads
+            // each cell, traces, and writes the forwarded value back
+            // through the same address.
+            let binding_cells = self.namespaces.collect_binding_cells();
 
-            let updated_roots = self.memory.run_gc(&gc_frame_tops, &namespace_roots);
+            self.memory.run_gc(&gc_frame_tops, &binding_cells);
             log_gc_probe("after", frame_pointer);
-
-            // Write updated namespace roots back to namespaces (for copying GC)
-            let mut root_index = 0;
-            for (ns_mutex, keys) in self.namespaces.namespaces.iter().zip(namespace_keys.iter()) {
-                let mut ns = ns_mutex.lock().expect("Failed to lock namespace after GC");
-                for key in keys {
-                    if root_index < updated_roots.len() {
-                        ns.bindings.insert(key.clone(), updated_roots[root_index]);
-                        root_index += 1;
-                    }
-                }
-            }
 
             return;
         }
@@ -5466,33 +5442,13 @@ impl Runtime {
 
         drop(thread_state);
 
-        // Collect namespace bindings as GC roots
-        // IMPORTANT: Namespace bindings are NOT in a heap-based PersistentMap despite
-        // what old comments said. They're in HashMap<String, usize> and must be
-        // explicitly passed as GC roots to prevent dynamic variables from being collected.
-        let mut namespace_roots: Vec<usize> = Vec::new();
-        let mut namespace_keys: Vec<Vec<String>> = Vec::new();
-        for ns_mutex in &self.namespaces.namespaces {
-            let ns = ns_mutex.lock().expect("Failed to lock namespace for GC");
-            let keys: Vec<String> = ns.bindings.keys().cloned().collect();
-            let values: Vec<usize> = ns.bindings.values().copied().collect();
-            namespace_keys.push(keys);
-            namespace_roots.extend(values);
-        }
+        // Stable cell pointers from BindingSpace. Cells are the
+        // authoritative store for namespace bindings; the GC reads
+        // each cell, traces, and writes the forwarded value back
+        // through the same address.
+        let binding_cells = self.namespaces.collect_binding_cells();
 
-        let updated_roots = self.memory.run_gc(&gc_frame_tops, &namespace_roots);
-
-        // Write updated namespace roots back to namespaces (for copying GC)
-        let mut root_index = 0;
-        for (ns_mutex, keys) in self.namespaces.namespaces.iter().zip(namespace_keys.iter()) {
-            let mut ns = ns_mutex.lock().expect("Failed to lock namespace after GC");
-            for key in keys {
-                if root_index < updated_roots.len() {
-                    ns.bindings.insert(key.clone(), updated_roots[root_index]);
-                    root_index += 1;
-                }
-            }
-        }
+        self.memory.run_gc(&gc_frame_tops, &binding_cells);
 
         // Memory barrier to ensure all GC writes are visible before continuing
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
@@ -5660,244 +5616,6 @@ impl Runtime {
             tg_ptr
         } else {
             std::ptr::null_mut()
-        }
-    }
-
-    /// Initialize the namespaces atom in GlobalObject slot 0.
-    ///
-    /// Creates an Atom containing an empty PersistentMap and stores it in the
-    /// reserved slot. This should be called once during runtime initialization,
-    /// after `initialize_thread_global()`.
-    ///
-    /// The namespaces atom stores: symbol → PersistentMap of bindings
-    /// Each namespace's bindings are: symbol → value
-    pub fn initialize_namespaces(&mut self) -> Result<(), Box<dyn Error>> {
-        let thread_id = std::thread::current().id();
-
-        // Check if already initialized (slot 0 should be null/free initially)
-        let current = self
-            .memory
-            .thread_globals
-            .lock()
-            .unwrap()
-            .get(&thread_id)
-            .map(|tg| tg.get_namespaces_atom())
-            .unwrap_or(GLOBAL_BLOCK_FREE_SLOT);
-        if current != GLOBAL_BLOCK_FREE_SLOT && current != BuiltInTypes::null_value() as usize {
-            // Already initialized
-            return Ok(());
-        }
-
-        // Use stack base as stack pointer during initialization
-        // (we're at the top of the stack during init, no Beagle frames yet)
-        let stack_pointer = self.get_stack_base();
-
-        // Create empty PersistentMap for namespace storage
-        let mut scope = HandleScope::new(self, stack_pointer);
-        let empty_map = PersistentMap::empty(scope.runtime(), stack_pointer)?;
-        let empty_map_h = scope.alloc_handle(empty_map);
-
-        // Create Atom with 1 field (the map)
-        let atom = scope.allocate_typed(1, TYPE_ID_ATOM)?;
-        atom.to_gc_handle()
-            .set_field_with_barrier(scope.runtime(), 0, empty_map_h.get());
-
-        // Store atom in GlobalObject slot 0
-        let atom_ptr = atom.get();
-        drop(scope);
-
-        let thread_globals = self.memory.thread_globals.lock().unwrap();
-        if let Some(tg) = thread_globals.get(&thread_id) {
-            tg.set_namespaces_atom(atom_ptr);
-        }
-        Ok(())
-    }
-
-    /// Get the namespaces atom from GlobalObject slot 0.
-    /// Returns the tagged pointer to the Atom, or null if not initialized.
-    pub fn get_namespaces_atom(&self) -> usize {
-        let thread_id = std::thread::current().id();
-        self.memory
-            .thread_globals
-            .lock()
-            .unwrap()
-            .get(&thread_id)
-            .map(|tg| tg.get_namespaces_atom())
-            .unwrap_or(GLOBAL_BLOCK_FREE_SLOT)
-    }
-
-    /// Create a composite key for binding lookup.
-    /// Encodes (namespace_id, slot) as a tagged integer.
-    #[inline]
-    fn make_binding_key(namespace_id: usize, slot: usize) -> usize {
-        // Use 20 bits for slot (supports up to 1M bindings per namespace)
-        // and remaining bits for namespace_id
-        let key = (namespace_id << 20) | (slot & 0xFFFFF);
-        BuiltInTypes::construct_int(key as isize) as usize
-    }
-
-    /// Get a binding value from the heap-based PersistentMap.
-    ///
-    /// Returns the value if found, or null if not found.
-    /// This is the core lookup for the new heap-based binding storage.
-    pub fn get_heap_binding(&self, namespace_id: usize, slot: usize) -> usize {
-        let atom_ptr = self.get_namespaces_atom();
-        if !BuiltInTypes::is_heap_pointer(atom_ptr) {
-            return BuiltInTypes::null_value() as usize;
-        }
-
-        // Additional validation: check pointer is properly aligned
-        let untagged = BuiltInTypes::untag(atom_ptr);
-        if !untagged.is_multiple_of(8) {
-            // Pointer is corrupted (possibly stale after GC)
-            return BuiltInTypes::null_value() as usize;
-        }
-
-        // Deref atom to get the map
-        let atom = HeapObject::from_tagged(atom_ptr);
-        let map_ptr = atom.get_field(0);
-        if !BuiltInTypes::is_heap_pointer(map_ptr) {
-            return BuiltInTypes::null_value() as usize;
-        }
-
-        // Additional validation for map pointer
-        let map_untagged = BuiltInTypes::untag(map_ptr);
-        if !map_untagged.is_multiple_of(8) {
-            return BuiltInTypes::null_value() as usize;
-        }
-
-        let key = Self::make_binding_key(namespace_id, slot);
-        let map = crate::collections::GcHandle::from_tagged(map_ptr);
-        PersistentMap::get(self, map, key)
-    }
-
-    /// Set a binding value in the heap-based PersistentMap.
-    ///
-    /// Creates a new map with the binding added/updated and swaps it into the atom.
-    /// This is the core update for the new heap-based binding storage.
-    pub fn set_heap_binding(
-        &mut self,
-        stack_pointer: usize,
-        namespace_id: usize,
-        slot: usize,
-        value: usize,
-    ) -> Result<(), Box<dyn Error>> {
-        let thread_id = std::thread::current().id();
-        let atom_ptr = self
-            .memory
-            .thread_globals
-            .lock()
-            .unwrap()
-            .get(&thread_id)
-            .map(|tg| tg.get_namespaces_atom())
-            .unwrap_or(GLOBAL_BLOCK_FREE_SLOT);
-        if !BuiltInTypes::is_heap_pointer(atom_ptr) {
-            return Err("Namespaces atom not initialized".into());
-        }
-
-        // Deref atom to get the current map
-        let atom = HeapObject::from_tagged(atom_ptr);
-        let map_ptr = atom.get_field(0);
-
-        let key = Self::make_binding_key(namespace_id, slot);
-
-        // Create new map with the binding
-        let new_map = PersistentMap::assoc(self, stack_pointer, map_ptr, key, value)?;
-
-        // Write new map to atom (this is atomic at the word level)
-        // CRITICAL: Re-read atom_ptr from GlobalObjectBlock because GC may have moved it
-        // during PersistentMap::assoc(). The GlobalObjectBlock entry is updated by GC's
-        // stack walker, but our local atom_ptr variable is stale.
-        let atom_ptr = self
-            .memory
-            .thread_globals
-            .lock()
-            .unwrap()
-            .get(&thread_id)
-            .map(|tg| tg.get_namespaces_atom())
-            .unwrap_or(GLOBAL_BLOCK_FREE_SLOT);
-        let atom = HeapObject::from_tagged(atom_ptr);
-        let new_map_tagged = new_map.as_tagged();
-
-        atom.write_field(0, new_map_tagged);
-
-        // Write barrier: notify GC that an old gen object (atom) may now point to young gen (new_map)
-        self.write_barrier(atom_ptr, new_map_tagged);
-
-        Ok(())
-    }
-
-    /// Flush any pending heap binding updates.
-    ///
-    /// Called from threads that have a stack (e.g., main thread) to process
-    /// bindings that were queued by threads without a stack (e.g., compiler thread).
-    pub fn peek_pending_heap_bindings(&self) -> Vec<(usize, usize, usize)> {
-        self.pending_heap_bindings
-            .lock()
-            .expect("Failed to lock pending_heap_bindings")
-            .clone()
-    }
-
-    /// Return the current length of the pending heap bindings queue. Used
-    /// together with `flush_pending_heap_bindings_from` to drain only the
-    /// bindings added since a given point, leaving earlier accumulated
-    /// null-placeholders (from `reserve_namespace_slot` called on the
-    /// compiler thread during file load) untouched.
-    pub fn pending_heap_bindings_len(&self) -> usize {
-        self.pending_heap_bindings
-            .lock()
-            .expect("Failed to lock pending_heap_bindings")
-            .len()
-    }
-
-    /// Flush pending heap bindings queued at index `>= start`. Bindings
-    /// below `start` are preserved in the queue for later processing.
-    ///
-    /// This is the targeted counterpart to `flush_pending_heap_bindings`,
-    /// used by `reflect/write-source` to install only the bindings its
-    /// recompile queued rather than processing the entire historical
-    /// queue, which would replay old null placeholders left over from
-    /// earlier `reserve_namespace_slot` calls and clobber live bindings.
-    pub fn flush_pending_heap_bindings_from(&mut self, stack_pointer: usize, start: usize) {
-        let pending = {
-            let mut guard = self
-                .pending_heap_bindings
-                .lock()
-                .expect("Failed to lock pending_heap_bindings");
-            if start >= guard.len() {
-                return;
-            }
-            guard.split_off(start)
-        };
-
-        for (namespace_id, slot, value) in pending {
-            if let Err(e) = self.set_heap_binding(stack_pointer, namespace_id, slot, value) {
-                eprintln!(
-                    "Warning: failed to flush heap binding (ns={}, slot={}): {}",
-                    namespace_id, slot, e
-                );
-            }
-        }
-    }
-
-    pub fn flush_pending_heap_bindings(&mut self, stack_pointer: usize) {
-        // Take all pending bindings (swap with empty vec to minimize lock time)
-        let pending = {
-            let mut guard = self
-                .pending_heap_bindings
-                .lock()
-                .expect("Failed to lock pending_heap_bindings");
-            std::mem::take(&mut *guard)
-        };
-
-        // Process each pending binding
-        for (namespace_id, slot, value) in pending {
-            if let Err(e) = self.set_heap_binding(stack_pointer, namespace_id, slot, value) {
-                eprintln!(
-                    "Warning: failed to flush heap binding (ns={}, slot={}): {}",
-                    namespace_id, slot, e
-                );
-            }
         }
     }
 
@@ -6538,20 +6256,11 @@ impl Runtime {
             .map(|tg| tg.get_root(thread_temp_id))
             .unwrap_or(0);
 
-        // CRITICAL: Share the main thread's namespaces atom with the child thread.
-        // Namespaces, keywords, and function bindings are global and must be shared
-        // across all threads. Only temporary roots (local variables) are per-thread.
-        let main_namespaces_atom = thread_globals
-            .get(&main_thread_id)
-            .map(|tg| tg.get_namespaces_atom())
-            .unwrap_or(GLOBAL_BLOCK_FREE_SLOT);
-
+        // Bindings now live in the global BindingSpace, which all threads
+        // observe directly through the cell addresses baked into JIT code.
+        // Nothing thread-local needs to be set up for them here.
         if let Some(child_tg) = thread_globals.get(&thread_id) {
             child_tg.set_thread_object(current_thread_obj);
-            // Share the namespaces atom (don't create a new one!)
-            if main_namespaces_atom != GLOBAL_BLOCK_FREE_SLOT {
-                child_tg.set_namespaces_atom(main_namespaces_atom);
-            }
         }
         drop(thread_globals);
 
@@ -6718,23 +6427,32 @@ impl Runtime {
             .add_binding(name, BuiltInTypes::null_value() as usize)
     }
 
+    /// Stable absolute address of the binding cell for `(namespace_id, slot)`.
+    /// Returns `None` if the slot hasn't been reserved yet. The compiler
+    /// uses this to bake the address into emitted code so a binding read
+    /// is a single load instruction.
+    pub fn binding_cell_address(&self, namespace_id: usize, slot: usize) -> Option<usize> {
+        self.namespaces.cell_address(namespace_id, slot)
+    }
+
     pub fn current_namespace_id(&self) -> usize {
         self.namespaces.current_namespace
     }
 
     pub fn update_binding(&mut self, namespace_id: usize, namespace_slot: usize, value: usize) {
-        let mut namespace = self
+        let namespace = self
             .namespaces
             .get_namespace_by_id(namespace_id)
             .expect("Namespace not found in update_binding - this is a fatal error")
             .lock()
             .expect("Failed to lock namespace in update_binding - this is a fatal error");
-        let name = namespace
-            .ids
+        let cell = *namespace
+            .cell_addrs
             .get(namespace_slot)
-            .expect("Namespace slot not found in update_binding - this is a fatal error")
-            .clone();
-        namespace.bindings.insert(name, value);
+            .expect("Cell address missing for slot in update_binding - this is a fatal error");
+        unsafe {
+            *(cell as *mut usize) = value;
+        }
     }
 
     pub fn get_binding(&self, namespace: usize, slot: usize) -> usize {
@@ -6746,13 +6464,11 @@ impl Runtime {
         let ns = ns_obj
             .lock()
             .expect("Failed to lock namespace in get_binding - this is a fatal error");
-        let name = ns
-            .ids
+        let cell = *ns
+            .cell_addrs
             .get(slot)
-            .expect("Namespace slot not found in get_binding - this is a fatal error");
-        *ns.bindings
-            .get(name)
-            .expect("Binding not found in namespace - this is a fatal error")
+            .expect("Cell address missing for slot in get_binding - this is a fatal error");
+        unsafe { *(cell as *const usize) }
     }
 
     /// Get namespace binding - alias for get_binding (used by dynamic vars)
@@ -6782,10 +6498,6 @@ impl Runtime {
 
     pub fn global_namespace_id(&self) -> usize {
         0
-    }
-
-    pub fn keyword_namespace_id(&self) -> usize {
-        self.keyword_namespace
     }
 
     /// Returns the names of all test functions (matching `__test_*__` pattern)
@@ -8619,27 +8331,11 @@ impl Runtime {
     }
 
     fn add_binding(&mut self, name: &str, function_pointer: usize) -> usize {
-        // Add to Rust-side namespace first to get the slot
-        let slot = self.namespaces.add_binding(name, function_pointer);
-        let namespace_id = self.namespaces.current_namespace;
-
-        // Store in heap-based PersistentMap if we have a stack,
-        // otherwise queue for later processing
-        if let Some(stack_pointer) = self.try_get_stack_base() {
-            if let Err(e) =
-                self.set_heap_binding(stack_pointer, namespace_id, slot, function_pointer)
-            {
-                eprintln!("Warning: failed to set heap binding for {}: {}", name, e);
-            }
-        } else {
-            // Queue for later - will be flushed when a thread with a stack accesses bindings
-            self.pending_heap_bindings
-                .lock()
-                .expect("Failed to lock pending_heap_bindings")
-                .push((namespace_id, slot, function_pointer));
-        }
-
-        slot
+        // The cell is written synchronously by the namespace manager —
+        // it's a single store into a stable mmap region with no allocation,
+        // so it doesn't need a stack pointer or a deferral queue. The cell
+        // is now the authoritative store.
+        self.namespaces.add_binding(name, function_pointer)
     }
 
     pub fn get_trampoline(&self) -> fn(u64, u64) -> u64 {
@@ -8706,9 +8402,11 @@ impl Runtime {
         {
             return index;
         }
+        let cell = self.namespaces.reserve_cell();
         self.keyword_constants
             .push(StringValue { str: keyword_text });
-        self.keyword_heap_ptrs.push(None);
+        self.keyword_cells.push(cell);
+        debug_assert_eq!(self.keyword_constants.len(), self.keyword_cells.len());
         self.keyword_constants.len() - 1
     }
 

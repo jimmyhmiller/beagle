@@ -138,16 +138,18 @@ pub extern "C" fn load_keyword_constant_runtime(
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
 
-    // Check heap-based PersistentMap first (survives GC relocation)
-    let kw_ns = runtime.keyword_namespace_id();
-    if kw_ns != 0 {
-        let heap_ptr = runtime.get_heap_binding(kw_ns, index);
-        if heap_ptr != BuiltInTypes::null_value() as usize {
-            return heap_ptr;
-        }
+    // Fast path: the keyword's cell is populated. Read it directly —
+    // every keyword that has been seen at compile time has a cell;
+    // every cell has been GC-traced if it held a heap pointer, so this
+    // value is current.
+    let cell = runtime.keyword_cells[index];
+    let cached = unsafe { *(cell as *const usize) };
+    if cached != BuiltInTypes::null_value() as usize {
+        return cached;
     }
 
-    // Allocate and register in heap-based map
+    // Slow path: first time this keyword is loaded. Intern it (which
+    // allocates and writes the cell).
     let keyword_text = runtime.keyword_constants[index].str.clone();
     match runtime.intern_keyword(stack_pointer, keyword_text) {
         Ok(ptr) => ptr,

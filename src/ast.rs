@@ -6178,12 +6178,21 @@ impl AstCompiler<'_> {
                 )
             }
             VariableLocation::NamespaceVariable(namespace, slot) => {
-                let slot = self.ir.assign_new(*slot);
-                let namespace = self.ir.assign_new(*namespace);
-                self.call_builtin(
-                    "beagle.builtin/get-binding",
-                    vec![namespace.into(), slot.into()],
-                )
+                // Direct load from the binding's stable storage cell. The
+                // address is reserved at compile time by
+                // `reserve_namespace_slot` and never moves, so we can bake
+                // it in as a 64-bit immediate and load the value with a
+                // single instruction — no call, no map walk, no mutex.
+                let cell_addr = self
+                    .compiler
+                    .binding_cell_address(*namespace, *slot)
+                    .ok_or_else(|| CompileError::InternalError {
+                        message: format!(
+                            "Binding cell missing for namespace {} slot {} - reserve_namespace_slot must run before resolve",
+                            namespace, slot
+                        ),
+                    })?;
+                Ok(self.ir.heap_load(Value::Pointer(cell_addr)))
             }
         }
     }
