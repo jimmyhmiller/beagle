@@ -78,6 +78,19 @@ pub const TYPE_ID_CONS_STRING: u8 = 35;
 /// This prevents the block from being considered for struct migration.
 pub const TYPE_ID_GLOBAL_OBJECT_BLOCK: u8 = 36;
 
+/// Type ID for opaque packed-byte storage.
+/// Layout: [header][bytes... packed in trailing words]
+/// type_data = capacity in bytes. Opaque (no fields traced by GC).
+/// Used as the backing store of TYPE_ID_STRING_BUILDER.
+pub const TYPE_ID_BYTE_STORAGE: u8 = 38;
+
+/// Type ID for mutable string builders.
+/// Layout: [header][storage_ptr][len_tagged]
+/// Field 0: tagged pointer to a TYPE_ID_BYTE_STORAGE object (traced by GC).
+/// Field 1: current length in bytes, stored as tagged int.
+/// Capacity lives in storage.header.type_data.
+pub const TYPE_ID_STRING_BUILDER: u8 = 40;
+
 /// Type ID for stack frame objects (heap-object-style headers on the native stack).
 /// These are NOT heap-allocated — they live on the stack but use heap object layout
 /// so the GC can trace locals uniformly. The upper 16 bits of type_data encode num_slots.

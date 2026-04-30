@@ -6823,6 +6823,15 @@ impl Runtime {
                             Some(repr)
                         }
                     }
+                    val if val == crate::collections::TYPE_ID_STRING_BUILDER => {
+                        Some(crate::builtins::string_builder_debug_repr(value))
+                    }
+                    val if val == crate::collections::TYPE_ID_BYTE_STORAGE => {
+                        Some(format!(
+                            "ByteStorage {{ capacity: {} }}",
+                            header.type_data
+                        ))
+                    }
                     _ => {
                         // This is an unknown object. Meaning it is invalid.
                         // We are going to print everything we can to debug this

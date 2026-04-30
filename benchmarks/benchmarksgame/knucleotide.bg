@@ -5,11 +5,10 @@ namespace knucleotide
 //
 // Beagle implementation - optimized with builtin mutable hash map
 
-use beagle.ffi as ffi
 use beagle.io as io
-use beagle.builtin as builtin
 use beagle.collections as c
 use beagle.mutable-array as arr
+use beagle.string-builder as sb
 
 let READ_CHUNK = 65536
 
@@ -62,10 +61,12 @@ fn bubble_sort_inner(entries, limit, j) {
     }
 }
 
-// Read all input and extract the THREE sequence
-// Accumulates lines into a list, then joins once at the end to avoid O(n^2) concat
+// Read all input and extract the THREE sequence.
+// Accumulates lines into a string-builder, then materializes once at the end.
+// One `sb/append!` per line (not per byte) — the string-builder runtime
+// memcpys whole strings into its packed-byte storage.
 fn read_sequence() {
-    // Growable array of lines: [lines_array, count, capacity]
+    // Growable array of lines: [lines_array, count, capacity, reading_flag]
     let lines_cap = 1024
     let state = arr/new-array(4)
     arr/write-field(state, 0, arr/new-array(lines_cap)) // lines
@@ -75,11 +76,11 @@ fn read_sequence() {
 
     read_loop(state)
 
-    // Join all collected lines into one string
     let lines = arr/read-field(state, 0)
     let count = arr/read-field(state, 1)
 
-    // Calculate total length
+    // Pre-compute total length so the builder can pre-size its backing
+    // storage and avoid repeated geometric grows.
     let mut total_len = 0
     let mut i = 0
     while i < count {
@@ -87,28 +88,13 @@ fn read_sequence() {
         i = i + 1
     }
 
-    // Build result by concatenating into a buffer
-    let buf = ffi/allocate(total_len)
-    let mut pos = 0
+    let buf = sb/new(total_len)
     i = 0
     while i < count {
-        let line = arr/read-field(lines, i)
-        let line_len = length(line)
-        let mut j = 0
-        while j < line_len {
-            let ch = get(line, j)
-            let byte = builtin/char-code(ch)
-            ffi/set-u8(buf, pos, byte)
-            pos = pos + 1
-            j = j + 1
-        }
+        sb/append!(buf, arr/read-field(lines, i))
         i = i + 1
     }
-
-    // Convert buffer back to string
-    let result = ffi/get-string(buf, 0, total_len)
-    ffi/deallocate(buf)
-    result
+    sb/to-string(buf)
 }
 
 fn add_line(state, line) {
@@ -180,12 +166,12 @@ fn process_line(state, chunk, start, line_len) {
             // End of sequence - stop reading
             arr/write-field(state, 3, false)
         } else {
-            let line = uppercase(substring(chunk, start, line_len))
+            let line = uppercase(substring(chunk, start, start + line_len))
             add_line(state, line)
         }
     } else {
         if line_len >= 6 {
-            let prefix = substring(chunk, start, 6)
+            let prefix = substring(chunk, start, start + 6)
             if prefix == ">THREE" {
                 arr/write-field(state, 3, true)
             }
@@ -214,7 +200,7 @@ fn count_kmers(seq, k) {
     let ht = c/mutable-map-with-capacity(capacity)
     let mut i = 0
     while i < n {
-        let kmer = substring(seq, i, k)
+        let kmer = substring(seq, i, i + k)
         c/mutable-map-increment!(ht, kmer)
         i = i + 1
     }

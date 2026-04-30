@@ -102,6 +102,7 @@ mod objects;
 mod reflect;
 pub mod regex;
 pub mod reset_shift;
+mod string_builder;
 mod strings;
 mod threads;
 
@@ -131,6 +132,7 @@ pub use networking::*;
 pub use objects::*;
 pub use reflect::*;
 pub use reset_shift::*;
+pub use string_builder::*;
 pub use strings::*;
 pub use threads::*;
 

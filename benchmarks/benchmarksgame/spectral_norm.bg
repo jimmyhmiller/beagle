@@ -20,7 +20,7 @@ fn Au(u, w, len) {
         let mut j = 0
         while j < len {
             let ij = i + j
-            t = t + (1.0 / to-float(ij * (ij + 1) / 2 + i + 1)) * arr/read-field(u, j)
+            t = t + (1.0 / to-float(ij * (ij + 1) / 2 + i + 1)) * arr/get(u, j)
             j = j + 1
         }
         arr/write-field(w, i, t)
@@ -35,7 +35,7 @@ fn Atu(w, v, len) {
         let mut j = 0
         while j < len {
             let ji = j + i
-            t = t + (1.0 / to-float(ji * (ji + 1) / 2 + j + 1)) * arr/read-field(w, j)
+            t = t + (1.0 / to-float(ji * (ji + 1) / 2 + j + 1)) * arr/get(w, j)
             j = j + 1
         }
         arr/write-field(v, i, t)
@@ -76,8 +76,8 @@ fn spectral_norm(n) {
     let mut vv = 0.0
     let mut i = 0
     while i < n {
-        let ui = arr/read-field(u, i)
-        let vi = arr/read-field(v, i)
+        let ui = arr/get(u, i)
+        let vi = arr/get(v, i)
         vBv = vBv + ui * vi
         vv = vv + vi * vi
         i = i + 1
@@ -124,5 +124,4 @@ fn main(args) {
 }
 
 // @beagle.core.snapshot
-// 1.274219991
 // 1.274219991

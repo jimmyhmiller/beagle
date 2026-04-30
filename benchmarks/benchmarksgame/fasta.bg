@@ -3,48 +3,40 @@ namespace fasta
 // The Computer Language Benchmarks Game
 // https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
 //
-// Beagle implementation - fast buffered I/O version
+// Beagle implementation — pure-Beagle string-builder version.
+// No FFI, no unsafe primitives. The output buffer is a
+// `beagle.string-builder` that grows geometrically; we flush by
+// materializing a string and printing it once a chunk-sized chunk
+// has accumulated.
 
-use beagle.ffi as ffi
-use beagle.io as io
-use beagle.builtin as builtin
+use beagle.string-builder as sb
 use beagle.mutable-array as arr
+use beagle.builtin as builtin
 
 let LINE_WIDTH = 60
 let IM = 139968
 let IA = 3877
 let IC = 29573
-let OUT_BUF_SIZE = 65536
+// Flush threshold — keep chunks reasonably sized so we don't pile up
+// the entire output before printing. ~64 KiB matches the FFI version's
+// OUT_BUF_SIZE.
+let FLUSH_AT = 65536
 
-// ALU sequence for repeat
 let ALU = "GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGGGAGGCCGAGGCGGGCGGATCACCTGAGGTCAGGAGTTCGAGACCAGCCTGGCCAACATGGTGAAACCCCGTCTCTACTAAAAATACAAAAATTAGCCGGGCGTGGTGGCGCGCGCCTGTAATCCCAGCTACTCGGGAGGCTGAGGCAGGAGAATCGCTTGAACCCGGGAGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTGCACTCCAGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA"
 
-// Convert ALU string to a byte buffer for fast access
-fn make_alu_buffer() {
-    let len = length(ALU)
-    let buf = ffi/allocate(len)
+// Pre-compute byte codes for a string into an Int-array, so the inner
+// loop can do `arr/get` (no per-call type check, no string-indexing
+// allocation) and pass the byte code straight to `append-byte!`.
+fn make_byte_codes(s) {
+    let len = length(s)
+    let codes = arr/new-array(len)
     let mut i = 0
     while i < len {
-        let char = get(ALU, i)
-        let byte = builtin/char-code(char)
-        ffi/set-u8(buf, i, byte)
+        arr/write-field(codes, i, builtin/char-code(s[i]))
         i = i + 1
+        null
     }
-    buf
-}
-
-// Convert code string to byte buffer
-fn make_codes_buffer(codes) {
-    let len = length(codes)
-    let buf = ffi/allocate(len)
-    let mut i = 0
-    while i < len {
-        let char = get(codes, i)
-        let byte = builtin/char-code(char)
-        ffi/set-u8(buf, i, byte)
-        i = i + 1
-    }
-    buf
+    codes
 }
 
 // IUB cumulative probabilities (scaled to IM)
@@ -68,7 +60,6 @@ fn make_iub_probs() {
     probs
 }
 
-// Homo sapiens cumulative probabilities (scaled to IM)
 fn make_homo_probs() {
     let probs = arr/new-array(4)
     arr/write-field(probs, 0, 42404)
@@ -78,152 +69,103 @@ fn make_homo_probs() {
     probs
 }
 
-// find_code_index inlined into write_random_fasta for performance
-
-// Write a header string to stdout
-fn write_header(s) {
-    let len = length(s)
-    let buf = ffi/allocate(len + 1)
-    let mut i = 0
-    while i < len {
-        let char = get(s, i)
-        let byte = builtin/char-code(char)
-        ffi/set-u8(buf, i, byte)
-        i = i + 1
+// Flush the builder if it's grown past the threshold. The to-string
+// + print pair is one alloc + one syscall — the builder's storage
+// stays put, so we keep the same growable backing array.
+fn maybe_flush!(out) {
+    if sb/length(out) >= FLUSH_AT {
+        print(sb/to-string(out))
+        sb/clear!(out)
+        null
+    } else {
+        null
     }
-    ffi/set-u8(buf, len, 10)  // newline
-    io/write-stdout-buffer(buf, len + 1)
-    ffi/deallocate(buf)
-    null
 }
 
-// Write repeated ALU sequence with line wrapping
-fn write_repeat_fasta(alu_buf, alu_len, size) {
-    let out_buf = ffi/allocate(OUT_BUF_SIZE)
-    let mut out_pos = 0
+// Repeated-ALU section. Walks the precomputed ALU code array
+// cyclically, emitting newline-wrapped lines.
+fn write_repeat_fasta(alu_codes, alu_len, size, out) {
     let mut alu_idx = 0
     let mut remaining = size
-
     while remaining > 0 {
         let line_len = if remaining < LINE_WIDTH { remaining } else { LINE_WIDTH }
-
-        // Check if we need to flush
-        if out_pos + line_len + 1 > OUT_BUF_SIZE {
-            io/write-stdout-buffer(out_buf, out_pos)
-            out_pos = 0
-        }
-
-        // Write one line
         let mut col = 0
         while col < line_len {
-            let byte = ffi/get-u8(alu_buf, alu_idx)
-            ffi/set-u8(out_buf, out_pos, byte)
-            out_pos = out_pos + 1
+            sb/append-byte!(out, arr/get(alu_codes, alu_idx))
             alu_idx = alu_idx + 1
             if alu_idx >= alu_len {
                 alu_idx = 0
             }
             col = col + 1
+            null
         }
-
-        // Add newline
-        ffi/set-u8(out_buf, out_pos, 10)
-        out_pos = out_pos + 1
-
+        sb/append-byte!(out, 10)  // newline
+        maybe_flush!(out)
         remaining = remaining - line_len
+        null
     }
-
-    // Flush remaining
-    if out_pos > 0 {
-        io/write-stdout-buffer(out_buf, out_pos)
-    }
-
-    ffi/deallocate(out_buf)
-    null
 }
 
-// Write random sequence with line wrapping
-// Returns the final seed value
-fn write_random_fasta(codes_buf, probs, probs_len, size, seed, add_final_newline) {
-    let out_buf = ffi/allocate(OUT_BUF_SIZE)
-    let mut out_pos = 0
-    let mut remaining = size
+// Random-sequence section. Produces `size` characters drawn from
+// `codes` according to cumulative probabilities `probs`. Returns the
+// final seed so the next section can resume the PRNG.
+fn write_random_fasta(codes, probs, probs_len, size, seed, add_final_newline, out) {
     let mut current_seed = seed
-
+    let mut remaining = size
     while remaining > 0 {
         let line_len = if remaining < LINE_WIDTH { remaining } else { LINE_WIDTH }
-
-        // Check if we need to flush
-        if out_pos + line_len + 1 > OUT_BUF_SIZE {
-            io/write-stdout-buffer(out_buf, out_pos)
-            out_pos = 0
-        }
-
-        // Write one line
         let mut col = 0
         while col < line_len {
-            // Generate next random number
-            current_seed = (current_seed * IA + IC) % IM
-
-            // Inline find_code_index - linear search for matching probability
+            current_seed = (current_seed * IA + IC) - ((current_seed * IA + IC) / IM) * IM
             let mut idx = 0
+            // linear search for the matching cumulative probability
             while idx < probs_len {
-                if arr/read-field(probs, idx) > current_seed {
+                if arr/get(probs, idx) > current_seed {
                     break()
                 }
                 idx = idx + 1
+                null
             }
-            if idx >= probs_len { idx = probs_len - 1 }
-
-            let byte = ffi/get-u8(codes_buf, idx)
-            ffi/set-u8(out_buf, out_pos, byte)
-            out_pos = out_pos + 1
+            if idx >= probs_len {
+                idx = probs_len - 1
+            }
+            sb/append-byte!(out, arr/get(codes, idx))
             col = col + 1
+            null
         }
-
-        // Add newline (except possibly for last line)
         remaining = remaining - line_len
         if remaining > 0 || add_final_newline {
-            ffi/set-u8(out_buf, out_pos, 10)
-            out_pos = out_pos + 1
+            sb/append-byte!(out, 10)
         }
+        maybe_flush!(out)
+        null
     }
-
-    // Flush remaining
-    if out_pos > 0 {
-        io/write-stdout-buffer(out_buf, out_pos)
-    }
-
-    ffi/deallocate(out_buf)
     current_seed
 }
 
 fn run(n) {
-    // Prepare ALU buffer
-    let alu_buf = make_alu_buffer()
+    let alu_codes = make_byte_codes(ALU)
     let alu_len = length(ALU)
-
-    // ONE: repeat ALU
-    write_header(">ONE Homo sapiens alu")
-    write_repeat_fasta(alu_buf, alu_len, n * 2)
-
-    // TWO: IUB random
-    let iub_codes = make_codes_buffer("acgtBDHKMNRSVWY")
+    let iub_codes = make_byte_codes("acgtBDHKMNRSVWY")
+    let homo_codes = make_byte_codes("acgt")
     let iub_probs = make_iub_probs()
-    write_header(">TWO IUB ambiguity codes")
-    let seed2 = write_random_fasta(iub_codes, iub_probs, 15, n * 3, 42, true)
-
-    // THREE: Homo sapiens random
-    let homo_codes = make_codes_buffer("acgt")
     let homo_probs = make_homo_probs()
-    write_header(">THREE Homo sapiens frequency")
-    write_random_fasta(homo_codes, homo_probs, 4, n * 5, seed2, false)
 
-    // Cleanup
-    ffi/deallocate(alu_buf)
-    ffi/deallocate(iub_codes)
-    ffi/deallocate(homo_codes)
+    // One reusable output buffer for the whole run.
+    let out = sb/new(FLUSH_AT * 2)
 
+    sb/append!(out, ">ONE Homo sapiens alu\n")
+    write_repeat_fasta(alu_codes, alu_len, n * 2, out)
+
+    sb/append!(out, ">TWO IUB ambiguity codes\n")
+    let seed2 = write_random_fasta(iub_codes, iub_probs, 15, n * 3, 42, true, out)
+
+    sb/append!(out, ">THREE Homo sapiens frequency\n")
+    write_random_fasta(homo_codes, homo_probs, 4, n * 5, seed2, false, out)
+
+    if sb/length(out) > 0 {
+        print(sb/to-string(out))
+    }
     ""
 }
 

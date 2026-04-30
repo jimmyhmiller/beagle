@@ -1,0 +1,135 @@
+namespace beagle.string-builder
+
+// Mutable, growable byte-buffer string builder.
+//
+// Backed by a packed-byte storage object in the runtime. Appending is
+// O(1) amortized (geometric capacity growth, in-place writes). The
+// final to-string materializes one immutable string in a single
+// allocation. Pattern after Java's StringBuilder: each mutating call
+// returns the same builder so calls can be chained or threaded.
+//
+// All functions ending in `!` mutate the builder in place.
+
+// Construct an empty builder. `capacity` is a hint — the buffer grows
+// automatically. Pass a large value if you know roughly how many bytes
+// you'll write to skip intermediate growth.
+fn new(capacity) {
+    string-builder-new(capacity)
+}
+
+// Append one byte (an Int 0..255). Out-of-range values are masked to a u8.
+fn append-byte!(sb, byte) {
+    string-builder-push-byte!(sb, byte)
+}
+
+// Append a single-character string (or any string really; the name
+// just signals that this is a per-char hot path).
+fn append-char!(sb, ch) {
+    string-builder-push-string!(sb, ch)
+}
+
+// Append a string. Works on flat strings, slices, and cons strings.
+fn append!(sb, s) {
+    string-builder-push-string!(sb, s)
+}
+
+// Append the decimal representation of an int.
+fn append-int!(sb, i) {
+    string-builder-push-int!(sb, i)
+}
+
+// Append a float, formatted the same way `println` formats floats.
+fn append-float!(sb, f) {
+    string-builder-push-float!(sb, f)
+}
+
+// Number of bytes written so far.
+fn length(sb) {
+    string-builder-length(sb)
+}
+
+// Total backing-buffer capacity in bytes.
+fn capacity(sb) {
+    string-builder-capacity(sb)
+}
+
+// Reset length to 0. Keeps the backing buffer (no re-alloc).
+fn clear!(sb) {
+    string-builder-clear!(sb)
+}
+
+// Read a byte by index (returns Int, or null if out of range).
+fn byte-at(sb, i) {
+    string-builder-byte-at(sb, i)
+}
+
+// Overwrite the byte at index `i`. Returns sb. No-op if out of range.
+fn set-byte-at!(sb, i, byte) {
+    string-builder-set-byte-at!(sb, i, byte)
+}
+
+// Reverse the bytes in place. ASCII-safe.
+fn reverse!(sb) {
+    string-builder-reverse!(sb)
+}
+
+// Materialize an immutable String containing the bytes appended so far.
+// One allocation, one memcpy. Repeated calls produce independent strings.
+fn to-string(sb) {
+    string-builder-to-string(sb)
+}
+
+fn main() {
+    let sb = new(8)
+    println(length(sb))
+    println(capacity(sb))
+
+    append!(sb, "hello")
+    append-byte!(sb, 32)
+    append!(sb, "world")
+    println(length(sb))
+    println(to-string(sb))
+
+    // Growth across the small capacity (8) — must trigger realloc.
+    println(capacity(sb) >= 11)
+
+    // Chained appends + numeric formatting.
+    let sb2 = new(4)
+    append-int!(sb2, 42)
+    append!(sb2, " ")
+    append-float!(sb2, 3.14)
+    println(to-string(sb2))
+
+    // Mutation after to-string doesn't affect the materialized string.
+    let snapshot = to-string(sb)
+    append!(sb, "!")
+    println(snapshot)
+    println(to-string(sb))
+
+    // Reverse.
+    let sb3 = new(8)
+    append!(sb3, "abcdef")
+    reverse!(sb3)
+    println(to-string(sb3))
+
+    // Clear keeps capacity.
+    let cap-before = capacity(sb3)
+    clear!(sb3)
+    println(length(sb3))
+    println(capacity(sb3) == cap-before)
+
+    "done"
+}
+
+// @beagle.core.snapshot
+// 0
+// 8
+// 11
+// hello world
+// true
+// 42 3.14
+// hello world
+// hello world!
+// fedcba
+// 0
+// true

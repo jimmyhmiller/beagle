@@ -37,17 +37,15 @@ fn fannkuch(n) {
 
         // Count flips and update max and checksum
         f = 0
-        k = arr/read-field(perm, 0)
+        k = arr/get(perm, 0)
         while k != 0 {
             i = 0
             while 2 * i < k {
-                let t = arr/read-field(perm, i)
-                arr/write-field(perm, i, arr/read-field(perm, k - i))
-                arr/write-field(perm, k - i, t)
+                arr/swap(perm, i, k - i)
                 i = i + 1
                 null
             }
-            k = arr/read-field(perm, 0)
+            k = arr/get(perm, 0)
             f = f + 1
             null
         }
@@ -69,17 +67,17 @@ fn fannkuch(n) {
                 more = false
                 null
             } else {
-                let p0 = arr/read-field(perm1, 0)
+                let p0 = arr/get(perm1, 0)
                 i = 0
                 while i < r {
                     let j = i + 1
-                    arr/write-field(perm1, i, arr/read-field(perm1, j))
+                    arr/write-field(perm1, i, arr/get(perm1, j))
                     i = j
                     null
                 }
                 arr/write-field(perm1, r, p0)
 
-                let cnt = arr/read-field(count, r) - 1
+                let cnt = arr/get(count, r) - 1
                 arr/write-field(count, r, cnt)
                 if cnt > 0 {
                     more = false
@@ -114,4 +112,3 @@ fn main(args) {
 // @beagle.core.snapshot
 // 228
 // Pfannkuchen(7) = 16
-// 16

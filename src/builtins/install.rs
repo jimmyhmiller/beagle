@@ -1700,6 +1700,71 @@ impl Runtime {
             4,
         )?;
 
+        // ===== StringBuilder builtins =====
+        // Mutable byte-buffer string builder. Backed by a separately-allocated
+        // ByteStorage object that grows geometrically. The user-facing namespace
+        // is `beagle.string-builder` (see standard-library/beagle.string-builder.bg).
+        self.add_builtin_function_with_fp(
+            "beagle.core/string-builder-new",
+            string_builder_new as *const u8,
+            true, true, 3, // sp, fp, capacity
+        )?;
+        self.add_builtin_function(
+            "beagle.core/string-builder-length",
+            string_builder_length as *const u8,
+            false, 1,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/string-builder-capacity",
+            string_builder_capacity as *const u8,
+            false, 1,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/string-builder-clear!",
+            string_builder_clear as *const u8,
+            false, 1,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/string-builder-push-byte!",
+            string_builder_push_byte as *const u8,
+            true, true, 4, // sp, fp, sb, byte
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/string-builder-push-string!",
+            string_builder_push_string as *const u8,
+            true, true, 4, // sp, fp, sb, s
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/string-builder-push-int!",
+            string_builder_push_int as *const u8,
+            true, true, 4, // sp, fp, sb, i
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/string-builder-push-float!",
+            string_builder_push_float as *const u8,
+            true, true, 4, // sp, fp, sb, f
+        )?;
+        self.add_builtin_function(
+            "beagle.core/string-builder-byte-at",
+            string_builder_byte_at as *const u8,
+            false, 2,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/string-builder-set-byte-at!",
+            string_builder_set_byte_at as *const u8,
+            false, 3,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/string-builder-reverse!",
+            string_builder_reverse as *const u8,
+            false, 1,
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/string-builder-to-string",
+            string_builder_to_string as *const u8,
+            true, true, 3, // sp, fp, sb
+        )?;
+
         // String functions
         self.add_builtin_with_doc(
             "beagle.core/substring",

@@ -93,13 +93,13 @@ fn offset_momentum(bodies, n) {
     let mut pz = 0.0
     let mut i = 0
     while i < n {
-        let b = arr/read-field(bodies, i)
+        let b = arr/get(bodies, i)
         px = px + b.vx * b.mass
         py = py + b.vy * b.mass
         pz = pz + b.vz * b.mass
         i = i + 1
     }
-    let s = arr/read-field(bodies, 0)
+    let s = arr/get(bodies, 0)
     s.vx = (0.0 - px) / SOLAR_MASS
     s.vy = (0.0 - py) / SOLAR_MASS
     s.vz = (0.0 - pz) / SOLAR_MASS
@@ -109,10 +109,10 @@ fn advance(bodies, n, dt) {
     // Update velocities
     let mut i = 0
     while i < n {
-        let bi = arr/read-field(bodies, i)
+        let bi = arr/get(bodies, i)
         let mut j = i + 1
         while j < n {
-            let bj = arr/read-field(bodies, j)
+            let bj = arr/get(bodies, j)
             let dx = bi.x - bj.x
             let dy = bi.y - bj.y
             let dz = bi.z - bj.z
@@ -135,7 +135,7 @@ fn advance(bodies, n, dt) {
     // Update positions
     i = 0
     while i < n {
-        let b = arr/read-field(bodies, i)
+        let b = arr/get(bodies, i)
         b.x = b.x + dt * b.vx
         b.y = b.y + dt * b.vy
         b.z = b.z + dt * b.vz
@@ -147,11 +147,11 @@ fn energy(bodies, n) {
     let mut e = 0.0
     let mut i = 0
     while i < n {
-        let b = arr/read-field(bodies, i)
+        let b = arr/get(bodies, i)
         e = e + 0.5 * b.mass * (b.vx * b.vx + b.vy * b.vy + b.vz * b.vz)
         let mut j = i + 1
         while j < n {
-            let bj = arr/read-field(bodies, j)
+            let bj = arr/get(bodies, j)
             let dx = b.x - bj.x
             let dy = b.y - bj.y
             let dz = b.z - bj.z

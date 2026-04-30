@@ -46,6 +46,36 @@ fn read-field(array, index) {
     }
 }
 
+// Bounds-checked read with the type check elided. Caller is
+// responsible for having proven `array` is an array (e.g. it came
+// from `new-array` and never escaped). Out-of-range still returns
+// `null` so memory safety is preserved; we just skip the
+// `is-object && type-id == 1` check on every access. In tight inner
+// loops (~ns per element) the type check is the dominant cost.
+fn get(array, index) {
+    if index < 0 || index >= primitive/size(array) {
+        null
+    } else {
+        read-field-unsafe(array, index)
+    }
+}
+
+// In-place swap. Equivalent to two reads + two writes through
+// `read-field`/`write-field`, but the panic-if-not-array and
+// `primitive/size` load happen once instead of four times. Both
+// indices are still bounds-checked.
+fn swap(array, i, j) {
+    panic-if-not-array("swap", array)
+    let size = primitive/size(array)
+    if i < 0 || i >= size || j < 0 || j >= size {
+        null
+    } else {
+        let tmp = read-field-unsafe(array, i)
+        write-field-unsafe(array, i, read-field-unsafe(array, j))
+        write-field-unsafe(array, j, tmp)
+    }
+}
+
 fn new-array(size) {
     if size < 0 {
         throw("Negative size")
@@ -197,4 +227,3 @@ fn main() {
 // [ ExampleStruct { value: "Example Struct Value2" } ]
 // [ 43 ]
 // [ 42, 44 ]
-// done

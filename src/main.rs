@@ -51,6 +51,9 @@ pub mod embedded_stdlib {
             "beagle.mutable-array.bg" => {
                 Some(include_str!("../standard-library/beagle.mutable-array.bg"))
             }
+            "beagle.string-builder.bg" => {
+                Some(include_str!("../standard-library/beagle.string-builder.bg"))
+            }
             _ => None,
         }
     }

@@ -3,230 +3,228 @@ namespace revcomp
 // The Computer Language Benchmarks Game
 // https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
 //
-// Beagle implementation - fast single-threaded version
-// Uses bulk native operations for parsing
+// Beagle implementation — pure-Beagle, uses beagle.string-builder.
+// No FFI buffers, no manual byte allocation.
 
-use beagle.ffi as ffi
 use beagle.io as io
 use beagle.mutable-array as arr
+use beagle.string-builder as sb
+use beagle.builtin as builtin
 
 let LINE_WIDTH = 60
 let READ_CHUNK = 65536
-let INITIAL_SEQ_SIZE = 1048576
 
-// State array indices
-let STATE_SEQ_BUF = 0
-let STATE_SEQ_LEN = 1
-let STATE_SEQ_CAP = 2
-let STATE_TBL = 3
-
-// Build complement lookup table (256 entries)
+// Build the complement lookup table: 256 ints, indexed by byte value,
+// each holding the complement byte. Identity for unmapped values.
 fn make_complement_table() {
-    let tbl = ffi/allocate(256)
+    let tbl = arr/new-array(256)
     let mut i = 0
     while i < 256 {
-        ffi/set-u8(tbl, i, i)
+        arr/write-field(tbl, i, i)
         i = i + 1
+        null
     }
-
+    // Standard FASTA complement pairs (both case forms map to uppercase).
     // A <-> T
-    ffi/set-u8(tbl, 65, 84)
-    ffi/set-u8(tbl, 97, 84)
-    ffi/set-u8(tbl, 84, 65)
-    ffi/set-u8(tbl, 116, 65)
+    arr/write-field(tbl, 65, 84)
+    arr/write-field(tbl, 97, 84)
+    arr/write-field(tbl, 84, 65)
+    arr/write-field(tbl, 116, 65)
     // C <-> G
-    ffi/set-u8(tbl, 67, 71)
-    ffi/set-u8(tbl, 99, 71)
-    ffi/set-u8(tbl, 71, 67)
-    ffi/set-u8(tbl, 103, 67)
+    arr/write-field(tbl, 67, 71)
+    arr/write-field(tbl, 99, 71)
+    arr/write-field(tbl, 71, 67)
+    arr/write-field(tbl, 103, 67)
     // U -> A
-    ffi/set-u8(tbl, 85, 65)
-    ffi/set-u8(tbl, 117, 65)
+    arr/write-field(tbl, 85, 65)
+    arr/write-field(tbl, 117, 65)
     // M <-> K
-    ffi/set-u8(tbl, 77, 75)
-    ffi/set-u8(tbl, 109, 75)
-    ffi/set-u8(tbl, 75, 77)
-    ffi/set-u8(tbl, 107, 77)
+    arr/write-field(tbl, 77, 75)
+    arr/write-field(tbl, 109, 75)
+    arr/write-field(tbl, 75, 77)
+    arr/write-field(tbl, 107, 77)
     // R <-> Y
-    ffi/set-u8(tbl, 82, 89)
-    ffi/set-u8(tbl, 114, 89)
-    ffi/set-u8(tbl, 89, 82)
-    ffi/set-u8(tbl, 121, 82)
+    arr/write-field(tbl, 82, 89)
+    arr/write-field(tbl, 114, 89)
+    arr/write-field(tbl, 89, 82)
+    arr/write-field(tbl, 121, 82)
     // W <-> W
-    ffi/set-u8(tbl, 87, 87)
-    ffi/set-u8(tbl, 119, 87)
+    arr/write-field(tbl, 87, 87)
+    arr/write-field(tbl, 119, 87)
     // S <-> S
-    ffi/set-u8(tbl, 83, 83)
-    ffi/set-u8(tbl, 115, 83)
+    arr/write-field(tbl, 83, 83)
+    arr/write-field(tbl, 115, 83)
     // V <-> B
-    ffi/set-u8(tbl, 86, 66)
-    ffi/set-u8(tbl, 118, 66)
-    ffi/set-u8(tbl, 66, 86)
-    ffi/set-u8(tbl, 98, 86)
+    arr/write-field(tbl, 86, 66)
+    arr/write-field(tbl, 118, 66)
+    arr/write-field(tbl, 66, 86)
+    arr/write-field(tbl, 98, 86)
     // H <-> D
-    ffi/set-u8(tbl, 72, 68)
-    ffi/set-u8(tbl, 104, 68)
-    ffi/set-u8(tbl, 68, 72)
-    ffi/set-u8(tbl, 100, 72)
+    arr/write-field(tbl, 72, 68)
+    arr/write-field(tbl, 104, 68)
+    arr/write-field(tbl, 68, 72)
+    arr/write-field(tbl, 100, 72)
     // N <-> N
-    ffi/set-u8(tbl, 78, 78)
-    ffi/set-u8(tbl, 110, 78)
-
+    arr/write-field(tbl, 78, 78)
+    arr/write-field(tbl, 110, 78)
     tbl
 }
 
-// Ensure sequence buffer has enough capacity
-fn ensure_capacity(state, needed) {
-    let seq_len = arr/read-field(state, STATE_SEQ_LEN)
-    let current_cap = arr/read-field(state, STATE_SEQ_CAP)
+let NEWLINE = 10
+let GT = 62  // '>'
 
-    if seq_len + needed > current_cap {
-        let seq_buf = arr/read-field(state, STATE_SEQ_BUF)
-        let mut new_cap = current_cap * 2
-        while new_cap < seq_len + needed {
-            new_cap = new_cap * 2
-        }
-        let new_buf = ffi/realloc(seq_buf, new_cap)
-        arr/write-field(state, STATE_SEQ_BUF, new_buf)
-        arr/write-field(state, STATE_SEQ_CAP, new_cap)
+// In-place complement-translate every byte of `seq` via the lookup table.
+fn translate(seq, tbl) {
+    let n = sb/length(seq)
+    let mut i = 0
+    while i < n {
+        sb/set-byte-at!(seq, i, arr/get(tbl, sb/byte-at(seq, i)))
+        i = i + 1
+        null
     }
-    null
 }
 
-// Output sequence with 60-char line wrapping (buffered)
-fn output_sequence_wrapped(seq_buf, seq_len) {
-    // Use larger output buffer to reduce syscalls
-    let out_buf_size = 65536
-    let out_buf = ffi/allocate(out_buf_size)
-    let mut out_pos = 0
+// Output `seq` (already complement-and-reversed) with 60-char line
+// wrapping. Builds into `out`, flushing periodically. Caller owns `out`
+// and decides when to flush after we return.
+fn output_wrapped(seq, out) {
+    let total = sb/length(seq)
     let mut pos = 0
-
-    while pos < seq_len {
-        let remaining = seq_len - pos
+    while pos < total {
+        let remaining = total - pos
         let line_len = if remaining < LINE_WIDTH { remaining } else { LINE_WIDTH }
-
-        // Check if we need to flush
-        if out_pos + line_len + 1 > out_buf_size {
-            io/write-stdout-buffer(out_buf, out_pos)
-            out_pos = 0
+        let mut col = 0
+        while col < line_len {
+            sb/append-byte!(out, sb/byte-at(seq, pos + col))
+            col = col + 1
+            null
         }
-
-        // Copy line to output buffer
-        ffi/copy-bytes(seq_buf, pos, out_buf, out_pos, line_len)
-        out_pos = out_pos + line_len
-        ffi/set-u8(out_buf, out_pos, 10)
-        out_pos = out_pos + 1
-
-        pos = pos + LINE_WIDTH
+        sb/append-byte!(out, NEWLINE)
+        pos = pos + line_len
+        null
     }
+}
 
-    // Flush remaining
-    if out_pos > 0 {
-        io/write-stdout-buffer(out_buf, out_pos)
+let FLUSH_AT = 65536
+
+fn maybe_flush!(out) {
+    if sb/length(out) >= FLUSH_AT {
+        print(sb/to-string(out))
+        sb/clear!(out)
+        null
+    } else {
+        null
     }
-
-    ffi/deallocate(out_buf)
-    null
 }
 
-// Process and output current sequence (reverse complement)
-fn flush_sequence(state) {
-    let seq_len = arr/read-field(state, STATE_SEQ_LEN)
-    if seq_len > 0 {
-        let seq_buf = arr/read-field(state, STATE_SEQ_BUF)
-        let tbl = arr/read-field(state, STATE_TBL)
-        // Bulk translate + reverse
-        ffi/translate-bytes(seq_buf, 0, seq_len, tbl)
-        ffi/reverse-bytes(seq_buf, 0, seq_len)
-        output_sequence_wrapped(seq_buf, seq_len)
+// Output the current sequence: translate, reverse, then write 60-wide.
+fn flush_sequence(seq, tbl, out) {
+    if sb/length(seq) > 0 {
+        translate(seq, tbl)
+        sb/reverse!(seq)
+        output_wrapped(seq, out)
+        sb/clear!(seq)
+        maybe_flush!(out)
+    } else {
+        null
     }
-    arr/write-field(state, STATE_SEQ_LEN, 0)
-    null
 }
 
-fn new_state(tbl) {
-    let state = arr/new-array(4)
-    arr/write-field(state, STATE_SEQ_BUF, ffi/allocate(INITIAL_SEQ_SIZE))
-    arr/write-field(state, STATE_SEQ_LEN, 0)
-    arr/write-field(state, STATE_SEQ_CAP, INITIAL_SEQ_SIZE)
-    arr/write-field(state, STATE_TBL, tbl)
-    state
+// Append a string to `seq` skipping all newlines. Used for FASTA
+// sequence-data lines, which have a trailing '\n' that we don't want
+// in the buffer being reversed.
+fn append_filter_newlines(seq, src) {
+    let n = length(src)
+    let mut i = 0
+    while i < n {
+        let b = builtin/char-code(src[i])
+        if b == NEWLINE {
+            null
+        } else {
+            sb/append-byte!(seq, b)
+        }
+        i = i + 1
+        null
+    }
 }
 
-// Output header from buffer range
-fn output_header_range(buf, start, end_pos) {
-    let len = end_pos - start
-    let header_buf = ffi/allocate(len + 1)
-    ffi/copy-bytes(buf, start, header_buf, 0, len)
-    ffi/set-u8(header_buf, len, 10)
-    io/write-stdout-buffer(header_buf, len + 1)
-    ffi/deallocate(header_buf)
-    null
-}
+// State indices
+let ST_SEQ = 0
+let ST_TBL = 1
+let ST_OUT = 2
+let ST_READING_HEADER = 3  // bool: are we currently consuming a header line?
+let ST_HEADER = 4          // string-builder for the current header line
 
-// Process a chunk of input using bulk operations
-fn process_chunk(state, input_buf, chunk_len) {
+fn process_chunk(state, chunk) {
+    let chunk_len = length(chunk)
+    let seq = arr/read-field(state, ST_SEQ)
+    let out = arr/read-field(state, ST_OUT)
+    let tbl = arr/read-field(state, ST_TBL)
+    let header = arr/read-field(state, ST_HEADER)
+
     let mut pos = 0
+    let mut reading_header = arr/read-field(state, ST_READING_HEADER)
 
     while pos < chunk_len {
-        // Find next '>' marker
-        let marker_pos = ffi/find-byte(input_buf, pos, chunk_len - pos, 62)
-
-        if marker_pos == -1 {
-            // No '>' found - rest is sequence data
-            // Copy to seq_buf, filtering out newlines
-            ensure_capacity(state, chunk_len - pos)
-            let seq_buf = arr/read-field(state, STATE_SEQ_BUF)
-            let seq_len = arr/read-field(state, STATE_SEQ_LEN)
-            let written = ffi/copy-bytes_filter(input_buf, pos, seq_buf, seq_len, chunk_len - pos, 10)
-            arr/write-field(state, STATE_SEQ_LEN, seq_len + written)
-            pos = chunk_len
-        } else {
-            // Found '>' at marker_pos
-            // First, copy any sequence data before the marker
-            if marker_pos > pos {
-                ensure_capacity(state, marker_pos - pos)
-                let seq_buf = arr/read-field(state, STATE_SEQ_BUF)
-                let seq_len = arr/read-field(state, STATE_SEQ_LEN)
-                let written = ffi/copy-bytes_filter(input_buf, pos, seq_buf, seq_len, marker_pos - pos, 10)
-                arr/write-field(state, STATE_SEQ_LEN, seq_len + written)
+        if reading_header {
+            // Accumulate header bytes (including the terminating newline)
+            // straight into `out` so the output order matches input order.
+            let b = builtin/char-code(chunk[pos])
+            sb/append-byte!(out, b)
+            if b == NEWLINE {
+                reading_header = false
+                maybe_flush!(out)
             }
-
-            // Flush previous sequence
-            flush_sequence(state)
-
-            // Find end of header line (newline after '>')
-            let newline_pos = ffi/find-byte(input_buf, marker_pos, chunk_len - marker_pos, 10)
-
-            if newline_pos == -1 {
-                // Header continues to next chunk - just output what we have
-                output_header_range(input_buf, marker_pos, chunk_len)
-                pos = chunk_len
+            pos = pos + 1
+            null
+        } else {
+            let b = builtin/char-code(chunk[pos])
+            if b == GT {
+                // End of previous sequence (if any), start of new header.
+                flush_sequence(seq, tbl, out)
+                sb/append-byte!(out, GT)
+                reading_header = true
+                pos = pos + 1
+                null
             } else {
-                // Output complete header
-                output_header_range(input_buf, marker_pos, newline_pos)
-                pos = newline_pos + 1
+                if b == NEWLINE {
+                    // Skip embedded newlines.
+                    pos = pos + 1
+                    null
+                } else {
+                    sb/append-byte!(seq, b)
+                    pos = pos + 1
+                    null
+                }
             }
         }
     }
+    arr/write-field(state, ST_READING_HEADER, reading_header)
     null
 }
 
-// Main entry point
 fn main() {
     let tbl = make_complement_table()
-    let state = new_state(tbl)
+    let seq = sb/new(1048576)
+    let out = sb/new(FLUSH_AT * 2)
+    let header = sb/new(256)
+
+    let state = arr/new-array(5)
+    arr/write-field(state, ST_SEQ, seq)
+    arr/write-field(state, ST_TBL, tbl)
+    arr/write-field(state, ST_OUT, out)
+    arr/write-field(state, ST_READING_HEADER, false)
+    arr/write-field(state, ST_HEADER, header)
 
     let mut done = false
     while done == false {
-        let result = io/read-stdin(READ_CHUNK)
+        let result = io/read-stdin-string(READ_CHUNK)
         match result {
             Result.Ok { value } => {
-                if value.length == 0 {
+                if length(value) == 0 {
                     done = true
                 } else {
-                    process_chunk(state, value.buffer, value.length)
-                    ffi/deallocate(value.buffer)
+                    process_chunk(state, value)
                 }
             },
             Result.Err { error } => {
@@ -236,12 +234,11 @@ fn main() {
     }
 
     // Flush final sequence
-    flush_sequence(state)
+    flush_sequence(seq, tbl, out)
 
-    // Cleanup
-    let seq_buf = arr/read-field(state, STATE_SEQ_BUF)
-    ffi/deallocate(seq_buf)
-    ffi/deallocate(tbl)
-
+    // Final flush of output buffer
+    if sb/length(out) > 0 {
+        print(sb/to-string(out))
+    }
     ""
 }
