@@ -54,6 +54,7 @@ pub mod embedded_stdlib {
             "beagle.string-builder.bg" => {
                 Some(include_str!("../standard-library/beagle.string-builder.bg"))
             }
+            "beagle.bail.bg" => Some(include_str!("../standard-library/beagle.bail.bg")),
             _ => None,
         }
     }
@@ -1011,6 +1012,7 @@ fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Erro
     let resource_files: [&str; 0] = [];
     let stdlib_files = [
         "std.bg",
+        "beagle.bail.bg",
         "beagle.ffi.bg",
         "beagle.io.bg",
         "beagle.effect.bg",

@@ -568,6 +568,111 @@ impl Compiler {
         }
     }
 
+    /// Recompile a single function with prior arithmetic-feedback bits
+    /// threaded into the AST→IR pass. Used by tier-up
+    /// (`runtime/specialize-all`) to install a specialized version of a
+    /// function whose feedback indicates monomorphic shapes — the
+    /// recompile emits `*_with_bail` IR for those sites instead of
+    /// `*_any`. The new code is registered via the same deferred-flush
+    /// path used by source redefinition, so the jump-table swap is
+    /// atomic with respect to other threads.
+    ///
+    /// Returns `Ok(true)` if the function was recompiled and swapped,
+    /// `Ok(false)` if there's nothing to do (no source, no feedback, or
+    /// not eligible — e.g. it's a `beagle.bail/...` helper, which we
+    /// must not specialize to avoid recursion through the bail path).
+    pub fn specialize_function(&mut self, full_name: &str) -> Result<bool, Box<dyn Error>> {
+        // Don't specialize the bail helpers themselves — their slow path
+        // is the bail call, and a specialized bail-of-a-bail would call
+        // itself.
+        if full_name.starts_with("beagle.bail/") {
+            return Ok(false);
+        }
+
+        // Resolve current pointer + source text.
+        let runtime = get_runtime().get_mut();
+        let function = match runtime.find_function(full_name) {
+            Some(f) => f,
+            None => return Ok(false),
+        };
+        let source_text = match function.source_text.as_ref() {
+            Some(s) if !s.is_empty() => s.clone(),
+            _ => return Ok(false),
+        };
+        let source_file = function
+            .source_file
+            .clone()
+            .unwrap_or_else(|| "<specialized>".to_string());
+        let current_address: usize = function.pointer.into();
+        let feedback_bits = self.arith_feedback_for_address(current_address);
+        if feedback_bits.is_empty() {
+            // No instrumented sites for the current compile — nothing to
+            // specialize on.
+            return Ok(false);
+        }
+
+        // Switch to the function's namespace so qualified-name resolution
+        // works during the recompile.
+        let (namespace, _) = match full_name.rsplit_once('/') {
+            Some(parts) => parts,
+            None => return Ok(false),
+        };
+        let saved_namespace_id = {
+            let current_id = self.current_namespace_id();
+            match self.get_namespace_id(namespace) {
+                Some(ns_id) => {
+                    self.set_current_namespace(ns_id);
+                    Some(current_id)
+                }
+                None => return Ok(false),
+            }
+        };
+
+        // Parse + compile, threading the feedback bits.
+        let mut parser = Parser::new(source_file.clone(), source_text.clone())?;
+        let ast = parser.parse()?;
+        let token_line_column_map = parser.get_token_line_column_map();
+        let token_byte_spans = parser.get_token_byte_spans();
+        let definition_byte_ranges = parser.get_definition_byte_ranges();
+
+        let functions_before = {
+            let runtime = get_runtime().get_mut();
+            runtime.functions.len()
+        };
+        self.defer_function_installs = true;
+
+        let result = self.compile_ast_with_feedback(
+            ast,
+            None,
+            &source_file,
+            token_line_column_map,
+            source_text,
+            token_byte_spans,
+            definition_byte_ranges,
+            feedback_bits,
+        );
+
+        if let Some(saved_id) = saved_namespace_id {
+            self.set_current_namespace(saved_id);
+        }
+
+        match result {
+            Ok(_) => {
+                self.defer_function_installs = false;
+                self.flush_deferred_functions();
+                self.code_allocator.make_executable();
+                Ok(true)
+            }
+            Err(e) => {
+                self.deferred_updates.clear();
+                self.defer_function_installs = false;
+                let runtime = get_runtime().get_mut();
+                runtime.functions.truncate(functions_before);
+                Err(e)
+            }
+        }
+    }
+
     pub fn compile_string_in_namespace(
         &mut self,
         string: &str,
@@ -859,13 +964,40 @@ impl Compiler {
         token_byte_spans: Vec<(usize, usize)>,
         definition_byte_ranges: HashMap<(usize, usize), (usize, usize)>,
     ) -> Result<(Option<String>, Vec<Diagnostic>), Box<dyn Error>> {
-        let (mut ir, token_map, diagnostics, top_level_arith_slots) = ast.compile(
+        self.compile_ast_with_feedback(
+            ast,
+            fn_name,
+            file_name,
+            token_line_column_map,
+            source_text,
+            token_byte_spans,
+            definition_byte_ranges,
+            Vec::new(),
+        )
+    }
+
+    /// Like `compile_ast`, but threads `feedback_bits` (in source-visit
+    /// order) into the AST→IR pass so monomorphic arithmetic sites get
+    /// emitted with `*_with_bail` specialization. Used by tier-up.
+    pub fn compile_ast_with_feedback(
+        &mut self,
+        ast: crate::ast::Ast,
+        fn_name: Option<String>,
+        file_name: &str,
+        token_line_column_map: Vec<(usize, usize)>,
+        source_text: String,
+        token_byte_spans: Vec<(usize, usize)>,
+        definition_byte_ranges: HashMap<(usize, usize), (usize, usize)>,
+        feedback_bits: Vec<u64>,
+    ) -> Result<(Option<String>, Vec<Diagnostic>), Box<dyn Error>> {
+        let (mut ir, token_map, diagnostics, top_level_arith_slots) = ast.compile_with_feedback(
             self,
             file_name,
             token_line_column_map,
             source_text,
             token_byte_spans,
             definition_byte_ranges,
+            feedback_bits,
         )?;
         let top_level_name =
             fn_name.unwrap_or_else(|| format!("{}/__top_level", self.current_namespace_name()));
@@ -1919,6 +2051,9 @@ pub enum CompilerMessage {
     /// Walk feedback and produce per-function specialization verdicts.
     /// Used by `--dump-specializable`.
     GetSpecializationReport,
+    /// Specialize every FullySpecializable function in the report.
+    /// Returns the count of functions that were actually swapped.
+    SpecializeAll,
 }
 
 pub enum CompilerResponse {
@@ -1933,6 +2068,7 @@ pub enum CompilerResponse {
     /// name at compile time and is for display only.
     ArithFeedback(Vec<(usize, u64, usize, String)>),
     SpecializationReport(Vec<crate::feedback::FunctionFeedbackSummary>),
+    SpecializeCount(usize),
 }
 
 pub struct CompilerThread {
@@ -2144,6 +2280,28 @@ impl CompilerThread {
                     CompilerMessage::GetSpecializationReport => {
                         let report = self.compiler.specialization_report();
                         work_done.mark_done(CompilerResponse::SpecializationReport(report));
+                    }
+                    CompilerMessage::SpecializeAll => {
+                        let report = self.compiler.specialization_report();
+                        let mut count = 0usize;
+                        for summary in report {
+                            if matches!(
+                                summary.verdict,
+                                crate::feedback::SpecializationVerdict::FullySpecializable
+                            ) {
+                                match self.compiler.specialize_function(&summary.debug_name) {
+                                    Ok(true) => count += 1,
+                                    Ok(false) => {}
+                                    Err(e) => {
+                                        eprintln!(
+                                            "specialize_function({}) failed: {}",
+                                            summary.debug_name, e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        work_done.mark_done(CompilerResponse::SpecializeCount(count));
                     }
                 },
                 Err(_) => {

@@ -3731,6 +3731,7 @@ impl NamespaceManager {
         s.add_namespace("beagle.__internal_test__");
         s.add_namespace("beagle.debug");
         s.add_namespace("beagle.reflect");
+        s.add_namespace("beagle.runtime");
         s
     }
 
@@ -4429,6 +4430,20 @@ impl Runtime {
         match response {
             CompilerResponse::ArithFeedback(v) => v,
             _ => vec![],
+        }
+    }
+
+    /// Specialize every FullySpecializable function. Returns the count
+    /// of functions actually recompiled and swapped.
+    pub fn specialize_all(&self) -> usize {
+        let response = self
+            .compiler_channel
+            .as_ref()
+            .expect("Compiler channel not initialized - this is a fatal error")
+            .send(CompilerMessage::SpecializeAll);
+        match response {
+            CompilerResponse::SpecializeCount(n) => n,
+            _ => 0,
         }
     }
 

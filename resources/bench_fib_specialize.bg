@@ -1,0 +1,41 @@
+namespace bench_fib_specialize
+
+use beagle.core as core
+use beagle.runtime as runtime
+
+fn fib(n) {
+    if n <= 1 {
+        n
+    } else {
+        fib(n - 1) + fib(n - 2)
+    }
+}
+
+fn measure(label, n, iters) {
+    let start = core/time-now()
+    let mut i = 0
+    let mut last = 0
+    while i < iters {
+        last = fib(n)
+        i = i + 1
+    }
+    let elapsed = core/time-now() - start
+    println("${label}: fib(${n}) x ${iters} = ${last}  (${elapsed} ns)")
+    elapsed
+}
+
+fn main() {
+    // Warmup — populates type feedback for fib's 4 arithmetic sites
+    // (n <= 1, n - 1, n - 2, +). All should record int+int.
+    let baseline = measure("baseline", 28, 5)
+
+    let n = runtime/specialize-all()
+    println("specialized ${n} functions")
+
+    let after = measure("after    ", 28, 5)
+
+    if baseline > 0 {
+        let pct = (baseline - after) * 100 / baseline
+        println("speedup: ${pct}%")
+    }
+}

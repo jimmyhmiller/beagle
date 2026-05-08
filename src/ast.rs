@@ -755,6 +755,38 @@ impl Ast {
         token_byte_spans: Vec<(usize, usize)>,
         definition_byte_ranges: HashMap<(usize, usize), (usize, usize)>,
     ) -> CompileResult {
+        self.compile_with_feedback(
+            compiler,
+            file_name,
+            token_line_column_map,
+            source_text,
+            token_byte_spans,
+            definition_byte_ranges,
+            Vec::new(),
+        )
+    }
+
+    /// Like `compile`, but seeds the AST→IR pass with prior feedback bits
+    /// in source order. Each arithmetic / comparison site consumes one
+    /// entry from `feedback_bits` as it's visited; if the entry indicates
+    /// a monomorphic numeric shape, the site is emitted with a specialized
+    /// `*_with_bail` IR builder instead of the polymorphic `*_any`. An
+    /// empty `feedback_bits` (the default for normal compiles) gives the
+    /// same behavior as `compile`.
+    ///
+    /// The visitation order must match between the original compile and
+    /// the specializing recompile — that's an invariant we rely on
+    /// (deterministic AST traversal).
+    pub fn compile_with_feedback(
+        &self,
+        compiler: &mut Compiler,
+        file_name: &str,
+        token_line_column_map: Vec<(usize, usize)>,
+        source_text: String,
+        token_byte_spans: Vec<(usize, usize)>,
+        definition_byte_ranges: HashMap<(usize, usize), (usize, usize)>,
+        feedback_bits: Vec<u64>,
+    ) -> CompileResult {
         let test_mode = compiler.command_line_arguments.test;
         let allocate_fn_pointer = compiler.allocate_fn_pointer()?;
         let mut ir = Ir::new(allocate_fn_pointer);
@@ -795,6 +827,8 @@ impl Ast {
             diagnostics: Vec::new(),
             test_mode,
             pending_arith_slots: vec![Vec::new()],
+            feedback_bits_input: feedback_bits,
+            feedback_bits_cursor: 0,
         };
 
         let ir = ast_compiler.compile()?;
@@ -983,6 +1017,13 @@ pub struct AstCompiler<'a> {
     /// entry and pops + binds it to the function's code address after
     /// `upsert_function` returns. See `Compiler::bind_arith_feedback`.
     pub pending_arith_slots: Vec<Vec<usize>>,
+    /// Prior feedback bits in source-visitation order, seeded by tier-up
+    /// when recompiling a function. Each arithmetic site consumes one
+    /// entry from the head of this list (advancing `feedback_bits_cursor`)
+    /// as it's visited and uses the bits to decide whether to emit a
+    /// specialized variant. Empty for first-time compiles.
+    pub feedback_bits_input: Vec<u64>,
+    pub feedback_bits_cursor: usize,
 }
 
 impl AstCompiler<'_> {
@@ -3338,27 +3379,57 @@ impl AstCompiler<'_> {
             Ast::Add { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
                 let fb = self.alloc_arith_feedback();
-                Ok(self.ir.add_any(left, right, fb))
+                let bits = self.next_feedback_bits();
+                let bail = self.specialize_int_int(bits, "add");
+                if bail != 0 {
+                    Ok(self.ir.add_int_with_bail(left, right, fb, bail))
+                } else {
+                    Ok(self.ir.add_any(left, right, fb))
+                }
             }
             Ast::Sub { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
                 let fb = self.alloc_arith_feedback();
-                Ok(self.ir.sub_any(left, right, fb))
+                let bits = self.next_feedback_bits();
+                let bail = self.specialize_int_int(bits, "sub");
+                if bail != 0 {
+                    Ok(self.ir.sub_int_with_bail(left, right, fb, bail))
+                } else {
+                    Ok(self.ir.sub_any(left, right, fb))
+                }
             }
             Ast::Mul { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
                 let fb = self.alloc_arith_feedback();
-                Ok(self.ir.mul_any(left, right, fb))
+                let bits = self.next_feedback_bits();
+                let bail = self.specialize_int_int(bits, "mul");
+                if bail != 0 {
+                    Ok(self.ir.mul_int_with_bail(left, right, fb, bail))
+                } else {
+                    Ok(self.ir.mul_any(left, right, fb))
+                }
             }
             Ast::Div { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
                 let fb = self.alloc_arith_feedback();
-                Ok(self.ir.div_any(left, right, fb))
+                let bits = self.next_feedback_bits();
+                let bail = self.specialize_int_int(bits, "div");
+                if bail != 0 {
+                    Ok(self.ir.div_int_with_bail(left, right, fb, bail))
+                } else {
+                    Ok(self.ir.div_any(left, right, fb))
+                }
             }
             Ast::Modulo { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
                 let fb = self.alloc_arith_feedback();
-                Ok(self.ir.modulo_any(left, right, fb))
+                let bits = self.next_feedback_bits();
+                let bail = self.specialize_int_int(bits, "modulo");
+                if bail != 0 {
+                    Ok(self.ir.modulo_int_with_bail(left, right, fb, bail))
+                } else {
+                    Ok(self.ir.modulo_any(left, right, fb))
+                }
             }
             Ast::ShiftLeft { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
@@ -3988,7 +4059,21 @@ impl AstCompiler<'_> {
                 self.not_tail_position();
                 let b = self.call_compile(&right)?;
                 let fb = self.alloc_arith_feedback();
-                Ok(self.ir.compare_any(a, b, operator, fb))
+                let bits = self.next_feedback_bits();
+                let bail_op = match operator {
+                    Condition::LessThan => "lt",
+                    Condition::LessThanOrEqual => "lte",
+                    Condition::GreaterThan => "gt",
+                    Condition::GreaterThanOrEqual => "gte",
+                    Condition::Equal => "eq",
+                    Condition::NotEqual => "ne",
+                };
+                let bail = self.specialize_int_int(bits, bail_op);
+                if bail != 0 {
+                    Ok(self.ir.compare_int_with_bail(a, b, operator, fb, bail))
+                } else {
+                    Ok(self.ir.compare_any(a, b, operator, fb))
+                }
             }
             Ast::String(str, _) => {
                 let constant_ptr = self.string_constant(str);
@@ -5033,6 +5118,44 @@ impl AstCompiler<'_> {
             }
         }
         slot
+    }
+
+    /// Consume the next feedback-bits entry seeded by tier-up, or 0 if no
+    /// feedback was provided. Drives per-site specialization decisions.
+    fn next_feedback_bits(&mut self) -> u64 {
+        let bits = self
+            .feedback_bits_input
+            .get(self.feedback_bits_cursor)
+            .copied()
+            .unwrap_or(0);
+        self.feedback_bits_cursor += 1;
+        bits
+    }
+
+    /// Resolve the jump-table address of a `beagle.bail/<op>` helper.
+    /// Returns 0 if the helper isn't registered (unexpected — the bail
+    /// namespace is part of the standard prelude). The caller falls back
+    /// to the polymorphic `*_any` lowering when this returns 0.
+    fn bail_jump_table_ptr(&mut self, op: &str) -> usize {
+        let name = format!("beagle.bail/{}", op);
+        let func = match self.compiler.find_function(&name) {
+            Some(f) => f,
+            None => return 0,
+        };
+        self.compiler.get_jump_table_pointer(func).unwrap_or(0)
+    }
+
+    /// If `bits` records a monomorphic int+int site, return the
+    /// bail-helper jump-table address for `bail_op` (so the caller can
+    /// emit the specialized `*_with_bail` variant). Otherwise return 0,
+    /// signalling "fall back to polymorphic lowering".
+    fn specialize_int_int(&mut self, bits: u64, bail_op: &str) -> usize {
+        match crate::feedback::classify_slot(bits) {
+            crate::feedback::SiteShape::Monomorphic(b) if b == crate::feedback::FB_INT_INT => {
+                self.bail_jump_table_ptr(bail_op)
+            }
+            _ => 0,
+        }
     }
 
     /// Compile two operands of a binary expression so heap values produced by

@@ -1,0 +1,33 @@
+namespace beagle.bail
+
+// Bail-out helpers for tier-2 specialized code.
+//
+// When a tier-2 (specialized) function is given an operand whose type
+// doesn't match the speculation it was compiled with — for example, an
+// `add_int_with_bail` site receiving a float — the inline guard fails
+// and control jumps here. Each helper performs the operation through
+// the normal polymorphic path, returning the correct result for any
+// operand types the runtime supports.
+//
+// These functions are themselves instrumented with type feedback (they
+// go through the same `math_any`/`compare_any` lowering as user code),
+// so calling them from a tier-2 site doesn't blind the system. Their
+// feedback ends up monomorphic-or-polymorphic depending on what
+// surprises tier-2 sites encounter — useful diagnostic when reasoning
+// about specialization choices.
+//
+// Kept deliberately minimal: one body, one operator. Inlining a more
+// complex slow path here doesn't help — the path is cold by definition.
+
+fn add(a, b) { a + b }
+fn sub(a, b) { a - b }
+fn mul(a, b) { a * b }
+fn div(a, b) { a / b }
+fn modulo(a, b) { a % b }
+
+fn lt(a, b)  { a < b }
+fn lte(a, b) { a <= b }
+fn gt(a, b)  { a > b }
+fn gte(a, b) { a >= b }
+fn eq(a, b)  { a == b }
+fn ne(a, b)  { a != b }

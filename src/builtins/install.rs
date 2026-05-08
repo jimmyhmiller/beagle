@@ -2341,6 +2341,14 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
+            "beagle.runtime/specialize-all",
+            runtime_specialize_all as *const u8,
+            true,
+            &[],
+            "Walk arithmetic-feedback and recompile every fully-monomorphic function with specialized variants. Returns the count of functions specialized.\n\nCall after a warmup phase to populate feedback, before the measured phase. Subsequent calls re-evaluate in case feedback evolved.",
+        )?;
+
+        self.add_builtin_with_doc(
             "beagle.reflect/apropos",
             reflect_apropos as *const u8,
             true,

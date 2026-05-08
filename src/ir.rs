@@ -885,6 +885,26 @@ impl Ir {
         )
     }
 
+    pub fn sub_int_with_bail<A, B>(
+        &mut self,
+        a: A,
+        b: B,
+        feedback_slot: usize,
+        bail_jump_table_ptr: usize,
+    ) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        self.math_any_int_with_bail(
+            a,
+            b,
+            Self::sub_int::<Value, Value>,
+            feedback_slot,
+            bail_jump_table_ptr,
+        )
+    }
+
     pub fn sub_int<A, B>(&mut self, a: A, b: B) -> Value
     where
         A: Into<Value>,
@@ -947,6 +967,70 @@ impl Ir {
         self.write_label(slow_path);
         let float_result = self.math_any_slow_path(a, b, &op_float, feedback_slot);
         self.assign(result_register, float_result);
+
+        self.write_label(after_op);
+        Value::Register(result_register)
+    }
+
+    /// Specialized arithmetic with a function-call bail-out.
+    ///
+    /// Used by tier-2 to replace the inline polymorphic slow path with a
+    /// call to a Beagle helper in `beagle.bail`. The fast path is
+    /// identical to `math_any`'s int branch (guard + integer op); on
+    /// guard miss we record `FB_OTHER` (to flag the speculation as
+    /// imperfect for any future re-tier-up decisions) and call the bail
+    /// helper through its jump-table slot, returning whatever the helper
+    /// returns.
+    ///
+    /// `bail_jump_table_ptr` is the address of the bail helper's
+    /// jump-table slot — get it from
+    /// `Compiler::get_jump_table_pointer("beagle.bail/<op>")`. The
+    /// function call follows the same protocol as a normal Beagle call
+    /// (loads the entry pointer through one indirection, sets arg_count,
+    /// invokes), so a future recompile of the bail helper itself is
+    /// picked up automatically by the next miss.
+    pub fn math_any_int_with_bail<A, B, F>(
+        &mut self,
+        a: A,
+        b: B,
+        op_int: F,
+        feedback_slot: usize,
+        bail_jump_table_ptr: usize,
+    ) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+        F: FnOnce(&mut Ir, Value, Value) -> Value,
+    {
+        let result_register = self.assign_new(Value::TaggedConstant(0));
+        let a: VirtualRegister = self.assign_new(a.into());
+        let b: VirtualRegister = self.assign_new(b.into());
+
+        let miss: Label = self.label("bail_miss");
+        let after_op = self.label("after_op");
+
+        // Fast path: both args must be tagged ints.
+        self.guard_int(a.into(), miss);
+        self.guard_int(b.into(), miss);
+        self.feedback_or(feedback_slot, crate::feedback::FB_INT_INT);
+
+        let result = op_int(self, a.into(), b.into());
+        self.assign(result_register, result);
+        self.jump(after_op);
+
+        // Slow path: call beagle.bail/<op>(a, b). Speculation missed —
+        // record FB_OTHER so a future tier-up pass can see this site has
+        // been wrong. We deliberately don't classify the operands' shape
+        // here (FB_INT_FLOAT etc.) — the bail helper itself is
+        // instrumented and its slot will record the actual shape.
+        self.write_label(miss);
+        self.feedback_or(feedback_slot, crate::feedback::FB_OTHER);
+
+        let table_ptr = self.assign_new(Value::Pointer(bail_jump_table_ptr));
+        let bail_fn_ptr = self.load_from_memory(table_ptr.into(), 0);
+        let bail_fn = self.function(bail_fn_ptr);
+        let call_result = self.call(bail_fn, vec![a.into(), b.into()]);
+        self.assign(result_register, call_result);
 
         self.write_label(after_op);
         Value::Register(result_register)
@@ -1087,6 +1171,28 @@ impl Ir {
         )
     }
 
+    /// Specialized `+` with a Beagle bail helper for the slow path. See
+    /// `math_any_int_with_bail`. Used by tier-2.
+    pub fn add_int_with_bail<A, B>(
+        &mut self,
+        a: A,
+        b: B,
+        feedback_slot: usize,
+        bail_jump_table_ptr: usize,
+    ) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        self.math_any_int_with_bail(
+            a,
+            b,
+            Self::add_int::<Value, Value>,
+            feedback_slot,
+            bail_jump_table_ptr,
+        )
+    }
+
     pub fn add_int<A, B>(&mut self, a: A, b: B) -> Value
     where
         A: Into<Value>,
@@ -1131,6 +1237,20 @@ impl Ir {
         self.math_any(a, b, Self::mul, Self::mul_float, feedback_slot)
     }
 
+    pub fn mul_int_with_bail<A, B>(
+        &mut self,
+        a: A,
+        b: B,
+        feedback_slot: usize,
+        bail_jump_table_ptr: usize,
+    ) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        self.math_any_int_with_bail(a, b, Self::mul, feedback_slot, bail_jump_table_ptr)
+    }
+
     pub fn div<A, B>(&mut self, a: A, b: B) -> Value
     where
         A: Into<Value>,
@@ -1162,6 +1282,20 @@ impl Ir {
         self.math_any(a, b, Self::div, Self::div_float, feedback_slot)
     }
 
+    pub fn div_int_with_bail<A, B>(
+        &mut self,
+        a: A,
+        b: B,
+        feedback_slot: usize,
+        bail_jump_table_ptr: usize,
+    ) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        self.math_any_int_with_bail(a, b, Self::div, feedback_slot, bail_jump_table_ptr)
+    }
+
     pub fn modulo<A, B>(&mut self, a: A, b: B) -> Value
     where
         A: Into<Value>,
@@ -1191,6 +1325,20 @@ impl Ir {
         B: Into<Value>,
     {
         self.math_any(a, b, Self::modulo, Self::modulo_float, feedback_slot)
+    }
+
+    pub fn modulo_int_with_bail<A, B>(
+        &mut self,
+        a: A,
+        b: B,
+        feedback_slot: usize,
+        bail_jump_table_ptr: usize,
+    ) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        self.math_any_int_with_bail(a, b, Self::modulo, feedback_slot, bail_jump_table_ptr)
     }
 
     pub fn compare(&mut self, a: Value, b: Value, condition: Condition) -> Value {
@@ -1374,6 +1522,59 @@ impl Ir {
             self.write_label(cmp_type_error);
             self.emit_type_error_with_resume(result_register, after_compare);
         }
+
+        self.write_label(after_compare);
+        Value::Register(result_register)
+    }
+
+    /// Specialized comparison with a Beagle bail helper for the slow path.
+    /// Used by tier-2 to replace `compare_any`'s inline float/non-numeric
+    /// path with a call into `beagle.bail/<lt|lte|gt|gte|eq|ne>`. Same
+    /// fast path as `compare_any`'s int branch.
+    pub fn compare_int_with_bail(
+        &mut self,
+        a: Value,
+        b: Value,
+        condition: Condition,
+        feedback_slot: usize,
+        bail_jump_table_ptr: usize,
+    ) -> Value {
+        let result_register = self.assign_new(Value::TaggedConstant(0));
+        let a: VirtualRegister = self.assign_new(a);
+        let b: VirtualRegister = self.assign_new(b);
+        let miss: Label = self.label("cmp_bail_miss");
+        let after_compare = self.label("cmp_bail_after");
+
+        // Fast path: both args int, do tagged-int compare directly.
+        self.guard_int(a.into(), miss);
+        self.guard_int(b.into(), miss);
+        self.feedback_or(feedback_slot, crate::feedback::FB_INT_INT);
+        {
+            let tag = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
+            let dest = self.volatile_register();
+            self.instructions.push(Instruction::Compare(
+                dest.into(),
+                a.into(),
+                b.into(),
+                condition,
+            ));
+            self.instructions
+                .push(Instruction::Tag(dest.into(), dest.into(), tag.into()));
+            self.assign(result_register, dest);
+            self.jump(after_compare);
+        }
+
+        // Slow path: speculation missed. Record FB_OTHER, hand off to the
+        // bail helper, return whatever it returns (already a tagged Bool
+        // because the helpers are written in Beagle and `< > == ...`
+        // produce tagged Bools).
+        self.write_label(miss);
+        self.feedback_or(feedback_slot, crate::feedback::FB_OTHER);
+        let table_ptr = self.assign_new(Value::Pointer(bail_jump_table_ptr));
+        let bail_fn_ptr = self.load_from_memory(table_ptr.into(), 0);
+        let bail_fn = self.function(bail_fn_ptr);
+        let call_result = self.call(bail_fn, vec![a.into(), b.into()]);
+        self.assign(result_register, call_result);
 
         self.write_label(after_compare);
         Value::Register(result_register)

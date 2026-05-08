@@ -628,6 +628,26 @@ pub extern "C" fn reflect_namespace_members(
     build_string_vec(runtime, stack_pointer, &local_names)
 }
 
+/// runtime/specialize-all() - Walk the arithmetic-feedback cache and
+/// recompile every fully-monomorphic function with `*_with_bail`
+/// specialization, atomically swapping each function's jump-table slot
+/// to the new version. Returns the number of functions specialized.
+///
+/// Intended call shape from a benchmark:
+///
+///     fn main() {
+///         warm_up()                         // populates feedback
+///         let n = runtime/specialize-all()
+///         println("specialized:", n)
+///         measure()                         // hits specialized code
+///     }
+pub extern "C" fn runtime_specialize_all(stack_pointer: usize, frame_pointer: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let count = runtime.specialize_all();
+    BuiltInTypes::construct_int(count as isize) as usize
+}
+
 /// reflect/all-namespaces() - List all namespace names
 pub extern "C" fn reflect_all_namespaces(stack_pointer: usize, frame_pointer: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
