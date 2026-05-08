@@ -53,6 +53,16 @@ pub enum StringInterpolationPart {
     Expression(Box<Ast>),
 }
 
+/// Tier-2 emit choice for a single arithmetic / comparison site,
+/// derived from prior feedback bits. `usize` is the jump-table address
+/// of the corresponding `beagle.bail/<op>` helper.
+#[derive(Debug, Clone, Copy)]
+enum Specialization {
+    None,
+    IntInt(usize),
+    FloatFloat(usize),
+}
+
 /// Check if a variable name is referenced anywhere in an AST slice.
 /// Used to determine if the `resume` binding in `catch(e, resume)` is actually used.
 fn references_variable(body: &[Ast], name: &str) -> bool {
@@ -3380,56 +3390,61 @@ impl AstCompiler<'_> {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
                 let fb = self.alloc_arith_feedback();
                 let bits = self.next_feedback_bits();
-                let bail = self.specialize_int_int(bits, "add");
-                if bail != 0 {
-                    Ok(self.ir.add_int_with_bail(left, right, fb, bail))
-                } else {
-                    Ok(self.ir.add_any(left, right, fb))
-                }
+                Ok(match self.pick_specialization(bits, "add") {
+                    Specialization::IntInt(p) => self.ir.add_int_with_bail(left, right, fb, p),
+                    Specialization::FloatFloat(p) => {
+                        self.ir.add_float_with_bail(left, right, fb, p)
+                    }
+                    Specialization::None => self.ir.add_any(left, right, fb),
+                })
             }
             Ast::Sub { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
                 let fb = self.alloc_arith_feedback();
                 let bits = self.next_feedback_bits();
-                let bail = self.specialize_int_int(bits, "sub");
-                if bail != 0 {
-                    Ok(self.ir.sub_int_with_bail(left, right, fb, bail))
-                } else {
-                    Ok(self.ir.sub_any(left, right, fb))
-                }
+                Ok(match self.pick_specialization(bits, "sub") {
+                    Specialization::IntInt(p) => self.ir.sub_int_with_bail(left, right, fb, p),
+                    Specialization::FloatFloat(p) => {
+                        self.ir.sub_float_with_bail(left, right, fb, p)
+                    }
+                    Specialization::None => self.ir.sub_any(left, right, fb),
+                })
             }
             Ast::Mul { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
                 let fb = self.alloc_arith_feedback();
                 let bits = self.next_feedback_bits();
-                let bail = self.specialize_int_int(bits, "mul");
-                if bail != 0 {
-                    Ok(self.ir.mul_int_with_bail(left, right, fb, bail))
-                } else {
-                    Ok(self.ir.mul_any(left, right, fb))
-                }
+                Ok(match self.pick_specialization(bits, "mul") {
+                    Specialization::IntInt(p) => self.ir.mul_int_with_bail(left, right, fb, p),
+                    Specialization::FloatFloat(p) => {
+                        self.ir.mul_float_with_bail(left, right, fb, p)
+                    }
+                    Specialization::None => self.ir.mul_any(left, right, fb),
+                })
             }
             Ast::Div { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
                 let fb = self.alloc_arith_feedback();
                 let bits = self.next_feedback_bits();
-                let bail = self.specialize_int_int(bits, "div");
-                if bail != 0 {
-                    Ok(self.ir.div_int_with_bail(left, right, fb, bail))
-                } else {
-                    Ok(self.ir.div_any(left, right, fb))
-                }
+                Ok(match self.pick_specialization(bits, "div") {
+                    Specialization::IntInt(p) => self.ir.div_int_with_bail(left, right, fb, p),
+                    Specialization::FloatFloat(p) => {
+                        self.ir.div_float_with_bail(left, right, fb, p)
+                    }
+                    Specialization::None => self.ir.div_any(left, right, fb),
+                })
             }
             Ast::Modulo { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
                 let fb = self.alloc_arith_feedback();
                 let bits = self.next_feedback_bits();
-                let bail = self.specialize_int_int(bits, "modulo");
-                if bail != 0 {
-                    Ok(self.ir.modulo_int_with_bail(left, right, fb, bail))
-                } else {
-                    Ok(self.ir.modulo_any(left, right, fb))
-                }
+                Ok(match self.pick_specialization(bits, "modulo") {
+                    Specialization::IntInt(p) => self.ir.modulo_int_with_bail(left, right, fb, p),
+                    Specialization::FloatFloat(p) => {
+                        self.ir.modulo_float_with_bail(left, right, fb, p)
+                    }
+                    Specialization::None => self.ir.modulo_any(left, right, fb),
+                })
             }
             Ast::ShiftLeft { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
@@ -4068,12 +4083,15 @@ impl AstCompiler<'_> {
                     Condition::Equal => "eq",
                     Condition::NotEqual => "ne",
                 };
-                let bail = self.specialize_int_int(bits, bail_op);
-                if bail != 0 {
-                    Ok(self.ir.compare_int_with_bail(a, b, operator, fb, bail))
-                } else {
-                    Ok(self.ir.compare_any(a, b, operator, fb))
-                }
+                Ok(match self.pick_specialization(bits, bail_op) {
+                    Specialization::IntInt(p) => {
+                        self.ir.compare_int_with_bail(a, b, operator, fb, p)
+                    }
+                    Specialization::FloatFloat(p) => {
+                        self.ir.compare_float_with_bail(a, b, operator, fb, p)
+                    }
+                    Specialization::None => self.ir.compare_any(a, b, operator, fb),
+                })
             }
             Ast::String(str, _) => {
                 let constant_ptr = self.string_constant(str);
@@ -5145,16 +5163,28 @@ impl AstCompiler<'_> {
         self.compiler.get_jump_table_pointer(func).unwrap_or(0)
     }
 
-    /// If `bits` records a monomorphic int+int site, return the
-    /// bail-helper jump-table address for `bail_op` (so the caller can
-    /// emit the specialized `*_with_bail` variant). Otherwise return 0,
-    /// signalling "fall back to polymorphic lowering".
-    fn specialize_int_int(&mut self, bits: u64, bail_op: &str) -> usize {
+    /// Decide how to emit an arithmetic / comparison site given prior
+    /// feedback bits. `bail_op` is the operator's `beagle.bail/...`
+    /// helper name, used to look up the slow-path call target.
+    fn pick_specialization(&mut self, bits: u64, bail_op: &str) -> Specialization {
         match crate::feedback::classify_slot(bits) {
             crate::feedback::SiteShape::Monomorphic(b) if b == crate::feedback::FB_INT_INT => {
-                self.bail_jump_table_ptr(bail_op)
+                let p = self.bail_jump_table_ptr(bail_op);
+                if p != 0 {
+                    Specialization::IntInt(p)
+                } else {
+                    Specialization::None
+                }
             }
-            _ => 0,
+            crate::feedback::SiteShape::Monomorphic(b) if b == crate::feedback::FB_FLOAT_FLOAT => {
+                let p = self.bail_jump_table_ptr(bail_op);
+                if p != 0 {
+                    Specialization::FloatFloat(p)
+                } else {
+                    Specialization::None
+                }
+            }
+            _ => Specialization::None,
         }
     }
 

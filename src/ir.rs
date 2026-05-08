@@ -905,6 +905,20 @@ impl Ir {
         )
     }
 
+    pub fn sub_float_with_bail<A, B>(
+        &mut self,
+        a: A,
+        b: B,
+        feedback_slot: usize,
+        bail_jump_table_ptr: usize,
+    ) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        self.math_any_float_with_bail(a, b, Self::sub_float, feedback_slot, bail_jump_table_ptr)
+    }
+
     pub fn sub_int<A, B>(&mut self, a: A, b: B) -> Value
     where
         A: Into<Value>,
@@ -1026,6 +1040,72 @@ impl Ir {
         self.write_label(miss);
         self.feedback_or(feedback_slot, crate::feedback::FB_OTHER);
 
+        let table_ptr = self.assign_new(Value::Pointer(bail_jump_table_ptr));
+        let bail_fn_ptr = self.load_from_memory(table_ptr.into(), 0);
+        let bail_fn = self.function(bail_fn_ptr);
+        let call_result = self.call(bail_fn, vec![a.into(), b.into()]);
+        self.assign(result_register, call_result);
+
+        self.write_label(after_op);
+        Value::Register(result_register)
+    }
+
+    /// Specialized float+float arithmetic with a function-call bail-out.
+    ///
+    /// Mirror of `math_any_int_with_bail` for sites whose feedback says
+    /// monomorphic float+float. Fast path is the same float-boxing
+    /// sequence used by `math_any_slow_path`'s `both_floats` arm. Slow
+    /// path on miss (one operand isn't a tagged float) records FB_OTHER
+    /// and calls `beagle.bail/<op>`, which goes through the polymorphic
+    /// path.
+    pub fn math_any_float_with_bail<A, B, G>(
+        &mut self,
+        a: A,
+        b: B,
+        op_float: G,
+        feedback_slot: usize,
+        bail_jump_table_ptr: usize,
+    ) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+        G: Fn(&mut Ir, Value, Value) -> Value,
+    {
+        let result_register = self.assign_new(Value::TaggedConstant(0));
+        let a: VirtualRegister = self.assign_new(a.into());
+        let b: VirtualRegister = self.assign_new(b.into());
+
+        let miss: Label = self.label("float_bail_miss");
+        let after_op = self.label("float_bail_after");
+
+        // Fast path: both args must be tagged floats. Allocation comes
+        // BEFORE the f64 math so no raw f64 value is live in a GPR
+        // across the GC safepoint inside `allocate_static`.
+        self.guard_float(a.into(), miss);
+        self.guard_float(b.into(), miss);
+        self.feedback_or(feedback_slot, crate::feedback::FB_FLOAT_FLOAT);
+
+        let float_pointer = self.allocate_static(1);
+        let float_pointer_untagged = self.untag(float_pointer);
+        self.write_small_object_header(float_pointer_untagged);
+        let a_untagged = self.untag(a.into());
+        let b_untagged = self.untag(b.into());
+        let a_val = self.load_from_heap(a_untagged, 1);
+        let b_val = self.load_from_heap(b_untagged, 1);
+        let a_float = self.fmov_general_to_float(a_val);
+        let b_float = self.fmov_general_to_float(b_val);
+        let float_result = op_float(self, a_float, b_float);
+        let float_result_general = self.fmov_float_to_general(float_result);
+        self.heap_store_offset(float_pointer_untagged, float_result_general, 1);
+        let tagged = self.tag(float_pointer_untagged, BuiltInTypes::Float.get_tag());
+        self.assign(result_register, tagged);
+        self.jump(after_op);
+
+        // Slow path: one operand wasn't a float. Record FB_OTHER and
+        // call the bail helper, which handles int+float / float+int /
+        // type-error in its body via the normal polymorphic path.
+        self.write_label(miss);
+        self.feedback_or(feedback_slot, crate::feedback::FB_OTHER);
         let table_ptr = self.assign_new(Value::Pointer(bail_jump_table_ptr));
         let bail_fn_ptr = self.load_from_memory(table_ptr.into(), 0);
         let bail_fn = self.function(bail_fn_ptr);
@@ -1193,6 +1273,20 @@ impl Ir {
         )
     }
 
+    pub fn add_float_with_bail<A, B>(
+        &mut self,
+        a: A,
+        b: B,
+        feedback_slot: usize,
+        bail_jump_table_ptr: usize,
+    ) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        self.math_any_float_with_bail(a, b, Self::add_float, feedback_slot, bail_jump_table_ptr)
+    }
+
     pub fn add_int<A, B>(&mut self, a: A, b: B) -> Value
     where
         A: Into<Value>,
@@ -1251,6 +1345,20 @@ impl Ir {
         self.math_any_int_with_bail(a, b, Self::mul, feedback_slot, bail_jump_table_ptr)
     }
 
+    pub fn mul_float_with_bail<A, B>(
+        &mut self,
+        a: A,
+        b: B,
+        feedback_slot: usize,
+        bail_jump_table_ptr: usize,
+    ) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        self.math_any_float_with_bail(a, b, Self::mul_float, feedback_slot, bail_jump_table_ptr)
+    }
+
     pub fn div<A, B>(&mut self, a: A, b: B) -> Value
     where
         A: Into<Value>,
@@ -1296,6 +1404,20 @@ impl Ir {
         self.math_any_int_with_bail(a, b, Self::div, feedback_slot, bail_jump_table_ptr)
     }
 
+    pub fn div_float_with_bail<A, B>(
+        &mut self,
+        a: A,
+        b: B,
+        feedback_slot: usize,
+        bail_jump_table_ptr: usize,
+    ) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        self.math_any_float_with_bail(a, b, Self::div_float, feedback_slot, bail_jump_table_ptr)
+    }
+
     pub fn modulo<A, B>(&mut self, a: A, b: B) -> Value
     where
         A: Into<Value>,
@@ -1339,6 +1461,20 @@ impl Ir {
         B: Into<Value>,
     {
         self.math_any_int_with_bail(a, b, Self::modulo, feedback_slot, bail_jump_table_ptr)
+    }
+
+    pub fn modulo_float_with_bail<A, B>(
+        &mut self,
+        a: A,
+        b: B,
+        feedback_slot: usize,
+        bail_jump_table_ptr: usize,
+    ) -> Value
+    where
+        A: Into<Value>,
+        B: Into<Value>,
+    {
+        self.math_any_float_with_bail(a, b, Self::modulo_float, feedback_slot, bail_jump_table_ptr)
     }
 
     pub fn compare(&mut self, a: Value, b: Value, condition: Condition) -> Value {
@@ -1522,6 +1658,59 @@ impl Ir {
             self.write_label(cmp_type_error);
             self.emit_type_error_with_resume(result_register, after_compare);
         }
+
+        self.write_label(after_compare);
+        Value::Register(result_register)
+    }
+
+    /// Float-specialized variant of `compare_int_with_bail`. Both args
+    /// must be tagged floats; the comparison is done in fp registers.
+    /// Slow path = bail call.
+    pub fn compare_float_with_bail(
+        &mut self,
+        a: Value,
+        b: Value,
+        condition: Condition,
+        feedback_slot: usize,
+        bail_jump_table_ptr: usize,
+    ) -> Value {
+        let result_register = self.assign_new(Value::TaggedConstant(0));
+        let a: VirtualRegister = self.assign_new(a);
+        let b: VirtualRegister = self.assign_new(b);
+        let miss: Label = self.label("cmp_float_bail_miss");
+        let after_compare = self.label("cmp_float_bail_after");
+
+        self.guard_float(a.into(), miss);
+        self.guard_float(b.into(), miss);
+        self.feedback_or(feedback_slot, crate::feedback::FB_FLOAT_FLOAT);
+        {
+            let a_untagged = self.untag(a.into());
+            let b_untagged = self.untag(b.into());
+            let a_raw = self.load_from_heap(a_untagged, 1);
+            let b_raw = self.load_from_heap(b_untagged, 1);
+            let a_float = self.fmov_general_to_float(a_raw);
+            let b_float = self.fmov_general_to_float(b_raw);
+            let tag = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
+            let dest = self.volatile_register();
+            self.instructions.push(Instruction::CompareFloat(
+                dest.into(),
+                a_float,
+                b_float,
+                condition,
+            ));
+            self.instructions
+                .push(Instruction::Tag(dest.into(), dest.into(), tag.into()));
+            self.assign(result_register, dest);
+            self.jump(after_compare);
+        }
+
+        self.write_label(miss);
+        self.feedback_or(feedback_slot, crate::feedback::FB_OTHER);
+        let table_ptr = self.assign_new(Value::Pointer(bail_jump_table_ptr));
+        let bail_fn_ptr = self.load_from_memory(table_ptr.into(), 0);
+        let bail_fn = self.function(bail_fn_ptr);
+        let call_result = self.call(bail_fn, vec![a.into(), b.into()]);
+        self.assign(result_register, call_result);
 
         self.write_label(after_compare);
         Value::Register(result_register)
