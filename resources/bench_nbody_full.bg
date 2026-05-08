@@ -1,0 +1,138 @@
+namespace bench_nbody_full
+
+use beagle.mutable-array as arr
+use beagle.core as core
+use beagle.runtime as runtime
+
+let PI = 3.141592653589793
+let SOLAR_MASS = 39.47841760435743
+let DAYS_PER_YEAR = 365.24
+
+struct Body {
+    mut x
+    mut y
+    mut z
+    mut vx
+    mut vy
+    mut vz
+    mass
+}
+
+fn jupiter() {
+    Body {
+        x: 4.84143144246472090,
+        y: -1.16032004402742839,
+        z: -0.103622044471123109,
+        vx: 0.00166007664274403694 * DAYS_PER_YEAR,
+        vy: 0.00769901118419740425 * DAYS_PER_YEAR,
+        vz: -0.0000690460016972063023 * DAYS_PER_YEAR,
+        mass: 0.000954791938424326609 * SOLAR_MASS,
+    }
+}
+
+fn saturn() {
+    Body {
+        x: 8.34336671824457987,
+        y: 4.12479856412430479,
+        z: -0.403523417114321381,
+        vx: -0.00276742510726862411 * DAYS_PER_YEAR,
+        vy: 0.00499852801234917238 * DAYS_PER_YEAR,
+        vz: 0.0000230417297573763929 * DAYS_PER_YEAR,
+        mass: 0.000285885980666130812 * SOLAR_MASS,
+    }
+}
+
+fn uranus() {
+    Body {
+        x: 12.894369562139131,
+        y: -15.111151401698631,
+        z: -0.22330757889265845,
+        vx: 0.0029641390130474417 * DAYS_PER_YEAR,
+        vy: 0.0023784607500332997 * DAYS_PER_YEAR,
+        vz: -0.000029658956854525742 * DAYS_PER_YEAR,
+        mass: 0.000043624048649355925 * SOLAR_MASS,
+    }
+}
+
+fn neptune() {
+    Body {
+        x: 15.379697114850917,
+        y: -25.919314609987964,
+        z: 0.17925877295037118,
+        vx: 0.0026806777249038932 * DAYS_PER_YEAR,
+        vy: 0.0016282417242097057 * DAYS_PER_YEAR,
+        vz: -0.00009515922545197645 * DAYS_PER_YEAR,
+        mass: 0.00005151389020466114 * SOLAR_MASS,
+    }
+}
+
+fn sun() {
+    Body { x: 0.0, y: 0.0, z: 0.0, vx: 0.0, vy: 0.0, vz: 0.0, mass: SOLAR_MASS }
+}
+
+fn make_bodies() {
+    let bodies = arr/new-array(5)
+    arr/write-field(bodies, 0, sun())
+    arr/write-field(bodies, 1, jupiter())
+    arr/write-field(bodies, 2, saturn())
+    arr/write-field(bodies, 3, uranus())
+    arr/write-field(bodies, 4, neptune())
+    bodies
+}
+
+fn advance(bodies, dt, n) {
+    let count = arr/count(bodies)
+    let mut step = 0
+    while step < n {
+        let mut i = 0
+        while i < count {
+            let bi = arr/get(bodies, i)
+            let mut j = i + 1
+            while j < count {
+                let bj = arr/get(bodies, j)
+                let dx = bi.x - bj.x
+                let dy = bi.y - bj.y
+                let dz = bi.z - bj.z
+                let d2 = dx*dx + dy*dy + dz*dz
+                let mag = dt / (d2 * core/sqrt(d2))
+                bi.vx = bi.vx - dx * bj.mass * mag
+                bi.vy = bi.vy - dy * bj.mass * mag
+                bi.vz = bi.vz - dz * bj.mass * mag
+                bj.vx = bj.vx + dx * bi.mass * mag
+                bj.vy = bj.vy + dy * bi.mass * mag
+                bj.vz = bj.vz + dz * bi.mass * mag
+                j = j + 1
+            }
+            i = i + 1
+        }
+        let mut k = 0
+        while k < count {
+            let b = arr/get(bodies, k)
+            b.x = b.x + dt * b.vx
+            b.y = b.y + dt * b.vy
+            b.z = b.z + dt * b.vz
+            k = k + 1
+        }
+        step = step + 1
+    }
+}
+
+fn measure(label, iters) {
+    let bodies = make_bodies()
+    let start = core/time-now()
+    advance(bodies, 0.01, iters)
+    let elapsed = core/time-now() - start
+    println("${label}: advance x ${iters}  (${elapsed} ns)")
+    elapsed
+}
+
+fn main() {
+    let baseline = measure("baseline", 5000)
+    let n = runtime/specialize-all()
+    println("specialized ${n} functions")
+    let after = measure("after   ", 5000)
+    if baseline > 0 {
+        let pct = (baseline - after) * 100 / baseline
+        println("speedup: ${pct}%")
+    }
+}
