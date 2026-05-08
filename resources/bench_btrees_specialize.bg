@@ -1,0 +1,50 @@
+namespace bench_btrees_specialize
+
+use beagle.core as core
+use beagle.runtime as runtime
+
+struct TreeNode {
+    left
+    right
+}
+
+fn build(depth) {
+    if depth > 0 {
+        TreeNode { left: build(depth - 1), right: build(depth - 1) }
+    } else {
+        TreeNode { left: null, right: null }
+    }
+}
+
+fn check(node) {
+    if node.left == null {
+        1
+    } else {
+        1 + check(node.left) + check(node.right)
+    }
+}
+
+fn measure(label, depth, iters) {
+    let tree = build(depth)
+    let start = core/time-now()
+    let mut i = 0
+    let mut sum = 0
+    while i < iters {
+        sum = sum + check(tree)
+        i = i + 1
+    }
+    let elapsed = core/time-now() - start
+    println("${label}: check(depth=${depth}) x ${iters}, sum=${sum}  (${elapsed} ns)")
+    elapsed
+}
+
+fn main() {
+    let baseline = measure("baseline", 14, 5)
+    let n = runtime/specialize-all()
+    println("specialized ${n} functions")
+    let after = measure("after   ", 14, 5)
+    if baseline > 0 {
+        let pct = (baseline - after) * 100 / baseline
+        println("speedup: ${pct}%")
+    }
+}

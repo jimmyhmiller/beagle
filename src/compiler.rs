@@ -347,6 +347,17 @@ pub struct Compiler {
     pub command_line_arguments: CommandLineArguments,
     pub pause_atom_ptr: Option<usize>,
     pub property_look_up_cache_offset: usize,
+    /// Code-entry address of the function owning each property-cache
+    /// entry, parallel to allocation order. 0 = pending (set later by
+    /// `bind_property_cache` after `upsert_function` returns the
+    /// function pointer). Used by tier-up to read a function's
+    /// observed struct shapes and bake them into the recompile.
+    pub property_cache_owners: Vec<usize>,
+    /// Reverse index: code address → property-cache entry addresses
+    /// (in source order). Each entry is the start address of the
+    /// 24-byte slot whose layout is documented on
+    /// `add_property_lookup`.
+    pub property_cache_by_address: HashMap<usize, Vec<usize>>,
     pub compiled_file_cache: HashSet<String>,
     pub diagnostic_store: Arc<Mutex<DiagnosticStore>>,
     /// Cache for protocol dispatch inline caching
@@ -605,7 +616,8 @@ impl Compiler {
             .unwrap_or_else(|| "<specialized>".to_string());
         let current_address: usize = function.pointer.into();
         let feedback_bits = self.arith_feedback_for_address(current_address);
-        if feedback_bits.is_empty() {
+        let property_feedback = self.property_cache_for_address(current_address);
+        if feedback_bits.is_empty() && property_feedback.is_empty() {
             // No instrumented sites for the current compile — nothing to
             // specialize on.
             return Ok(false);
@@ -650,6 +662,7 @@ impl Compiler {
             token_byte_spans,
             definition_byte_ranges,
             feedback_bits,
+            property_feedback,
         );
 
         if let Some(saved_id) = saved_namespace_id {
@@ -973,12 +986,17 @@ impl Compiler {
             token_byte_spans,
             definition_byte_ranges,
             Vec::new(),
+            Vec::new(),
         )
     }
 
     /// Like `compile_ast`, but threads `feedback_bits` (in source-visit
     /// order) into the AST→IR pass so monomorphic arithmetic sites get
-    /// emitted with `*_with_bail` specialization. Used by tier-up.
+    /// emitted with `*_with_bail` specialization. `property_feedback`
+    /// plays the analogous role for `Ast::PropertyAccess`: each entry
+    /// is the prior `(struct_id_versioned, field_offset_bytes,
+    /// is_mutable)` triple from the IC slot, in source order. Used by
+    /// tier-up.
     pub fn compile_ast_with_feedback(
         &mut self,
         ast: crate::ast::Ast,
@@ -989,16 +1007,19 @@ impl Compiler {
         token_byte_spans: Vec<(usize, usize)>,
         definition_byte_ranges: HashMap<(usize, usize), (usize, usize)>,
         feedback_bits: Vec<u64>,
+        property_feedback: Vec<(u64, u64, u64)>,
     ) -> Result<(Option<String>, Vec<Diagnostic>), Box<dyn Error>> {
-        let (mut ir, token_map, diagnostics, top_level_arith_slots) = ast.compile_with_feedback(
-            self,
-            file_name,
-            token_line_column_map,
-            source_text,
-            token_byte_spans,
-            definition_byte_ranges,
-            feedback_bits,
-        )?;
+        let (mut ir, token_map, diagnostics, top_level_arith_slots, top_level_property_slots) = ast
+            .compile_with_feedback(
+                self,
+                file_name,
+                token_line_column_map,
+                source_text,
+                token_byte_spans,
+                definition_byte_ranges,
+                feedback_bits,
+                property_feedback,
+            )?;
         let top_level_name =
             fn_name.unwrap_or_else(|| format!("{}/__top_level", self.current_namespace_name()));
         if ast.has_top_level() {
@@ -1038,6 +1059,7 @@ impl Compiler {
             // address now that we have it. Nested fn bodies were bound
             // during AST compilation.
             self.bind_arith_feedback(&top_level_arith_slots, _function_pointer);
+            self.bind_property_cache(&top_level_property_slots, _function_pointer);
             debug_only! {
                 debugger(Message {
                     kind: "ir".to_string(),
@@ -1106,6 +1128,9 @@ impl Compiler {
             *cache_ptr = usize::MAX;
         }
         self.property_look_up_cache_offset += 3 * 8;
+        // Owner address is unknown at allocation time; tier-up binds it
+        // when `upsert_function` returns, via `bind_property_cache`.
+        self.property_cache_owners.push(0);
         Ok(location)
     }
 
@@ -1212,6 +1237,48 @@ impl Compiler {
                 slots
                     .iter()
                     .map(|&addr| unsafe { *(addr as *const u64) })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Stamp `code_address` onto every property-cache entry in `slots`,
+    /// and add them to the per-address index. Mirrors
+    /// `bind_arith_feedback`. Called by AST-side bookkeeping after
+    /// `upsert_function` returns.
+    pub fn bind_property_cache(&mut self, slots: &[usize], code_address: usize) {
+        if code_address == 0 || slots.is_empty() {
+            return;
+        }
+        let base = self.property_look_up_cache.as_ptr() as usize;
+        for &slot_addr in slots {
+            let index = (slot_addr - base) / (3 * 8);
+            if let Some(owner) = self.property_cache_owners.get_mut(index) {
+                if *owner == 0 {
+                    *owner = code_address;
+                }
+            }
+        }
+        self.property_cache_by_address
+            .entry(code_address)
+            .or_default()
+            .extend_from_slice(slots);
+    }
+
+    /// Snapshot every property-cache entry owned by the function compiled
+    /// at `code_address`. Returns `(struct_id_versioned, field_offset_bytes,
+    /// is_mutable)` triples in source order. Sentinel entries (where the
+    /// site never executed) appear with `struct_id_versioned == usize::MAX`.
+    pub fn property_cache_for_address(&self, code_address: usize) -> Vec<(u64, u64, u64)> {
+        self.property_cache_by_address
+            .get(&code_address)
+            .map(|slots| {
+                slots
+                    .iter()
+                    .map(|&addr| unsafe {
+                        let p = addr as *const u64;
+                        (*p, *p.add(1), *p.add(2))
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -2096,6 +2163,8 @@ impl CompilerThread {
                         CompileError::MemoryMapping(format!("Failed to make mmap mutable: {}", e))
                     })?,
                 property_look_up_cache_offset: 0,
+                property_cache_owners: Vec::new(),
+                property_cache_by_address: HashMap::new(),
                 protocol_dispatch_cache: MmapOptions::new(MmapOptions::page_size())
                     .map_err(|e| {
                         CompileError::MemoryMapping(format!("Failed to create mmap: {}", e))

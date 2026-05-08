@@ -18,16 +18,18 @@ use crate::{
 type TokenPosition = usize;
 
 /// Type alias for the complex compile result to avoid clippy::type_complexity warning.
-/// The fourth element is the list of arithmetic-feedback slot addresses
-/// allocated for the synthetic top-level body of this AST; the caller is
-/// responsible for binding them to the top-level function's code address
-/// after `upsert_function` returns. Slots inside named `fn` bodies are
+/// The fourth and fifth elements are the lists of arithmetic-feedback
+/// and property-cache slot addresses allocated for the synthetic
+/// top-level body of this AST; the caller is responsible for binding
+/// them to the top-level function's code address after
+/// `upsert_function` returns. Slots inside named `fn` bodies are
 /// already bound during AST compilation.
 type CompileResult = Result<
     (
         Ir,
         Vec<(TokenRange, IRRange)>,
         Vec<crate::compiler::Diagnostic>,
+        Vec<usize>,
         Vec<usize>,
     ),
     CompileError,
@@ -773,6 +775,7 @@ impl Ast {
             token_byte_spans,
             definition_byte_ranges,
             Vec::new(),
+            Vec::new(),
         )
     }
 
@@ -796,6 +799,7 @@ impl Ast {
         token_byte_spans: Vec<(usize, usize)>,
         definition_byte_ranges: HashMap<(usize, usize), (usize, usize)>,
         feedback_bits: Vec<u64>,
+        property_feedback: Vec<(u64, u64, u64)>,
     ) -> CompileResult {
         let test_mode = compiler.command_line_arguments.test;
         let allocate_fn_pointer = compiler.allocate_fn_pointer()?;
@@ -837,8 +841,11 @@ impl Ast {
             diagnostics: Vec::new(),
             test_mode,
             pending_arith_slots: vec![Vec::new()],
+            pending_property_slots: vec![Vec::new()],
             feedback_bits_input: feedback_bits,
             feedback_bits_cursor: 0,
+            property_feedback_input: property_feedback,
+            property_feedback_cursor: 0,
         };
 
         let ir = ast_compiler.compile()?;
@@ -846,8 +853,12 @@ impl Ast {
         let diagnostics = ast_compiler.diagnostics;
         // Pending slots from the bottom frame belong to the synthetic
         // top-level body; nested fn bodies were already bound on exit.
-        let top_level_slots = ast_compiler.pending_arith_slots.pop().unwrap_or_default();
-        Ok((ir, ir_ranges, diagnostics, top_level_slots))
+        let top_level_arith = ast_compiler.pending_arith_slots.pop().unwrap_or_default();
+        let top_level_props = ast_compiler
+            .pending_property_slots
+            .pop()
+            .unwrap_or_default();
+        Ok((ir, ir_ranges, diagnostics, top_level_arith, top_level_props))
     }
 
     pub fn has_top_level(&self) -> bool {
@@ -1027,6 +1038,10 @@ pub struct AstCompiler<'a> {
     /// entry and pops + binds it to the function's code address after
     /// `upsert_function` returns. See `Compiler::bind_arith_feedback`.
     pub pending_arith_slots: Vec<Vec<usize>>,
+    /// Same shape as `pending_arith_slots` but for property-cache slots.
+    /// `Compiler::bind_property_cache` consumes the popped frame so
+    /// tier-up can later read each function's observed struct shapes.
+    pub pending_property_slots: Vec<Vec<usize>>,
     /// Prior feedback bits in source-visitation order, seeded by tier-up
     /// when recompiling a function. Each arithmetic site consumes one
     /// entry from the head of this list (advancing `feedback_bits_cursor`)
@@ -1034,6 +1049,14 @@ pub struct AstCompiler<'a> {
     /// specialized variant. Empty for first-time compiles.
     pub feedback_bits_input: Vec<u64>,
     pub feedback_bits_cursor: usize,
+    /// Prior property-cache contents in source-visitation order,
+    /// `(struct_id_versioned, field_offset_bytes, is_mutable)`. Each
+    /// `Ast::PropertyAccess` consumes one entry; if the recorded
+    /// struct_id is non-sentinel the site is emitted as a specialized
+    /// inline read with baked-in immediates instead of the regular IC.
+    /// Empty for first-time compiles.
+    pub property_feedback_input: Vec<(u64, u64, u64)>,
+    pub property_feedback_cursor: usize,
 }
 
 impl AstCompiler<'_> {
@@ -1249,6 +1272,7 @@ impl AstCompiler<'_> {
                 // allocated while compiling its body land here and get
                 // bound to the function's code address after upsert.
                 self.pending_arith_slots.push(Vec::new());
+                self.pending_property_slots.push(Vec::new());
 
                 self.name = name.clone();
                 self.current_function_arity = actual_arity;
@@ -1619,12 +1643,12 @@ impl AstCompiler<'_> {
                 // slot allocated while compiling its body. After this
                 // point the slots are discoverable via
                 // `Compiler::arith_feedback_for_address(function_pointer)`.
-                let pending = self
-                    .pending_arith_slots
-                    .pop()
-                    .unwrap_or_default();
+                let pending = self.pending_arith_slots.pop().unwrap_or_default();
                 self.compiler
                     .bind_arith_feedback(&pending, function_pointer);
+                let pending_props = self.pending_property_slots.pop().unwrap_or_default();
+                self.compiler
+                    .bind_property_cache(&pending_props, function_pointer);
 
                 let _ = backend.share_label_info_debug(function_pointer);
 
@@ -3254,8 +3278,8 @@ impl AstCompiler<'_> {
                 let object = self.call_compile(object.as_ref())?;
                 let object = self.ir.assign_new(object);
 
-                let property_location =
-                    Value::RawValue(self.compiler.add_property_lookup().unwrap());
+                let (property_addr, prior) = self.alloc_property_cache().unwrap();
+                let property_location = Value::RawValue(property_addr);
                 let property_location = self.ir.assign_new(property_location);
                 let result = self.ir.assign_new(0);
 
@@ -3272,20 +3296,37 @@ impl AstCompiler<'_> {
                 );
 
                 let untagged_object = self.ir.untag(object.into());
-                // self.ir.breakpoint();
                 let struct_id_versioned = self.ir.read_struct_id_versioned(untagged_object);
-                let property_value = self.ir.load_from_heap(property_location.into(), 0);
-                self.ir.jump_if(
-                    slow_property_path,
-                    Condition::NotEqual,
-                    struct_id_versioned,
-                    property_value,
-                );
 
-                let property_offset = self.ir.load_from_heap(property_location.into(), 1);
-                let property_result = self.ir.read_field(untagged_object, property_offset);
-
-                self.ir.assign(result, property_result);
+                // Tier-2: if we have a warm cache value from the prior
+                // compile, bake it into the comparison and load offset
+                // — saving two memory loads through the cache slot per
+                // access. Otherwise emit the regular runtime IC.
+                if let Some((expected_id, offset_bytes, _is_mutable)) = prior {
+                    let baked_id =
+                        self.ir.assign_new(Value::RawValue(expected_id as usize));
+                    self.ir.jump_if(
+                        slow_property_path,
+                        Condition::NotEqual,
+                        struct_id_versioned,
+                        baked_id,
+                    );
+                    let baked_offset =
+                        self.ir.assign_new(Value::RawValue(offset_bytes as usize));
+                    let property_result = self.ir.read_field(untagged_object, baked_offset.into());
+                    self.ir.assign(result, property_result);
+                } else {
+                    let property_value = self.ir.load_from_heap(property_location.into(), 0);
+                    self.ir.jump_if(
+                        slow_property_path,
+                        Condition::NotEqual,
+                        struct_id_versioned,
+                        property_value,
+                    );
+                    let property_offset = self.ir.load_from_heap(property_location.into(), 1);
+                    let property_result = self.ir.read_field(untagged_object, property_offset);
+                    self.ir.assign(result, property_result);
+                }
                 self.ir.jump(exit_property_access);
 
                 self.ir.write_label(slow_property_path);
@@ -3899,8 +3940,11 @@ impl AstCompiler<'_> {
                     let object_reg = self.ir.assign_new(object_val);
                     let untagged_object = self.ir.untag(object_reg.into());
                     let struct_id_versioned = self.ir.read_struct_id_versioned(untagged_object);
-                    let property_location =
-                        Value::RawValue(self.compiler.add_property_lookup().unwrap());
+                    // Writes also consume one feedback entry to keep the
+                    // cursor aligned; we don't yet specialize them so
+                    // the entry is discarded.
+                    let (property_addr, _prior) = self.alloc_property_cache().unwrap();
+                    let property_location = Value::RawValue(property_addr);
                     let property_location = self.ir.assign_new(property_location);
                     let property_value = self.ir.load_from_heap(property_location.into(), 0);
                     let result = self.ir.assign_new(0);
@@ -5161,6 +5205,33 @@ impl AstCompiler<'_> {
             None => return 0,
         };
         self.compiler.get_jump_table_pointer(func).unwrap_or(0)
+    }
+
+    /// Allocate a property-cache slot AND consume one feedback entry,
+    /// returning both. Combining them keeps the feedback cursor in
+    /// lockstep with cache allocation order — every property site
+    /// (read, write, destructure pattern) calls this exactly once, so
+    /// the visitor order of the recompile matches the original.
+    /// Feedback is `Some((struct_id_versioned, field_offset_bytes,
+    /// is_mutable))` only when the prior site was warm; sentinel slots
+    /// and first-time compiles produce `None`, signalling "fall back
+    /// to runtime IC".
+    fn alloc_property_cache(&mut self) -> Result<(usize, Option<(u64, u64, u64)>), CompileError> {
+        let addr = self.compiler.add_property_lookup()?;
+        if let Some(frame) = self.pending_property_slots.last_mut() {
+            frame.push(addr);
+        }
+        let entry = self
+            .property_feedback_input
+            .get(self.property_feedback_cursor)
+            .copied();
+        self.property_feedback_cursor += 1;
+        let feedback = match entry {
+            Some((sid, _, _)) if sid == usize::MAX as u64 => None,
+            Some(t) => Some(t),
+            None => None,
+        };
+        Ok((addr, feedback))
     }
 
     /// Decide how to emit an arithmetic / comparison site given prior
@@ -7293,7 +7364,8 @@ impl AstCompiler<'_> {
                 })?;
 
                 for (fi, field_pattern) in fields.iter().enumerate() {
-                    let property_location = Value::RawValue(self.compiler.add_property_lookup()?);
+                    let (property_addr, _prior) = self.alloc_property_cache()?;
+                    let property_location = Value::RawValue(property_addr);
                     let property_location = self.ir.assign_new(property_location);
                     let constant_ptr = self.string_constant(field_pattern.field_name.clone());
                     let constant_ptr = self.ir.assign_new(constant_ptr);
@@ -7334,7 +7406,8 @@ impl AstCompiler<'_> {
                 })?;
 
                 for (fi, field_pattern) in fields.iter().enumerate() {
-                    let property_location = Value::RawValue(self.compiler.add_property_lookup()?);
+                    let (property_addr, _prior) = self.alloc_property_cache()?;
+                    let property_location = Value::RawValue(property_addr);
                     let property_location = self.ir.assign_new(property_location);
                     let constant_ptr = self.string_constant(field_pattern.field_name.clone());
                     let constant_ptr = self.ir.assign_new(constant_ptr);
