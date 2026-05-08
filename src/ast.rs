@@ -17,12 +17,18 @@ use crate::{
 
 type TokenPosition = usize;
 
-/// Type alias for the complex compile result to avoid clippy::type_complexity warning
+/// Type alias for the complex compile result to avoid clippy::type_complexity warning.
+/// The fourth element is the list of arithmetic-feedback slot addresses
+/// allocated for the synthetic top-level body of this AST; the caller is
+/// responsible for binding them to the top-level function's code address
+/// after `upsert_function` returns. Slots inside named `fn` bodies are
+/// already bound during AST compilation.
 type CompileResult = Result<
     (
         Ir,
         Vec<(TokenRange, IRRange)>,
         Vec<crate::compiler::Diagnostic>,
+        Vec<usize>,
     ),
     CompileError,
 >;
@@ -788,12 +794,16 @@ impl Ast {
             definition_byte_ranges,
             diagnostics: Vec::new(),
             test_mode,
+            pending_arith_slots: vec![Vec::new()],
         };
 
         let ir = ast_compiler.compile()?;
         let ir_ranges = ast_compiler.ir_range_to_token_range.pop().unwrap();
         let diagnostics = ast_compiler.diagnostics;
-        Ok((ir, ir_ranges, diagnostics))
+        // Pending slots from the bottom frame belong to the synthetic
+        // top-level body; nested fn bodies were already bound on exit.
+        let top_level_slots = ast_compiler.pending_arith_slots.pop().unwrap_or_default();
+        Ok((ir, ir_ranges, diagnostics, top_level_slots))
     }
 
     pub fn has_top_level(&self) -> bool {
@@ -967,6 +977,12 @@ pub struct AstCompiler<'a> {
     pub diagnostics: Vec<crate::compiler::Diagnostic>,
     /// Whether we are compiling in test mode (test blocks are compiled as functions)
     pub test_mode: bool,
+    /// Stack of pending arithmetic-feedback slot addresses, one frame per
+    /// function currently being compiled. Bottom frame holds slots from
+    /// the synthetic top-level body. `Ast::Function` pushes a new frame on
+    /// entry and pops + binds it to the function's code address after
+    /// `upsert_function` returns. See `Compiler::bind_arith_feedback`.
+    pub pending_arith_slots: Vec<Vec<usize>>,
 }
 
 impl AstCompiler<'_> {
@@ -1178,6 +1194,10 @@ impl AstCompiler<'_> {
                 let old_is_variadic = self.current_function_is_variadic;
                 let old_min_args = self.current_function_min_args;
                 self.ir_range_to_token_range.push(Vec::new());
+                // Open a fresh feedback-slot frame for this function. Slots
+                // allocated while compiling its body land here and get
+                // bound to the function's code address after upsert.
+                self.pending_arith_slots.push(Vec::new());
 
                 self.name = name.clone();
                 self.current_function_arity = actual_arity;
@@ -1543,6 +1563,17 @@ impl AstCompiler<'_> {
                         disk_location,
                     )
                     .unwrap();
+
+                // Stamp this function's entry address onto every feedback
+                // slot allocated while compiling its body. After this
+                // point the slots are discoverable via
+                // `Compiler::arith_feedback_for_address(function_pointer)`.
+                let pending = self
+                    .pending_arith_slots
+                    .pop()
+                    .unwrap_or_default();
+                self.compiler
+                    .bind_arith_feedback(&pending, function_pointer);
 
                 let _ = backend.share_label_info_debug(function_pointer);
 
@@ -3306,23 +3337,28 @@ impl AstCompiler<'_> {
             }
             Ast::Add { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
-                Ok(self.ir.add_any(left, right))
+                let fb = self.alloc_arith_feedback();
+                Ok(self.ir.add_any(left, right, fb))
             }
             Ast::Sub { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
-                Ok(self.ir.sub_any(left, right))
+                let fb = self.alloc_arith_feedback();
+                Ok(self.ir.sub_any(left, right, fb))
             }
             Ast::Mul { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
-                Ok(self.ir.mul_any(left, right))
+                let fb = self.alloc_arith_feedback();
+                Ok(self.ir.mul_any(left, right, fb))
             }
             Ast::Div { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
-                Ok(self.ir.div_any(left, right))
+                let fb = self.alloc_arith_feedback();
+                Ok(self.ir.div_any(left, right, fb))
             }
             Ast::Modulo { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
-                Ok(self.ir.modulo_any(left, right))
+                let fb = self.alloc_arith_feedback();
+                Ok(self.ir.modulo_any(left, right, fb))
             }
             Ast::ShiftLeft { left, right, .. } => {
                 let (left, right) = self.compile_binop_operands(&left, &right)?;
@@ -3951,7 +3987,8 @@ impl AstCompiler<'_> {
                 let a = self.call_compile(&left)?;
                 self.not_tail_position();
                 let b = self.call_compile(&right)?;
-                Ok(self.ir.compare_any(a, b, operator))
+                let fb = self.alloc_arith_feedback();
+                Ok(self.ir.compare_any(a, b, operator, fb))
             }
             Ast::String(str, _) => {
                 let constant_ptr = self.string_constant(str);
@@ -4964,6 +5001,38 @@ impl AstCompiler<'_> {
                 Ok(result)
             }
         }
+    }
+
+    /// Fully-qualified name (`namespace/name`) of the function currently
+    /// being compiled, or the synthetic top-level name
+    /// (`<ns>/__top_level`) when compiling a namespace's top-level
+    /// expressions. Used as the owner key for arithmetic-feedback slots so
+    /// the tier-up consumer can find every slot for a function. Matches
+    /// the form the runtime registers functions under
+    /// (see `compile_ast` in compiler.rs).
+    fn current_function_key(&self) -> String {
+        let ns = self.compiler.current_namespace_name();
+        match &self.name {
+            Some(name) => format!("{}/{}", ns, name),
+            None => format!("{}/__top_level", ns),
+        }
+    }
+
+    /// Allocate a feedback slot for an arithmetic/comparison site in the
+    /// function currently being compiled. The slot is recorded in the top
+    /// of `pending_arith_slots` so it can be stamped with the function's
+    /// code address after `upsert_function` returns. Returns 0 if the
+    /// cache is full, which `Ir::feedback_or` treats as "skip recording"
+    /// — losing feedback for one site is safer than aborting the compile.
+    fn alloc_arith_feedback(&mut self) -> usize {
+        let debug_name = self.current_function_key();
+        let slot = self.compiler.add_arith_feedback(debug_name).unwrap_or(0);
+        if slot != 0 {
+            if let Some(frame) = self.pending_arith_slots.last_mut() {
+                frame.push(slot);
+            }
+        }
+        slot
     }
 
     /// Compile two operands of a binary expression so heap values produced by

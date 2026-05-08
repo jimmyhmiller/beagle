@@ -204,6 +204,13 @@ pub enum Instruction {
     PerformEffect(Value, Value, Value, Label, usize, usize), // handler, enum_type, op_value, resume_label, result_local_index, builtin_fn_ptr
     ReturnFromShift(Value, Value, usize), // value, cont_ptr, builtin_fn_ptr - calls return_from_shift with current SP/FP
     RecordGcSafepoint, // Record a GC safepoint at the current position (for continuation resume points)
+    /// OR a small bitmask into a 64-bit slot at a fixed absolute address.
+    /// Used for arithmetic / comparison type-feedback. Both arguments are
+    /// compile-time immediates: `slot_addr` is the address of the feedback
+    /// word in `Compiler::arith_feedback_cache`, `bits` is the shape mask
+    /// from `crate::feedback`. No virtual registers are read or written;
+    /// lowering acquires temporaries from the backend.
+    FeedbackOr(usize, u64),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -558,6 +565,7 @@ impl Instruction {
             Instruction::InlineBumpAllocate(dst, _, _, _) => {
                 get_register!(dst)
             }
+            Instruction::FeedbackOr(_, _) => vec![],
         }
     }
 
@@ -662,7 +670,10 @@ impl Instruction {
                 }
             }
 
-            Instruction::Jump(_) | Instruction::Breakpoint | Instruction::RecordGcSafepoint => {}
+            Instruction::Jump(_)
+            | Instruction::Breakpoint
+            | Instruction::RecordGcSafepoint
+            | Instruction::FeedbackOr(_, _) => {}
             Instruction::PushExceptionHandler(_, value, _) => {
                 replace_register!(value, old_register, new_register);
             }
@@ -860,12 +871,18 @@ impl Ir {
         Value::Register(register)
     }
 
-    pub fn sub_any<A, B>(&mut self, a: A, b: B) -> Value
+    pub fn sub_any<A, B>(&mut self, a: A, b: B, feedback_slot: usize) -> Value
     where
         A: Into<Value>,
         B: Into<Value>,
     {
-        self.math_any(a, b, Self::sub_int::<Value, Value>, Self::sub_float)
+        self.math_any(
+            a,
+            b,
+            Self::sub_int::<Value, Value>,
+            Self::sub_float,
+            feedback_slot,
+        )
     }
 
     pub fn sub_int<A, B>(&mut self, a: A, b: B) -> Value
@@ -891,7 +908,14 @@ impl Ir {
         Value::Register(result)
     }
 
-    pub fn math_any<A, B, F, G>(&mut self, a: A, b: B, op_int: F, op_float: G) -> Value
+    pub fn math_any<A, B, F, G>(
+        &mut self,
+        a: A,
+        b: B,
+        op_int: F,
+        op_float: G,
+        feedback_slot: usize,
+    ) -> Value
     where
         A: Into<Value>,
         B: Into<Value>,
@@ -909,6 +933,11 @@ impl Ir {
         self.guard_int(a.into(), slow_path);
         self.guard_int(b.into(), slow_path);
 
+        // Record int+int feedback before the operation. Cheap (3 instr) but
+        // measurable on hot integer loops; the cost will be recovered once a
+        // tier-2 pass reads the bit and emits a guard-free specialization.
+        self.feedback_or(feedback_slot, crate::feedback::FB_INT_INT);
+
         // Both are ints - do integer operation (fast path)
         let result = op_int(self, a.into(), b.into());
         self.assign(result_register, result);
@@ -916,7 +945,7 @@ impl Ir {
 
         // Slow path: handle floats and mixed types
         self.write_label(slow_path);
-        let float_result = self.math_any_slow_path(a, b, &op_float);
+        let float_result = self.math_any_slow_path(a, b, &op_float, feedback_slot);
         self.assign(result_register, float_result);
 
         self.write_label(after_op);
@@ -930,6 +959,7 @@ impl Ir {
         a: VirtualRegister,
         b: VirtualRegister,
         op_float: &G,
+        feedback_slot: usize,
     ) -> Value
     where
         G: Fn(&mut Ir, Value, Value) -> Value,
@@ -950,6 +980,7 @@ impl Ir {
 
         // Case: a is int, b is float - convert a to float
         {
+            self.feedback_or(feedback_slot, crate::feedback::FB_INT_FLOAT);
             // Allocate result heap object BEFORE computing the float result.
             // This ensures no raw f64 values are live in GPRs across the
             // allocation call, which could cause GC to misinterpret them
@@ -979,6 +1010,7 @@ impl Ir {
 
         // Case: a is float, b is int - convert b to float
         {
+            self.feedback_or(feedback_slot, crate::feedback::FB_FLOAT_INT);
             // Allocate before float computation to avoid raw f64 in GPRs across GC safepoint
             let float_pointer = self.allocate_static(1);
             let float_pointer_untagged = self.untag(float_pointer);
@@ -1001,6 +1033,7 @@ impl Ir {
         self.guard_float(b.into(), type_error_3);
 
         {
+            self.feedback_or(feedback_slot, crate::feedback::FB_FLOAT_FLOAT);
             // Allocate before float computation to avoid raw f64 in GPRs across GC safepoint
             let float_pointer = self.allocate_static(1);
             let float_pointer_untagged = self.untag(float_pointer);
@@ -1025,24 +1058,33 @@ impl Ir {
         self.jump(after_errors);
 
         self.write_label(type_error_1);
+        self.feedback_or(feedback_slot, crate::feedback::FB_OTHER);
         self.emit_type_error_with_resume(result_register, after_slow);
 
         self.write_label(type_error_2);
+        self.feedback_or(feedback_slot, crate::feedback::FB_OTHER);
         self.emit_type_error_with_resume(result_register, after_slow);
 
         self.write_label(type_error_3);
+        self.feedback_or(feedback_slot, crate::feedback::FB_OTHER);
         self.emit_type_error_with_resume(result_register, after_slow);
 
         self.write_label(after_errors);
         Value::Register(result_register)
     }
 
-    pub fn add_any<A, B>(&mut self, a: A, b: B) -> Value
+    pub fn add_any<A, B>(&mut self, a: A, b: B, feedback_slot: usize) -> Value
     where
         A: Into<Value>,
         B: Into<Value>,
     {
-        self.math_any(a, b, Self::add_int::<Value, Value>, Self::add_float)
+        self.math_any(
+            a,
+            b,
+            Self::add_int::<Value, Value>,
+            Self::add_float,
+            feedback_slot,
+        )
     }
 
     pub fn add_int<A, B>(&mut self, a: A, b: B) -> Value
@@ -1081,12 +1123,12 @@ impl Ir {
         Value::Register(register)
     }
 
-    pub fn mul_any<A, B>(&mut self, a: A, b: B) -> Value
+    pub fn mul_any<A, B>(&mut self, a: A, b: B, feedback_slot: usize) -> Value
     where
         A: Into<Value>,
         B: Into<Value>,
     {
-        self.math_any(a, b, Self::mul, Self::mul_float)
+        self.math_any(a, b, Self::mul, Self::mul_float, feedback_slot)
     }
 
     pub fn div<A, B>(&mut self, a: A, b: B) -> Value
@@ -1112,12 +1154,12 @@ impl Ir {
         Value::Register(register)
     }
 
-    pub fn div_any<A, B>(&mut self, a: A, b: B) -> Value
+    pub fn div_any<A, B>(&mut self, a: A, b: B, feedback_slot: usize) -> Value
     where
         A: Into<Value>,
         B: Into<Value>,
     {
-        self.math_any(a, b, Self::div, Self::div_float)
+        self.math_any(a, b, Self::div, Self::div_float, feedback_slot)
     }
 
     pub fn modulo<A, B>(&mut self, a: A, b: B) -> Value
@@ -1143,12 +1185,12 @@ impl Ir {
         Value::Register(register)
     }
 
-    pub fn modulo_any<A, B>(&mut self, a: A, b: B) -> Value
+    pub fn modulo_any<A, B>(&mut self, a: A, b: B, feedback_slot: usize) -> Value
     where
         A: Into<Value>,
         B: Into<Value>,
     {
-        self.math_any(a, b, Self::modulo, Self::modulo_float)
+        self.math_any(a, b, Self::modulo, Self::modulo_float, feedback_slot)
     }
 
     pub fn compare(&mut self, a: Value, b: Value, condition: Condition) -> Value {
@@ -1170,7 +1212,13 @@ impl Ir {
         Value::Register(register)
     }
 
-    pub fn compare_any(&mut self, a: Value, b: Value, condition: Condition) -> Value {
+    pub fn compare_any(
+        &mut self,
+        a: Value,
+        b: Value,
+        condition: Condition,
+        feedback_slot: usize,
+    ) -> Value {
         let result_register = self.assign_new(Value::TaggedConstant(0));
         let a: VirtualRegister = self.assign_new(a);
         let b: VirtualRegister = self.assign_new(b);
@@ -1184,6 +1232,7 @@ impl Ir {
 
         // Both ints - integer comparison (fast path)
         {
+            self.feedback_or(feedback_slot, crate::feedback::FB_INT_INT);
             let tag = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
             let dest = self.volatile_register();
             self.instructions.push(Instruction::Compare(
@@ -1212,6 +1261,7 @@ impl Ir {
 
         // Case: a is int, b is float - convert a to float and compare
         {
+            self.feedback_or(feedback_slot, crate::feedback::FB_INT_FLOAT);
             let a_untagged = self.shift_right_imm_raw(a.into(), 3);
             let a_float = self.int_to_float(a_untagged);
             let b_untagged = self.untag(b.into());
@@ -1240,6 +1290,7 @@ impl Ir {
 
         // Case: a is float, b is int - convert b to float and compare
         {
+            self.feedback_or(feedback_slot, crate::feedback::FB_FLOAT_INT);
             let a_untagged = self.untag(a.into());
             let a_val = self.load_from_heap(a_untagged, 1);
             let a_float = self.fmov_general_to_float(a_val);
@@ -1264,6 +1315,7 @@ impl Ir {
         self.guard_float(b.into(), default_compare_label);
 
         {
+            self.feedback_or(feedback_slot, crate::feedback::FB_FLOAT_FLOAT);
             let a_untagged = self.untag(a.into());
             let b_untagged = self.untag(b.into());
             let a_raw = self.load_from_heap(a_untagged, 1);
@@ -1284,8 +1336,12 @@ impl Ir {
             self.jump(after_compare);
         }
 
-        // Default path - neither operand is a number, or non-numeric types
+        // Default path - neither operand is a number, or non-numeric types.
+        // For ordered comparisons this throws; for == / != this is the
+        // generic structural compare. Either way the site is not amenable
+        // to numeric specialization, so record FB_OTHER.
         self.write_label(default_compare_label);
+        self.feedback_or(feedback_slot, crate::feedback::FB_OTHER);
         let cmp_type_error_label = match condition {
             Condition::LessThan
             | Condition::LessThanOrEqual
@@ -2835,6 +2891,24 @@ impl Ir {
                         slow_path: slow_path_lang,
                     });
                 }
+                Instruction::FeedbackOr(slot_addr, bits) => {
+                    // load slot, or in bits, store back. Slot address is a
+                    // compile-time constant — load via mov_64. Two scratch
+                    // registers: one holds the address, one holds the value
+                    // (the immediate bits also need a register since `or`
+                    // takes two register operands on both backends).
+                    let addr_reg = backend.temporary_register();
+                    let val_reg = backend.temporary_register();
+                    let bits_reg = backend.temporary_register();
+                    backend.mov_64(addr_reg, *slot_addr as isize);
+                    backend.load_from_heap(val_reg, addr_reg, 0);
+                    backend.mov_64(bits_reg, *bits as isize);
+                    backend.or(val_reg, val_reg, bits_reg);
+                    backend.store_on_heap(addr_reg, val_reg, 0);
+                    backend.free_temporary_register(bits_reg);
+                    backend.free_temporary_register(val_reg);
+                    backend.free_temporary_register(addr_reg);
+                }
             }
             let end_machine_code = backend.current_position();
             self.ir_to_machine_code_range.push((
@@ -2846,6 +2920,21 @@ impl Ir {
 
     pub fn breakpoint(&mut self) {
         self.instructions.push(Instruction::Breakpoint);
+    }
+
+    /// Emit a `*slot |= bits` against the absolute address `slot_addr`.
+    /// `slot_addr` must point to an 8-byte word (typically allocated via
+    /// `Compiler::add_arith_feedback`). `bits` is one of the constants in
+    /// `crate::feedback`.
+    pub fn feedback_or(&mut self, slot_addr: usize, bits: u64) {
+        if slot_addr == 0 {
+            // Defensive: a zero slot would clobber address 0; treat as a no-op
+            // so callers that opt out of feedback (e.g. by passing 0) don't
+            // need a separate code path.
+            return;
+        }
+        self.instructions
+            .push(Instruction::FeedbackOr(slot_addr, bits));
     }
 
     pub fn jump(&mut self, label: Label) {

@@ -458,7 +458,6 @@ impl ThreadGlobal {
         }
         true
     }
-
 }
 
 /// Iterator over GlobalObjectBlocks in a ThreadGlobal
@@ -4418,6 +4417,21 @@ impl Runtime {
         self.is_paused.as_ptr() as usize
     }
 
+    /// Snapshot the compiler's arithmetic-feedback slots. Returns a vec of
+    /// `(slot_address, slot_value, owning_code_address, debug_name)`
+    /// tuples in allocation order. Used by `--dump-arith-feedback`.
+    pub fn snapshot_arith_feedback(&self) -> Vec<(usize, u64, usize, String)> {
+        let response = self
+            .compiler_channel
+            .as_ref()
+            .expect("Compiler channel not initialized - this is a fatal error")
+            .send(CompilerMessage::GetArithFeedback);
+        match response {
+            CompilerResponse::ArithFeedback(v) => v,
+            _ => vec![],
+        }
+    }
+
     pub fn compile(&mut self, file_name: &str) -> Result<Vec<String>, Box<dyn Error>> {
         let response = self
             .compiler_channel
@@ -6827,10 +6841,7 @@ impl Runtime {
                         Some(crate::builtins::string_builder_debug_repr(value))
                     }
                     val if val == crate::collections::TYPE_ID_BYTE_STORAGE => {
-                        Some(format!(
-                            "ByteStorage {{ capacity: {} }}",
-                            header.type_data
-                        ))
+                        Some(format!("ByteStorage {{ capacity: {} }}", header.type_data))
                     }
                     _ => {
                         // This is an unknown object. Meaning it is invalid.

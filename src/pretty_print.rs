@@ -611,6 +611,9 @@ impl PrettyPrint for Instruction {
                     slow_path.index
                 )
             }
+            Instruction::FeedbackOr(slot_addr, bits) => {
+                format!("feedback_or [{:#x}], {:#x}", slot_addr, bits)
+            }
         }
     }
 }

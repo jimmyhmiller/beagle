@@ -353,6 +353,27 @@ pub struct Compiler {
     /// Layout per entry: [type_id (8 bytes), fn_ptr (8 bytes)]
     pub protocol_dispatch_cache: MmapMut,
     pub protocol_dispatch_cache_offset: usize,
+    /// Type-feedback slots for arithmetic and comparison sites.
+    /// Layout per entry: [bitfield (8 bytes)] using `crate::feedback` constants.
+    /// Each `+ - * / % < > <= >= == !=` site owns one slot. The fast and slow
+    /// paths OR observed-shape bits into their slot; bits are monotonic.
+    pub arith_feedback_cache: MmapMut,
+    pub arith_feedback_cache_offset: usize,
+    /// Code-entry address of the compiled function owning each slot,
+    /// parallel to the allocation order. 0 means "not yet bound" — slots
+    /// are allocated during AST→IR before the entry pointer is known, then
+    /// stamped via `bind_arith_feedback` once `upsert_function` returns.
+    /// A slot whose owning function is later recompiled keeps its old
+    /// address; the new compile allocates fresh slots tied to the new
+    /// address. Tier-up reads slots filtered by the current entry pointer.
+    pub arith_feedback_owners: Vec<usize>,
+    /// Reverse index: code address → slot addresses (in source order).
+    /// Populated by `bind_arith_feedback`.
+    pub arith_feedback_by_address: HashMap<usize, Vec<usize>>,
+    /// Debug-only fully-qualified function name parallel to slots. Used
+    /// by `--dump-arith-feedback` to give the dump a human-readable owner
+    /// label. Tier-up logic should use the address, not the name.
+    pub arith_feedback_debug_names: Vec<String>,
     /// Multi-arity function metadata for static dispatch
     pub multi_arity_functions: HashMap<String, MultiArityInfo>,
     /// Dynamic variables: name -> (namespace_id, slot)
@@ -838,7 +859,7 @@ impl Compiler {
         token_byte_spans: Vec<(usize, usize)>,
         definition_byte_ranges: HashMap<(usize, usize), (usize, usize)>,
     ) -> Result<(Option<String>, Vec<Diagnostic>), Box<dyn Error>> {
-        let (mut ir, token_map, diagnostics) = ast.compile(
+        let (mut ir, token_map, diagnostics, top_level_arith_slots) = ast.compile(
             self,
             file_name,
             token_line_column_map,
@@ -881,6 +902,10 @@ impl Compiler {
                 None,
                 None,
             )?;
+            // Stamp the top-level body's feedback slots with its entry
+            // address now that we have it. Nested fn bodies were bound
+            // during AST compilation.
+            self.bind_arith_feedback(&top_level_arith_slots, _function_pointer);
             debug_only! {
                 debugger(Message {
                     kind: "ir".to_string(),
@@ -972,6 +997,92 @@ impl Compiler {
         // 16 bytes: type_id (8) + fn_ptr (8)
         self.protocol_dispatch_cache_offset += 2 * 8;
         Ok(location)
+    }
+
+    /// Allocate an 8-byte type-feedback slot for an arithmetic or comparison
+    /// site. The slot is zero-initialized (mmap default), which represents
+    /// "no observations yet". Returns the absolute address of the slot.
+    ///
+    /// The owning code-address is left as 0 ("pending"); the AST compiler
+    /// is expected to call `bind_arith_feedback` once `upsert_function`
+    /// returns the function's entry pointer. `debug_name` is recorded as a
+    /// human-readable label for `--dump-arith-feedback`; tier-up logic
+    /// should look up by address, not by name.
+    pub fn add_arith_feedback(&mut self, debug_name: String) -> Result<usize, CompileError> {
+        if self.arith_feedback_cache_offset + 8 > self.arith_feedback_cache.len() {
+            return Err(CompileError::PropertyCacheFull);
+        }
+        let location = unsafe {
+            self.arith_feedback_cache
+                .as_ptr()
+                .add(self.arith_feedback_cache_offset) as usize
+        };
+        self.arith_feedback_cache_offset += 8;
+        self.arith_feedback_owners.push(0);
+        self.arith_feedback_debug_names.push(debug_name);
+        Ok(location)
+    }
+
+    /// Stamp a code address onto every slot in `slots`, and add them to
+    /// the per-address index. Called by the AST compiler after
+    /// `upsert_function` returns the entry pointer for the function whose
+    /// body just allocated those slots. Slots already bound to a previous
+    /// address are left alone (defensive — should never happen).
+    pub fn bind_arith_feedback(&mut self, slots: &[usize], code_address: usize) {
+        if code_address == 0 || slots.is_empty() {
+            return;
+        }
+        let base = self.arith_feedback_cache.as_ptr() as usize;
+        for &slot_addr in slots {
+            let index = (slot_addr - base) / 8;
+            if let Some(owner) = self.arith_feedback_owners.get_mut(index) {
+                if *owner == 0 {
+                    *owner = code_address;
+                }
+            }
+        }
+        self.arith_feedback_by_address
+            .entry(code_address)
+            .or_default()
+            .extend_from_slice(slots);
+    }
+
+    /// Iterate over all allocated arithmetic-feedback slots, yielding
+    /// `(slot_address, slot_value, owning_code_address, debug_name)`
+    /// tuples in allocation order. Used by `--dump-arith-feedback`.
+    /// `owning_code_address` is 0 for slots whose function compile never
+    /// reached the bind step (should be rare and indicates a bug).
+    pub fn iter_arith_feedback(&self) -> impl Iterator<Item = (usize, u64, usize, &str)> + '_ {
+        let base = self.arith_feedback_cache.as_ptr() as usize;
+        let count = self.arith_feedback_cache_offset / 8;
+        (0..count).map(move |i| {
+            let addr = base + i * 8;
+            let value = unsafe { *(addr as *const u64) };
+            let owner_addr = self.arith_feedback_owners.get(i).copied().unwrap_or(0);
+            let name = self
+                .arith_feedback_debug_names
+                .get(i)
+                .map(|s| s.as_str())
+                .unwrap_or("<unknown>");
+            (addr, value, owner_addr, name)
+        })
+    }
+
+    /// Read every feedback slot bound to the given code entry address.
+    /// Returns slot values in source order. Tier-up logic asks
+    /// `runtime.get_function(name).pointer` and passes it here to get the
+    /// feedback for the *currently installed* compile; older compiles'
+    /// slots stay associated with their original (now-stale) addresses.
+    pub fn arith_feedback_for_address(&self, code_address: usize) -> Vec<u64> {
+        self.arith_feedback_by_address
+            .get(&code_address)
+            .map(|slots| {
+                slots
+                    .iter()
+                    .map(|&addr| unsafe { *(addr as *const u64) })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     // TODO: All of this seems bad
@@ -1759,6 +1870,9 @@ pub enum CompilerMessage {
     CompileProtocolMethod(String, String, Vec<ProtocolMethodInfo>),
     SetPauseAtomPointer(usize),
     GetCodeBaseAddress,
+    /// Snapshot every allocated arithmetic-feedback slot. Used by
+    /// `--dump-arith-feedback` after the program exits.
+    GetArithFeedback,
 }
 
 pub enum CompilerResponse {
@@ -1767,6 +1881,11 @@ pub enum CompilerResponse {
     FunctionPointer(usize),
     CompileError(String),
     CodeBaseAddress(usize),
+    /// Per slot: (slot_address, slot_value, owning_code_address, debug_name).
+    /// `owning_code_address` is 0 for slots whose owning compile failed
+    /// or was never bound. `debug_name` is the function's fully-qualified
+    /// name at compile time and is for display only.
+    ArithFeedback(Vec<(usize, u64, usize, String)>),
 }
 
 pub struct CompilerThread {
@@ -1805,6 +1924,20 @@ impl CompilerThread {
                         CompileError::MemoryMapping(format!("Failed to make mmap mutable: {}", e))
                     })?,
                 protocol_dispatch_cache_offset: 0,
+                arith_feedback_cache: MmapOptions::new(MmapOptions::page_size() * 256) // 1MB = ~131k slots
+                    .map_err(|e| {
+                        CompileError::MemoryMapping(format!("Failed to create mmap: {}", e))
+                    })?
+                    .map_mut()
+                    .map_err(|e| CompileError::MemoryMapping(format!("Failed to map mmap: {}", e)))?
+                    .make_mut()
+                    .map_err(|(_map, e)| {
+                        CompileError::MemoryMapping(format!("Failed to make mmap mutable: {}", e))
+                    })?,
+                arith_feedback_cache_offset: 0,
+                arith_feedback_owners: Vec::new(),
+                arith_feedback_by_address: HashMap::new(),
+                arith_feedback_debug_names: Vec::new(),
                 command_line_arguments: command_line_arguments.clone(),
                 pause_atom_ptr: None,
                 compiled_file_cache: HashSet::new(),
@@ -1950,6 +2083,16 @@ impl CompilerThread {
                     CompilerMessage::GetCodeBaseAddress => {
                         let base = self.compiler.code_allocator.base_address();
                         work_done.mark_done(CompilerResponse::CodeBaseAddress(base));
+                    }
+                    CompilerMessage::GetArithFeedback => {
+                        let snapshot: Vec<(usize, u64, usize, String)> = self
+                            .compiler
+                            .iter_arith_feedback()
+                            .map(|(addr, value, owner_addr, name)| {
+                                (addr, value, owner_addr, name.to_string())
+                            })
+                            .collect();
+                        work_done.mark_done(CompilerResponse::ArithFeedback(snapshot));
                     }
                 },
                 Err(_) => {

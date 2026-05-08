@@ -70,13 +70,14 @@ mod trace;
 pub mod abi;
 pub mod ast;
 pub mod backend;
+mod binding_space;
 mod builtins;
 mod code_memory;
 pub mod common;
 mod compiler;
 pub mod dump;
-mod binding_space;
 mod eternal;
+pub mod feedback;
 mod gc;
 pub mod ir;
 pub mod lir;
@@ -1002,6 +1003,7 @@ pub struct CommandLineArguments {
     update_snapshots: bool,
     include_paths: Vec<String>,
     pub dump: std::sync::Arc<crate::dump::DumpConfig>,
+    pub dump_arith_feedback: bool,
 }
 
 fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Error>> {
@@ -1174,6 +1176,10 @@ struct RunArgs {
     /// Output path for the dump (defaults to `beagle-dump.jsonl` in the current directory).
     #[clap(long = "dump-out", value_name = "PATH")]
     dump_out: Option<std::path::PathBuf>,
+    /// After execution, print collected arithmetic-comparison type feedback
+    /// (one line per `+ - * / % < > <= >= == !=` site) to stderr.
+    #[clap(long = "dump-arith-feedback")]
+    dump_arith_feedback: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1213,6 +1219,7 @@ impl CommandLineArguments {
             update_snapshots: false,
             include_paths: vec![],
             dump: crate::dump::DumpConfig::disabled(),
+            dump_arith_feedback: false,
         }
     }
 
@@ -1234,6 +1241,7 @@ impl CommandLineArguments {
             update_snapshots: false,
             include_paths: vec![],
             dump: crate::dump::DumpConfig::disabled(),
+            dump_arith_feedback: false,
         }
     }
 
@@ -1267,6 +1275,7 @@ impl CommandLineArguments {
             update_snapshots: run_args.update_snapshots,
             include_paths: run_args.include,
             dump,
+            dump_arith_feedback: run_args.dump_arith_feedback,
         }
     }
 }
@@ -2239,6 +2248,54 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     // Wait for threads spawned by main() before inspecting snapshot output or running
     // test blocks. This avoids racing child-thread teardown against test-mode bookkeeping.
     runtime.wait_for_other_threads();
+
+    if args.dump_arith_feedback {
+        let entries = runtime.snapshot_arith_feedback();
+        eprintln!("=== arith feedback ({} sites) ===", entries.len());
+        // Group by owning code address — that's the stable identity of a
+        // compiled body. Multiple compiles of the same source name will
+        // appear as separate groups, which is exactly what we want for
+        // tier-up: feedback is per-compile, not per-name.
+        let mut by_addr: std::collections::BTreeMap<
+            usize,
+            (Option<&str>, Vec<(usize, usize, u64)>),
+        > = std::collections::BTreeMap::new();
+        for (i, (addr, value, owner_addr, name)) in entries.iter().enumerate() {
+            let entry = by_addr
+                .entry(*owner_addr)
+                .or_insert_with(|| (None, Vec::new()));
+            if entry.0.is_none() {
+                entry.0 = Some(name.as_str());
+            }
+            entry.1.push((i, *addr, *value));
+        }
+        for (owner_addr, (name, sites)) in by_addr {
+            // Skip groups where every slot is still zero, to keep the
+            // dump focused on functions that actually executed.
+            let any_hit = sites.iter().any(|(_, _, v)| *v != 0);
+            if !any_hit {
+                continue;
+            }
+            let name = name.unwrap_or("<unknown>");
+            if owner_addr == 0 {
+                eprintln!("{} (unbound — compile failed before bind)", name);
+            } else {
+                eprintln!("{} @ {:#x}", name, owner_addr);
+            }
+            for (i, addr, value) in sites {
+                let shapes = crate::feedback::decode_shapes(value);
+                let label = if shapes.is_empty() {
+                    "<unused>".to_string()
+                } else {
+                    shapes.join(",")
+                };
+                eprintln!(
+                    "  #{:<5} slot={:#x} bits={:#06x} shapes=[{}]",
+                    i, addr, value, label
+                );
+            }
+        }
+    }
 
     if has_expect {
         let source = std::fs::read_to_string(program.clone())?;

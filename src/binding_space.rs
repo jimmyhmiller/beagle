@@ -82,7 +82,10 @@ impl BindingSpace {
             chunk_size % CELL_BYTES == 0,
             "chunk size must be a multiple of cell size",
         );
-        assert!(chunk_size >= CELL_BYTES, "chunk size must hold at least one cell");
+        assert!(
+            chunk_size >= CELL_BYTES,
+            "chunk size must hold at least one cell"
+        );
         Self {
             chunk_size,
             state: Mutex::new(State {

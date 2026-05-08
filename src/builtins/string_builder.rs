@@ -17,7 +17,9 @@
 
 use std::error::Error;
 
-use crate::collections::{HandleScope, TYPE_ID_BYTE_STORAGE, TYPE_ID_STRING, TYPE_ID_STRING_BUILDER};
+use crate::collections::{
+    HandleScope, TYPE_ID_BYTE_STORAGE, TYPE_ID_STRING, TYPE_ID_STRING_BUILDER,
+};
 use crate::types::{BuiltInTypes, Header, HeapObject};
 
 use super::*;
@@ -41,7 +43,9 @@ fn storage_bytes_ptr(storage_tagged: usize) -> *mut u8 {
 
 #[inline]
 fn storage_capacity(storage_tagged: usize) -> usize {
-    HeapObject::from_tagged(storage_tagged).get_header().type_data as usize
+    HeapObject::from_tagged(storage_tagged)
+        .get_header()
+        .type_data as usize
 }
 
 #[inline]
