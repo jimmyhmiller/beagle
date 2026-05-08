@@ -11,12 +11,20 @@ Beagle is a dynamically-typed, functional programming language that compiles dir
 - **Performance**: Already outperforms Ruby 2x, runs 30% slower than Node.js
 
 ## Language Features
-- Dynamic typing with structs, enums, closures, atoms, threads
-- Namespace system for code organization
-- Tail call optimization (currently only way to do loops)
-- Multi-threading with thread-safe GC
-- FFI for C interop
+- Dynamic typing with structs, enums, protocols, closures, atoms, keywords
+- Persistent collections (vectors, maps, sets) and dedicated mutable-array API
+- Namespace system with aliased imports (`use beagle.fs as fs`)
+- Control flow: `if`/`match` expressions, `while`/`for`/`loop` expressions, `break(value)`/`continue()` as call syntax
+- Multi-arity and variadic (`...rest`) functions, destructuring in `let`/params/match
+- String interpolation with `${...}`, two pipe operators (`|>` first-arg, `|>>` last-arg)
+- Resumable exceptions (`catch (e, resume)`) — runtime errors included
+- Algebraic effects with handlers (`handle ... with ...`, `perform`); delimited continuations (`reset`/`shift`)
+- Async I/O, futures, structured concurrency (`with-scope`); OS threads
+- Tail call optimization
+- FFI for C interop with GC-managed buffers/cells
 - Built-in debugger with runtime introspection
+
+**Authoritative language reference:** `docs/language-guide.md`. Read it before writing or reviewing `.bg` code — it's the source of truth for syntax and semantics, and lists the most common mistakes (§28). The `beagle-language` skill loads it on demand.
 
 ## Development Commands
 ```bash
@@ -98,12 +106,14 @@ fn fib(n) {
 }
 
 fn main() {
-    println(fib(30))
+    println("fib(30) = ${fib(30)}")
 }
 ```
 
+For idiomatic examples covering effects, protocols, async, persistent collections, etc., see `docs/language-guide.md` and the `.bg` files in `resources/` and `standard-library/`.
+
 ## Testing System
-Beagle uses a simple but effective testing system:
+Beagle has two complementary test styles; files can mix both. See `docs/language-guide.md` §27 for full details.
 
 **CRITICAL: ALL TESTS MUST PASS**
 - **100% test pass rate is required** - partial success is not acceptable
@@ -111,19 +121,20 @@ Beagle uses a simple but effective testing system:
 - "Most tests passing" is considered a failure state
 - New features should not break existing functionality
 
-**Test Requirements:**
-- Tests must be `.bg` files in the `resources/` directory
-- **Must contain the exact string `"// @beagle.core.snapshot"`** to be discovered by `cargo run -- test`
-- Expected output follows immediately after `// @beagle.core.snapshot` on lines starting with `//`
+**Discovery:** `cargo run -- test` finds any `.bg` file containing either:
+- the marker `// @beagle.core.snapshot`, **or**
+- one or more `test "name" { ... }` blocks.
 
-**Test Format:**
+### Snapshot tests
+Compare `main()`'s stdout to `//` lines following `// @beagle.core.snapshot`. Comparison is exact (whitespace + formatting).
+
 ```beagle
 namespace example_test
 
 fn main() {
     println("Hello")
     println(42)
-    "done"  // Return value also appears in output
+    "done"  // return value of main is also printed
 }
 
 // @beagle.core.snapshot
@@ -132,17 +143,36 @@ fn main() {
 // done
 ```
 
+### `test "name" { ... }` blocks
+Top-level test forms with assertion macros (globally available, no `use`):
+
+```beagle
+namespace math_test
+
+fn add(a, b) { a + b }
+
+test "addition" {
+    assert-eq!(add(1, 2), 3)
+    assert-ne!(add(1, 2), 4)
+    assert!(true)
+    assert-throws!(fn() { throw("boom") })
+}
+```
+
+A test passes if its body completes without a thrown exception. The `!` is part of the macro name.
+
 **Special Annotations:**
 - `// no-std` - Sets no_std flag automatically
 - `// Skip` or `// Skip: reason` - Skip this test (use for flaky/timing-dependent tests)
 - `// gc-always` - Run GC on every allocation (for GC stress testing)
 
 **Test Execution:**
-- `cargo run -- test resources/` runs all tests with `// @beagle.core.snapshot`
+- `cargo run -- test resources/` runs all discovered tests in a directory
 - `cargo run -- test resources/some_test.bg` runs a single test file
 - `cargo run -- test --update-snapshots resources/some_test.bg` updates snapshot to match actual output
-- Output comparison is exact - whitespace and formatting must match
-- Tests use `TestPrinter` to capture all `println()` and `print()` calls
+- With no path, `test/` or `tests/` is used if present
+- Files are dependency-sorted so imports work
+- Tests use `TestPrinter` to capture all `println()` / `print()` calls
 - Each test runs in a fresh runtime environment
 
 ## Current Status
