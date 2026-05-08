@@ -1085,6 +1085,49 @@ impl Compiler {
             .unwrap_or_default()
     }
 
+    /// Look up the debug name we recorded for the function compiled at
+    /// `code_address`. Returns `None` if no slot is bound there (function
+    /// has no instrumented arithmetic, or never had its slots bound).
+    pub fn debug_name_for_code_address(&self, code_address: usize) -> Option<&str> {
+        let slots = self.arith_feedback_by_address.get(&code_address)?;
+        let first_slot_addr = *slots.first()?;
+        let base = self.arith_feedback_cache.as_ptr() as usize;
+        let index = (first_slot_addr - base) / 8;
+        self.arith_feedback_debug_names
+            .get(index)
+            .map(|s| s.as_str())
+    }
+
+    /// Walk every bound function and produce a per-function feedback
+    /// summary. Sorted with the most-active functions first
+    /// (active = slots with any observed shape) so consumers see
+    /// specialization candidates at the top. Functions whose slots are
+    /// all cold are still included so the dump can show "X functions are
+    /// instrumented but never ran".
+    pub fn specialization_report(&self) -> Vec<crate::feedback::FunctionFeedbackSummary> {
+        let mut report: Vec<crate::feedback::FunctionFeedbackSummary> = self
+            .arith_feedback_by_address
+            .iter()
+            .map(|(&code_addr, slots)| {
+                let bits: Vec<u64> = slots
+                    .iter()
+                    .map(|&addr| unsafe { *(addr as *const u64) })
+                    .collect();
+                let name = self
+                    .debug_name_for_code_address(code_addr)
+                    .unwrap_or("<unknown>")
+                    .to_string();
+                crate::feedback::FunctionFeedbackSummary::from_bits(code_addr, name, &bits)
+            })
+            .collect();
+        report.sort_by(|a, b| {
+            b.active()
+                .cmp(&a.active())
+                .then_with(|| a.debug_name.cmp(&b.debug_name))
+        });
+        report
+    }
+
     // TODO: All of this seems bad
     pub fn add_struct(&mut self, s: Struct) {
         let runtime = get_runtime().get_mut();
@@ -1873,6 +1916,9 @@ pub enum CompilerMessage {
     /// Snapshot every allocated arithmetic-feedback slot. Used by
     /// `--dump-arith-feedback` after the program exits.
     GetArithFeedback,
+    /// Walk feedback and produce per-function specialization verdicts.
+    /// Used by `--dump-specializable`.
+    GetSpecializationReport,
 }
 
 pub enum CompilerResponse {
@@ -1886,6 +1932,7 @@ pub enum CompilerResponse {
     /// or was never bound. `debug_name` is the function's fully-qualified
     /// name at compile time and is for display only.
     ArithFeedback(Vec<(usize, u64, usize, String)>),
+    SpecializationReport(Vec<crate::feedback::FunctionFeedbackSummary>),
 }
 
 pub struct CompilerThread {
@@ -2093,6 +2140,10 @@ impl CompilerThread {
                             })
                             .collect();
                         work_done.mark_done(CompilerResponse::ArithFeedback(snapshot));
+                    }
+                    CompilerMessage::GetSpecializationReport => {
+                        let report = self.compiler.specialization_report();
+                        work_done.mark_done(CompilerResponse::SpecializationReport(report));
                     }
                 },
                 Err(_) => {

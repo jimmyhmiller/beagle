@@ -1004,6 +1004,7 @@ pub struct CommandLineArguments {
     include_paths: Vec<String>,
     pub dump: std::sync::Arc<crate::dump::DumpConfig>,
     pub dump_arith_feedback: bool,
+    pub dump_specializable: bool,
 }
 
 fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Error>> {
@@ -1180,6 +1181,11 @@ struct RunArgs {
     /// (one line per `+ - * / % < > <= >= == !=` site) to stderr.
     #[clap(long = "dump-arith-feedback")]
     dump_arith_feedback: bool,
+    /// After execution, print a per-function specialization verdict
+    /// derived from arithmetic feedback. Sorted with the most active
+    /// (and most specializable) functions first.
+    #[clap(long = "dump-specializable")]
+    dump_specializable: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1220,6 +1226,7 @@ impl CommandLineArguments {
             include_paths: vec![],
             dump: crate::dump::DumpConfig::disabled(),
             dump_arith_feedback: false,
+            dump_specializable: false,
         }
     }
 
@@ -1242,6 +1249,7 @@ impl CommandLineArguments {
             include_paths: vec![],
             dump: crate::dump::DumpConfig::disabled(),
             dump_arith_feedback: false,
+            dump_specializable: false,
         }
     }
 
@@ -1276,6 +1284,7 @@ impl CommandLineArguments {
             include_paths: run_args.include,
             dump,
             dump_arith_feedback: run_args.dump_arith_feedback,
+            dump_specializable: run_args.dump_specializable,
         }
     }
 }
@@ -2294,6 +2303,56 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                     i, addr, value, label
                 );
             }
+        }
+    }
+
+    if args.dump_specializable {
+        use crate::feedback::SpecializationVerdict;
+        let report = runtime.specialization_report();
+        let mut counts = [0usize; 4];
+        for s in &report {
+            let idx = match s.verdict {
+                SpecializationVerdict::Cold => 0,
+                SpecializationVerdict::FullySpecializable => 1,
+                SpecializationVerdict::PartiallySpecializable => 2,
+                SpecializationVerdict::NotSpecializable => 3,
+            };
+            counts[idx] += 1;
+        }
+        eprintln!(
+            "=== specialization report: {} functions ({} fully, {} partially, {} not, {} cold) ===",
+            report.len(),
+            counts[1],
+            counts[2],
+            counts[3],
+            counts[0],
+        );
+        for s in &report {
+            // Suppress functions that never executed, to keep the dump
+            // focused on signal. They're counted in the header.
+            if matches!(s.verdict, SpecializationVerdict::Cold) {
+                continue;
+            }
+            let verdict = match s.verdict {
+                SpecializationVerdict::Cold => "cold",
+                SpecializationVerdict::FullySpecializable => "FULL",
+                SpecializationVerdict::PartiallySpecializable => "part",
+                SpecializationVerdict::NotSpecializable => "none",
+            };
+            eprintln!(
+                "  [{}] {} @ {:#x}  active={}/{}  ii={} ff={} if={} fi={} poly={} other={}",
+                verdict,
+                s.debug_name,
+                s.code_address,
+                s.active(),
+                s.total,
+                s.monomorphic_int_int,
+                s.monomorphic_float_float,
+                s.monomorphic_int_float,
+                s.monomorphic_float_int,
+                s.polymorphic,
+                s.not_numeric,
+            );
         }
     }
 

@@ -4432,6 +4432,20 @@ impl Runtime {
         }
     }
 
+    /// Per-function specialization verdicts derived from the feedback
+    /// cache. Used by `--dump-specializable`.
+    pub fn specialization_report(&self) -> Vec<crate::feedback::FunctionFeedbackSummary> {
+        let response = self
+            .compiler_channel
+            .as_ref()
+            .expect("Compiler channel not initialized - this is a fatal error")
+            .send(CompilerMessage::GetSpecializationReport);
+        match response {
+            CompilerResponse::SpecializationReport(v) => v,
+            _ => vec![],
+        }
+    }
+
     pub fn compile(&mut self, file_name: &str) -> Result<Vec<String>, Box<dyn Error>> {
         let response = self
             .compiler_channel
