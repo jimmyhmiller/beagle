@@ -385,6 +385,12 @@ pub struct Compiler {
     /// by `--dump-arith-feedback` to give the dump a human-readable owner
     /// label. Tier-up logic should use the address, not the name.
     pub arith_feedback_debug_names: Vec<String>,
+    /// Names of functions that have been recompiled to a specialized
+    /// version at least once. Used by `specialize_function` to skip
+    /// repeated work — the auto-specialize background thread fires on
+    /// a schedule and would otherwise re-specialize already-specialized
+    /// functions on every tick.
+    pub specialized_names: HashSet<String>,
     /// Multi-arity function metadata for static dispatch
     pub multi_arity_functions: HashMap<String, MultiArityInfo>,
     /// Dynamic variables: name -> (namespace_id, slot)
@@ -599,6 +605,14 @@ impl Compiler {
         if full_name.starts_with("beagle.bail/") {
             return Ok(false);
         }
+        // Already specialized in a prior tick. Skip — re-specializing
+        // produces identical code and just churns the jump table. A
+        // future enhancement could compare current feedback to the
+        // last-specialization snapshot and recompile when shapes have
+        // genuinely changed.
+        if self.specialized_names.contains(full_name) {
+            return Ok(false);
+        }
 
         // Resolve current pointer + source text.
         let runtime = get_runtime().get_mut();
@@ -674,6 +688,7 @@ impl Compiler {
                 self.defer_function_installs = false;
                 self.flush_deferred_functions();
                 self.code_allocator.make_executable();
+                self.specialized_names.insert(full_name.to_string());
                 Ok(true)
             }
             Err(e) => {
@@ -2190,6 +2205,7 @@ impl CompilerThread {
                 arith_feedback_owners: Vec::new(),
                 arith_feedback_by_address: HashMap::new(),
                 arith_feedback_debug_names: Vec::new(),
+                specialized_names: HashSet::new(),
                 command_line_arguments: command_line_arguments.clone(),
                 pause_atom_ptr: None,
                 compiled_file_cache: HashSet::new(),
@@ -2383,6 +2399,19 @@ impl CompilerThread {
 
 pub struct BlockingSender<T, R> {
     inner: SyncSender<(T, SyncSender<R>)>,
+}
+
+// Manual Clone — the auto-derive adds `T: Clone, R: Clone` bounds we
+// don't need (SyncSender is Clone for any inner type). Done by hand so
+// the auto-specialize background thread can hold its own sender
+// without forcing Clone onto CompilerMessage / CompilerResponse, which
+// carry response payloads we never want to deep-copy.
+impl<T, R> Clone for BlockingSender<T, R> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 impl<T, R> BlockingSender<T, R> {

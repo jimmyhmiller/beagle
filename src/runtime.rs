@@ -4391,7 +4391,37 @@ impl Runtime {
                 .expect("Failed to spawn compiler thread - this is a fatal error");
             self.compiler_channel = Some(sender);
             self.compiler_thread = Some(compiler_thread);
+            self.start_auto_specialize_thread();
         }
+    }
+
+    /// Spawn a daemon thread that periodically pings the compiler with
+    /// `SpecializeAll`. The compiler skips functions it has already
+    /// specialized (see `Compiler::specialized_names`), so the
+    /// steady-state cost is one channel round-trip per tick. Disabled
+    /// by `--no-auto-specialize`. The thread is detached: it dies when
+    /// the process exits, no clean-shutdown handshake.
+    fn start_auto_specialize_thread(&self) {
+        if !self.command_line_arguments.auto_specialize {
+            return;
+        }
+        let interval_ms = self.command_line_arguments.auto_specialize_interval_ms;
+        if interval_ms == 0 {
+            return;
+        }
+        let sender = match self.compiler_channel.clone() {
+            Some(s) => s,
+            None => return,
+        };
+        let _ = thread::Builder::new()
+            .name("Beagle AutoSpecialize".to_string())
+            .spawn(move || {
+                let interval = std::time::Duration::from_millis(interval_ms);
+                loop {
+                    thread::sleep(interval);
+                    let _ = sender.send(crate::compiler::CompilerMessage::SpecializeAll);
+                }
+            });
     }
 
     pub fn print(&mut self, result: usize) {

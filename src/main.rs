@@ -1006,6 +1006,14 @@ pub struct CommandLineArguments {
     pub dump: std::sync::Arc<crate::dump::DumpConfig>,
     pub dump_arith_feedback: bool,
     pub dump_specializable: bool,
+    /// When true, a background thread periodically calls
+    /// `runtime/specialize-all` so monomorphic functions get
+    /// recompiled with `*_with_bail` automatically. Default on; turn
+    /// off with `--no-auto-specialize` (e.g. for benchmark harnesses
+    /// that want manual control).
+    pub auto_specialize: bool,
+    /// Period of the auto-specialize tick in milliseconds.
+    pub auto_specialize_interval_ms: u64,
 }
 
 fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Error>> {
@@ -1188,6 +1196,19 @@ struct RunArgs {
     /// (and most specializable) functions first.
     #[clap(long = "dump-specializable")]
     dump_specializable: bool,
+    /// Disable the background auto-specialize thread. With this flag,
+    /// specialization happens only when Beagle code calls
+    /// `runtime/specialize-all`. Useful for benchmark harnesses that
+    /// want a baseline-then-specialize-then-measure workflow.
+    #[clap(long = "no-auto-specialize")]
+    no_auto_specialize: bool,
+    /// Period (ms) of the auto-specialize background tick. Default 100.
+    #[clap(
+        long = "auto-specialize-interval-ms",
+        value_name = "MS",
+        default_value_t = 100
+    )]
+    auto_specialize_interval_ms: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1229,6 +1250,8 @@ impl CommandLineArguments {
             dump: crate::dump::DumpConfig::disabled(),
             dump_arith_feedback: false,
             dump_specializable: false,
+            auto_specialize: true,
+            auto_specialize_interval_ms: 100,
         }
     }
 
@@ -1252,6 +1275,8 @@ impl CommandLineArguments {
             dump: crate::dump::DumpConfig::disabled(),
             dump_arith_feedback: false,
             dump_specializable: false,
+            auto_specialize: true,
+            auto_specialize_interval_ms: 100,
         }
     }
 
@@ -1287,6 +1312,8 @@ impl CommandLineArguments {
             dump,
             dump_arith_feedback: run_args.dump_arith_feedback,
             dump_specializable: run_args.dump_specializable,
+            auto_specialize: !run_args.no_auto_specialize,
+            auto_specialize_interval_ms: run_args.auto_specialize_interval_ms,
         }
     }
 }

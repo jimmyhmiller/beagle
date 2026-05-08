@@ -39,10 +39,10 @@ fn measure(label, depth, iters) {
 }
 
 fn main() {
-    let baseline = measure("baseline", 14, 5)
+    let baseline = measure("baseline", 21, 1)
     let n = runtime/specialize-all()
     println("specialized ${n} functions")
-    let after = measure("after   ", 14, 5)
+    let after = measure("after   ", 21, 1)
     if baseline > 0 {
         let pct = (baseline - after) * 100 / baseline
         println("speedup: ${pct}%")
