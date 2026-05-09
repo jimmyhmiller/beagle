@@ -628,6 +628,44 @@ pub extern "C" fn reflect_namespace_members(
     build_string_vec(runtime, stack_pointer, &local_names)
 }
 
+/// Tier-up trampoline. Called from JIT'd code via the per-function
+/// entry counter when a function has accumulated enough calls to
+/// warrant specialization. `name_ptr` is a stable C-string holding
+/// the function's fully-qualified name (allocated by
+/// `Compiler::add_function_counter` and kept alive in
+/// `Compiler::function_counter_names`).
+///
+/// Idempotent — the compiler skips already-specialized functions, so
+/// the worst case for repeated firings (e.g. multiple threads racing
+/// past the threshold) is one extra channel round-trip per race.
+///
+/// Uses a system-V calling convention: name_ptr is in the first arg
+/// register. Beagle's normal arg registers x0–x7 are caller-saved
+/// across this call by the function-entry tier-up check, so we don't
+/// need to preserve them here ourselves — the caller has already
+/// arranged for them to be in locals.
+pub extern "C" fn tier_up_trampoline(name_ptr: *const std::ffi::c_char) {
+    if name_ptr.is_null() {
+        return;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(name_ptr) };
+    if let Ok(name_str) = name.to_str() {
+        // Spawn a short-lived thread to send the SpecializeFunction
+        // message asynchronously — the channel is rendezvous-style and
+        // would otherwise block the running Beagle function for the
+        // duration of the recompile (~10ms on fib, more on bigger
+        // bodies). The trampoline fires at most once per function
+        // (counter never decrements past zero again), so this spawns
+        // at most O(number-of-eligible-functions) short threads over
+        // the program's lifetime.
+        let owned = name_str.to_string();
+        std::thread::spawn(move || {
+            let runtime = get_runtime().get_mut();
+            runtime.specialize_function(&owned);
+        });
+    }
+}
+
 /// runtime/specialize-all() - Walk the arithmetic-feedback cache and
 /// recompile every fully-monomorphic function with `*_with_bail`
 /// specialization, atomically swapping each function's jump-table slot

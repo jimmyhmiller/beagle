@@ -387,10 +387,22 @@ pub struct Compiler {
     pub arith_feedback_debug_names: Vec<String>,
     /// Names of functions that have been recompiled to a specialized
     /// version at least once. Used by `specialize_function` to skip
-    /// repeated work — the auto-specialize background thread fires on
-    /// a schedule and would otherwise re-specialize already-specialized
-    /// functions on every tick.
+    /// repeated work — the per-function entry counter trampoline can
+    /// fire multiple times in races, and we don't want to recompile
+    /// over and over.
     pub specialized_names: HashSet<String>,
+    /// Per-function entry counters. Each compiled (named, non-bail,
+    /// first-time) function gets one 8-byte slot. The slot is
+    /// initialized to the negative of the threshold and incremented on
+    /// every call; when it reaches zero the entry trampoline fires.
+    /// Layout: parallel mmap, slots are 8-byte signed integers.
+    pub function_counter_cache: MmapMut,
+    pub function_counter_cache_offset: usize,
+    /// Leaked C-strings, one per function with an entry counter,
+    /// holding the function's fully-qualified name. The pointer is
+    /// baked into the function's prologue; the trampoline reads it
+    /// to know which name to specialize.
+    pub function_counter_names: Vec<std::ffi::CString>,
     /// Multi-arity function metadata for static dispatch
     pub multi_arity_functions: HashMap<String, MultiArityInfo>,
     /// Dynamic variables: name -> (namespace_id, slot)
@@ -1217,6 +1229,39 @@ impl Compiler {
             .entry(code_address)
             .or_default()
             .extend_from_slice(slots);
+    }
+
+    /// Allocate an 8-byte entry-counter slot for a freshly compiled
+    /// function. Initializes the slot to `-threshold` so an
+    /// inline `subs ; cbnz` decrement-and-branch fires when the
+    /// function has been called `threshold` times. Returns
+    /// `(slot_address, name_c_str_ptr)` — both meant to be baked into
+    /// the function prologue's tier-up check. The C-string is leaked
+    /// into `function_counter_names` so its pointer stays valid for
+    /// the program's lifetime.
+    pub fn add_function_counter(
+        &mut self,
+        function_name: &str,
+        threshold: i64,
+    ) -> Result<(usize, usize), CompileError> {
+        if self.function_counter_cache_offset + 8 > self.function_counter_cache.len() {
+            return Err(CompileError::PropertyCacheFull);
+        }
+        let slot = unsafe {
+            self.function_counter_cache
+                .as_ptr()
+                .add(self.function_counter_cache_offset) as usize
+        };
+        unsafe {
+            // Counter starts at +threshold and is decremented on each
+            // call. The trampoline fires when it reaches zero.
+            *(slot as *mut i64) = threshold;
+        }
+        self.function_counter_cache_offset += 8;
+        let cstring = std::ffi::CString::new(function_name).unwrap_or_default();
+        let name_ptr = cstring.as_ptr() as usize;
+        self.function_counter_names.push(cstring);
+        Ok((slot, name_ptr))
     }
 
     /// Iterate over all allocated arithmetic-feedback slots, yielding
@@ -2136,6 +2181,10 @@ pub enum CompilerMessage {
     /// Specialize every FullySpecializable function in the report.
     /// Returns the count of functions that were actually swapped.
     SpecializeAll,
+    /// Tier-up trigger fired by the per-function entry counter.
+    /// Specializes only the named function; idempotent (handler skips
+    /// already-specialized).
+    SpecializeFunction(String),
 }
 
 pub enum CompilerResponse {
@@ -2206,6 +2255,18 @@ impl CompilerThread {
                 arith_feedback_by_address: HashMap::new(),
                 arith_feedback_debug_names: Vec::new(),
                 specialized_names: HashSet::new(),
+                function_counter_cache: MmapOptions::new(MmapOptions::page_size() * 64) // 256KB ≈ 32k functions
+                    .map_err(|e| {
+                        CompileError::MemoryMapping(format!("Failed to create mmap: {}", e))
+                    })?
+                    .map_mut()
+                    .map_err(|e| CompileError::MemoryMapping(format!("Failed to map mmap: {}", e)))?
+                    .make_mut()
+                    .map_err(|(_map, e)| {
+                        CompileError::MemoryMapping(format!("Failed to make mmap mutable: {}", e))
+                    })?,
+                function_counter_cache_offset: 0,
+                function_counter_names: Vec::new(),
                 command_line_arguments: command_line_arguments.clone(),
                 pause_atom_ptr: None,
                 compiled_file_cache: HashSet::new(),
@@ -2365,6 +2426,12 @@ impl CompilerThread {
                     CompilerMessage::GetSpecializationReport => {
                         let report = self.compiler.specialization_report();
                         work_done.mark_done(CompilerResponse::SpecializationReport(report));
+                    }
+                    CompilerMessage::SpecializeFunction(name) => {
+                        if let Err(e) = self.compiler.specialize_function(&name) {
+                            eprintln!("specialize_function({}) failed: {}", name, e);
+                        }
+                        work_done.mark_done(CompilerResponse::Done);
                     }
                     CompilerMessage::SpecializeAll => {
                         let report = self.compiler.specialization_report();

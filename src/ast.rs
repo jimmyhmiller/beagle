@@ -1471,6 +1471,33 @@ impl AstCompiler<'_> {
                     self.ir.write_label(skip_pause);
                 }
 
+                // Tier-up entry-counter check. Only emit on the first
+                // compile (no inbound feedback bits); recompiled
+                // specialized versions don't need to retrigger
+                // tier-up. Skip bail helpers (they're already the slow
+                // path), anonymous functions (no stable name to feed
+                // the trampoline), and the synthetic top-level
+                // wrappers (run once, never hot).
+                let is_first_compile = self.feedback_bits_input.is_empty();
+                let full_function_name_for_check = name
+                    .as_ref()
+                    .map(|n| format!("{}/{}", self.compiler.current_namespace_name(), n));
+                if is_first_compile
+                    && self.compiler.command_line_arguments.auto_specialize
+                    && let Some(ref full_name) = full_function_name_for_check
+                    && !full_name.starts_with("beagle.bail/")
+                {
+                    let threshold =
+                        self.compiler.command_line_arguments.auto_specialize_threshold as i64;
+                    if let Ok((counter_addr, name_ptr)) =
+                        self.compiler.add_function_counter(full_name, threshold)
+                    {
+                        let trampoline_ptr =
+                            crate::builtins::tier_up_trampoline as *const u8 as usize;
+                        self.ir.tier_up_check(counter_addr, name_ptr, trampoline_ptr);
+                    }
+                }
+
                 let is_reset_trampoline = name.as_deref() == Some("__reset__")
                     && self.compiler.current_namespace_name() == "beagle.core"
                     && body.len() == 1
@@ -3596,14 +3623,19 @@ impl AstCompiler<'_> {
                     #[cfg(target_arch = "x86_64")]
                     const MAX_RECURSE_ARGS: usize = 6;
 
-                    if args.len() <= MAX_RECURSE_ARGS {
-                        if self.is_tail_position() {
-                            return self.call_compile(&Ast::TailRecurse { args, token_range });
-                        } else {
-                            return self.call_compile(&Ast::Recurse { args, token_range });
-                        }
+                    // Tail position: use TailRecurse (backjump within body).
+                    // Non-tail position: fall through to the regular Call
+                    // path so the call goes through the jump table — that
+                    // way tier-up's atomic jump-table swap is picked up by
+                    // self-recursive calls. (Pre-tier-up this used a
+                    // direct branch via Ast::Recurse; the bypass meant a
+                    // recompiled fib's recursive call kept hitting the
+                    // old code.)
+                    if args.len() <= MAX_RECURSE_ARGS && self.is_tail_position() {
+                        return self.call_compile(&Ast::TailRecurse { args, token_range });
                     }
-                    // Too many args - fall through to regular Call handling below
+                    // Non-tail self-call falls through to the regular Call
+                    // handling below; same for over-long arg lists.
                 }
 
                 if self.should_not_evaluate_arguments(&name) {

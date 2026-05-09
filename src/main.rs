@@ -1006,14 +1006,16 @@ pub struct CommandLineArguments {
     pub dump: std::sync::Arc<crate::dump::DumpConfig>,
     pub dump_arith_feedback: bool,
     pub dump_specializable: bool,
-    /// When true, a background thread periodically calls
-    /// `runtime/specialize-all` so monomorphic functions get
-    /// recompiled with `*_with_bail` automatically. Default on; turn
-    /// off with `--no-auto-specialize` (e.g. for benchmark harnesses
-    /// that want manual control).
+    /// When true, each first-compiled named function emits an inline
+    /// entry counter; when the counter hits `auto_specialize_threshold`,
+    /// a trampoline tier-up specializes that function. Default on;
+    /// turn off with `--no-auto-specialize` (e.g. for benchmark
+    /// harnesses that want manual control via `runtime/specialize-all`).
     pub auto_specialize: bool,
-    /// Period of the auto-specialize tick in milliseconds.
-    pub auto_specialize_interval_ms: u64,
+    /// Calls until tier-up fires per function. Lower = sooner
+    /// specialization with less feedback; higher = more warmup before
+    /// committing.
+    pub auto_specialize_threshold: u64,
 }
 
 fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Error>> {
@@ -1196,19 +1198,20 @@ struct RunArgs {
     /// (and most specializable) functions first.
     #[clap(long = "dump-specializable")]
     dump_specializable: bool,
-    /// Disable the background auto-specialize thread. With this flag,
-    /// specialization happens only when Beagle code calls
-    /// `runtime/specialize-all`. Useful for benchmark harnesses that
-    /// want a baseline-then-specialize-then-measure workflow.
+    /// Disable inline tier-up entry counters. With this flag, each
+    /// function-entry skips the counter emit and tier-up only fires
+    /// when Beagle code calls `runtime/specialize-all`. Useful for
+    /// benchmark harnesses that want a baseline-then-specialize-then-
+    /// measure workflow.
     #[clap(long = "no-auto-specialize")]
     no_auto_specialize: bool,
-    /// Period (ms) of the auto-specialize background tick. Default 100.
+    /// Calls before a function tier-ups. Default 1000.
     #[clap(
-        long = "auto-specialize-interval-ms",
-        value_name = "MS",
-        default_value_t = 100
+        long = "auto-specialize-threshold",
+        value_name = "N",
+        default_value_t = 1000
     )]
-    auto_specialize_interval_ms: u64,
+    auto_specialize_threshold: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -1251,7 +1254,7 @@ impl CommandLineArguments {
             dump_arith_feedback: false,
             dump_specializable: false,
             auto_specialize: true,
-            auto_specialize_interval_ms: 100,
+            auto_specialize_threshold: 1000,
         }
     }
 
@@ -1276,7 +1279,7 @@ impl CommandLineArguments {
             dump_arith_feedback: false,
             dump_specializable: false,
             auto_specialize: true,
-            auto_specialize_interval_ms: 100,
+            auto_specialize_threshold: 1000,
         }
     }
 
@@ -1313,7 +1316,7 @@ impl CommandLineArguments {
             dump_arith_feedback: run_args.dump_arith_feedback,
             dump_specializable: run_args.dump_specializable,
             auto_specialize: !run_args.no_auto_specialize,
-            auto_specialize_interval_ms: run_args.auto_specialize_interval_ms,
+            auto_specialize_threshold: run_args.auto_specialize_threshold,
         }
     }
 }
@@ -2308,8 +2311,6 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             entry.1.push((i, *addr, *value));
         }
         for (owner_addr, (name, sites)) in by_addr {
-            // Skip groups where every slot is still zero, to keep the
-            // dump focused on functions that actually executed.
             let any_hit = sites.iter().any(|(_, _, v)| *v != 0);
             if !any_hit {
                 continue;

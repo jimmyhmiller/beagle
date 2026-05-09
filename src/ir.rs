@@ -211,6 +211,16 @@ pub enum Instruction {
     /// from `crate::feedback`. No virtual registers are read or written;
     /// lowering acquires temporaries from the backend.
     FeedbackOr(usize, u64),
+    /// Per-function entry counter check. Decrements the counter at
+    /// `counter_addr` (initialized to the threshold by
+    /// `Compiler::add_function_counter`); when the result reaches zero,
+    /// loads `name_ptr` into the first arg register and calls
+    /// `trampoline_fn_ptr` to enqueue tier-up specialization.
+    /// Emitted at function entry on first compile only — specialized
+    /// recompiles run without the check, so the per-call overhead is
+    /// bounded by the threshold.
+    /// Fields: (counter_addr, name_c_str_ptr, trampoline_fn_ptr).
+    TierUpCheck(usize, usize, usize),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -566,6 +576,7 @@ impl Instruction {
                 get_register!(dst)
             }
             Instruction::FeedbackOr(_, _) => vec![],
+            Instruction::TierUpCheck(_, _, _) => vec![],
         }
     }
 
@@ -673,7 +684,8 @@ impl Instruction {
             Instruction::Jump(_)
             | Instruction::Breakpoint
             | Instruction::RecordGcSafepoint
-            | Instruction::FeedbackOr(_, _) => {}
+            | Instruction::FeedbackOr(_, _)
+            | Instruction::TierUpCheck(_, _, _) => {}
             Instruction::PushExceptionHandler(_, value, _) => {
                 replace_register!(value, old_register, new_register);
             }
@@ -3281,6 +3293,39 @@ impl Ir {
                         slow_path: slow_path_lang,
                     });
                 }
+                Instruction::TierUpCheck(counter_addr, name_ptr, trampoline_ptr) => {
+                    // Hot path: decrement counter, store, branch on
+                    // non-zero around the trampoline call. Cold path
+                    // (when the counter hits zero): load the name
+                    // pointer into the first arg register and call the
+                    // trampoline. Args of the function being entered
+                    // have already been moved to locals before this
+                    // instruction is emitted, so clobbering volatile
+                    // registers (x0–x18 on ARM64) is safe here.
+                    let addr_reg = backend.temporary_register();
+                    let cnt_reg = backend.temporary_register();
+                    let zero_reg = backend.temporary_register();
+                    backend.mov_64(addr_reg, *counter_addr as isize);
+                    backend.load_from_heap(cnt_reg, addr_reg, 0);
+                    backend.sub_imm(cnt_reg, cnt_reg, 1);
+                    backend.store_on_heap(addr_reg, cnt_reg, 0);
+                    backend.mov_64(zero_reg, 0);
+                    backend.compare(cnt_reg, zero_reg);
+                    backend.free_temporary_register(zero_reg);
+
+                    let after = backend.new_label("tier_up_after");
+                    backend.jump_not_equal(after);
+
+                    // Threshold reached: trampoline(name_ptr).
+                    let arg0 = backend.arg(0);
+                    backend.mov_64(arg0, *name_ptr as isize);
+                    backend.mov_64(addr_reg, *trampoline_ptr as isize);
+                    backend.call_builtin(addr_reg);
+
+                    backend.write_label(after);
+                    backend.free_temporary_register(addr_reg);
+                    backend.free_temporary_register(cnt_reg);
+                }
                 Instruction::FeedbackOr(slot_addr, bits) => {
                     // load slot, or in bits, store back. Slot address is a
                     // compile-time constant — load via mov_64. Two scratch
@@ -3325,6 +3370,21 @@ impl Ir {
         }
         self.instructions
             .push(Instruction::FeedbackOr(slot_addr, bits));
+    }
+
+    /// Emit a per-function entry counter check. See
+    /// `Instruction::TierUpCheck`. Pass 0 for any of the addresses to
+    /// suppress the emit entirely (defensive — used when the counter
+    /// allocator is full or auto-specialize is disabled).
+    pub fn tier_up_check(&mut self, counter_addr: usize, name_ptr: usize, trampoline_ptr: usize) {
+        if counter_addr == 0 || name_ptr == 0 || trampoline_ptr == 0 {
+            return;
+        }
+        self.instructions.push(Instruction::TierUpCheck(
+            counter_addr,
+            name_ptr,
+            trampoline_ptr,
+        ));
     }
 
     pub fn jump(&mut self, label: Label) {

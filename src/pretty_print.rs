@@ -614,6 +614,12 @@ impl PrettyPrint for Instruction {
             Instruction::FeedbackOr(slot_addr, bits) => {
                 format!("feedback_or [{:#x}], {:#x}", slot_addr, bits)
             }
+            Instruction::TierUpCheck(counter_addr, name_ptr, trampoline_ptr) => {
+                format!(
+                    "tier_up_check counter={:#x} name={:#x} trampoline={:#x}",
+                    counter_addr, name_ptr, trampoline_ptr
+                )
+            }
         }
     }
 }
