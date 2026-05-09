@@ -1024,6 +1024,10 @@ impl Compiler {
     /// is the prior `(struct_id_versioned, field_offset_bytes,
     /// is_mutable)` triple from the IC slot, in source order. Used by
     /// tier-up.
+    // Mirrors the parameter list of `compile_ast` plus the two
+    // feedback inputs; bundling them into a struct would just push
+    // the noise to the call sites.
+    #[allow(clippy::too_many_arguments)]
     pub fn compile_ast_with_feedback(
         &mut self,
         ast: crate::ast::Ast,
@@ -1219,10 +1223,10 @@ impl Compiler {
         let base = self.arith_feedback_cache.as_ptr() as usize;
         for &slot_addr in slots {
             let index = (slot_addr - base) / 8;
-            if let Some(owner) = self.arith_feedback_owners.get_mut(index) {
-                if *owner == 0 {
-                    *owner = code_address;
-                }
+            if let Some(owner) = self.arith_feedback_owners.get_mut(index)
+                && *owner == 0
+            {
+                *owner = code_address;
             }
         }
         self.arith_feedback_by_address
@@ -1313,10 +1317,10 @@ impl Compiler {
         let base = self.property_look_up_cache.as_ptr() as usize;
         for &slot_addr in slots {
             let index = (slot_addr - base) / (3 * 8);
-            if let Some(owner) = self.property_cache_owners.get_mut(index) {
-                if *owner == 0 {
-                    *owner = code_address;
-                }
+            if let Some(owner) = self.property_cache_owners.get_mut(index)
+                && *owner == 0
+            {
+                *owner = code_address;
             }
         }
         self.property_cache_by_address

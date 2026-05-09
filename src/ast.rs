@@ -65,6 +65,12 @@ enum Specialization {
     FloatFloat(usize),
 }
 
+/// Snapshot of a prior property-cache slot for tier-up: the
+/// `(struct_id_versioned, field_offset_bytes, is_mutable)` triple
+/// recorded by the runtime IC during the previous compile's
+/// execution. `None` means the slot was never warmed.
+type PropertyFeedback = Option<(u64, u64, u64)>;
+
 /// Check if a variable name is referenced anywhere in an AST slice.
 /// Used to determine if the `resume` binding in `catch(e, resume)` is actually used.
 fn references_variable(body: &[Ast], name: &str) -> bool {
@@ -5206,10 +5212,10 @@ impl AstCompiler<'_> {
     fn alloc_arith_feedback(&mut self) -> usize {
         let debug_name = self.current_function_key();
         let slot = self.compiler.add_arith_feedback(debug_name).unwrap_or(0);
-        if slot != 0 {
-            if let Some(frame) = self.pending_arith_slots.last_mut() {
-                frame.push(slot);
-            }
+        if slot != 0
+            && let Some(frame) = self.pending_arith_slots.last_mut()
+        {
+            frame.push(slot);
         }
         slot
     }
@@ -5248,7 +5254,7 @@ impl AstCompiler<'_> {
     /// is_mutable))` only when the prior site was warm; sentinel slots
     /// and first-time compiles produce `None`, signalling "fall back
     /// to runtime IC".
-    fn alloc_property_cache(&mut self) -> Result<(usize, Option<(u64, u64, u64)>), CompileError> {
+    fn alloc_property_cache(&mut self) -> Result<(usize, PropertyFeedback), CompileError> {
         let addr = self.compiler.add_property_lookup()?;
         if let Some(frame) = self.pending_property_slots.last_mut() {
             frame.push(addr);

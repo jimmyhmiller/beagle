@@ -2297,10 +2297,9 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         // compiled body. Multiple compiles of the same source name will
         // appear as separate groups, which is exactly what we want for
         // tier-up: feedback is per-compile, not per-name.
-        let mut by_addr: std::collections::BTreeMap<
-            usize,
-            (Option<&str>, Vec<(usize, usize, u64)>),
-        > = std::collections::BTreeMap::new();
+        type FeedbackGroup<'a> = (Option<&'a str>, Vec<(usize, usize, u64)>);
+        let mut by_addr: std::collections::BTreeMap<usize, FeedbackGroup> =
+            std::collections::BTreeMap::new();
         for (i, (addr, value, owner_addr, name)) in entries.iter().enumerate() {
             let entry = by_addr
                 .entry(*owner_addr)
