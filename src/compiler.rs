@@ -358,6 +358,15 @@ pub struct Compiler {
     /// 24-byte slot whose layout is documented on
     /// `add_property_lookup`.
     pub property_cache_by_address: HashMap<usize, Vec<usize>>,
+    /// Code address → contiguous `(start_byte_offset, end_byte_offset)`
+    /// range in `property_look_up_cache` covering every slot allocated
+    /// while compiling this function's body — including slots from any
+    /// nested fns (closures / lambdas). Tier-up reads this transitive
+    /// range as the feedback array so the recompile can bake offsets
+    /// for nested-fn property accesses too. Per-function ownership for
+    /// per-fn tier-up triggering still lives in
+    /// `property_cache_by_address`.
+    pub property_cache_range_by_address: HashMap<usize, (usize, usize)>,
     pub compiled_file_cache: HashSet<String>,
     pub diagnostic_store: Arc<Mutex<DiagnosticStore>>,
     /// Cache for protocol dispatch inline caching
@@ -381,6 +390,14 @@ pub struct Compiler {
     /// Reverse index: code address → slot addresses (in source order).
     /// Populated by `bind_arith_feedback`.
     pub arith_feedback_by_address: HashMap<usize, Vec<usize>>,
+    /// Code address → contiguous `(start_byte_offset, end_byte_offset)`
+    /// range in `arith_feedback_cache` covering every slot allocated
+    /// while compiling this function's body — including slots from
+    /// nested fns. Symmetric to `property_cache_range_by_address` and
+    /// used by tier-up so per-site specialization decisions stay in
+    /// lockstep with allocation order even when nested fns appear
+    /// between sites.
+    pub arith_feedback_range_by_address: HashMap<usize, (usize, usize)>,
     /// Debug-only fully-qualified function name parallel to slots. Used
     /// by `--dump-arith-feedback` to give the dump a human-readable owner
     /// label. Tier-up logic should use the address, not the name.
@@ -641,8 +658,20 @@ impl Compiler {
             .clone()
             .unwrap_or_else(|| "<specialized>".to_string());
         let current_address: usize = function.pointer.into();
-        let feedback_bits = self.arith_feedback_for_address(current_address);
-        let property_feedback = self.property_cache_for_address(current_address);
+        // Use the transitive ranges so we also capture feedback for
+        // sites inside nested fns (closures / lambdas). The cursor in
+        // the recompile advances on every alloc, so the feedback array
+        // must include every slot the original compile allocated — not
+        // just those bound to this fn's pointer. Falls back to the
+        // per-fn list when no range was recorded.
+        let mut feedback_bits = self.arith_feedback_range_for_address(current_address);
+        if feedback_bits.is_empty() {
+            feedback_bits = self.arith_feedback_for_address(current_address);
+        }
+        let mut property_feedback = self.property_cache_range_for_address(current_address);
+        if property_feedback.is_empty() {
+            property_feedback = self.property_cache_for_address(current_address);
+        }
         if feedback_bits.is_empty() && property_feedback.is_empty() {
             // No instrumented sites for the current compile — nothing to
             // specialize on.
@@ -1306,6 +1335,44 @@ impl Compiler {
             .unwrap_or_default()
     }
 
+    /// Snapshot every arith-feedback slot allocated while compiling the
+    /// function at `code_address` — INCLUDING nested fns. Symmetric to
+    /// `property_cache_range_for_address`. Tier-up needs this so per-
+    /// site specialization stays aligned with allocation order across
+    /// nested-fn boundaries.
+    pub fn arith_feedback_range_for_address(&self, code_address: usize) -> Vec<u64> {
+        let Some(&(start, end)) = self.arith_feedback_range_by_address.get(&code_address)
+        else {
+            return Vec::new();
+        };
+        if end <= start {
+            return Vec::new();
+        }
+        let base = self.arith_feedback_cache.as_ptr() as usize;
+        let stride = 8;
+        let count = (end - start) / stride;
+        (0..count)
+            .map(|i| unsafe { *((base + start + i * stride) as *const u64) })
+            .collect()
+    }
+
+    /// Record the contiguous slot range covered by `bind_arith_feedback`
+    /// and any nested-fn binds for the function compiled at
+    /// `code_address`. Called once per `Ast::Function` exit.
+    pub fn record_arith_feedback_range(
+        &mut self,
+        code_address: usize,
+        start_byte_offset: usize,
+        end_byte_offset: usize,
+    ) {
+        if code_address == 0 || end_byte_offset <= start_byte_offset {
+            return;
+        }
+        self.arith_feedback_range_by_address
+            .entry(code_address)
+            .or_insert((start_byte_offset, end_byte_offset));
+    }
+
     /// Stamp `code_address` onto every property-cache entry in `slots`,
     /// and add them to the per-address index. Mirrors
     /// `bind_arith_feedback`. Called by AST-side bookkeeping after
@@ -1346,6 +1413,60 @@ impl Compiler {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Snapshot every property-cache slot allocated while compiling the
+    /// function at `code_address` — INCLUDING nested fns (closures and
+    /// lambdas). Returns slots in cache-allocation order, which matches
+    /// AST source-visit order. Tier-up uses this so the recompile can
+    /// also bake offsets for property accesses inside the function's
+    /// nested fns (their slots aren't in `property_cache_by_address`,
+    /// which only holds slots directly bound to each fn's pointer for
+    /// per-fn tier-up triggering).
+    ///
+    /// Returns the empty vec when no range was recorded (anonymous
+    /// top-level bodies, etc.) — caller falls back to the per-fn list.
+    pub fn property_cache_range_for_address(
+        &self,
+        code_address: usize,
+    ) -> Vec<(u64, u64, u64)> {
+        let Some(&(start, end)) = self.property_cache_range_by_address.get(&code_address)
+        else {
+            return Vec::new();
+        };
+        if end <= start {
+            return Vec::new();
+        }
+        let base = self.property_look_up_cache.as_ptr() as usize;
+        let stride = 3 * 8;
+        let count = (end - start) / stride;
+        (0..count)
+            .map(|i| unsafe {
+                let p = (base + start + i * stride) as *const u64;
+                (*p, *p.add(1), *p.add(2))
+            })
+            .collect()
+    }
+
+    /// Record the contiguous slot range that `bind_property_cache` and
+    /// nested-fn binds covered for the function compiled at
+    /// `code_address`. Called once per `Ast::Function` exit, after
+    /// `upsert_function` returns the pointer.
+    pub fn record_property_cache_range(
+        &mut self,
+        code_address: usize,
+        start_byte_offset: usize,
+        end_byte_offset: usize,
+    ) {
+        if code_address == 0 || end_byte_offset <= start_byte_offset {
+            return;
+        }
+        // First write wins. A function whose AST is recompiled (tier-up)
+        // gets a NEW pointer from `overwrite_function`, so it lands in a
+        // fresh entry — no collision with the prior compile's range.
+        self.property_cache_range_by_address
+            .entry(code_address)
+            .or_insert((start_byte_offset, end_byte_offset));
     }
 
     /// Look up the debug name we recorded for the function compiled at
@@ -2233,6 +2354,7 @@ impl CompilerThread {
                 property_look_up_cache_offset: 0,
                 property_cache_owners: Vec::new(),
                 property_cache_by_address: HashMap::new(),
+                property_cache_range_by_address: HashMap::new(),
                 protocol_dispatch_cache: MmapOptions::new(MmapOptions::page_size())
                     .map_err(|e| {
                         CompileError::MemoryMapping(format!("Failed to create mmap: {}", e))
@@ -2257,6 +2379,7 @@ impl CompilerThread {
                 arith_feedback_cache_offset: 0,
                 arith_feedback_owners: Vec::new(),
                 arith_feedback_by_address: HashMap::new(),
+                arith_feedback_range_by_address: HashMap::new(),
                 arith_feedback_debug_names: Vec::new(),
                 specialized_names: HashSet::new(),
                 function_counter_cache: MmapOptions::new(MmapOptions::page_size() * 64) // 256KB ≈ 32k functions

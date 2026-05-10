@@ -1279,6 +1279,15 @@ impl AstCompiler<'_> {
                 // bound to the function's code address after upsert.
                 self.pending_arith_slots.push(Vec::new());
                 self.pending_property_slots.push(Vec::new());
+                // Snapshot the property-cache and arith-feedback offsets
+                // before compiling this fn's body. After upsert we pair
+                // them with the post-body offsets to record *transitive*
+                // ranges — so tier-up can specialize sites inside any
+                // nested fn this body contains.
+                let property_cache_range_start =
+                    self.compiler.property_look_up_cache_offset;
+                let arith_feedback_range_start =
+                    self.compiler.arith_feedback_cache_offset;
 
                 self.name = name.clone();
                 self.current_function_arity = actual_arity;
@@ -1682,6 +1691,23 @@ impl AstCompiler<'_> {
                 let pending_props = self.pending_property_slots.pop().unwrap_or_default();
                 self.compiler
                     .bind_property_cache(&pending_props, function_pointer);
+                // Record the [start, end) cache offset ranges for this
+                // fn — covers everything allocated during body compile,
+                // including any nested fns. Used by tier-up to gather
+                // transitive feedback so nested-fn sites also get
+                // specialized on recompile.
+                let property_cache_range_end = self.compiler.property_look_up_cache_offset;
+                self.compiler.record_property_cache_range(
+                    function_pointer,
+                    property_cache_range_start,
+                    property_cache_range_end,
+                );
+                let arith_feedback_range_end = self.compiler.arith_feedback_cache_offset;
+                self.compiler.record_arith_feedback_range(
+                    function_pointer,
+                    arith_feedback_range_start,
+                    arith_feedback_range_end,
+                );
 
                 let _ = backend.share_label_info_debug(function_pointer);
 
@@ -5259,6 +5285,11 @@ impl AstCompiler<'_> {
         if let Some(frame) = self.pending_property_slots.last_mut() {
             frame.push(addr);
         }
+        // `property_feedback_input` covers every slot allocated during
+        // the recompile of this function — including slots inside any
+        // nested fns (closures / lambdas) — in source-visit order. Each
+        // alloc consumes exactly one entry, keeping the cursor in
+        // lockstep with the original compile's allocation order.
         let entry = self
             .property_feedback_input
             .get(self.property_feedback_cursor)

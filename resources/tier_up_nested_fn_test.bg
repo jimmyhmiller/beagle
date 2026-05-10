@@ -1,0 +1,214 @@
+namespace tier_up_nested_fn_test
+
+// Regression tests for the nested-fn alignment bug in tier-up
+// specialization. Each test:
+//   1. Warms a function to populate property + arith feedback slots.
+//   2. Forces tier-up via `runtime/specialize-all()`.
+//   3. Asserts the specialized version returns the same value the
+//      tier-1 version did.
+//
+// The bug: `alloc_property_cache` advances `property_feedback_cursor`
+// for slots inside nested fn bodies (closures / lambdas), but those
+// slots aren't in the outer fn's per-fn feedback list. Every property
+// access in the outer body AFTER a nested-fn property access reads
+// shifted feedback, baking mismatched (struct_id, offset) pairs.
+//
+// Triggering the bug requires:
+//   - The nested fn to allocate a property-cache slot (i.e., access
+//     a struct field), AND
+//   - The outer fn to have property accesses *after* the nested fn,
+//     ideally with distinguishable offsets so a shift produces wrong
+//     values.
+
+use beagle.runtime as runtime
+
+struct Vec2 { x, y }
+struct Point3 { x, y, z }
+
+fn make_v(x, y) { Vec2 { x: x, y: y } }
+fn warm(f, iters) {
+    let mut i = 0
+    let mut last = 0
+    while i < iters {
+        last = f()
+        i = i + 1
+    }
+    last
+}
+
+// === Test 1: lambda with property access between two outer reads ===
+// Reproduces the draw_shadow_geometry shape: lambda accesses .x of
+// its arg (cursor advances inside lambda), then outer reads .x and
+// .y. Without the fix, outer .x reads feedback for a y-offset and
+// outer .y reads feedback for the wrong site entirely.
+
+fn lambda_with_prop_access(v, pts) {
+    let _ = sort-by(pts, fn(p) { p.x })
+    v.x + v.y * 2.0
+}
+
+test "lambda accesses property — outer reads stay correct after tier-up" {
+    let v = make_v(10.0, 100.0)
+    let pts = [make_v(3.0, 0.0), make_v(1.0, 0.0), make_v(2.0, 0.0)]
+    // Expected: 10 + 100*2 = 210
+    let _ = warm(fn() { lambda_with_prop_access(v, pts) }, 1500)
+    let n = runtime/specialize-all()
+    assert!(n > 0)
+    assert-eq!(lambda_with_prop_access(v, pts), 210.0)
+}
+
+// === Test 2: many outer reads after lambda with property access ===
+// Long sequence so a shift produces obviously-wrong sums.
+
+fn many_reads_after_lambda(a, b, c, pts) {
+    let _ = sort-by(pts, fn(p) { p.x })
+    a.x + a.y + b.x + b.y + c.x + c.y
+}
+
+test "many property reads after lambda — all aligned" {
+    let a = make_v(1.0, 10.0)
+    let b = make_v(2.0, 20.0)
+    let c = make_v(3.0, 30.0)
+    let pts = [make_v(5.0, 0.0)]
+    // Expected: 1 + 10 + 2 + 20 + 3 + 30 = 66
+    let _ = warm(fn() { many_reads_after_lambda(a, b, c, pts) }, 1500)
+    let n = runtime/specialize-all()
+    assert!(n > 0)
+    assert-eq!(many_reads_after_lambda(a, b, c, pts), 66.0)
+}
+
+// === Test 3: nested-fn property access also gets baked ===
+// Verifies the *smarter* part of the fix: the lambda's own property
+// access reads from the lambda's slot in the transitive feedback
+// range, so it gets baked too (not just falls back to the runtime
+// IC). Hard to assert directly without inspecting generated code,
+// but we can at least confirm correctness end-to-end.
+
+fn lambda_field_sort(pts) {
+    sort-by(pts, fn(p) { p.x })
+}
+
+test "lambda's own property access correct after tier-up" {
+    let pts = [
+        Vec2 { x: 3.0, y: 99.0 },
+        Vec2 { x: 1.0, y: 99.0 },
+        Vec2 { x: 2.0, y: 99.0 }
+    ]
+    let _ = warm(fn() { lambda_field_sort(pts) }, 1500)
+    let n = runtime/specialize-all()
+    assert!(n > 0)
+    let sorted = lambda_field_sort(pts)
+    assert-eq!(sorted[0].x, 1.0)
+    assert-eq!(sorted[1].x, 2.0)
+    assert-eq!(sorted[2].x, 3.0)
+}
+
+// === Test 4: doubly-nested fn with property access ===
+// The inner-inner lambda's slot is two levels deep but still inside
+// the outermost fn's transitive range.
+
+fn double_nested(v, pts) {
+    let _ = sort-by(pts, fn(outer_p) {
+        let inner = sort-by([outer_p], fn(inner_p) { inner_p.y })
+        inner[0].x
+    })
+    v.x + v.y
+}
+
+test "doubly-nested lambda — outer reads still aligned" {
+    let v = make_v(7.0, 13.0)
+    let pts = [make_v(1.0, 2.0)]
+    let _ = warm(fn() { double_nested(v, pts) }, 1500)
+    let n = runtime/specialize-all()
+    assert!(n > 0)
+    assert-eq!(double_nested(v, pts), 20.0)
+}
+
+// === Test 5: multiple lambdas each with property access ===
+// Each lambda's property alloc shifts the cursor; with multiple,
+// errors compound across the outer body.
+
+fn multiple_lambdas(v, pts) {
+    let _ = sort-by(pts, fn(p) { p.x })
+    let mid = v.x
+    let _ = sort-by(pts, fn(p) { p.y })
+    let end = v.y
+    mid + end
+}
+
+test "multiple lambdas with property access — outer reads aligned" {
+    let v = make_v(50.0, 500.0)
+    let pts = [make_v(1.0, 2.0)]
+    let _ = warm(fn() { multiple_lambdas(v, pts) }, 1500)
+    let n = runtime/specialize-all()
+    assert!(n > 0)
+    assert-eq!(multiple_lambdas(v, pts), 550.0)
+}
+
+// === Test 6: mixed struct shapes with lambda between ===
+// Different struct sids on either side of a lambda — confirms each
+// site bakes its OWN struct_id, not one pulled from a neighbor.
+
+fn mixed_shapes(v2, p3, pts) {
+    let _ = sort-by(pts, fn(p) { p.x })
+    v2.x + p3.x + v2.y + p3.y + p3.z
+}
+
+test "mixed struct shapes around lambda — each site bakes its own shape" {
+    let v2 = make_v(1.0, 2.0)
+    let p3 = Point3 { x: 10.0, y: 20.0, z: 30.0 }
+    let pts = [make_v(5.0, 0.0)]
+    // 1 + 10 + 2 + 20 + 30 = 63
+    let _ = warm(fn() { mixed_shapes(v2, p3, pts) }, 1500)
+    let n = runtime/specialize-all()
+    assert!(n > 0)
+    assert-eq!(mixed_shapes(v2, p3, pts), 63.0)
+}
+
+// === Test 7: arith feedback alignment around nested-fn arith ===
+// Symmetric correctness check for the arith-feedback range fix.
+
+fn arith_around_lambda(x, y, pts) {
+    let _ = sort-by(pts, fn(p) { p.x * 2.0 })
+    x * y + x - y
+}
+
+test "arith after lambda — result matches tier-1" {
+    let pts = [make_v(1.0, 2.0)]
+    let _ = warm(fn() { arith_around_lambda(5, 4, pts) }, 1500)
+    let n = runtime/specialize-all()
+    assert!(n > 0)
+    // 5 * 4 + 5 - 4 = 21
+    assert-eq!(arith_around_lambda(5, 4, pts), 21)
+}
+
+// === Test 8: regression for the exact zelda shape ===
+// Records the angle/hit pattern: lambda reads `h.angle` (1 prop in
+// nested fn), then outer body reads .x/.y on Vec2 in many places.
+
+struct Hit { angle, hit }
+
+fn zelda_shape(hits) {
+    let sorted = sort-by(hits, fn(h) { h.angle })
+    let mut sum = 0.0
+    let mut i = 0
+    while i < length(sorted) {
+        let h = sorted[i]
+        sum = sum + h.hit.x + h.hit.y
+        i = i + 1
+    }
+    sum
+}
+
+test "zelda sort-by hit pattern — sums correctly after tier-up" {
+    let hits = [
+        Hit { angle: 0.3, hit: make_v(10.0, 100.0) },
+        Hit { angle: 0.1, hit: make_v(20.0, 200.0) },
+        Hit { angle: 0.2, hit: make_v(30.0, 300.0) }
+    ]
+    // Expected: 10+100 + 20+200 + 30+300 = 660
+    let _ = warm(fn() { zelda_shape(hits) }, 1500)
+    let n = runtime/specialize-all()
+    assert!(n > 0)
+    assert-eq!(zelda_shape(hits), 660.0)
+}
