@@ -135,6 +135,30 @@ impl From<std::io::Error> for ParseError {
 
 pub type ParseResult<T> = Result<T, ParseError>;
 
+/// Build a `ParseError` describing an attempt to use a reserved keyword as a
+/// function name (e.g. `fn handle(...)` at the top level). Reserved keywords
+/// have special parse behavior at call sites, so allowing them as function
+/// names silently misparses calls — this error tells the user exactly what
+/// happened and how to fix it.
+fn reserved_keyword_fn_name_error(
+    keyword: &str,
+    used_for: &str,
+    location: SourceLocation,
+) -> ParseError {
+    ParseError::InvalidDeclaration {
+        message: format!(
+            "`{kw}` is a reserved keyword (used for {used_for}) and cannot be used \
+             as a function name. Calls written `{kw}(...)` would silently parse as \
+             the keyword form rather than a function call. Rename this function \
+             (e.g. `{kw}-impl`, `do-{kw}`, or a domain-specific name) and update \
+             its call sites.",
+            kw = keyword,
+            used_for = used_for,
+        ),
+        location,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
     OpenParen,
@@ -1504,7 +1528,7 @@ impl Parser {
 
     fn parse_atom(&mut self, struct_creation_allowed: bool) -> ParseResult<Option<Ast>> {
         match self.current_token() {
-            Token::Fn => Ok(Some(self.parse_function()?)),
+            Token::Fn => Ok(Some(self.parse_function(false)?)),
             Token::Loop => Ok(Some(self.parse_loop()?)),
             Token::While => Ok(Some(self.parse_while()?)),
             Token::Break => Ok(Some(self.parse_break()?)),
@@ -2038,11 +2062,16 @@ impl Parser {
         }
     }
 
-    fn parse_function(&mut self) -> ParseResult<Ast> {
+    fn parse_function(&mut self, allow_reserved_keyword_names: bool) -> ParseResult<Ast> {
         let start_position = self.position;
         let docstring = self.take_pending_docstring();
         self.move_to_next_non_whitespace();
-        // Allow keywords like "handle" and "perform" to be used as function names
+        // Inside `extend ... with ...` blocks, reserved keywords like `handle`
+        // are valid method names (they correspond to protocol methods such as
+        // `Handler.handle`). At the top level, defining `fn handle(...)` is a
+        // misparse trap: `handle(x)` at a call site is the effect-handler form,
+        // so the call would silently turn into a bare identifier reference
+        // instead of a call. Reject it with a clear error.
         let name = match self.current_token() {
             Token::Atom((start, end)) => {
                 self.move_to_next_non_whitespace();
@@ -2055,18 +2084,46 @@ impl Parser {
                 )
             }
             Token::Handle => {
+                if !allow_reserved_keyword_names {
+                    return Err(reserved_keyword_fn_name_error(
+                        "handle",
+                        "effect handler blocks (`handle Protocol(...) with ... { ... }`)",
+                        self.current_source_location(),
+                    ));
+                }
                 self.move_to_next_non_whitespace();
                 Some("handle".to_string())
             }
             Token::Perform => {
+                if !allow_reserved_keyword_names {
+                    return Err(reserved_keyword_fn_name_error(
+                        "perform",
+                        "performing algebraic effects (`perform Op(...)`)",
+                        self.current_source_location(),
+                    ));
+                }
                 self.move_to_next_non_whitespace();
                 Some("perform".to_string())
             }
             Token::Future => {
+                if !allow_reserved_keyword_names {
+                    return Err(reserved_keyword_fn_name_error(
+                        "future",
+                        "the `future(expr)` async form",
+                        self.current_source_location(),
+                    ));
+                }
                 self.move_to_next_non_whitespace();
                 Some("future".to_string())
             }
             Token::Test => {
+                if !allow_reserved_keyword_names {
+                    return Err(reserved_keyword_fn_name_error(
+                        "test",
+                        "test blocks (`test \"name\" { ... }`)",
+                        self.current_source_location(),
+                    ));
+                }
                 self.move_to_next_non_whitespace();
                 Some("test".to_string())
             }
@@ -2761,7 +2818,9 @@ impl Parser {
 
     fn parse_extend_member(&mut self) -> ParseResult<Ast> {
         self.skip_whitespace();
-        self.parse_function()
+        // Inside `extend ... with ...` blocks, keywords like `handle` are valid
+        // method names (they're protocol method names, not keyword forms).
+        self.parse_function(true)
     }
 
     fn parse_enum(&mut self) -> ParseResult<Ast> {
