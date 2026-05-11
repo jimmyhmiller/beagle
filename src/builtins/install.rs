@@ -1744,6 +1744,41 @@ impl Runtime {
             4, // sp, fp, sb, s
         )?;
         self.add_builtin_function_with_fp(
+            "beagle.core/string-builder-push-string-range!",
+            string_builder_push_string_range as *const u8,
+            true,
+            true,
+            6, // sp, fp, sb, s, start, end
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/string-builder-push-string-range-filter-byte!",
+            string_builder_push_string_range_filter_byte as *const u8,
+            true,
+            true,
+            7, // sp, fp, sb, s, start, end, skip-byte
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/string-builder-push-string-range-uppercase!",
+            string_builder_push_string_range_uppercase as *const u8,
+            true,
+            true,
+            6, // sp, fp, sb, s, start, end
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/string-builder-push-builder-range!",
+            string_builder_push_builder_range as *const u8,
+            true,
+            true,
+            6, // sp, fp, dst, src, start, end
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/string-index-byte",
+            string_index_byte as *const u8,
+            true,
+            true,
+            5, // sp, fp, s, byte, start
+        )?;
+        self.add_builtin_function_with_fp(
             "beagle.core/string-builder-push-int!",
             string_builder_push_int as *const u8,
             true,

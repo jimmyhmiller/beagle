@@ -33,6 +33,31 @@ fn append!(sb, s) {
     string-builder-push-string!(sb, s)
 }
 
+// Append bytes from s[start:end].
+fn append-range!(sb, s, start, end) {
+    string-builder-push-string-range!(sb, s, start, end)
+}
+
+// Append bytes from s[start:end], skipping every occurrence of skip-byte.
+fn append-range-filter-byte!(sb, s, start, end, skip-byte) {
+    string-builder-push-string-range-filter-byte!(sb, s, start, end, skip-byte)
+}
+
+// Append bytes from s[start:end], converting ASCII letters to uppercase.
+fn append-range-uppercase!(sb, s, start, end) {
+    string-builder-push-string-range-uppercase!(sb, s, start, end)
+}
+
+// Append bytes from src[start:end] into dst.
+fn append-builder-range!(dst, src, start, end) {
+    string-builder-push-builder-range!(dst, src, start, end)
+}
+
+// Return the byte index of byte in s at or after start, or -1.
+fn index-byte(s, byte, start) {
+    string-index-byte(s, byte, start)
+}
+
 // Append the decimal representation of an int.
 fn append-int!(sb, i) {
     string-builder-push-int!(sb, i)

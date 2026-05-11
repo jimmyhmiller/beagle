@@ -292,6 +292,246 @@ pub extern "C" fn string_builder_push_string(
     sb_tagged
 }
 
+pub extern "C" fn string_builder_push_string_range(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    sb_tagged: usize,
+    s_tagged: usize,
+    start_tagged: usize,
+    end_tagged: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "string_builder_push_string_range");
+    let runtime = get_runtime().get_mut();
+
+    let src_bytes = runtime.get_string_bytes_vec(s_tagged);
+    let start = BuiltInTypes::untag_isize(start_tagged as isize).max(0) as usize;
+    let end = BuiltInTypes::untag_isize(end_tagged as isize).max(0) as usize;
+    let start = start.min(src_bytes.len());
+    let end = end.min(src_bytes.len()).max(start);
+    let src_bytes = src_bytes[start..end].to_vec();
+
+    if src_bytes.is_empty() {
+        return sb_tagged;
+    }
+
+    let len = sb_len(sb_tagged);
+    let needed = len + src_bytes.len();
+    let sb_tagged = if needed > storage_capacity(sb_storage(sb_tagged)) {
+        match ensure_capacity_for(runtime, stack_pointer, sb_tagged, needed) {
+            Ok(new_sb) => new_sb,
+            Err(e) => unsafe {
+                throw_runtime_error(stack_pointer, "AllocationError", e.to_string());
+            },
+        }
+    } else {
+        sb_tagged
+    };
+
+    let storage_tagged = sb_storage(sb_tagged);
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            src_bytes.as_ptr(),
+            storage_bytes_ptr(storage_tagged).add(len),
+            src_bytes.len(),
+        );
+    }
+    write_len(sb_tagged, needed);
+    sb_tagged
+}
+
+pub extern "C" fn string_builder_push_string_range_filter_byte(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    sb_tagged: usize,
+    s_tagged: usize,
+    start_tagged: usize,
+    end_tagged: usize,
+    skip_byte_tagged: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(
+        get_runtime().get(),
+        "string_builder_push_string_range_filter_byte",
+    );
+    let runtime = get_runtime().get_mut();
+
+    let src_bytes = runtime.get_string_bytes_vec(s_tagged);
+    let start = BuiltInTypes::untag_isize(start_tagged as isize).max(0) as usize;
+    let end = BuiltInTypes::untag_isize(end_tagged as isize).max(0) as usize;
+    let start = start.min(src_bytes.len());
+    let end = end.min(src_bytes.len()).max(start);
+    let skip = (BuiltInTypes::untag_isize(skip_byte_tagged as isize) & 0xFF) as u8;
+
+    let filtered: Vec<u8> = src_bytes[start..end]
+        .iter()
+        .copied()
+        .filter(|b| *b != skip)
+        .collect();
+
+    if filtered.is_empty() {
+        return sb_tagged;
+    }
+
+    let len = sb_len(sb_tagged);
+    let needed = len + filtered.len();
+    let sb_tagged = if needed > storage_capacity(sb_storage(sb_tagged)) {
+        match ensure_capacity_for(runtime, stack_pointer, sb_tagged, needed) {
+            Ok(new_sb) => new_sb,
+            Err(e) => unsafe {
+                throw_runtime_error(stack_pointer, "AllocationError", e.to_string());
+            },
+        }
+    } else {
+        sb_tagged
+    };
+
+    let storage_tagged = sb_storage(sb_tagged);
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            filtered.as_ptr(),
+            storage_bytes_ptr(storage_tagged).add(len),
+            filtered.len(),
+        );
+    }
+    write_len(sb_tagged, needed);
+    sb_tagged
+}
+
+pub extern "C" fn string_builder_push_string_range_uppercase(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    sb_tagged: usize,
+    s_tagged: usize,
+    start_tagged: usize,
+    end_tagged: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(
+        get_runtime().get(),
+        "string_builder_push_string_range_uppercase",
+    );
+    let runtime = get_runtime().get_mut();
+
+    let src_bytes = runtime.get_string_bytes_vec(s_tagged);
+    let start = BuiltInTypes::untag_isize(start_tagged as isize).max(0) as usize;
+    let end = BuiltInTypes::untag_isize(end_tagged as isize).max(0) as usize;
+    let start = start.min(src_bytes.len());
+    let end = end.min(src_bytes.len()).max(start);
+    let uppercased: Vec<u8> = src_bytes[start..end]
+        .iter()
+        .map(|b| b.to_ascii_uppercase())
+        .collect();
+
+    if uppercased.is_empty() {
+        return sb_tagged;
+    }
+
+    let len = sb_len(sb_tagged);
+    let needed = len + uppercased.len();
+    let sb_tagged = if needed > storage_capacity(sb_storage(sb_tagged)) {
+        match ensure_capacity_for(runtime, stack_pointer, sb_tagged, needed) {
+            Ok(new_sb) => new_sb,
+            Err(e) => unsafe {
+                throw_runtime_error(stack_pointer, "AllocationError", e.to_string());
+            },
+        }
+    } else {
+        sb_tagged
+    };
+
+    let storage_tagged = sb_storage(sb_tagged);
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            uppercased.as_ptr(),
+            storage_bytes_ptr(storage_tagged).add(len),
+            uppercased.len(),
+        );
+    }
+    write_len(sb_tagged, needed);
+    sb_tagged
+}
+
+pub extern "C" fn string_builder_push_builder_range(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    dst_tagged: usize,
+    src_tagged: usize,
+    start_tagged: usize,
+    end_tagged: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "string_builder_push_builder_range");
+    let runtime = get_runtime().get_mut();
+
+    let src_len = sb_len(src_tagged);
+    let start = BuiltInTypes::untag_isize(start_tagged as isize).max(0) as usize;
+    let end = BuiltInTypes::untag_isize(end_tagged as isize).max(0) as usize;
+    let start = start.min(src_len);
+    let end = end.min(src_len).max(start);
+    let copy_len = end - start;
+    if copy_len == 0 {
+        return dst_tagged;
+    }
+
+    let mut snapshot = Vec::with_capacity(copy_len);
+    {
+        let src_storage = sb_storage(src_tagged);
+        let src_bytes = storage_bytes_ptr(src_storage);
+        unsafe { snapshot.set_len(copy_len) };
+        unsafe {
+            std::ptr::copy_nonoverlapping(src_bytes.add(start), snapshot.as_mut_ptr(), copy_len)
+        };
+    }
+
+    let dst_len = sb_len(dst_tagged);
+    let needed = dst_len + copy_len;
+    let dst_tagged = if needed > storage_capacity(sb_storage(dst_tagged)) {
+        match ensure_capacity_for(runtime, stack_pointer, dst_tagged, needed) {
+            Ok(new_dst) => new_dst,
+            Err(e) => unsafe {
+                throw_runtime_error(stack_pointer, "AllocationError", e.to_string());
+            },
+        }
+    } else {
+        dst_tagged
+    };
+
+    let dst_storage = sb_storage(dst_tagged);
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            snapshot.as_ptr(),
+            storage_bytes_ptr(dst_storage).add(dst_len),
+            copy_len,
+        );
+    }
+    write_len(dst_tagged, needed);
+    dst_tagged
+}
+
+pub extern "C" fn string_index_byte(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    s_tagged: usize,
+    byte_tagged: usize,
+    start_tagged: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    print_call_builtin(get_runtime().get(), "string_index_byte");
+    let runtime = get_runtime().get_mut();
+
+    let bytes = runtime.get_string_bytes_vec(s_tagged);
+    let needle = (BuiltInTypes::untag_isize(byte_tagged as isize) & 0xFF) as u8;
+    let start = BuiltInTypes::untag_isize(start_tagged as isize).max(0) as usize;
+    if start >= bytes.len() {
+        return BuiltInTypes::construct_int(-1) as usize;
+    }
+    match bytes[start..].iter().position(|b| *b == needle) {
+        Some(offset) => BuiltInTypes::construct_int((start + offset) as isize) as usize,
+        None => BuiltInTypes::construct_int(-1) as usize,
+    }
+}
+
 pub extern "C" fn string_builder_push_int(
     stack_pointer: usize,
     frame_pointer: usize,
