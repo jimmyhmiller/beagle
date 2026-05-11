@@ -264,6 +264,18 @@ pub enum X86Asm {
         index: X86Register,
         src: X86Register,
     },
+    /// MOVZX r64, byte ptr [base + index*1] - zero-extending byte load with SIB
+    MovzxRMIndexedByte {
+        dest: X86Register,
+        base: X86Register,
+        index: X86Register,
+    },
+    /// MOV byte ptr [base + index*1], r8 - byte store with SIB
+    MovMRIndexedByte {
+        base: X86Register,
+        index: X86Register,
+        src: X86Register,
+    },
     /// LEA r64, [base + offset]
     Lea {
         dest: X86Register,
@@ -626,6 +638,54 @@ impl X86Asm {
                     vec![rex, 0x89, modrm, sib_byte, 0x00]
                 } else {
                     vec![rex, 0x89, modrm, sib_byte]
+                }
+            }
+
+            X86Asm::MovzxRMIndexedByte { dest, base, index } => {
+                // MOVZX r64, byte ptr [base + index*1]: REX.W + 0F B6 /r with SIB
+                // Zero-extends an 8-bit memory load into the full 64-bit dest.
+                let base_idx = base.index;
+                let index_idx = index.index;
+                let dest_idx = dest.index;
+
+                let rex = 0x48
+                    | ((dest_idx >> 3) << 2)  // REX.R
+                    | ((index_idx >> 3) << 1) // REX.X
+                    | (base_idx >> 3); // REX.B
+
+                let modrm = ((dest_idx & 0b111) << 3) | 0b100;
+                let sib_byte = ((index_idx & 0b111) << 3) | (base_idx & 0b111);
+
+                if (base_idx & 0b111) == 5 {
+                    let modrm = 0b01_000_100 | ((dest_idx & 0b111) << 3);
+                    vec![rex, 0x0F, 0xB6, modrm, sib_byte, 0x00]
+                } else {
+                    vec![rex, 0x0F, 0xB6, modrm, sib_byte]
+                }
+            }
+
+            X86Asm::MovMRIndexedByte { base, index, src } => {
+                // MOV byte ptr [base + index*1], r8: 88 /r with SIB.
+                // Emit REX (without W) unconditionally so that the source
+                // encodes as the uniform low byte (SIL/DIL/BPL/SPL, R8B-R15B)
+                // rather than the legacy AH/CH/DH/BH aliases.
+                let base_idx = base.index;
+                let index_idx = index.index;
+                let src_idx = src.index;
+
+                let rex = 0x40
+                    | ((src_idx >> 3) << 2)   // REX.R
+                    | ((index_idx >> 3) << 1) // REX.X
+                    | (base_idx >> 3); // REX.B
+
+                let modrm = ((src_idx & 0b111) << 3) | 0b100;
+                let sib_byte = ((index_idx & 0b111) << 3) | (base_idx & 0b111);
+
+                if (base_idx & 0b111) == 5 {
+                    let modrm = 0b01_000_100 | ((src_idx & 0b111) << 3);
+                    vec![rex, 0x88, modrm, sib_byte, 0x00]
+                } else {
+                    vec![rex, 0x88, modrm, sib_byte]
                 }
             }
 
@@ -1220,6 +1280,76 @@ mod tests {
     #[test]
     fn test_ret() {
         assert_eq!(X86Asm::Ret.encode(), vec![0xC3]);
+    }
+
+    #[test]
+    fn test_movzx_byte_indexed() {
+        // MOVZX RAX, byte ptr [RBX + RCX*1]
+        let instr = X86Asm::MovzxRMIndexedByte {
+            dest: RAX,
+            base: RBX,
+            index: RCX,
+        };
+        assert_eq!(instr.encode(), vec![0x48, 0x0F, 0xB6, 0x04, 0x0B]);
+
+        // MOVZX R8, byte ptr [R9 + R10*1] — exercises REX.R/B/X all set
+        let instr = X86Asm::MovzxRMIndexedByte {
+            dest: R8,
+            base: R9,
+            index: R10,
+        };
+        assert_eq!(instr.encode(), vec![0x4F, 0x0F, 0xB6, 0x04, 0x11]);
+
+        // MOVZX RAX, byte ptr [RBP + RCX*1] — RBP-as-base needs disp8=0
+        let instr = X86Asm::MovzxRMIndexedByte {
+            dest: RAX,
+            base: RBP,
+            index: RCX,
+        };
+        assert_eq!(instr.encode(), vec![0x48, 0x0F, 0xB6, 0x44, 0x0D, 0x00]);
+
+        // MOVZX RAX, byte ptr [R13 + RCX*1] — R13 has the same low-3 quirk
+        let instr = X86Asm::MovzxRMIndexedByte {
+            dest: RAX,
+            base: R13,
+            index: RCX,
+        };
+        assert_eq!(instr.encode(), vec![0x49, 0x0F, 0xB6, 0x44, 0x0D, 0x00]);
+    }
+
+    #[test]
+    fn test_mov_byte_indexed_store() {
+        // MOV byte ptr [RBX + RCX*1], DL
+        let instr = X86Asm::MovMRIndexedByte {
+            base: RBX,
+            index: RCX,
+            src: RDX,
+        };
+        assert_eq!(instr.encode(), vec![0x40, 0x88, 0x14, 0x0B]);
+
+        // MOV byte ptr [R8 + RCX*1], R9B — REX.R and REX.B set
+        let instr = X86Asm::MovMRIndexedByte {
+            base: R8,
+            index: RCX,
+            src: R9,
+        };
+        assert_eq!(instr.encode(), vec![0x45, 0x88, 0x0C, 0x08]);
+
+        // MOV byte ptr [RBP + RCX*1], DL — RBP-as-base needs disp8=0
+        let instr = X86Asm::MovMRIndexedByte {
+            base: RBP,
+            index: RCX,
+            src: RDX,
+        };
+        assert_eq!(instr.encode(), vec![0x40, 0x88, 0x54, 0x0D, 0x00]);
+
+        // MOV byte ptr [RBX + R12*1], DL — REX.X set for index>=8
+        let instr = X86Asm::MovMRIndexedByte {
+            base: RBX,
+            index: R12,
+            src: RDX,
+        };
+        assert_eq!(instr.encode(), vec![0x42, 0x88, 0x14, 0x23]);
     }
 
     #[test]

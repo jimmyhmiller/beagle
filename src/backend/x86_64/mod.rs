@@ -219,11 +219,12 @@ impl CodegenBackend for X86_64Backend {
 
     fn load_byte_from_heap_with_reg_offset(
         &mut self,
-        _dest: Self::Register,
-        _src: Self::Register,
-        _offset: Self::Register,
+        dest: Self::Register,
+        src: Self::Register,
+        offset: Self::Register,
     ) {
-        todo!("inline byte heap loads are not implemented for x86-64 yet");
+        self.inner
+            .load_byte_from_heap_with_reg_offset(dest, src, offset);
     }
 
     fn store_to_heap_with_reg_offset(
@@ -237,11 +238,12 @@ impl CodegenBackend for X86_64Backend {
 
     fn store_byte_to_heap_with_reg_offset(
         &mut self,
-        _ptr: Self::Register,
-        _val: Self::Register,
-        _offset: Self::Register,
+        ptr: Self::Register,
+        val: Self::Register,
+        offset: Self::Register,
     ) {
-        todo!("inline byte heap stores are not implemented for x86-64 yet");
+        self.inner
+            .store_byte_to_heap_with_reg_offset(ptr, val, offset);
     }
 
     // === Memory operations - Stack ===

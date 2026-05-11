@@ -638,6 +638,34 @@ impl LowLevelX86 {
         });
     }
 
+    pub fn load_byte_from_heap_with_reg_offset(
+        &mut self,
+        dest: X86Register,
+        src: X86Register,
+        offset: X86Register,
+    ) {
+        // MOVZX dest, byte ptr [src + offset*1]
+        self.instructions.push(X86Asm::MovzxRMIndexedByte {
+            dest,
+            base: src,
+            index: offset,
+        });
+    }
+
+    pub fn store_byte_to_heap_with_reg_offset(
+        &mut self,
+        ptr: X86Register,
+        val: X86Register,
+        offset: X86Register,
+    ) {
+        // MOV byte ptr [ptr + offset*1], val_low_byte
+        self.instructions.push(X86Asm::MovMRIndexedByte {
+            base: ptr,
+            index: offset,
+            src: val,
+        });
+    }
+
     // === Stack operations ===
 
     /// Offset in bytes from FP to the first local slot.
