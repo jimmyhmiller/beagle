@@ -237,7 +237,7 @@ LANG_LIST="${LANG_LIST%, }"
 echo "Languages: $LANG_LIST"
 echo ""
 
-BEAGLE="$PROJECT_DIR/target/release/main"
+BEAGLE="$PROJECT_DIR/target/release/beag"
 
 # Build Beagle in release mode (unless skipped or not running Beagle)
 if lang_enabled beagle; then
