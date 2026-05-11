@@ -9,7 +9,6 @@ namespace revcomp
 use beagle.io as io
 use beagle.mutable-array as arr
 use beagle.string-builder as sb
-use beagle.builtin as builtin
 
 let LINE_WIDTH = 60
 let READ_CHUNK = 65536
@@ -78,7 +77,7 @@ fn translate(seq, tbl) {
     let n = sb/length(seq)
     let mut i = 0
     while i < n {
-        sb/set-byte-at!(seq, i, arr/get(tbl, sb/byte-at(seq, i)))
+        sb/set-byte-at!(seq, i, arr/read-field-unsafe(tbl, sb/byte-at(seq, i)))
         i = i + 1
         null
     }
@@ -93,14 +92,10 @@ fn output_wrapped(seq, out) {
     while pos < total {
         let remaining = total - pos
         let line_len = if remaining < LINE_WIDTH { remaining } else { LINE_WIDTH }
-        let mut col = 0
-        while col < line_len {
-            sb/append-byte!(out, sb/byte-at(seq, pos + col))
-            col = col + 1
-            null
-        }
+        sb/append-builder-range!(out, seq, pos, pos + line_len)
         sb/append-byte!(out, NEWLINE)
         pos = pos + line_len
+        maybe_flush!(out)
         null
     }
 }
@@ -130,72 +125,47 @@ fn flush_sequence(seq, tbl, out) {
     }
 }
 
-// Append a string to `seq` skipping all newlines. Used for FASTA
-// sequence-data lines, which have a trailing '\n' that we don't want
-// in the buffer being reversed.
-fn append_filter_newlines(seq, src) {
-    let n = length(src)
-    let mut i = 0
-    while i < n {
-        let b = builtin/char-code(src[i])
-        if b == NEWLINE {
-            null
-        } else {
-            sb/append-byte!(seq, b)
-        }
-        i = i + 1
-        null
-    }
-}
-
 // State indices
 let ST_SEQ = 0
 let ST_TBL = 1
 let ST_OUT = 2
 let ST_READING_HEADER = 3  // bool: are we currently consuming a header line?
-let ST_HEADER = 4          // string-builder for the current header line
 
 fn process_chunk(state, chunk) {
     let chunk_len = length(chunk)
     let seq = arr/read-field(state, ST_SEQ)
     let out = arr/read-field(state, ST_OUT)
     let tbl = arr/read-field(state, ST_TBL)
-    let header = arr/read-field(state, ST_HEADER)
 
     let mut pos = 0
     let mut reading_header = arr/read-field(state, ST_READING_HEADER)
 
     while pos < chunk_len {
         if reading_header {
-            // Accumulate header bytes (including the terminating newline)
-            // straight into `out` so the output order matches input order.
-            let b = builtin/char-code(chunk[pos])
-            sb/append-byte!(out, b)
-            if b == NEWLINE {
-                reading_header = false
-                maybe_flush!(out)
-            }
-            pos = pos + 1
-            null
-        } else {
-            let b = builtin/char-code(chunk[pos])
-            if b == GT {
-                // End of previous sequence (if any), start of new header.
-                flush_sequence(seq, tbl, out)
-                sb/append-byte!(out, GT)
-                reading_header = true
-                pos = pos + 1
+            let newline = sb/index-byte(chunk, NEWLINE, pos)
+            if newline == -1 {
+                sb/append-range!(out, chunk, pos, chunk_len)
+                pos = chunk_len
                 null
             } else {
-                if b == NEWLINE {
-                    // Skip embedded newlines.
-                    pos = pos + 1
-                    null
-                } else {
-                    sb/append-byte!(seq, b)
-                    pos = pos + 1
-                    null
-                }
+                sb/append-range!(out, chunk, pos, newline + 1)
+                reading_header = false
+                pos = newline + 1
+                maybe_flush!(out)
+                null
+            }
+        } else {
+            let gt = sb/index-byte(chunk, GT, pos)
+            if gt == -1 {
+                sb/append-range-filter-byte!(seq, chunk, pos, chunk_len, NEWLINE)
+                pos = chunk_len
+                null
+            } else {
+                sb/append-range-filter-byte!(seq, chunk, pos, gt, NEWLINE)
+                flush_sequence(seq, tbl, out)
+                reading_header = true
+                pos = gt
+                null
             }
         }
     }
@@ -207,14 +177,12 @@ fn main() {
     let tbl = make_complement_table()
     let seq = sb/new(1048576)
     let out = sb/new(FLUSH_AT * 2)
-    let header = sb/new(256)
 
-    let state = arr/new-array(5)
+    let state = arr/new-array(4)
     arr/write-field(state, ST_SEQ, seq)
     arr/write-field(state, ST_TBL, tbl)
     arr/write-field(state, ST_OUT, out)
     arr/write-field(state, ST_READING_HEADER, false)
-    arr/write-field(state, ST_HEADER, header)
 
     let mut done = false
     while done == false {

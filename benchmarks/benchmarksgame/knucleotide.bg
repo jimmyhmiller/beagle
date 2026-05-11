@@ -11,6 +11,7 @@ use beagle.mutable-array as arr
 use beagle.string-builder as sb
 
 let READ_CHUNK = 65536
+let NEWLINE = 10
 
 // Sort entries by count (descending), then by key (ascending)
 fn sort_entries(entries) {
@@ -66,58 +67,13 @@ fn bubble_sort_inner(entries, limit, j) {
 // One `sb/append!` per line (not per byte) — the string-builder runtime
 // memcpys whole strings into its packed-byte storage.
 fn read_sequence() {
-    // Growable array of lines: [lines_array, count, capacity, reading_flag]
-    let lines_cap = 1024
-    let state = arr/new-array(4)
-    arr/write-field(state, 0, arr/new-array(lines_cap)) // lines
-    arr/write-field(state, 1, 0)     // count
-    arr/write-field(state, 2, lines_cap) // capacity
-    arr/write-field(state, 3, false) // reading flag
+    // [sequence_builder, reading_flag]
+    let state = arr/new-array(2)
+    arr/write-field(state, 0, sb/new(READ_CHUNK))
+    arr/write-field(state, 1, false)
 
     read_loop(state)
-
-    let lines = arr/read-field(state, 0)
-    let count = arr/read-field(state, 1)
-
-    // Pre-compute total length so the builder can pre-size its backing
-    // storage and avoid repeated geometric grows.
-    let mut total_len = 0
-    let mut i = 0
-    while i < count {
-        total_len = total_len + length(arr/read-field(lines, i))
-        i = i + 1
-    }
-
-    let buf = sb/new(total_len)
-    i = 0
-    while i < count {
-        sb/append!(buf, arr/read-field(lines, i))
-        i = i + 1
-    }
-    sb/to-string(buf)
-}
-
-fn add_line(state, line) {
-    let lines = arr/read-field(state, 0)
-    let count = arr/read-field(state, 1)
-    let capacity = arr/read-field(state, 2)
-
-    // Grow if needed
-    if count >= capacity {
-        let new_cap = capacity * 2
-        let new_lines = arr/new-array(new_cap)
-        let mut i = 0
-        while i < count {
-            arr/write-field(new_lines, i, arr/read-field(lines, i))
-            i = i + 1
-        }
-        arr/write-field(state, 0, new_lines)
-        arr/write-field(state, 2, new_cap)
-        arr/write-field(new_lines, count, line)
-    } else {
-        arr/write-field(lines, count, line)
-    }
-    arr/write-field(state, 1, count + 1)
+    sb/to-string(arr/read-field(state, 0))
 }
 
 fn read_loop(state) {
@@ -139,41 +95,37 @@ fn read_loop(state) {
 
 fn process_chunk(state, chunk) {
     let len = length(chunk)
-    let mut i = 0
-    let mut line_start = 0
+    let mut start = 0
 
-    while i < len {
-        let ch = get(chunk, i)
-        if ch == "\n" {
-            if i > line_start {
-                process_line(state, chunk, line_start, i - line_start)
+    while start < len {
+        let newline = sb/index-byte(chunk, NEWLINE, start)
+        if newline == -1 {
+            process_line(state, chunk, start, len - start)
+            start = len
+        } else {
+            if newline > start {
+                process_line(state, chunk, start, newline - start)
             }
-            line_start = i + 1
+            start = newline + 1
         }
-        i = i + 1
-    }
-    // Handle last line without newline
-    if line_start < len {
-        process_line(state, chunk, line_start, len - line_start)
     }
 }
 
 fn process_line(state, chunk, start, line_len) {
-    let reading = arr/read-field(state, 3)
+    let reading = arr/read-field(state, 1)
     if reading {
         let first = get(chunk, start)
         if first == ">" {
             // End of sequence - stop reading
-            arr/write-field(state, 3, false)
+            arr/write-field(state, 1, false)
         } else {
-            let line = uppercase(substring(chunk, start, start + line_len))
-            add_line(state, line)
+            sb/append-range-uppercase!(arr/read-field(state, 0), chunk, start, start + line_len)
         }
     } else {
         if line_len >= 6 {
             let prefix = substring(chunk, start, start + 6)
             if prefix == ">THREE" {
-                arr/write-field(state, 3, true)
+                arr/write-field(state, 1, true)
             }
         }
     }
