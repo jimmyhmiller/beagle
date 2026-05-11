@@ -1132,6 +1132,22 @@ impl LowLevelArm {
         })
     }
 
+    pub fn load_byte_from_heap_with_reg_offset(
+        &mut self,
+        destination: Register,
+        source: Register,
+        offset: Register,
+    ) {
+        self.instructions.push(ArmAsm::LdrRegGen {
+            size: 0b00,
+            rm: offset,
+            option: 0b11,
+            s: 0b0,
+            rn: source,
+            rt: destination,
+        })
+    }
+
     pub fn store_to_heap_with_reg_offset(
         &mut self,
         destination: Register,
@@ -1140,6 +1156,22 @@ impl LowLevelArm {
     ) {
         self.instructions.push(ArmAsm::StrRegGen {
             size: 0b11,
+            rm: offset,
+            option: 0b11,
+            s: 0b0,
+            rn: destination,
+            rt: source,
+        })
+    }
+
+    pub fn store_byte_to_heap_with_reg_offset(
+        &mut self,
+        destination: Register,
+        source: Register,
+        offset: Register,
+    ) {
+        self.instructions.push(ArmAsm::StrRegGen {
+            size: 0b00,
             rm: offset,
             option: 0b11,
             s: 0b0,

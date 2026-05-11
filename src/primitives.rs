@@ -3,6 +3,7 @@ use std::ops::Deref;
 use crate::{
     ast::{Ast, AstCompiler},
     builtins::write_barrier,
+    collections::{TYPE_ID_RAW_ARRAY, TYPE_ID_STRING_BUILDER},
     compiler::CompileError,
     ir::{Condition, Value},
     types::{BuiltInTypes, Header},
@@ -19,6 +20,10 @@ pub fn get_inline_primitive_arity(name: &str) -> usize {
         "beagle.primitive/read-struct-id" => 1,
         "beagle.primitive/write-field" => 3,
         "beagle.primitive/read-field" => 2,
+        "beagle.primitive/string-builder-byte-at" | "beagle.string-builder/byte-at" => 2,
+        "beagle.primitive/string-builder-set-byte-at!" | "beagle.string-builder/set-byte-at!" => 3,
+        "beagle.mutable-array/get" => 2,
+        "beagle.mutable-array/read-field-unsafe" => 2,
         "beagle.primitive/breakpoint" => 0,
         "beagle.primitive/size" => 1,
         "beagle.primitive/panic" => 1,
@@ -33,6 +38,62 @@ pub fn get_inline_primitive_arity(name: &str) -> usize {
 
 // TODO: I'd rather this be on Ir I think?
 impl AstCompiler<'_> {
+    fn compile_string_builder_type_guard(
+        &mut self,
+        sb: Value,
+        invalid_label: crate::common::Label,
+    ) -> Value {
+        let tag = self.ir.get_tag(sb);
+        self.ir.jump_if(
+            invalid_label,
+            Condition::NotEqual,
+            tag,
+            Value::RawValue(BuiltInTypes::HeapObject.get_tag() as usize),
+        );
+
+        let sb_ptr = self.ir.untag(sb);
+        let header = self.ir.load_from_heap(sb_ptr, 0);
+        let type_id_offset = Header::type_id_offset();
+        let type_id = self
+            .ir
+            .shift_right_imm_raw(header, (type_id_offset * 8) as i32);
+        let type_id = self.ir.and_imm(type_id, 0x0000_0000_0000_FFFF);
+        self.ir.jump_if(
+            invalid_label,
+            Condition::NotEqual,
+            type_id,
+            Value::RawValue(TYPE_ID_STRING_BUILDER as usize),
+        );
+        sb_ptr
+    }
+
+    fn compile_string_builder_payload_base(&mut self, sb: Value) -> Value {
+        let sb_ptr = self.ir.untag(sb);
+        let storage_tagged = self.ir.load_from_heap(sb_ptr, 1);
+        let storage_ptr = self.ir.untag(storage_tagged);
+
+        let header = self.ir.load_from_heap(storage_ptr, 0);
+        let large_flag = self
+            .ir
+            .and_imm(header, 1 << Header::LARGE_OBJECT_BIT_POSITION);
+        let zero = self.ir.assign_new(Value::RawValue(0));
+        let not_large = self.ir.label("sb_storage_not_large");
+        let done = self.ir.label("sb_storage_payload_done");
+        let payload_offset = self.ir.volatile_register();
+
+        self.ir.assign(payload_offset, Value::RawValue(16));
+        self.ir
+            .jump_if(not_large, Condition::Equal, large_flag, zero);
+        self.ir.jump(done);
+
+        self.ir.write_label(not_large);
+        self.ir.assign(payload_offset, Value::RawValue(8));
+
+        self.ir.write_label(done);
+        self.ir
+            .add_int(storage_ptr, Value::Register(payload_offset))
+    }
+
     pub fn compile_inline_primitive_function(&mut self, name: &str, args: Vec<Value>) -> Value {
         match name {
             "beagle.primitive/deref" => {
@@ -163,7 +224,7 @@ impl AstCompiler<'_> {
 
                 Value::Null
             }
-            "beagle.primitive/read-field" => {
+            "beagle.primitive/read-field" | "beagle.mutable-array/read-field-unsafe" => {
                 let pointer = args[0];
                 let untagged = self.ir.untag(pointer);
                 let field = args[1];
@@ -198,6 +259,185 @@ impl AstCompiler<'_> {
                 self.ir.write_label(done_label);
                 self.ir
                     .heap_load_with_reg_offset(untagged, offset_reg.into())
+            }
+            "beagle.mutable-array/get" => {
+                let array = args[0];
+                let index = args[1];
+
+                let invalid = self.ir.label("array_get_invalid");
+                let done = self.ir.label("array_get_done");
+                let result = self.ir.assign_new(Value::Null);
+
+                let tag = self.ir.get_tag(array);
+                self.ir.jump_if(
+                    invalid,
+                    Condition::NotEqual,
+                    tag,
+                    Value::RawValue(BuiltInTypes::HeapObject.get_tag() as usize),
+                );
+
+                let array_ptr = self.ir.untag(array);
+                let header = self.ir.load_from_heap(array_ptr, 0);
+                let type_id_offset = Header::type_id_offset();
+                let type_id = self
+                    .ir
+                    .shift_right_imm_raw(header, (type_id_offset * 8) as i32);
+                let type_id = self.ir.and_imm(type_id, 0x0000_0000_0000_FFFF);
+                self.ir.jump_if(
+                    invalid,
+                    Condition::NotEqual,
+                    type_id,
+                    Value::RawValue(TYPE_ID_RAW_ARRAY as usize),
+                );
+
+                let index_reg = self.ir.assign_new(index);
+                let index_value = Value::Register(index_reg);
+                self.ir.jump_if(
+                    invalid,
+                    Condition::LessThan,
+                    index_value,
+                    Value::TaggedConstant(0),
+                );
+
+                let large_flag = self
+                    .ir
+                    .and_imm(header, 1 << Header::LARGE_OBJECT_BIT_POSITION);
+                let zero = self.ir.assign_new(Value::RawValue(0));
+                let not_large_size = self.ir.label("array_get_not_large_size");
+                let size_done = self.ir.label("array_get_size_done");
+                let size_reg = self.ir.volatile_register();
+
+                self.ir
+                    .jump_if(not_large_size, Condition::Equal, large_flag, zero);
+                let extended_size = self.ir.load_from_heap(array_ptr, 1);
+                self.ir.assign(size_reg, extended_size);
+                self.ir.jump(size_done);
+
+                self.ir.write_label(not_large_size);
+                let size_offset = Header::size_offset();
+                let inline_size = self
+                    .ir
+                    .shift_right_imm_raw(header, (size_offset * 8) as i32);
+                let inline_size = self.ir.and_imm(inline_size, 0x0000_0000_0000_FFFF);
+                self.ir.assign(size_reg, inline_size);
+
+                self.ir.write_label(size_done);
+                let tagged_size = self
+                    .ir
+                    .tag(Value::Register(size_reg), BuiltInTypes::Int.get_tag());
+                self.ir.jump_if(
+                    invalid,
+                    Condition::GreaterThanOrEqual,
+                    index_value,
+                    tagged_size,
+                );
+
+                let offset_reg = self.ir.volatile_register();
+                let not_large = self.ir.label("array_get_not_large");
+                let offset_done = self.ir.label("array_get_offset_done");
+
+                self.ir
+                    .jump_if(not_large, Condition::Equal, large_flag, zero);
+                let field_large = self.ir.add_int(index_value, Value::TaggedConstant(2));
+                let field_large = self.ir.mul(field_large, Value::RawValue(8));
+                self.ir.assign(offset_reg, field_large);
+                self.ir.jump(offset_done);
+
+                self.ir.write_label(not_large);
+                let field_small = self.ir.add_int(index_value, Value::TaggedConstant(1));
+                let field_small = self.ir.mul(field_small, Value::RawValue(8));
+                self.ir.assign(offset_reg, field_small);
+
+                self.ir.write_label(offset_done);
+                let value = self
+                    .ir
+                    .heap_load_with_reg_offset(array_ptr, Value::Register(offset_reg));
+                self.ir.assign(result, value);
+                self.ir.jump(done);
+
+                self.ir.write_label(invalid);
+                self.ir.assign(result, Value::Null);
+                self.ir.write_label(done);
+                Value::Register(result)
+            }
+            "beagle.primitive/string-builder-byte-at" | "beagle.string-builder/byte-at" => {
+                let sb = args[0];
+                let index = args[1];
+
+                let out_of_bounds = self.ir.label("sb_byte_at_oob");
+                let done = self.ir.label("sb_byte_at_done");
+                let result = self.ir.assign_new(Value::Null);
+                let sb_ptr = self.compile_string_builder_type_guard(sb, out_of_bounds);
+                let len = self.ir.load_from_heap(sb_ptr, 2);
+                let index_reg = self.ir.assign_new(index);
+                let index_value = Value::Register(index_reg);
+
+                self.ir.jump_if(
+                    out_of_bounds,
+                    Condition::LessThan,
+                    index_value,
+                    Value::TaggedConstant(0),
+                );
+                self.ir.jump_if(
+                    out_of_bounds,
+                    Condition::GreaterThanOrEqual,
+                    index_value,
+                    len,
+                );
+
+                let raw_index = self.ir.untag(index_value);
+                let payload_base = self.compile_string_builder_payload_base(sb);
+                let byte = self
+                    .ir
+                    .heap_load_byte_with_reg_offset(payload_base, raw_index);
+                let tagged_byte = self.ir.tag(byte, BuiltInTypes::Int.get_tag());
+                self.ir.assign(result, tagged_byte);
+                self.ir.jump(done);
+
+                self.ir.write_label(out_of_bounds);
+                self.ir.assign(result, Value::Null);
+                self.ir.write_label(done);
+                Value::Register(result)
+            }
+            "beagle.primitive/string-builder-set-byte-at!"
+            | "beagle.string-builder/set-byte-at!" => {
+                let sb = args[0];
+                let index = args[1];
+                let byte = args[2];
+
+                let out_of_bounds = self.ir.label("sb_set_byte_at_oob");
+                let done = self.ir.label("sb_set_byte_at_done");
+                let result = self.ir.assign_new(sb);
+                let sb_ptr = self.compile_string_builder_type_guard(sb, out_of_bounds);
+                let len = self.ir.load_from_heap(sb_ptr, 2);
+                let index_reg = self.ir.assign_new(index);
+                let index_value = Value::Register(index_reg);
+
+                self.ir.jump_if(
+                    out_of_bounds,
+                    Condition::LessThan,
+                    index_value,
+                    Value::TaggedConstant(0),
+                );
+                self.ir.jump_if(
+                    out_of_bounds,
+                    Condition::GreaterThanOrEqual,
+                    index_value,
+                    len,
+                );
+
+                let raw_index = self.ir.untag(index_value);
+                let raw_byte = self.ir.untag(byte);
+                let raw_byte = self.ir.and_imm(raw_byte, 0xFF);
+                let payload_base = self.compile_string_builder_payload_base(sb);
+                self.ir
+                    .heap_store_byte_with_reg_offset(payload_base, raw_byte, raw_index);
+                self.ir.jump(done);
+
+                self.ir.write_label(out_of_bounds);
+                self.ir.assign(result, Value::Null);
+                self.ir.write_label(done);
+                Value::Register(result)
             }
             "beagle.primitive/breakpoint" => {
                 self.ir.breakpoint();

@@ -211,6 +211,16 @@ impl CodegenBackend for Arm64Backend {
         self.inner.load_from_heap_with_reg_offset(dest, src, offset);
     }
 
+    fn load_byte_from_heap_with_reg_offset(
+        &mut self,
+        dest: Self::Register,
+        src: Self::Register,
+        offset: Self::Register,
+    ) {
+        self.inner
+            .load_byte_from_heap_with_reg_offset(dest, src, offset);
+    }
+
     fn store_to_heap_with_reg_offset(
         &mut self,
         ptr: Self::Register,
@@ -218,6 +228,16 @@ impl CodegenBackend for Arm64Backend {
         offset: Self::Register,
     ) {
         self.inner.store_to_heap_with_reg_offset(ptr, val, offset);
+    }
+
+    fn store_byte_to_heap_with_reg_offset(
+        &mut self,
+        ptr: Self::Register,
+        val: Self::Register,
+        offset: Self::Register,
+    ) {
+        self.inner
+            .store_byte_to_heap_with_reg_offset(ptr, val, offset);
     }
 
     // === Memory operations - Stack ===

@@ -255,6 +255,14 @@ impl PrettyPrint for Instruction {
                     value2.pretty_print()
                 )
             }
+            Instruction::HeapLoadByteReg(value, value1, value2) => {
+                format!(
+                    "heap_load_byte_reg {}, {}, {}",
+                    value.pretty_print(),
+                    value1.pretty_print(),
+                    value2.pretty_print()
+                )
+            }
             Instruction::HeapStore(value, value1) => {
                 format!(
                     "heap_store {}, {}",
@@ -328,6 +336,14 @@ impl PrettyPrint for Instruction {
             Instruction::HeapStoreOffsetReg(value, value1, value2) => {
                 format!(
                     "heap_store_offset_reg {}, {}, {}",
+                    value.pretty_print(),
+                    value1.pretty_print(),
+                    value2.pretty_print()
+                )
+            }
+            Instruction::HeapStoreByteOffsetReg(value, value1, value2) => {
+                format!(
+                    "heap_store_byte_offset_reg {}, {}, {}",
                     value.pretty_print(),
                     value1.pretty_print(),
                     value2.pretty_print()

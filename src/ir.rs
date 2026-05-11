@@ -136,6 +136,7 @@ pub enum Instruction {
     Call(Value, Value, Vec<Value>, bool),
     HeapLoad(Value, Value, i32),
     HeapLoadReg(Value, Value, Value),
+    HeapLoadByteReg(Value, Value, Value),
     HeapStore(Value, Value),
     LoadLocal(Value, Value),
     StoreLocal(Value, Value),
@@ -152,6 +153,7 @@ pub enum Instruction {
     CurrentStackPosition(Value),
     ExtendLifeTime(Value),
     HeapStoreOffsetReg(Value, Value, Value),
+    HeapStoreByteOffsetReg(Value, Value, Value),
     AtomicLoad(Value, Value),
     AtomicStore(Value, Value),
     CompareAndSwap(Value, Value, Value),
@@ -464,7 +466,7 @@ impl Instruction {
             Instruction::CompareAndSwap(a, b, c) => {
                 get_registers!(a, b, c)
             }
-            Instruction::HeapLoadReg(a, b, c) => {
+            Instruction::HeapLoadReg(a, b, c) | Instruction::HeapLoadByteReg(a, b, c) => {
                 get_registers!(a, b, c)
             }
             Instruction::HeapStore(a, b) => {
@@ -476,7 +478,8 @@ impl Instruction {
             Instruction::HeapStoreByteOffsetMasked(a, b, c, d, _, _, _) => {
                 get_registers!(a, b, c, d)
             }
-            Instruction::HeapStoreOffsetReg(a, b, c) => {
+            Instruction::HeapStoreOffsetReg(a, b, c)
+            | Instruction::HeapStoreByteOffsetReg(a, b, c) => {
                 get_registers!(a, b, c)
             }
             Instruction::LoadTrue(a) => {
@@ -597,7 +600,9 @@ impl Instruction {
             | Instruction::Div(value, value1, value2, _)
             | Instruction::Modulo(value, value1, value2, _)
             | Instruction::HeapLoadReg(value, value1, value2)
+            | Instruction::HeapLoadByteReg(value, value1, value2)
             | Instruction::HeapStoreOffsetReg(value, value1, value2)
+            | Instruction::HeapStoreByteOffsetReg(value, value1, value2)
             | Instruction::ShiftLeft(value, value1, value2, _)
             | Instruction::ShiftRight(value, value1, value2, _)
             | Instruction::ShiftRightZero(value, value1, value2, _)
@@ -2823,6 +2828,14 @@ impl Ir {
                     backend.load_from_heap_with_reg_offset(dest, ptr, offset);
                     self.store_spill(dest, dest_spill, backend);
                 }
+                Instruction::HeapLoadByteReg(dest, ptr, offset) => {
+                    let ptr = self.value_to_register(ptr, backend);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, backend);
+                    let offset = self.value_to_register(offset, backend);
+                    backend.load_byte_from_heap_with_reg_offset(dest, ptr, offset);
+                    self.store_spill(dest, dest_spill, backend);
+                }
                 Instruction::HeapStore(ptr, val) => {
                     let ptr = self.value_to_register(ptr, backend);
                     let val = self.value_to_register(val, backend);
@@ -2864,6 +2877,12 @@ impl Ir {
                     let val = self.value_to_register(val, backend);
                     let offset = self.value_to_register(offset, backend);
                     backend.store_to_heap_with_reg_offset(ptr, val, offset);
+                }
+                Instruction::HeapStoreByteOffsetReg(ptr, val, offset) => {
+                    let ptr = self.value_to_register(ptr, backend);
+                    let val = self.value_to_register(val, backend);
+                    let offset = self.value_to_register(offset, backend);
+                    backend.store_byte_to_heap_with_reg_offset(ptr, val, offset);
                 }
                 Instruction::RegisterArgument(_arg) => {}
                 Instruction::PushStack(val) => {
@@ -3661,6 +3680,18 @@ impl Ir {
         dest.into()
     }
 
+    pub fn heap_load_byte_with_reg_offset(&mut self, source: Value, offset: Value) -> Value {
+        let dest = self.volatile_register();
+        let source = self.assign_new(source);
+        let offset = self.assign_new(offset);
+        self.instructions.push(Instruction::HeapLoadByteReg(
+            dest.into(),
+            source.into(),
+            offset.into(),
+        ));
+        dest.into()
+    }
+
     pub fn function(&mut self, function_index: Value) -> Value {
         let function = self.assign_new(function_index);
         function.into()
@@ -3893,6 +3924,11 @@ impl Ir {
     pub fn heap_store_with_reg_offset(&mut self, pointer: Value, value: Value, offset: Value) {
         self.instructions
             .push(Instruction::HeapStoreOffsetReg(pointer, value, offset));
+    }
+
+    pub fn heap_store_byte_with_reg_offset(&mut self, pointer: Value, value: Value, offset: Value) {
+        self.instructions
+            .push(Instruction::HeapStoreByteOffsetReg(pointer, value, offset));
     }
 
     pub fn write_float_literal(&mut self, float_pointer: Value, n: String) {

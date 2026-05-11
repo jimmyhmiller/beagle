@@ -153,7 +153,19 @@ pub trait CodegenBackend: Sized {
         src: Self::Register,
         offset: Self::Register,
     );
+    fn load_byte_from_heap_with_reg_offset(
+        &mut self,
+        dest: Self::Register,
+        src: Self::Register,
+        offset: Self::Register,
+    );
     fn store_to_heap_with_reg_offset(
+        &mut self,
+        ptr: Self::Register,
+        val: Self::Register,
+        offset: Self::Register,
+    );
+    fn store_byte_to_heap_with_reg_offset(
         &mut self,
         ptr: Self::Register,
         val: Self::Register,

@@ -1,5 +1,7 @@
 namespace beagle.string-builder
 
+use beagle.primitive as primitive
+
 // Mutable, growable byte-buffer string builder.
 //
 // Backed by a packed-byte storage object in the runtime. Appending is
@@ -85,12 +87,12 @@ fn clear!(sb) {
 
 // Read a byte by index (returns Int, or null if out of range).
 fn byte-at(sb, i) {
-    string-builder-byte-at(sb, i)
+    primitive/string-builder-byte-at(sb, i)
 }
 
 // Overwrite the byte at index `i`. Returns sb. No-op if out of range.
 fn set-byte-at!(sb, i, byte) {
-    string-builder-set-byte-at!(sb, i, byte)
+    primitive/string-builder-set-byte-at!(sb, i, byte)
 }
 
 // Reverse the bytes in place. ASCII-safe.
