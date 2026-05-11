@@ -1,0 +1,10 @@
+namespace toml_folder_main
+
+use myproj.utils as u
+
+fn main() {
+    println(u/hello())
+}
+
+// @beagle.core.snapshot
+// folder

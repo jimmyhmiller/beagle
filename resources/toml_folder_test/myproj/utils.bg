@@ -1,0 +1,5 @@
+namespace myproj.utils
+
+fn hello() {
+    "folder"
+}

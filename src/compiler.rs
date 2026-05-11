@@ -999,13 +999,13 @@ impl Compiler {
             if self.namespace_exists(&namespace_name) {
                 continue;
             }
-            match self.resolve_namespace_to_file(&namespace_name, source_file) {
-                Ok(file_name) => {
+            match self.resolve_namespace_to_file(&namespace_name, source_file)? {
+                Some(file_name) => {
                     let top_level = self.compile(&file_name)?;
                     top_levels_to_run.extend(top_level);
                 }
-                Err(_) => {
-                    // File not found on disk - try embedded stdlib
+                None => {
+                    // Not found on disk — try embedded stdlib.
                     let embedded_name = format!("{}.bg", namespace_name);
                     if let Some(source) = crate::embedded_stdlib::get(&embedded_name) {
                         let top_level = self.compile_source(&embedded_name, source)?;
@@ -1341,8 +1341,7 @@ impl Compiler {
     /// site specialization stays aligned with allocation order across
     /// nested-fn boundaries.
     pub fn arith_feedback_range_for_address(&self, code_address: usize) -> Vec<u64> {
-        let Some(&(start, end)) = self.arith_feedback_range_by_address.get(&code_address)
-        else {
+        let Some(&(start, end)) = self.arith_feedback_range_by_address.get(&code_address) else {
             return Vec::new();
         };
         if end <= start {
@@ -1426,12 +1425,8 @@ impl Compiler {
     ///
     /// Returns the empty vec when no range was recorded (anonymous
     /// top-level bodies, etc.) — caller falls back to the per-fn list.
-    pub fn property_cache_range_for_address(
-        &self,
-        code_address: usize,
-    ) -> Vec<(u64, u64, u64)> {
-        let Some(&(start, end)) = self.property_cache_range_by_address.get(&code_address)
-        else {
+    pub fn property_cache_range_for_address(&self, code_address: usize) -> Vec<(u64, u64, u64)> {
+        let Some(&(start, end)) = self.property_cache_range_by_address.get(&code_address) else {
             return Vec::new();
         };
         if end <= start {
@@ -1588,6 +1583,13 @@ impl Compiler {
 
     pub fn is_inline_primitive_function(&self, name: &str) -> bool {
         name.starts_with("beagle.primitive/")
+            || matches!(
+                name,
+                "beagle.string-builder/byte-at"
+                    | "beagle.string-builder/set-byte-at!"
+                    | "beagle.mutable-array/get"
+                    | "beagle.mutable-array/read-field-unsafe"
+            )
     }
 
     pub fn extract_use(
@@ -1622,140 +1624,174 @@ impl Compiler {
     /// Each path is tried:
     /// 1. Relative to source file
     /// 2. In standard library paths
+    ///
+    /// If a `beagle.toml` is found by walking up from the source file and
+    /// declares `name = "thing"`, then for namespaces whose first segment
+    /// matches that name, both the folder layout (`thing/foo/bar.bg`) and
+    /// the stripped layout (`foo/bar.bg`) are accepted; an error is
+    /// returned if both exist as different files.
     pub fn resolve_namespace_to_file(
         &self,
         namespace_name: &str,
         source_file: &str,
-    ) -> Result<String, Box<dyn Error>> {
+    ) -> Result<Option<String>, Box<dyn Error>> {
         let source_dir = Path::new(source_file)
             .parent()
             .ok_or("Invalid source file path")?;
 
-        // Get the parts of the namespace
         let parts: Vec<&str> = namespace_name.split('.').collect();
 
-        // Generate candidate paths in order of preference
+        // Candidate paths in order of preference.
         let mut candidates: Vec<String> = vec![];
-
-        // 1. Full path: com/foo/bar.bg
-        candidates.push(format!("{}.bg", parts.join("/")));
-
-        // 2. Dotted path: com.foo.bar.bg (for standard library modules)
-        candidates.push(format!("{}.bg", namespace_name));
-
-        // 3. Drop first segment: foo/bar.bg (if there are at least 2 parts)
+        candidates.push(format!("{}.bg", parts.join("/"))); // com/foo/bar.bg
+        candidates.push(format!("{}.bg", namespace_name)); // com.foo.bar.bg
         if parts.len() >= 2 {
-            candidates.push(format!("{}.bg", parts[1..].join("/")));
+            candidates.push(format!("{}.bg", parts[1..].join("/"))); // foo/bar.bg
         }
-
-        // 4. Just last segment: bar.bg
         if let Some(last) = parts.last() {
-            candidates.push(format!("{}.bg", last));
+            candidates.push(format!("{}.bg", last)); // bar.bg
         }
 
-        // Try each candidate in each search location
+        let mut winner: Option<String> = None;
         for candidate in &candidates {
-            // Try relative to source file
-            let relative_path = source_dir.join(candidate);
-            if relative_path.exists() {
-                return relative_path
-                    .to_str()
-                    .ok_or_else(|| CompileError::PathConversion {
-                        path: format!("{:?}", relative_path),
-                    })
-                    .map(|s| s.to_string())
-                    .map_err(|e| e.into());
-            }
-
-            // Try include paths (-I flag)
-            for include_dir in &self.command_line_arguments.include_paths {
-                let include_path = Path::new(include_dir).join(candidate);
-                if include_path.exists() {
-                    return include_path
-                        .to_str()
-                        .ok_or_else(|| CompileError::PathConversion {
-                            path: format!("{:?}", include_path),
-                        })
-                        .map(|s| s.to_string())
-                        .map_err(|e| e.into());
-                }
-            }
-
-            // Try standard library paths
-            let mut exe_path = env::current_exe()?;
-            exe_path = exe_path
-                .parent()
-                .ok_or("Cannot get parent of executable path")?
-                .to_path_buf();
-
-            let stdlib_path = exe_path.join(format!("standard-library/{}", candidate));
-            if stdlib_path.exists() {
-                return stdlib_path
-                    .to_str()
-                    .ok_or_else(|| CompileError::PathConversion {
-                        path: format!("{:?}", stdlib_path),
-                    })
-                    .map(|s| s.to_string())
-                    .map_err(|e| e.into());
-            }
-
-            // Try one level up (for development - cargo run from project root)
-            if let Some(parent) = exe_path.parent() {
-                let parent_stdlib_path = parent.join(format!("standard-library/{}", candidate));
-                if parent_stdlib_path.exists() {
-                    return parent_stdlib_path
-                        .to_str()
-                        .ok_or_else(|| CompileError::PathConversion {
-                            path: format!("{:?}", parent_stdlib_path),
-                        })
-                        .map(|s| s.to_string())
-                        .map_err(|e| e.into());
-                }
-            }
-
-            // Try two levels up (for cargo run - target/debug -> target -> root)
-            if let Some(parent) = exe_path.parent()
-                && let Some(grandparent) = parent.parent()
-            {
-                let grandparent_stdlib_path =
-                    grandparent.join(format!("standard-library/{}", candidate));
-                if grandparent_stdlib_path.exists() {
-                    return grandparent_stdlib_path
-                        .to_str()
-                        .ok_or_else(|| CompileError::PathConversion {
-                            path: format!("{:?}", grandparent_stdlib_path),
-                        })
-                        .map(|s| s.to_string())
-                        .map_err(|e| e.into());
-                }
-            }
-
-            // Try three levels up (for cargo test)
-            if let Some(parent) = exe_path.parent()
-                && let Some(grandparent) = parent.parent()
-                && let Some(great_grandparent) = grandparent.parent()
-            {
-                let great_grandparent_stdlib_path =
-                    great_grandparent.join(format!("standard-library/{}", candidate));
-                if great_grandparent_stdlib_path.exists() {
-                    return great_grandparent_stdlib_path
-                        .to_str()
-                        .ok_or_else(|| CompileError::PathConversion {
-                            path: format!("{:?}", great_grandparent_stdlib_path),
-                        })
-                        .map(|s| s.to_string())
-                        .map_err(|e| e.into());
-                }
+            if let Some(p) = self.find_candidate_file(candidate, source_dir)? {
+                winner = Some(p);
+                break;
             }
         }
 
-        Err(format!(
-            "Could not find namespace '{}' (tried: {}, relative to {}, and standard-library/)",
-            namespace_name,
-            candidates.join(", "),
-            source_file
-        )
-        .into())
+        // If beagle.toml declares a project name and the namespace's first
+        // segment matches it, both the folder and stripped layouts are valid.
+        // Disallow the ambiguous case where both exist as different files.
+        if parts.len() >= 2
+            && let Some(project_name) = Self::find_project_name(source_file)
+            && parts[0] == project_name
+        {
+            let folder_form = format!("{}.bg", parts.join("/"));
+            let stripped_form = format!("{}.bg", parts[1..].join("/"));
+            let folder_resolved = self.find_candidate_file(&folder_form, source_dir)?;
+            let stripped_resolved = self.find_candidate_file(&stripped_form, source_dir)?;
+            if let (Some(a), Some(b)) = (folder_resolved, stripped_resolved)
+                && a != b
+            {
+                return Err(format!(
+                    "Ambiguous namespace '{}': resolves to both '{}' and '{}'. Remove one.",
+                    namespace_name, a, b
+                )
+                .into());
+            }
+        }
+
+        Ok(winner)
+    }
+
+    /// Search every location used by `resolve_namespace_to_file` for a
+    /// single candidate filename (e.g. `foo/bar.bg`). Returns the first
+    /// existing path, or `None`.
+    fn find_candidate_file(
+        &self,
+        candidate: &str,
+        source_dir: &Path,
+    ) -> Result<Option<String>, Box<dyn Error>> {
+        let path_to_string = |p: &Path| -> Result<String, Box<dyn Error>> {
+            p.to_str().map(|s| s.to_string()).ok_or_else(|| {
+                CompileError::PathConversion {
+                    path: format!("{:?}", p),
+                }
+                .into()
+            })
+        };
+
+        let relative_path = source_dir.join(candidate);
+        if relative_path.exists() {
+            return Ok(Some(path_to_string(&relative_path)?));
+        }
+
+        for include_dir in &self.command_line_arguments.include_paths {
+            let include_path = Path::new(include_dir).join(candidate);
+            if include_path.exists() {
+                return Ok(Some(path_to_string(&include_path)?));
+            }
+        }
+
+        let exe_path = env::current_exe()?;
+        let exe_dir = exe_path
+            .parent()
+            .ok_or("Cannot get parent of executable path")?
+            .to_path_buf();
+
+        let stdlib_path = exe_dir.join(format!("standard-library/{}", candidate));
+        if stdlib_path.exists() {
+            return Ok(Some(path_to_string(&stdlib_path)?));
+        }
+
+        // Walk up from the executable's directory looking for `standard-library/`,
+        // covering layouts like `target/debug/...` (cargo run, cargo test).
+        let mut walk = exe_dir.parent();
+        for _ in 0..3 {
+            let Some(dir) = walk else { break };
+            let candidate_path = dir.join(format!("standard-library/{}", candidate));
+            if candidate_path.exists() {
+                return Ok(Some(path_to_string(&candidate_path)?));
+            }
+            walk = dir.parent();
+        }
+
+        Ok(None)
+    }
+
+    /// Walk up from the source file's directory looking for a `beagle.toml`,
+    /// and return the value of its `name = "..."` field if present.
+    fn find_project_name(source_file: &str) -> Option<String> {
+        let mut dir = Path::new(source_file).parent()?.to_path_buf();
+        if dir.as_os_str().is_empty() {
+            dir = std::env::current_dir().ok()?;
+        }
+        loop {
+            let toml_path = dir.join("beagle.toml");
+            if toml_path.exists() {
+                let content = std::fs::read_to_string(&toml_path).ok()?;
+                return Self::parse_toml_name(&content);
+            }
+            dir = match dir.parent() {
+                Some(p) => p.to_path_buf(),
+                None => return None,
+            };
+        }
+    }
+
+    /// Minimal hand parser for the single `name = "..."` field we care about
+    /// today. A full toml parser can replace this when the manifest grows.
+    fn parse_toml_name(content: &str) -> Option<String> {
+        for raw_line in content.lines() {
+            // Strip comments, ignoring `#` inside strings (we only look at top-level
+            // `name = "..."` so this simple stripping is fine for the field we read).
+            let line = match raw_line.find('#') {
+                Some(i) => &raw_line[..i],
+                None => raw_line,
+            };
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('[') {
+                continue;
+            }
+            let Some(rest) = line.strip_prefix("name") else {
+                continue;
+            };
+            let rest = rest.trim_start();
+            let Some(rest) = rest.strip_prefix('=') else {
+                continue;
+            };
+            let rest = rest.trim();
+            let value = rest
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))?;
+            if value.is_empty() {
+                return None;
+            }
+            return Some(value.to_string());
+        }
+        None
     }
 
     pub fn get_struct_by_id(&self, struct_id: usize) -> Option<&Struct> {
