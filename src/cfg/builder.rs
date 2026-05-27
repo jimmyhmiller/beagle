@@ -27,8 +27,9 @@
 
 use std::collections::HashMap;
 
+use crate::cfg::{BlockId, CfgFunction, Op, RegClass, SlotId, Terminator, VReg};
 use crate::common::Label;
-use crate::ir::Instruction;
+use crate::ir::{Instruction, Ir, Value, VirtualRegister};
 
 /// Map from `Label::index` to the position of that label in the
 /// instruction list. Built by scanning for `Instruction::Label`.
@@ -144,6 +145,458 @@ pub fn label_targets(inst: &Instruction) -> Vec<Label> {
         Instruction::LoadLabelAddress(_, l) => vec![*l],
 
         _ => Vec::new(),
+    }
+}
+
+// =========================================================================
+// Phase 1b: full CFG construction from a legacy Ir
+// =========================================================================
+
+/// Failure modes for CFG construction. Distinguishes "we haven't taught
+/// the translator about this op yet" from "the input IR is malformed in
+/// a way Phase 1 cares about". Per the no-stubs rule, the translator
+/// never emits a placeholder Op — anything it can't handle returns an
+/// Err whose `variant` field names the legacy op for the caller's log.
+#[derive(Debug, Clone)]
+pub enum BuildError {
+    /// A legacy `Instruction` variant has no translator arm yet.
+    UnsupportedInstruction {
+        position: usize,
+        variant: &'static str,
+    },
+    /// A legacy `Value` variant appeared where Phase 1 expects a
+    /// `Value::Register` or `Value::Local`. Most commonly arises when the
+    /// IR emits a raw immediate / pointer where a vreg was expected.
+    UnsupportedValueKind { position: usize, msg: String },
+    /// A `JumpIf`'s fall-through target (the position immediately after
+    /// the JumpIf) is not a leader. Means Phase 1a's leader computation
+    /// and the construction's expectations disagree — bug, not a
+    /// translator gap.
+    FallThroughNotLeader { position: usize },
+    /// A `Jump`/`JumpIf`/`Throw` target label resolves to a position that
+    /// is not a leader. Also a leader-computation bug.
+    LabelTargetNotLeader { position: usize, label: usize },
+    /// A label was named by an instruction but never appeared as an
+    /// `Instruction::Label(_)` marker in the IR. Indicates a broken IR
+    /// builder upstream.
+    UnknownLabel { position: usize, label: usize },
+}
+
+/// Build a `CfgFunction` from a legacy `Ir`.
+///
+/// Translates the linear IR to a CFG with explicit terminators and
+/// block-param-style argument passing. Function arguments (read in the
+/// entry by a run of `RegisterArgument` ops) become entry-block params;
+/// this is the only "promote at construction" path allowed in Phase 1
+/// (per I3), and it is OK because arguments are not locals (they're
+/// inputs to the function, not mutable storage), so I6 doesn't apply.
+///
+/// All other locals (`Value::Local(n)`) stay materialized as
+/// `Op::SlotLoad` / `Op::SlotStore` per I6; mem2reg in Phase 2 decides
+/// whether to promote them.
+///
+/// Phase 1b-1 handles: `RegisterArgument`, `LoadLocal`, `StoreLocal`,
+/// `AddInt`, `Ret`, `Jump`, `JumpIf`, `Label` (filtered). Every other
+/// `Instruction` variant returns `Err(UnsupportedInstruction)`.
+pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
+    let mut f = CfgFunction::new(ir.debug_name.clone(), ir.num_locals as u32);
+
+    // Register every VReg this function references, with its inferred
+    // class. Phase 1b-1 has only GP-producing ops, so the table will be
+    // all-GP today; 1b-2 adds FP-producing ops and the class inference
+    // will start mattering.
+    let class_table = classify_vregs(&ir.instructions);
+    let max_vreg = class_table.keys().copied().max().unwrap_or(0);
+    for idx in 0..=max_vreg {
+        let class = class_table.get(&idx).copied().unwrap_or(RegClass::Gp);
+        f.vreg_classes.push(class);
+    }
+
+    let leaders = compute_leaders(&ir.instructions);
+    if leaders.is_empty() {
+        return Ok(f);
+    }
+
+    let mut leader_to_block: HashMap<usize, BlockId> = HashMap::new();
+    for &leader_pos in &leaders {
+        let bid = f.new_block();
+        leader_to_block.insert(leader_pos, bid);
+    }
+    f.entry = leader_to_block[&0];
+
+    let label_pos = label_positions(&ir.instructions);
+
+    for (i, &leader_pos) in leaders.iter().enumerate() {
+        let end = leaders.get(i + 1).copied().unwrap_or(ir.instructions.len());
+        let block_id = leader_to_block[&leader_pos];
+        fill_block(
+            &mut f,
+            ir,
+            block_id,
+            leader_pos,
+            end,
+            &leader_to_block,
+            &label_pos,
+        )?;
+    }
+
+    rebuild_predecessors(&mut f);
+    Ok(f)
+}
+
+/// Walk the [start, end) window of `ir.instructions`, populating the
+/// block's params (for the entry block), body, and terminator.
+fn fill_block(
+    f: &mut CfgFunction,
+    ir: &Ir,
+    block_id: BlockId,
+    start: usize,
+    end: usize,
+    leader_to_block: &HashMap<usize, BlockId>,
+    label_pos: &HashMap<usize, usize>,
+) -> Result<(), BuildError> {
+    let mut idx = start;
+
+    // Entry block: gather the run of `RegisterArgument(VR_n)` ops at the
+    // top and promote each to a block param. This is the I3-compatible
+    // way to introduce function arguments (block params, not phis).
+    if block_id == f.entry {
+        while idx < end {
+            if let Instruction::RegisterArgument(Value::Register(vr)) = &ir.instructions[idx] {
+                let v = VReg {
+                    index: vr.index as u32,
+                    class: RegClass::Gp,
+                };
+                f.block_mut(block_id).params.push(v);
+                idx += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    while idx < end {
+        let inst = &ir.instructions[idx];
+
+        // Skip Label markers — they served their purpose in leader
+        // computation; I1 forbids them inside block bodies.
+        if matches!(inst, Instruction::Label(_)) {
+            idx += 1;
+            continue;
+        }
+        // Skip RegisterArgument that didn't make it into the entry-param
+        // run (e.g. a later block somehow contains one — shouldn't happen
+        // in well-formed IR, but defensively ignore rather than translate).
+        if matches!(inst, Instruction::RegisterArgument(_)) {
+            idx += 1;
+            continue;
+        }
+
+        if is_terminator(inst) {
+            let term = translate_terminator(inst, idx, leader_to_block, label_pos)?;
+            f.block_mut(block_id).terminator = term;
+            idx += 1;
+            continue;
+        }
+
+        let op = translate_op(inst, idx)?;
+        f.block_mut(block_id).body.push(op);
+        idx += 1;
+    }
+
+    // Implicit fall-through: legacy IR can let one block run into the
+    // next without a terminator (e.g. when the last instruction of a
+    // block is straight-line and the next instruction is a Label that
+    // started a new leader). Synthesize a Jump to the fall-through block.
+    if matches!(f.block(block_id).terminator, Terminator::Unreachable) {
+        if let Some(&next_bid) = leader_to_block.get(&end) {
+            f.block_mut(block_id).terminator = Terminator::Jump {
+                target: next_bid,
+                args: vec![],
+            };
+        }
+        // No next leader => the function ends without a terminator on the
+        // last block. The verifier will flag this with UnfilledTerminator.
+    }
+    Ok(())
+}
+
+fn translate_op(inst: &Instruction, position: usize) -> Result<Op, BuildError> {
+    match inst {
+        Instruction::LoadLocal(Value::Register(dst), Value::Local(idx)) => Ok(Op::SlotLoad {
+            dst: VReg {
+                index: dst.index as u32,
+                class: RegClass::Gp,
+            },
+            slot: SlotId(*idx as u32),
+        }),
+        Instruction::StoreLocal(Value::Local(idx), Value::Register(src)) => Ok(Op::SlotStore {
+            slot: SlotId(*idx as u32),
+            src: VReg {
+                index: src.index as u32,
+                class: RegClass::Gp,
+            },
+        }),
+        Instruction::AddInt(Value::Register(dst), Value::Register(lhs), Value::Register(rhs)) => {
+            Ok(Op::AddInt {
+                dst: gp_vreg(dst),
+                lhs: gp_vreg(lhs),
+                rhs: gp_vreg(rhs),
+            })
+        }
+        // Explicit failure modes for mis-shaped values on otherwise
+        // supported ops — surfaces them with the position rather than
+        // matching a wider pattern and silently producing wrong CFG.
+        Instruction::LoadLocal(..) | Instruction::StoreLocal(..) | Instruction::AddInt(..) => {
+            Err(BuildError::UnsupportedValueKind {
+                position,
+                msg: format!("operand shape not handled for {}", instruction_name(inst)),
+            })
+        }
+        _ => Err(BuildError::UnsupportedInstruction {
+            position,
+            variant: instruction_name(inst),
+        }),
+    }
+}
+
+fn translate_terminator(
+    inst: &Instruction,
+    position: usize,
+    leader_to_block: &HashMap<usize, BlockId>,
+    label_pos: &HashMap<usize, usize>,
+) -> Result<Terminator, BuildError> {
+    let resolve_label = |label: &Label| -> Result<BlockId, BuildError> {
+        let pos = label_pos
+            .get(&label.index)
+            .ok_or(BuildError::UnknownLabel {
+                position,
+                label: label.index,
+            })?;
+        leader_to_block
+            .get(pos)
+            .copied()
+            .ok_or(BuildError::LabelTargetNotLeader {
+                position,
+                label: label.index,
+            })
+    };
+    match inst {
+        Instruction::Ret(Value::Register(v)) => Ok(Terminator::Ret { value: gp_vreg(v) }),
+        Instruction::Jump(l) => Ok(Terminator::Jump {
+            target: resolve_label(l)?,
+            args: vec![],
+        }),
+        Instruction::JumpIf(l, cond, lhs, rhs) => {
+            let lhs_vr = require_register(lhs, position)?;
+            let rhs_vr = require_register(rhs, position)?;
+            let t_target = resolve_label(l)?;
+            let f_target = leader_to_block
+                .get(&(position + 1))
+                .copied()
+                .ok_or(BuildError::FallThroughNotLeader { position })?;
+            Ok(Terminator::Branch {
+                cond: *cond,
+                lhs: gp_vreg(lhs_vr),
+                rhs: gp_vreg(rhs_vr),
+                t_target,
+                t_args: vec![],
+                f_target,
+                f_args: vec![],
+            })
+        }
+        // Operand-shape mismatch on a supported terminator.
+        Instruction::Ret(..) => Err(BuildError::UnsupportedValueKind {
+            position,
+            msg: "Ret operand was not a Value::Register".to_string(),
+        }),
+        // Other terminators (Throw, TailRecurse) land in later sub-phases.
+        _ => Err(BuildError::UnsupportedInstruction {
+            position,
+            variant: instruction_name(inst),
+        }),
+    }
+}
+
+fn require_register<'a>(
+    value: &'a Value,
+    position: usize,
+) -> Result<&'a VirtualRegister, BuildError> {
+    match value {
+        Value::Register(vr) => Ok(vr),
+        _ => Err(BuildError::UnsupportedValueKind {
+            position,
+            msg: format!("expected register, got {:?}", value),
+        }),
+    }
+}
+
+fn gp_vreg(vr: &VirtualRegister) -> VReg {
+    VReg {
+        index: vr.index as u32,
+        class: RegClass::Gp,
+    }
+}
+
+/// Recompute every block's `predecessors` list from the terminator graph.
+/// Called after fill_block has populated all terminators.
+fn rebuild_predecessors(f: &mut CfgFunction) {
+    let n = f.blocks.len();
+    let mut new_preds: Vec<Vec<BlockId>> = vec![Vec::new(); n];
+    for (idx, block) in f.blocks.iter().enumerate() {
+        let from = BlockId(idx as u32);
+        for succ in block.terminator.successors() {
+            new_preds[succ.0 as usize].push(from);
+        }
+    }
+    for (idx, preds) in new_preds.into_iter().enumerate() {
+        f.blocks[idx].predecessors = preds;
+    }
+}
+
+/// Infer the RegClass of every VReg by scanning def sites.
+///
+/// Phase 1b-1: every translated op produces a GP value, so the table is
+/// uniform GP. 1b-2 adds FP-producing ops (AddFloat, IntToFloat,
+/// FmovGeneralToFloat, etc.) and the inference becomes meaningful.
+fn classify_vregs(instructions: &[Instruction]) -> HashMap<u32, RegClass> {
+    let mut classes = HashMap::new();
+    for inst in instructions {
+        for (vr, class) in def_class_of(inst) {
+            classes.insert(vr, class);
+        }
+    }
+    classes
+}
+
+fn def_class_of(inst: &Instruction) -> Vec<(u32, RegClass)> {
+    let as_gp = |v: &Value| match v {
+        Value::Register(vr) => Some((vr.index as u32, RegClass::Gp)),
+        _ => None,
+    };
+    let mut out = Vec::new();
+    match inst {
+        Instruction::AddInt(dst, _, _) => out.extend(as_gp(dst)),
+        Instruction::LoadLocal(dst, _) => out.extend(as_gp(dst)),
+        Instruction::RegisterArgument(dst) => out.extend(as_gp(dst)),
+        _ => {}
+    }
+    out
+}
+
+/// Wire-up helper: build the CFG and run the verifier, logging failures
+/// under `BEAGLE_SSA_VERIFY=1`. Returns the constructed CFG on success
+/// so callers can hand it to mem2reg / regalloc once those land. Never
+/// aborts compilation — diagnostics go to stderr.
+pub fn try_build_and_verify(ir: &Ir) -> Option<CfgFunction> {
+    let enabled = std::env::var("BEAGLE_SSA_VERIFY")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false);
+    if !enabled {
+        return None;
+    }
+    let name = ir.debug_name.as_deref().unwrap_or("<anonymous>");
+    match build_cfg(ir) {
+        Err(e) => {
+            eprintln!("[cfg-build] {name}: {:?}", e);
+            None
+        }
+        Ok(cfg) => match crate::cfg::verify::verify(&cfg) {
+            Err(e) => {
+                eprintln!("[cfg-verify] {name}: {:?}", e);
+                None
+            }
+            Ok(()) => Some(cfg),
+        },
+    }
+}
+
+/// Diagnostic name for a legacy Instruction variant. Centralized here so
+/// the failure messages from `build_cfg` always agree with the variant
+/// names you can search for in `src/ir.rs`.
+fn instruction_name(inst: &Instruction) -> &'static str {
+    match inst {
+        Instruction::Sub(..) => "Sub",
+        Instruction::AddInt(..) => "AddInt",
+        Instruction::Mul(..) => "Mul",
+        Instruction::Div(..) => "Div",
+        Instruction::Modulo(..) => "Modulo",
+        Instruction::Assign(..) => "Assign",
+        Instruction::Recurse(..) => "Recurse",
+        Instruction::TailRecurse(..) => "TailRecurse",
+        Instruction::JumpIf(..) => "JumpIf",
+        Instruction::Jump(..) => "Jump",
+        Instruction::Ret(..) => "Ret",
+        Instruction::Breakpoint => "Breakpoint",
+        Instruction::Compare(..) => "Compare",
+        Instruction::Tag(..) => "Tag",
+        Instruction::LoadTrue(..) => "LoadTrue",
+        Instruction::LoadFalse(..) => "LoadFalse",
+        Instruction::LoadConstant(..) => "LoadConstant",
+        Instruction::Call(..) => "Call",
+        Instruction::HeapLoad(..) => "HeapLoad",
+        Instruction::HeapLoadReg(..) => "HeapLoadReg",
+        Instruction::HeapLoadByteReg(..) => "HeapLoadByteReg",
+        Instruction::HeapStore(..) => "HeapStore",
+        Instruction::LoadLocal(..) => "LoadLocal",
+        Instruction::StoreLocal(..) => "StoreLocal",
+        Instruction::RegisterArgument(..) => "RegisterArgument",
+        Instruction::PushStack(..) => "PushStack",
+        Instruction::PopStack(..) => "PopStack",
+        Instruction::GetStackPointer(..) => "GetStackPointer",
+        Instruction::GetStackPointerImm(..) => "GetStackPointerImm",
+        Instruction::GetFramePointer(..) => "GetFramePointer",
+        Instruction::GetTag(..) => "GetTag",
+        Instruction::Untag(..) => "Untag",
+        Instruction::HeapStoreOffset(..) => "HeapStoreOffset",
+        Instruction::HeapStoreByteOffsetMasked(..) => "HeapStoreByteOffsetMasked",
+        Instruction::CurrentStackPosition(..) => "CurrentStackPosition",
+        Instruction::ExtendLifeTime(..) => "ExtendLifeTime",
+        Instruction::HeapStoreOffsetReg(..) => "HeapStoreOffsetReg",
+        Instruction::HeapStoreByteOffsetReg(..) => "HeapStoreByteOffsetReg",
+        Instruction::AtomicLoad(..) => "AtomicLoad",
+        Instruction::AtomicStore(..) => "AtomicStore",
+        Instruction::CompareAndSwap(..) => "CompareAndSwap",
+        Instruction::StoreFloat(..) => "StoreFloat",
+        Instruction::GuardInt(..) => "GuardInt",
+        Instruction::GuardFloat(..) => "GuardFloat",
+        Instruction::FmovGeneralToFloat(..) => "FmovGeneralToFloat",
+        Instruction::FmovFloatToGeneral(..) => "FmovFloatToGeneral",
+        Instruction::IntToFloat(..) => "IntToFloat",
+        Instruction::FRoundToZero(..) => "FRoundToZero",
+        Instruction::AddFloat(..) => "AddFloat",
+        Instruction::SubFloat(..) => "SubFloat",
+        Instruction::MulFloat(..) => "MulFloat",
+        Instruction::DivFloat(..) => "DivFloat",
+        Instruction::CompareFloat(..) => "CompareFloat",
+        Instruction::ShiftRightImm(..) => "ShiftRightImm",
+        Instruction::ShiftRightImmRaw(..) => "ShiftRightImmRaw",
+        Instruction::AndImm(..) => "AndImm",
+        Instruction::ShiftLeft(..) => "ShiftLeft",
+        Instruction::ShiftRight(..) => "ShiftRight",
+        Instruction::ShiftRightZero(..) => "ShiftRightZero",
+        Instruction::And(..) => "And",
+        Instruction::Or(..) => "Or",
+        Instruction::Xor(..) => "Xor",
+        Instruction::PushExceptionHandler(..) => "PushExceptionHandler",
+        Instruction::PushResumableExceptionHandler(..) => "PushResumableExceptionHandler",
+        Instruction::PopExceptionHandler(..) => "PopExceptionHandler",
+        Instruction::PopExceptionHandlerById(..) => "PopExceptionHandlerById",
+        Instruction::Throw(..) => "Throw",
+        Instruction::ReadArgCount(..) => "ReadArgCount",
+        Instruction::Label(..) => "Label",
+        Instruction::PushPromptHandler(..) => "PushPromptHandler",
+        Instruction::PopPromptHandler(..) => "PopPromptHandler",
+        Instruction::PushPromptTag(..) => "PushPromptTag",
+        Instruction::LoadLabelAddress(..) => "LoadLabelAddress",
+        Instruction::CaptureContinuation(..) => "CaptureContinuation",
+        Instruction::InlineBumpAllocate(..) => "InlineBumpAllocate",
+        Instruction::CaptureContinuationTagged(..) => "CaptureContinuationTagged",
+        Instruction::PerformEffect(..) => "PerformEffect",
+        Instruction::ReturnFromShift(..) => "ReturnFromShift",
+        Instruction::RecordGcSafepoint => "RecordGcSafepoint",
+        Instruction::FeedbackOr(..) => "FeedbackOr",
+        Instruction::TierUpCheck(..) => "TierUpCheck",
     }
 }
 
@@ -397,5 +850,154 @@ mod tests {
         //      lands here = Label, suppressed)
         //   6 (L_after target; pos 6 = Label)
         assert_eq!(compute_leaders(&insts), vec![0, 4, 6]);
+    }
+
+    // ---- build_cfg tests (Phase 1b-1) ---------------------------------
+
+    fn ir_with(instructions: Vec<Instruction>, num_locals: usize, name: &str) -> Ir {
+        let mut ir = Ir::new(0);
+        ir.instructions = instructions;
+        ir.num_locals = num_locals;
+        ir.debug_name = Some(name.to_string());
+        ir
+    }
+
+    /// `fn id(x) { x }` — one RegisterArgument, one Ret. The arg becomes
+    /// an entry block param; body is empty; terminator is Ret(VR0).
+    #[test]
+    fn build_identity_function() {
+        let ir = ir_with(
+            vec![
+                Instruction::RegisterArgument(vr(0)),
+                Instruction::Ret(vr(0)),
+            ],
+            0,
+            "id",
+        );
+        let cfg = build_cfg(&ir).expect("identity should build");
+        crate::cfg::verify::verify(&cfg).expect("identity should verify");
+        assert_eq!(cfg.num_blocks(), 1);
+        let entry = cfg.block(cfg.entry);
+        assert_eq!(entry.params.len(), 1);
+        assert_eq!(entry.body.len(), 0);
+        assert!(matches!(entry.terminator, Terminator::Ret { .. }));
+    }
+
+    /// `fn add(a, b) { a + b }` — two RegisterArguments, AddInt, Ret.
+    /// Entry block has two params; body has one AddInt; Ret(VR2).
+    #[test]
+    fn build_add_function() {
+        let ir = ir_with(
+            vec![
+                Instruction::RegisterArgument(vr(0)),
+                Instruction::RegisterArgument(vr(1)),
+                Instruction::AddInt(vr(2), vr(0), vr(1)),
+                Instruction::Ret(vr(2)),
+            ],
+            0,
+            "add",
+        );
+        let cfg = build_cfg(&ir).expect("add should build");
+        crate::cfg::verify::verify(&cfg).expect("add should verify");
+        let entry = cfg.block(cfg.entry);
+        assert_eq!(entry.params.len(), 2);
+        assert_eq!(entry.body.len(), 1);
+        assert!(matches!(entry.body[0], Op::AddInt { .. }));
+        assert!(matches!(entry.terminator, Terminator::Ret { .. }));
+    }
+
+    /// LoadLocal + StoreLocal translate to SlotLoad / SlotStore.
+    /// Locals stay materialized as slots per I6.
+    #[test]
+    fn build_load_store_local() {
+        let ir = ir_with(
+            vec![
+                Instruction::RegisterArgument(vr(0)),
+                Instruction::StoreLocal(Value::Local(0), vr(0)),
+                Instruction::LoadLocal(vr(1), Value::Local(0)),
+                Instruction::Ret(vr(1)),
+            ],
+            1,
+            "load_store",
+        );
+        let cfg = build_cfg(&ir).expect("load/store should build");
+        crate::cfg::verify::verify(&cfg).expect("load/store should verify");
+        let entry = cfg.block(cfg.entry);
+        assert!(matches!(entry.body[0], Op::SlotStore { .. }));
+        assert!(matches!(entry.body[1], Op::SlotLoad { .. }));
+        assert_eq!(cfg.num_slots, 1);
+    }
+
+    /// JumpIf produces a Branch terminator with proper t/f targets, and
+    /// the predecessors are stitched correctly. The diamond should
+    /// verify (no critical edges because then/else each have one pred).
+    #[test]
+    fn build_jumpif_diamond() {
+        // 0: RegisterArgument vr0
+        // 1: RegisterArgument vr1
+        // 2: JumpIf L_true Eq vr0 vr1
+        // 3: AddInt vr2 vr0 vr1   (false branch)
+        // 4: Jump L_join
+        // 5: Label L_true
+        // 6: AddInt vr2 vr0 vr1   (true branch; same dst in legacy is OK
+        //    since we don't promote locals)
+        // 7: Label L_join
+        // 8: Ret vr2
+        //
+        // NOTE: vr2 is defined on both branches with the same index in
+        // legacy IR (the IR builder reuses indices). For Phase 1b-1 the
+        // verifier's dominance check would flag this if we constructed the
+        // function such that vr2 is used after the join, because neither
+        // def dominates the use across the join. To keep the diamond test
+        // green we hold the result through a slot instead.
+        let ir = ir_with(
+            vec![
+                Instruction::RegisterArgument(vr(0)),
+                Instruction::RegisterArgument(vr(1)),
+                Instruction::JumpIf(lbl(0), Condition::Equal, vr(0), vr(1)),
+                Instruction::AddInt(vr(2), vr(0), vr(1)),
+                Instruction::StoreLocal(Value::Local(0), vr(2)),
+                Instruction::Jump(lbl(1)),
+                Instruction::Label(lbl(0)),
+                Instruction::AddInt(vr(3), vr(0), vr(1)),
+                Instruction::StoreLocal(Value::Local(0), vr(3)),
+                Instruction::Label(lbl(1)),
+                Instruction::LoadLocal(vr(4), Value::Local(0)),
+                Instruction::Ret(vr(4)),
+            ],
+            1,
+            "diamond",
+        );
+        let cfg = build_cfg(&ir).expect("diamond should build");
+        crate::cfg::verify::verify(&cfg).expect("diamond should verify");
+        assert!(
+            cfg.num_blocks() >= 3,
+            "diamond should have at least entry/then/else/join blocks"
+        );
+    }
+
+    /// Unsupported instruction → clear Err with the variant name.
+    #[test]
+    fn unsupported_instruction_returns_error() {
+        let ir = ir_with(
+            vec![Instruction::Breakpoint, Instruction::Ret(vr(0))],
+            0,
+            "with_breakpoint",
+        );
+        let err = build_cfg(&ir).expect_err("Breakpoint not yet supported");
+        match err {
+            BuildError::UnsupportedInstruction { variant, .. } => {
+                assert_eq!(variant, "Breakpoint");
+            }
+            other => panic!("expected UnsupportedInstruction, got {:?}", other),
+        }
+    }
+
+    /// Empty IR produces an empty CfgFunction (no blocks).
+    #[test]
+    fn empty_ir_produces_empty_function() {
+        let ir = ir_with(vec![], 0, "empty");
+        let cfg = build_cfg(&ir).expect("empty should build");
+        assert_eq!(cfg.num_blocks(), 0);
     }
 }

@@ -1630,6 +1630,10 @@ impl AstCompiler<'_> {
                     format!("<anonymous>{}", source_loc)
                 };
                 self.ir.debug_name = Some(debug_name);
+                // SSA-pipeline coverage probe: see compiler.rs sibling
+                // call. Gated on BEAGLE_SSA_VERIFY=1; legacy lowering is
+                // unaffected.
+                let _ = crate::cfg::builder::try_build_and_verify(&self.ir);
                 let dump = self.compiler.dump.clone();
                 let mut backend = self.ir.compile(backend, error_fn_pointer, &dump);
                 let token_map = self.ir.ir_range_to_token_range.clone();

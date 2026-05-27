@@ -70,16 +70,18 @@ pub struct Block {
     pub predecessors: Vec<BlockId>,
 }
 
-/// CFG-layer op. Phase 0 ships only the two slot ops; Phase 1's
-/// construction path adds the variants it needs as it lowers legacy IR.
-/// Per the project rule, op variants are added when their lowering
-/// lands — no catch-all `Legacy(_)` stub.
+/// CFG-layer op. Variants are added as Phase 1b lowers their legacy IR
+/// counterparts. Per the project rule, every variant corresponds to a
+/// real, fully-translated legacy op — no catch-all `Legacy(_)` stub.
 #[derive(Debug, Clone)]
 pub enum Op {
     /// Read a stack-slot local into a fresh VReg.
     SlotLoad { dst: VReg, slot: SlotId },
     /// Write a VReg into a stack-slot local.
     SlotStore { slot: SlotId, src: VReg },
+    /// Tagged-integer addition. Two-input, one-output. Both operands and
+    /// the destination are GP-class.
+    AddInt { dst: VReg, lhs: VReg, rhs: VReg },
 }
 
 /// Block terminator. Exactly one per block (**I1**). All control transfer
@@ -237,6 +239,7 @@ impl Op {
         match self {
             Op::SlotLoad { dst, .. } => vec![*dst],
             Op::SlotStore { .. } => vec![],
+            Op::AddInt { dst, .. } => vec![*dst],
         }
     }
 
@@ -244,6 +247,7 @@ impl Op {
         match self {
             Op::SlotLoad { .. } => vec![],
             Op::SlotStore { src, .. } => vec![*src],
+            Op::AddInt { lhs, rhs, .. } => vec![*lhs, *rhs],
         }
     }
 }

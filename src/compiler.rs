@@ -1097,6 +1097,11 @@ impl Compiler {
 
             ir.ir_range_to_token_range = token_map.clone();
             ir.debug_name = Some(top_level_name.clone());
+            // SSA-pipeline coverage probe: build a CfgFunction from the
+            // finalized legacy IR and run the verifier. No-op unless
+            // BEAGLE_SSA_VERIFY=1; failures go to stderr and do not
+            // affect the legacy lowering below.
+            let _ = crate::cfg::builder::try_build_and_verify(&ir);
             let dump = self.dump.clone();
             let mut backend = ir.compile(backend, error_fn_pointer, &dump);
             let _token_map = ir.ir_range_to_token_range.clone();
