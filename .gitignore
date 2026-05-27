@@ -22,6 +22,7 @@ Cargo.lock
 
 **/*profile.json
 **/*profile.json.gz
-.claude/
+.claude/*
+!.claude/skills/
 
 .ai-dashboard

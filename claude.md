@@ -175,6 +175,26 @@ A test passes if its body completes without a thrown exception. The `!` is part 
 - Tests use `TestPrinter` to capture all `println()` / `print()` calls
 - Each test runs in a fresh runtime environment
 
+## SSA work — read the spec, run the critic
+
+Beagle has tried SSA several times and each attempt blew up on the same
+architectural mistakes (orphan blocks, FP-class loss, force-spill across
+calls, missing critical-edge split, dead-coded coalescer, missing TCO).
+
+The next attempt has a written contract:
+
+- **`docs/SSA_ARCHITECTURE.md`** — the eight invariants, the pipeline, the
+  forbidden-patterns table, and the rollout phases. Read it before
+  touching `src/cfg/`, `src/ssa/`, `src/register_allocation/`, `src/ir.rs`,
+  `src/lir/`, `src/compiler.rs`, or backend regalloc/spill code. A diff
+  that contradicts the spec is a blocking review failure; change the spec
+  in the same commit if there's a real reason.
+- **`/ssa-review`** — the critic. Run it before committing any change that
+  touches the SSA layer. It loads the spec, reads the diff, and reports
+  blocking violations and advisory notes. Forms: `/ssa-review` (working
+  tree), `/ssa-review --staged`, `/ssa-review <commit>`, `/ssa-review
+  <range>`.
+
 ## Current Status
 Early proof-of-concept with solid foundations. Missing many language features but demonstrates promising performance characteristics. Active development focuses on GC optimization and language feature completion.
 

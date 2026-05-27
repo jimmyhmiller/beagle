@@ -73,6 +73,7 @@ pub mod ast;
 pub mod backend;
 mod binding_space;
 mod builtins;
+mod cfg;
 mod code_memory;
 pub mod common;
 mod compiler;
