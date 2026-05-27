@@ -25,10 +25,11 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::cfg::{
-    BlockId, CfgFunction, ClobberSet, InlineBranchOp, Op, RegClass, SlotId, Terminator, VReg,
+    BlockId, CallTarget, CfgFunction, ClobberSet, InlineBranchOp, Op, RegClass, SlotId, TagSource,
+    Terminator, VReg,
 };
 use crate::common::Label;
 use crate::ir::{Instruction, Ir, Value, VirtualRegister};
@@ -62,6 +63,17 @@ pub fn compute_leaders(instructions: &[Instruction]) -> Vec<usize> {
         return Vec::new();
     }
     let labels = label_positions(instructions);
+    // Labels named as targets by any instruction (per `label_targets`).
+    // Rule 4 only suppresses post-terminator leaders if the Label at
+    // position+1 is in this set — otherwise the Label is "dead" and not
+    // a rule-2 leader, so suppressing rule 3 would leave no leader at
+    // all and break fall-through resolution.
+    let referenced: HashSet<usize> = instructions
+        .iter()
+        .flat_map(label_targets)
+        .map(|l| l.index)
+        .collect();
+
     let mut leaders: Vec<usize> = Vec::with_capacity(instructions.len() / 4 + 1);
     leaders.push(0);
     for (pos, inst) in instructions.iter().enumerate() {
@@ -74,8 +86,14 @@ pub fn compute_leaders(instructions: &[Instruction]) -> Vec<usize> {
         // Rule 3 + 4: post-terminator position.
         if is_terminator(inst) {
             let next = pos + 1;
-            if next < instructions.len() && !matches!(instructions[next], Instruction::Label(_)) {
-                leaders.push(next);
+            if next < instructions.len() {
+                let suppress = matches!(
+                    &instructions[next],
+                    Instruction::Label(l) if referenced.contains(&l.index)
+                );
+                if !suppress {
+                    leaders.push(next);
+                }
             }
         }
     }
@@ -262,7 +280,128 @@ pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
     }
 
     rebuild_predecessors(&mut f);
+
+    // Phase 1c: split critical edges so I2 holds at every post-
+    // construction phase boundary. Runs unconditionally — the spec
+    // requires no critical edges to survive any pass.
+    split_critical_edges(&mut f);
+
     Ok(f)
+}
+
+/// Edge-position discriminator inside a terminator, used by the
+/// critical-edge splitter to redirect exactly one outgoing edge of a
+/// multi-successor terminator without disturbing its sibling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EdgePos {
+    BranchTrue,
+    BranchFalse,
+    InlineFallThrough,
+    InlineBail,
+}
+
+/// Split every critical edge — an edge whose source has >1 successors AND
+/// whose target has >1 predecessors. Per **I2**, no critical edge may
+/// survive any phase boundary. Phase 5 (edge resolution) relies on this:
+/// parallel-copy implementation of block-param transfers is well-defined
+/// only on single-pred-single-succ edges, eliminating the
+/// const-before-branch clobber bug class (forbidden pattern F3).
+///
+/// For each critical edge, inserts a fresh empty block (`mid`) between
+/// source and target. `mid`'s only contents are a `Jump(target, args)`
+/// that forwards whatever args the source's terminator was passing along
+/// the edge. For Phase 1 (no mem2reg promotion yet) the args are empty;
+/// when mem2reg lands, this passthrough is already correct because
+/// `mid` has no params of its own and the args flow source→mid→target
+/// referencing source-block-dominated VRegs.
+pub fn split_critical_edges(f: &mut CfgFunction) {
+    // First pass: collect critical edges. Doing this in two passes avoids
+    // mutating `f` while iterating its blocks.
+    let mut to_split: Vec<(BlockId, EdgePos, BlockId)> = Vec::new();
+    for (idx, block) in f.blocks.iter().enumerate() {
+        let from = BlockId(idx as u32);
+        match &block.terminator {
+            Terminator::Branch {
+                t_target, f_target, ..
+            } => {
+                if f.block(*t_target).predecessors.len() > 1 {
+                    to_split.push((from, EdgePos::BranchTrue, *t_target));
+                }
+                if t_target != f_target && f.block(*f_target).predecessors.len() > 1 {
+                    to_split.push((from, EdgePos::BranchFalse, *f_target));
+                }
+            }
+            Terminator::InlineBranch {
+                fall_through, bail, ..
+            } => {
+                if f.block(*fall_through).predecessors.len() > 1 {
+                    to_split.push((from, EdgePos::InlineFallThrough, *fall_through));
+                }
+                if fall_through != bail && f.block(*bail).predecessors.len() > 1 {
+                    to_split.push((from, EdgePos::InlineBail, *bail));
+                }
+            }
+            _ => {} // Jump / Ret / Throw / Unreachable: <=1 successor
+        }
+    }
+
+    // Second pass: split each. Each new `mid` block gets the highest
+    // index allocated so far, so updating source's terminator field to
+    // point at `mid` doesn't invalidate earlier BlockId references.
+    for (source, pos, target) in to_split {
+        let mid = f.new_block();
+        let args = {
+            let term = &mut f.block_mut(source).terminator;
+            match (term, pos) {
+                (
+                    Terminator::Branch {
+                        t_target, t_args, ..
+                    },
+                    EdgePos::BranchTrue,
+                ) => {
+                    let args = std::mem::take(t_args);
+                    *t_target = mid;
+                    args
+                }
+                (
+                    Terminator::Branch {
+                        f_target, f_args, ..
+                    },
+                    EdgePos::BranchFalse,
+                ) => {
+                    let args = std::mem::take(f_args);
+                    *f_target = mid;
+                    args
+                }
+                (
+                    Terminator::InlineBranch {
+                        fall_through,
+                        fall_args,
+                        ..
+                    },
+                    EdgePos::InlineFallThrough,
+                ) => {
+                    let args = std::mem::take(fall_args);
+                    *fall_through = mid;
+                    args
+                }
+                (
+                    Terminator::InlineBranch {
+                        bail, bail_args, ..
+                    },
+                    EdgePos::InlineBail,
+                ) => {
+                    let args = std::mem::take(bail_args);
+                    *bail = mid;
+                    args
+                }
+                _ => unreachable!("EdgePos / terminator mismatch in split_critical_edges"),
+            }
+        };
+        f.block_mut(mid).terminator = Terminator::Jump { target, args };
+    }
+
+    rebuild_predecessors(f);
 }
 
 /// Walk the [start, end) window of `ir.instructions`, populating the
@@ -279,17 +418,19 @@ fn fill_block(
 ) -> Result<(), BuildError> {
     let mut idx = start;
 
-    // Entry block: gather the run of `RegisterArgument(VR_n)` ops at the
-    // top and promote each to a block param. This is the I3-compatible
-    // way to introduce function arguments (block params, not phis).
+    // Entry block: collect function-argument VRegs and promote them to
+    // block params. The legacy IR doesn't emit an explicit op for each
+    // argument — instead, `Ir::arg(n)` produces a `VirtualRegister` with
+    // `argument: Some(n)` set, and the legacy regalloc binds those to
+    // physical arg registers at function entry. We mirror that by
+    // walking every VReg the function references and adding any with
+    // an `argument` index as an entry block param (sorted by arg
+    // position so the param order matches the ABI). This is the
+    // I3-compatible introduction of function args — allowed to "promote
+    // at construction" because arguments aren't locals.
     if block_id == f.entry {
-        while idx < end {
-            if let Instruction::RegisterArgument(Value::Register(vr)) = &ir.instructions[idx] {
-                f.block_mut(block_id).params.push(to_cfg_vreg(vr, classes));
-                idx += 1;
-            } else {
-                break;
-            }
+        for v in collect_argument_vregs(&ir.instructions) {
+            f.block_mut(block_id).params.push(to_cfg_vreg(&v, classes));
         }
     }
 
@@ -454,7 +595,7 @@ fn translate_op(
         I::Tag(Value::Register(d), Value::Register(s), tag) => Ok(Op::Tag {
             dst: v(d),
             src: v(s),
-            tag_bits: extract_imm_u64(tag, position)?,
+            tag_source: extract_tag_source(tag, position, classes)?,
         }),
         I::Untag(Value::Register(d), Value::Register(s)) => Ok(Op::Untag {
             dst: v(d),
@@ -619,9 +760,9 @@ fn translate_op(
         }),
 
         // ---- Calls (I7: per-call clobber set) --------------------------
-        I::Call(Value::Register(dst), Value::Register(fn_ptr), args, is_builtin) => Ok(Op::Call {
+        I::Call(Value::Register(dst), fn_ptr, args, is_builtin) => Ok(Op::Call {
             dst: v(dst),
-            fn_ptr: v(fn_ptr),
+            target: extract_call_target(fn_ptr, position, classes)?,
             args: translate_value_args(args, position, classes)?,
             is_builtin: *is_builtin,
             clobbers: ClobberSet::AllCallerSaved,
@@ -1140,7 +1281,8 @@ fn to_cfg_vreg(vr: &VirtualRegister, classes: &HashMap<u32, RegClass>) -> VReg {
 }
 
 /// Extract a 64-bit immediate from a `Value` that's expected to encode a
-/// compile-time constant. Used for the tag-bits argument of `Tag`.
+/// compile-time constant. Used for the tag-bits argument of `Tag` in the
+/// common case (BuiltInType-derived constant).
 fn extract_imm_u64(value: &Value, position: usize) -> Result<u64, BuildError> {
     match value {
         Value::TaggedConstant(n) => Ok(*n as u64),
@@ -1148,6 +1290,48 @@ fn extract_imm_u64(value: &Value, position: usize) -> Result<u64, BuildError> {
         _ => Err(BuildError::UnsupportedValueKind {
             position,
             msg: format!("expected constant immediate, got {:?}", value),
+        }),
+    }
+}
+
+/// Extract a `TagSource` from `Tag`'s third arg. Tag accepts either a
+/// register (runtime-computed tag, e.g. from a struct id) or a
+/// compile-time immediate (the common case).
+fn extract_tag_source(
+    value: &Value,
+    position: usize,
+    classes: &HashMap<u32, RegClass>,
+) -> Result<TagSource, BuildError> {
+    match value {
+        Value::Register(vr) => Ok(TagSource::Register(to_cfg_vreg(vr, classes))),
+        Value::TaggedConstant(n) => Ok(TagSource::Bits(*n as u64)),
+        Value::RawValue(v) => Ok(TagSource::Bits(*v as u64)),
+        _ => Err(BuildError::UnsupportedValueKind {
+            position,
+            msg: format!(
+                "Tag third arg: expected register or immediate, got {:?}",
+                value
+            ),
+        }),
+    }
+}
+
+/// Extract a `CallTarget` from a Call's function-position arg. Accepts
+/// register (computed function pointer) and the common constant kinds
+/// (function id, raw pointer, raw value).
+fn extract_call_target(
+    value: &Value,
+    position: usize,
+    classes: &HashMap<u32, RegClass>,
+) -> Result<CallTarget, BuildError> {
+    match value {
+        Value::Register(vr) => Ok(CallTarget::Register(to_cfg_vreg(vr, classes))),
+        Value::Function(id) => Ok(CallTarget::FunctionId(*id)),
+        Value::Pointer(p) => Ok(CallTarget::Pointer(*p)),
+        Value::RawValue(v) => Ok(CallTarget::Raw(*v as u64)),
+        _ => Err(BuildError::UnsupportedValueKind {
+            position,
+            msg: format!("Call fn position: unsupported value kind {:?}", value),
         }),
     }
 }
@@ -1187,6 +1371,16 @@ fn rebuild_predecessors(f: &mut CfgFunction) {
 fn classify_vregs(instructions: &[Instruction]) -> HashMap<u32, RegClass> {
     let mut classes = HashMap::new();
 
+    // Pass 0: function-argument VRegs. The legacy IR doesn't emit an
+    // explicit "register argument" op; arg VRegs are simply
+    // `VirtualRegister` values with `argument: Some(n)` set. They're
+    // "defined" by the calling convention at function entry and need to
+    // be in the class table (and later, entry block params) even though
+    // no Instruction in the body defines them.
+    for vr in collect_argument_vregs(instructions) {
+        classes.insert(vr.index as u32, RegClass::Gp);
+    }
+
     // Pass 1: definite-class defs.
     for inst in instructions {
         for (vr, class) in def_class_of(inst) {
@@ -1194,7 +1388,25 @@ fn classify_vregs(instructions: &[Instruction]) -> HashMap<u32, RegClass> {
         }
     }
 
-    // Pass 2: fixpoint over reg-to-reg Assign / LoadConstant moves.
+    // Pass 2: default-GP for `Assign` / `LoadConstant` dsts that aren't
+    // already classified. Without this, `Assign(Register, NonRegister)` —
+    // e.g. Assign of a `TaggedConstant` — would leave dst unclassified
+    // (def_class_of doesn't cover Assign, and the reg-reg fixpoint
+    // doesn't fire on a non-register source). Pass 3's fixpoint can
+    // override this with FP if a chained reg-reg move propagates FP from
+    // an FP-producing op.
+    for inst in instructions {
+        let dst_idx = match inst {
+            Instruction::Assign(Value::Register(d), _) => Some(d.index as u32),
+            Instruction::LoadConstant(Value::Register(d), _) => Some(d.index as u32),
+            _ => None,
+        };
+        if let Some(idx) = dst_idx {
+            classes.entry(idx).or_insert(RegClass::Gp);
+        }
+    }
+
+    // Pass 3: fixpoint over reg-to-reg Assign / LoadConstant moves.
     loop {
         let mut changed = false;
         for inst in instructions {
@@ -1217,6 +1429,37 @@ fn classify_vregs(instructions: &[Instruction]) -> HashMap<u32, RegClass> {
     }
 
     classes
+}
+
+/// Collect the function-argument `VirtualRegister` values referenced by
+/// any instruction in the function, sorted by argument position.
+///
+/// `Ir::arg(n)` returns a fresh `VirtualRegister` with `argument:
+/// Some(n)` for the n'th function parameter. Multiple calls to
+/// `arg(n)` produce different VRegs all carrying `argument: Some(n)`;
+/// we take the lowest-indexed VReg per argument position (deterministic
+/// and matches the first IR allocation order, which the legacy regalloc
+/// uses for arg-register binding).
+fn collect_argument_vregs(instructions: &[Instruction]) -> Vec<VirtualRegister> {
+    // arg_index → (vreg_index, vreg). Keep the lowest vreg_index per arg.
+    let mut by_arg: HashMap<usize, VirtualRegister> = HashMap::new();
+    for inst in instructions {
+        for vr in inst.get_registers() {
+            if let Some(arg_idx) = vr.argument {
+                by_arg
+                    .entry(arg_idx)
+                    .and_modify(|existing| {
+                        if vr.index < existing.index {
+                            *existing = vr;
+                        }
+                    })
+                    .or_insert(vr);
+            }
+        }
+    }
+    let mut result: Vec<(usize, VirtualRegister)> = by_arg.into_iter().collect();
+    result.sort_by_key(|&(arg_idx, _)| arg_idx);
+    result.into_iter().map(|(_, vr)| vr).collect()
 }
 
 /// For each Instruction, return `(vreg_index, RegClass)` for every VReg
@@ -1438,6 +1681,19 @@ mod tests {
     fn vr(idx: usize) -> Value {
         Value::Register(VirtualRegister {
             argument: None,
+            index: idx,
+            volatile: false,
+            is_physical: false,
+        })
+    }
+
+    /// A VReg marked as the `arg_position`-th function argument. Mirrors
+    /// what `Ir::arg(n)` produces in the real compiler — sets
+    /// `argument: Some(arg_position)` so `collect_argument_vregs` picks
+    /// it up as an entry block param.
+    fn arg_vr(idx: usize, arg_position: usize) -> Value {
+        Value::Register(VirtualRegister {
+            argument: Some(arg_position),
             index: idx,
             volatile: false,
             is_physical: false,
@@ -1691,18 +1947,12 @@ mod tests {
         ir
     }
 
-    /// `fn id(x) { x }` — one RegisterArgument, one Ret. The arg becomes
-    /// an entry block param; body is empty; terminator is Ret(VR0).
+    /// `fn id(x) { x }` — entry takes one arg, returns it. The arg is a
+    /// VReg with `argument: Some(0)` set (matching `Ir::arg(0)` semantics)
+    /// and becomes an entry block param.
     #[test]
     fn build_identity_function() {
-        let ir = ir_with(
-            vec![
-                Instruction::RegisterArgument(vr(0)),
-                Instruction::Ret(vr(0)),
-            ],
-            0,
-            "id",
-        );
+        let ir = ir_with(vec![Instruction::Ret(arg_vr(0, 0))], 0, "id");
         let cfg = build_cfg(&ir).expect("identity should build");
         crate::cfg::verify::verify(&cfg).expect("identity should verify");
         assert_eq!(cfg.num_blocks(), 1);
@@ -1712,15 +1962,13 @@ mod tests {
         assert!(matches!(entry.terminator, Terminator::Ret { .. }));
     }
 
-    /// `fn add(a, b) { a + b }` — two RegisterArguments, AddInt, Ret.
-    /// Entry block has two params; body has one AddInt; Ret(VR2).
+    /// `fn add(a, b) { a + b }` — two args, AddInt, Ret. Entry has two
+    /// params; body has one AddInt; Ret(VR2).
     #[test]
     fn build_add_function() {
         let ir = ir_with(
             vec![
-                Instruction::RegisterArgument(vr(0)),
-                Instruction::RegisterArgument(vr(1)),
-                Instruction::AddInt(vr(2), vr(0), vr(1)),
+                Instruction::AddInt(vr(2), arg_vr(0, 0), arg_vr(1, 1)),
                 Instruction::Ret(vr(2)),
             ],
             0,
@@ -1735,14 +1983,13 @@ mod tests {
         assert!(matches!(entry.terminator, Terminator::Ret { .. }));
     }
 
-    /// LoadLocal + StoreLocal translate to SlotLoad / SlotStore.
-    /// Locals stay materialized as slots per I6.
+    /// LoadLocal + StoreLocal translate to SlotLoad / SlotStore. Locals
+    /// stay materialized as slots per I6.
     #[test]
     fn build_load_store_local() {
         let ir = ir_with(
             vec![
-                Instruction::RegisterArgument(vr(0)),
-                Instruction::StoreLocal(Value::Local(0), vr(0)),
+                Instruction::StoreLocal(Value::Local(0), arg_vr(0, 0)),
                 Instruction::LoadLocal(vr(1), Value::Local(0)),
                 Instruction::Ret(vr(1)),
             ],
@@ -1781,14 +2028,12 @@ mod tests {
         // green we hold the result through a slot instead.
         let ir = ir_with(
             vec![
-                Instruction::RegisterArgument(vr(0)),
-                Instruction::RegisterArgument(vr(1)),
-                Instruction::JumpIf(lbl(0), Condition::Equal, vr(0), vr(1)),
-                Instruction::AddInt(vr(2), vr(0), vr(1)),
+                Instruction::JumpIf(lbl(0), Condition::Equal, arg_vr(0, 0), arg_vr(1, 1)),
+                Instruction::AddInt(vr(2), arg_vr(0, 0), arg_vr(1, 1)),
                 Instruction::StoreLocal(Value::Local(0), vr(2)),
                 Instruction::Jump(lbl(1)),
                 Instruction::Label(lbl(0)),
-                Instruction::AddInt(vr(3), vr(0), vr(1)),
+                Instruction::AddInt(vr(3), arg_vr(0, 0), arg_vr(1, 1)),
                 Instruction::StoreLocal(Value::Local(0), vr(3)),
                 Instruction::Label(lbl(1)),
                 Instruction::LoadLocal(vr(4), Value::Local(0)),
@@ -1828,5 +2073,112 @@ mod tests {
         let ir = ir_with(vec![], 0, "empty");
         let cfg = build_cfg(&ir).expect("empty should build");
         assert_eq!(cfg.num_blocks(), 0);
+    }
+
+    // ---- Phase 1c/1d tests --------------------------------------------
+
+    /// Phase 1c: a function whose CFG would have a critical edge
+    /// (`entry → join` with `entry` having 2 successors and `join` having
+    /// 2 predecessors) gets a `mid` block inserted automatically, and the
+    /// resulting CFG passes the I2 verifier check.
+    #[test]
+    fn critical_edges_are_split_automatically() {
+        // 0: RegisterArgument vr0
+        // 1: JumpIf L_join Eq vr0 vr0      (Branch: t=L_join, f=post=pos 2)
+        // 2: AddInt vr2 vr0 vr0            (false branch body)
+        // 3: Jump L_join                   (false branch terminator)
+        // 4: Label L_join                  (join — 2 preds: from Branch.t
+        //                                    AND from Jump-at-3)
+        // 5: Ret vr0
+        //
+        // Before split: entry → join (critical), entry → false_block,
+        //               false_block → join.
+        // After split:  entry → false_block (1 pred), entry → mid (1 pred),
+        //               mid → join, false_block → join. No critical edges.
+        let ir = ir_with(
+            vec![
+                Instruction::JumpIf(lbl(1), Condition::Equal, arg_vr(0, 0), arg_vr(0, 0)),
+                Instruction::AddInt(vr(2), arg_vr(0, 0), arg_vr(0, 0)),
+                Instruction::Jump(lbl(1)),
+                Instruction::Label(lbl(1)),
+                Instruction::Ret(arg_vr(0, 0)),
+            ],
+            0,
+            "critical_edge_diamond",
+        );
+        let cfg = build_cfg(&ir).expect("builds");
+        crate::cfg::verify::verify(&cfg).expect("verifies after critical-edge split");
+        // 3 original leaders → 3 blocks pre-split, plus one mid block on
+        // the critical edge.
+        assert_eq!(
+            cfg.num_blocks(),
+            4,
+            "expected 4 blocks (3 originals + 1 mid), got {}",
+            cfg.num_blocks()
+        );
+    }
+
+    /// Phase 1d: a tail self-call (`TailRecurse`) rewrites at construction
+    /// time to `Terminator::Jump(entry, args)`, satisfying **I8** and
+    /// keeping the function's deep-recursion benchmarks SIGBUS-free.
+    #[test]
+    fn tail_recurse_becomes_jump_to_entry() {
+        // 0: AddInt vr1 = arg(0) + arg(0)
+        // 1: TailRecurse vr2 [vr1]   (rewrites to Jump(entry, [vr1]))
+        let ir = ir_with(
+            vec![
+                Instruction::AddInt(vr(1), arg_vr(0, 0), arg_vr(0, 0)),
+                Instruction::TailRecurse(vr(2), vec![vr(1)]),
+            ],
+            0,
+            "tail_loop",
+        );
+        let cfg = build_cfg(&ir).expect("builds");
+        crate::cfg::verify::verify(&cfg).expect("verifies");
+        let entry = cfg.entry;
+        let entry_block = cfg.block(entry);
+        assert_eq!(entry_block.params.len(), 1, "entry should have 1 param");
+        match &entry_block.terminator {
+            Terminator::Jump { target, args } => {
+                assert_eq!(*target, entry, "tail call must jump to entry");
+                assert_eq!(
+                    args.len(),
+                    1,
+                    "tail call must pass 1 arg matching entry's params"
+                );
+            }
+            other => panic!("expected Jump-to-entry, got {:?}", other),
+        }
+    }
+
+    /// Phase 1a fix: an unreferenced `Label` immediately after a
+    /// terminator no longer suppresses rule 3, so the post-terminator
+    /// position is still a leader. Without this, `JumpIf x; Label dead;
+    /// ...` left the fall-through with no resolvable leader.
+    #[test]
+    fn unreferenced_label_after_terminator_does_not_suppress_leader() {
+        // 0: Jump L_done
+        // 1: Label L_orphan          (NOT referenced anywhere)
+        // 2: AddInt                   (dead code)
+        // 3: Label L_done
+        // 4: Ret
+        let insts = vec![
+            Instruction::Jump(lbl(1)),
+            Instruction::Label(lbl(0)),
+            Instruction::AddInt(vr(0), vr(0), vr(0)),
+            Instruction::Label(lbl(1)),
+            Instruction::Ret(vr(0)),
+        ];
+        let leaders = compute_leaders(&insts);
+        assert!(
+            leaders.contains(&1),
+            "post-Jump (pos 1) should be a leader even though L_orphan is unreferenced; got {:?}",
+            leaders
+        );
+        assert!(
+            leaders.contains(&3),
+            "L_done (pos 3) should be a leader; got {:?}",
+            leaders
+        );
     }
 }

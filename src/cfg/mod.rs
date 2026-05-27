@@ -206,10 +206,14 @@ pub enum Op {
     },
 
     // ---- Tag bit manipulation (low 3 bits on tagged values) ----
+    /// `dst = src OR tag_source` — install tag bits in the low bits of
+    /// src. The tag may be a compile-time immediate (the BuiltInType for
+    /// the common case) or a runtime-computed register (when the tag is
+    /// derived from a struct id or other dynamic source).
     Tag {
         dst: VReg,
         src: VReg,
-        tag_bits: u64,
+        tag_source: TagSource,
     },
     Untag {
         dst: VReg,
@@ -370,10 +374,12 @@ pub enum Op {
     },
 
     // ---- Calls (I7 — carry an explicit clobber set) ----
-    /// General function call (direct or builtin).
+    /// General function call (direct or builtin). The callee target may
+    /// be a register (computed function pointer) or a compile-time
+    /// constant (function id, raw pointer, etc.).
     Call {
         dst: VReg,
-        fn_ptr: VReg,
+        target: CallTarget,
         args: Vec<VReg>,
         is_builtin: bool,
         clobbers: ClobberSet,
@@ -467,6 +473,35 @@ pub enum ClobberSet {
     /// Beagle's default ABI assumption for any call across the Rust/JIT
     /// boundary or to another Beagle function.
     AllCallerSaved,
+}
+
+/// Source of tag bits for `Op::Tag`. The IR builder emits Tag with either
+/// a constant tag (the common case — BuiltInType-derived) or a
+/// runtime-computed tag (e.g. derived from a struct id).
+#[derive(Debug, Clone)]
+pub enum TagSource {
+    Register(VReg),
+    Bits(u64),
+}
+
+/// Callee target for `Op::Call`. The legacy IR's Call op accepts any
+/// Value as the function position; we split the common kinds into named
+/// variants so SSA passes (mem2reg, regalloc, codegen) can pattern-match
+/// without sniffing through a Value wrapper.
+#[derive(Debug, Clone)]
+pub enum CallTarget {
+    /// Computed function pointer in a register (e.g. closure dispatch,
+    /// method resolution).
+    Register(VReg),
+    /// Function-id constant; the codegen resolves this to the tagged
+    /// function pointer at emit time.
+    FunctionId(usize),
+    /// Raw pointer constant — typically a Rust runtime builtin's address
+    /// pre-resolved at IR build time.
+    Pointer(usize),
+    /// Raw 64-bit constant. Rare; covers cases where the IR builder
+    /// pre-tagged or pre-shifted a function pointer.
+    Raw(u64),
 }
 
 /// Block terminator. Exactly one per block (**I1**). All control transfer
@@ -875,7 +910,12 @@ impl Op {
             Op::FmovGpToFp { src, .. } => vec![*src],
             Op::FmovFpToGp { src, .. } => vec![*src],
 
-            Op::Tag { src, .. } => vec![*src],
+            Op::Tag {
+                src, tag_source, ..
+            } => match tag_source {
+                TagSource::Register(t) => vec![*src, *t],
+                TagSource::Bits(_) => vec![*src],
+            },
             Op::Untag { src, .. } => vec![*src],
             Op::GetTag { src, .. } => vec![*src],
 
@@ -919,9 +959,11 @@ impl Op {
             Op::FeedbackOr { .. } => vec![],
             Op::TierUpCheck { .. } => vec![],
 
-            Op::Call { fn_ptr, args, .. } => {
+            Op::Call { target, args, .. } => {
                 let mut v = Vec::with_capacity(1 + args.len());
-                v.push(*fn_ptr);
+                if let CallTarget::Register(fp) = target {
+                    v.push(*fp);
+                }
                 v.extend_from_slice(args);
                 v
             }

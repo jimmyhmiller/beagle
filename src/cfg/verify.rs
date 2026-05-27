@@ -341,7 +341,12 @@ fn check_def_dominates_use(
             msg: "use of VReg with no def site".to_string(),
         })?;
     if def_block == use_block {
-        if def_pos >= use_pos {
+        // Same-position def/use is legal: an op that both reads and
+        // writes the same VReg (in-place arithmetic, in-place tag
+        // manipulation, or InlineBranch where dst equals lhs/rhs)
+        // semantically reads the operand first, then writes the result.
+        // Only flag strict use-before-def.
+        if def_pos > use_pos {
             return Err(VerifyError::UseBeforeDef {
                 vreg,
                 block: use_block,
