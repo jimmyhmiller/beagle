@@ -21,8 +21,9 @@
 
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 
+use crate::cfg::dom::{compute_idoms, compute_reachable, dominates, reverse_postorder};
 use crate::cfg::{BlockId, CfgFunction, Terminator, VReg};
 
 /// A verifier failure. Each variant maps to an invariant; the message is
@@ -365,118 +366,6 @@ fn check_def_dominates_use(
             use_block,
         })
     }
-}
-
-// ---- dominator computation ---------------------------------------------
-
-fn compute_reachable(f: &CfgFunction) -> HashSet<BlockId> {
-    let mut reached = HashSet::new();
-    if f.blocks.is_empty() {
-        return reached;
-    }
-    let mut queue = VecDeque::new();
-    queue.push_back(f.entry);
-    reached.insert(f.entry);
-    while let Some(b) = queue.pop_front() {
-        for s in f.block(b).terminator.successors() {
-            if reached.insert(s) {
-                queue.push_back(s);
-            }
-        }
-    }
-    reached
-}
-
-fn reverse_postorder(f: &CfgFunction) -> Vec<BlockId> {
-    let mut visited = HashSet::new();
-    let mut post = Vec::new();
-    fn dfs(f: &CfgFunction, b: BlockId, visited: &mut HashSet<BlockId>, post: &mut Vec<BlockId>) {
-        if !visited.insert(b) {
-            return;
-        }
-        for s in f.block(b).terminator.successors() {
-            dfs(f, s, visited, post);
-        }
-        post.push(b);
-    }
-    dfs(f, f.entry, &mut visited, &mut post);
-    post.reverse();
-    post
-}
-
-/// Cooper/Harvey/Kennedy iterative idom. Returns a map from each reachable
-/// block (other than entry) to its immediate dominator. Entry has no entry
-/// in the map (entry dominates itself but has no idom).
-fn compute_idoms(f: &CfgFunction, rpo: &[BlockId]) -> HashMap<BlockId, BlockId> {
-    let mut rpo_index: HashMap<BlockId, usize> = HashMap::new();
-    for (i, &b) in rpo.iter().enumerate() {
-        rpo_index.insert(b, i);
-    }
-    let mut idom: HashMap<BlockId, BlockId> = HashMap::new();
-    let entry = f.entry;
-    idom.insert(entry, entry);
-
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &b in rpo.iter().skip(1) {
-            let preds: Vec<BlockId> = f
-                .block(b)
-                .predecessors
-                .iter()
-                .copied()
-                .filter(|p| idom.contains_key(p))
-                .collect();
-            if preds.is_empty() {
-                continue;
-            }
-            let mut new_idom = preds[0];
-            for &p in &preds[1..] {
-                new_idom = intersect(&idom, &rpo_index, p, new_idom);
-            }
-            if idom.get(&b) != Some(&new_idom) {
-                idom.insert(b, new_idom);
-                changed = true;
-            }
-        }
-    }
-
-    // Strip the entry's self-loop so callers can use `idom` as a parent map.
-    idom.remove(&entry);
-    idom
-}
-
-fn intersect(
-    idom: &HashMap<BlockId, BlockId>,
-    rpo_index: &HashMap<BlockId, usize>,
-    mut b1: BlockId,
-    mut b2: BlockId,
-) -> BlockId {
-    while b1 != b2 {
-        while rpo_index[&b1] > rpo_index[&b2] {
-            b1 = idom[&b1];
-        }
-        while rpo_index[&b2] > rpo_index[&b1] {
-            b2 = idom[&b2];
-        }
-    }
-    b1
-}
-
-fn dominates(idom: &HashMap<BlockId, BlockId>, a: BlockId, mut b: BlockId) -> bool {
-    if a == b {
-        return true;
-    }
-    while let Some(&parent) = idom.get(&b) {
-        if parent == a {
-            return true;
-        }
-        if parent == b {
-            return false;
-        }
-        b = parent;
-    }
-    false
 }
 
 // =========================================================================

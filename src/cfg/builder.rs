@@ -286,7 +286,45 @@ pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
     // requires no critical edges to survive any pass.
     split_critical_edges(&mut f);
 
+    // Phase 1d (light DCE): wipe out unreachable blocks. mem2reg's
+    // dom-tree DFS only visits reachable blocks, so unreachable
+    // predecessors of a reachable block would never get phi-arg
+    // additions on their outgoing edges, producing ArgArityMismatch
+    // when the verifier walks ALL terminators. Replacing unreachable
+    // terminators with `Unreachable` removes their phantom edges from
+    // the predecessor map.
+    dce_unreachable_blocks(&mut f);
+
+    // Phase 2: mem2reg. Promotes profitable stack slots to SSA values +
+    // block params at iterated dominance frontiers (Cytron-style). Runs
+    // unconditionally; slots that don't pay (fewer than 2 reads) stay
+    // as SlotLoad / SlotStore. Preserves I1–I8 by construction; phi
+    // placement is "block params" not "Phi op" per I3 / F10.
+    crate::cfg::mem2reg::promote_slots(&mut f);
+
     Ok(f)
+}
+
+/// Wipe out any block not reachable from `entry`. The block stays in
+/// the `blocks` vec (so BlockId indices remain stable for everything
+/// else that references them), but its body, params, and outgoing edges
+/// are cleared and its terminator becomes `Unreachable`. Without this,
+/// mem2reg's dom-tree DFS leaves unreachable predecessors' terminator-
+/// edge args empty while the target block gains phi-params, triggering
+/// `ArgArityMismatch` in the verifier.
+fn dce_unreachable_blocks(f: &mut CfgFunction) {
+    let reachable = crate::cfg::dom::compute_reachable(f);
+    if reachable.len() == f.blocks.len() {
+        return;
+    }
+    for (idx, block) in f.blocks.iter_mut().enumerate() {
+        if !reachable.contains(&BlockId(idx as u32)) {
+            block.params.clear();
+            block.body.clear();
+            block.terminator = Terminator::Unreachable;
+        }
+    }
+    rebuild_predecessors(f);
 }
 
 /// Edge-position discriminator inside a terminator, used by the

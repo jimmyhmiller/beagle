@@ -19,6 +19,8 @@
 #![allow(dead_code)]
 
 pub mod builder;
+pub mod dom;
+pub mod mem2reg;
 pub mod verify;
 
 use crate::ir::Condition;
