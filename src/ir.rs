@@ -1986,6 +1986,64 @@ impl Ir {
     ) -> B {
         debug_assert!(!self.ir_range_to_token_range.is_empty());
 
+        // Opt-in SSA pipeline. Set `BEAGLE_USE_SSA=1` to try the new
+        // path; falls back to legacy on bail (unimplemented op,
+        // spill overflow, build failure).
+        let ssa_enabled = std::env::var("BEAGLE_USE_SSA")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false);
+        let ssa_only_match = std::env::var("BEAGLE_SSA_ONLY")
+            .ok()
+            .map(|sub| {
+                self.debug_name
+                    .as_deref()
+                    .map(|n| n.contains(&sub))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(true);
+        let ssa_deny_match = std::env::var("BEAGLE_SSA_DENY")
+            .ok()
+            .map(|sub| {
+                self.debug_name
+                    .as_deref()
+                    .map(|n| n.contains(&sub))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if ssa_enabled && ssa_only_match && !ssa_deny_match {
+            // Clone-and-try: a panic in the SSA path (e.g. an op
+            // hits its `todo!()`) will unwind from compile_via_ssa
+            // and the caller never sees the half-mutated ir. Until
+            // every op is implemented, that's the safe shape.
+            let saved_instructions = self.instructions.clone();
+            let saved_labels = self.labels.clone();
+            let saved_label_names = self.label_names.clone();
+            let saved_label_locations = self.label_locations.clone();
+            let saved_num_locals = self.num_locals;
+            match crate::cfg::emit_legacy::compile_via_ssa(self, backend) {
+                Ok(b) => {
+                    if std::env::var("BEAGLE_SSA_LOG_BAIL").is_ok() {
+                        let name = self.debug_name.as_deref().unwrap_or("<anon>");
+                        eprintln!("[ssa-compile] OK    {}", name);
+                    }
+                    return b;
+                }
+                Err((e, b)) => {
+                    if std::env::var("BEAGLE_SSA_LOG_BAIL").is_ok() {
+                        let name = self.debug_name.as_deref().unwrap_or("<anon>");
+                        eprintln!("[ssa-compile] BAIL  {} -- {:?}", name, e);
+                    }
+                    // Restore Ir state and fall through to legacy.
+                    self.instructions = saved_instructions;
+                    self.labels = saved_labels;
+                    self.label_names = saved_label_names;
+                    self.label_locations = saved_label_locations;
+                    self.num_locals = saved_num_locals;
+                    backend = b;
+                }
+            }
+        }
+
         // backend.breakpoint();
 
         let function_name = self.debug_name.as_deref().unwrap_or("<anonymous>");
@@ -2141,6 +2199,37 @@ impl Ir {
             Value::Spill(_, index) => Some(*index),
             _ => None,
         }
+    }
+
+    /// Install a `cfg::emit_legacy::TranslatedIr` produced by the SSA
+    /// pipeline (Phase 4f-2). Replaces the four state pieces the
+    /// legacy `compile_instructions` loop reads, plus `num_locals`.
+    /// Other Ir fields (`debug_name`, `mark_local_index`,
+    /// `ir_range_to_token_range`, etc.) are untouched.
+    pub fn install_translated_program(
+        &mut self,
+        translated: crate::cfg::emit_legacy::TranslatedIr,
+    ) {
+        self.instructions = translated.instructions;
+        self.labels = translated.labels;
+        self.label_names = translated.label_names;
+        self.label_locations = translated.label_locations;
+        self.num_locals = translated.num_locals;
+    }
+
+    /// External entry point to the legacy instruction-emission loop,
+    /// used by the SSA driver (`cfg::emit_legacy::compile_via_ssa`)
+    /// after it has installed a translated program via
+    /// [`install_translated_program`]. The non-SSA path keeps using
+    /// `compile_instructions` directly.
+    pub fn compile_via_legacy_emit<B: CodegenBackend>(
+        &mut self,
+        backend: &mut B,
+        exit: Label,
+        before_prelude: Label,
+        after_prelude: Label,
+    ) {
+        self.compile_instructions(backend, exit, before_prelude, after_prelude);
     }
 
     fn compile_instructions<B: CodegenBackend>(

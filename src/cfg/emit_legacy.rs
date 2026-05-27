@@ -30,9 +30,13 @@
 
 use std::collections::HashMap;
 
-use crate::cfg::{BlockId, CfgFunction, InlineBranchOp, Op, RegClass, Terminator, VReg};
+use crate::backend::CodegenBackend;
+use crate::cfg::{
+    BlockId, CallTarget, CfgFunction, ClobberSet, InlineBranchOp, Op, RegClass, TagSource,
+    Terminator, VReg,
+};
 use crate::common::Label;
-use crate::ir::{Instruction, Value, VirtualRegister};
+use crate::ir::{Instruction, Ir, Value, VirtualRegister};
 
 /// Output of [`translate`]. Layout matches the four state pieces the
 /// legacy `Ir::compile_instructions` reads.
@@ -54,20 +58,26 @@ pub struct TranslatedIr {
 /// (arg regs at 0..N for entry params vs. allocator-pool indices for
 /// the rest), which is a coloring-side concern that Phase 4f-2 must
 /// not redo inside the translator.
+///
+/// Returns `Err(SsaCompileError::UnsupportedOp(...))` when an op
+/// hasn't been translated yet. The caller is expected to fall back
+/// to the legacy pipeline on this error. Returning Err instead of
+/// panicking lets the gate be opt-in without blowing up the compile
+/// thread on every untranslated op encountered.
 pub fn translate(
     cfg: &CfgFunction,
     color_to_physical: impl Fn(u32, RegClass) -> usize,
-) -> TranslatedIr {
+) -> Result<TranslatedIr, SsaCompileError> {
     let order = crate::cfg::dom::reverse_postorder(cfg);
     let mut t = Translator::new(cfg, &order, color_to_physical);
-    t.run();
-    TranslatedIr {
+    t.run()?;
+    Ok(TranslatedIr {
         instructions: t.instructions,
         labels: t.labels,
         label_names: t.label_names,
         label_locations: t.label_locations,
         num_locals: cfg.num_slots as usize,
-    }
+    })
 }
 
 struct Translator<'a, F: Fn(u32, RegClass) -> usize> {
@@ -128,17 +138,18 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
         self.label_locations.insert(pos, label.index);
     }
 
-    fn run(&mut self) {
+    fn run(&mut self) -> Result<(), SsaCompileError> {
         for (i, &bid) in self.order.iter().enumerate() {
             let label = self.block_label[&bid];
             self.emit_label(label);
             let block = self.cfg.block(bid);
             for op in &block.body {
-                self.emit_op(op);
+                self.emit_op(op)?;
             }
             let next_in_order = self.order.get(i + 1).copied();
-            self.emit_terminator(&block.terminator, next_in_order);
+            self.emit_terminator(&block.terminator, next_in_order)?;
         }
+        Ok(())
     }
 
     /// VReg → legacy Value::Register with `index` = physical register
@@ -155,7 +166,7 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
         })
     }
 
-    fn emit_op(&mut self, op: &Op) {
+    fn emit_op(&mut self, op: &Op) -> Result<(), SsaCompileError> {
         use Instruction as I;
         match op {
             // ---- Moves & constants ----
@@ -166,6 +177,31 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
                 self.reg(*dst),
                 Value::TaggedConstant(*value as isize),
             )),
+            Op::ConstStringPtr { dst, ptr } => self
+                .instructions
+                .push(I::Assign(self.reg(*dst), Value::StringConstantPtr(*ptr))),
+            Op::ConstKeywordPtr { dst, ptr } => self
+                .instructions
+                .push(I::Assign(self.reg(*dst), Value::KeywordConstantPtr(*ptr))),
+            Op::ConstFunctionId { dst, function_id } => self
+                .instructions
+                .push(I::Assign(self.reg(*dst), Value::Function(*function_id))),
+            Op::ConstPointer { dst, ptr } => self
+                .instructions
+                .push(I::Assign(self.reg(*dst), Value::Pointer(*ptr))),
+            Op::ConstRawValue { dst, value } => self
+                .instructions
+                .push(I::Assign(self.reg(*dst), Value::RawValue(*value as usize))),
+            Op::ConstTrue { dst } => self.instructions.push(I::LoadTrue(self.reg(*dst))),
+            Op::ConstFalse { dst } => self.instructions.push(I::LoadFalse(self.reg(*dst))),
+            Op::ConstNull { dst } => self
+                .instructions
+                .push(I::Assign(self.reg(*dst), Value::Null)),
+            Op::ConstLabelAddress { dst, target } => {
+                let label = self.block_label[target];
+                self.instructions
+                    .push(I::LoadLabelAddress(self.reg(*dst), label));
+            }
 
             // ---- Integer arithmetic (no bail) ----
             Op::AddInt { dst, lhs, rhs } => {
@@ -185,6 +221,91 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
                 self.reg(*rhs),
                 *cond,
             )),
+            Op::CompareFloat {
+                dst,
+                lhs,
+                rhs,
+                cond,
+            } => self.instructions.push(I::CompareFloat(
+                self.reg(*dst),
+                self.reg(*lhs),
+                self.reg(*rhs),
+                *cond,
+            )),
+
+            // ---- Floating-point arithmetic ----
+            Op::AddFloat { dst, lhs, rhs } => {
+                self.instructions
+                    .push(I::AddFloat(self.reg(*dst), self.reg(*lhs), self.reg(*rhs)))
+            }
+            Op::SubFloat { dst, lhs, rhs } => {
+                self.instructions
+                    .push(I::SubFloat(self.reg(*dst), self.reg(*lhs), self.reg(*rhs)))
+            }
+            Op::MulFloat { dst, lhs, rhs } => {
+                self.instructions
+                    .push(I::MulFloat(self.reg(*dst), self.reg(*lhs), self.reg(*rhs)))
+            }
+            Op::DivFloat { dst, lhs, rhs } => {
+                self.instructions
+                    .push(I::DivFloat(self.reg(*dst), self.reg(*lhs), self.reg(*rhs)))
+            }
+
+            // ---- Conversions / bit-moves between classes ----
+            Op::IntToFloat { dst, src } => self
+                .instructions
+                .push(I::IntToFloat(self.reg(*dst), self.reg(*src))),
+            Op::FRoundToZero { dst, src } => self
+                .instructions
+                .push(I::FRoundToZero(self.reg(*dst), self.reg(*src))),
+            Op::FmovGpToFp { dst, src } => self
+                .instructions
+                .push(I::FmovGeneralToFloat(self.reg(*dst), self.reg(*src))),
+            Op::FmovFpToGp { dst, src } => self
+                .instructions
+                .push(I::FmovFloatToGeneral(self.reg(*dst), self.reg(*src))),
+
+            // ---- Tag bit manipulation ----
+            Op::Tag {
+                dst,
+                src,
+                tag_source,
+            } => {
+                let tag_v = match tag_source {
+                    TagSource::Register(t) => self.reg(*t),
+                    TagSource::Bits(bits) => Value::RawValue(*bits as usize),
+                };
+                self.instructions
+                    .push(I::Tag(self.reg(*dst), self.reg(*src), tag_v));
+            }
+            Op::Untag { dst, src } => self
+                .instructions
+                .push(I::Untag(self.reg(*dst), self.reg(*src))),
+            Op::GetTag { dst, src } => self
+                .instructions
+                .push(I::GetTag(self.reg(*dst), self.reg(*src))),
+
+            // ---- Bit ops ----
+            Op::And { dst, lhs, rhs } => {
+                self.instructions
+                    .push(I::And(self.reg(*dst), self.reg(*lhs), self.reg(*rhs)))
+            }
+            Op::Or { dst, lhs, rhs } => {
+                self.instructions
+                    .push(I::Or(self.reg(*dst), self.reg(*lhs), self.reg(*rhs)))
+            }
+            Op::Xor { dst, lhs, rhs } => {
+                self.instructions
+                    .push(I::Xor(self.reg(*dst), self.reg(*lhs), self.reg(*rhs)))
+            }
+            Op::AndImm { dst, src, imm } => {
+                self.instructions
+                    .push(I::AndImm(self.reg(*dst), self.reg(*src), *imm))
+            }
+            Op::ShiftRightImmRaw { dst, src, imm } => {
+                self.instructions
+                    .push(I::ShiftRightImmRaw(self.reg(*dst), self.reg(*src), *imm))
+            }
 
             // ---- Slots (locals) ----
             Op::SlotLoad { dst, slot } => self
@@ -194,25 +315,164 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
                 .instructions
                 .push(I::StoreLocal(Value::Local(slot.0 as usize), self.reg(*src))),
 
-            // Everything else surfaces loudly so 4f-2d work is
-            // self-discovering when a real corpus run hits it.
-            other => todo!("emit_legacy: Op::{:?} not yet translated", op_tag(other)),
+            // ---- Heap memory ----
+            Op::HeapLoad { dst, base, offset } => {
+                self.instructions
+                    .push(I::HeapLoad(self.reg(*dst), self.reg(*base), *offset))
+            }
+            Op::HeapLoadReg { dst, base, offset } => self.instructions.push(I::HeapLoadReg(
+                self.reg(*dst),
+                self.reg(*base),
+                self.reg(*offset),
+            )),
+            Op::HeapLoadByteReg { dst, base, offset } => self.instructions.push(
+                I::HeapLoadByteReg(self.reg(*dst), self.reg(*base), self.reg(*offset)),
+            ),
+            Op::HeapStore { addr, src } => self
+                .instructions
+                .push(I::HeapStore(self.reg(*addr), self.reg(*src))),
+            Op::HeapStoreOffset { base, src, offset } => self
+                .instructions
+                .push(I::HeapStoreOffset(self.reg(*base), self.reg(*src), *offset)),
+            Op::HeapStoreOffsetReg { base, src, offset } => self.instructions.push(
+                I::HeapStoreOffsetReg(self.reg(*base), self.reg(*src), self.reg(*offset)),
+            ),
+            Op::HeapStoreByteOffsetReg { base, src, offset } => self.instructions.push(
+                I::HeapStoreByteOffsetReg(self.reg(*base), self.reg(*src), self.reg(*offset)),
+            ),
+            Op::HeapStoreByteOffsetMasked {
+                ptr,
+                val,
+                temp1,
+                temp2,
+                offset,
+                byte_offset,
+                mask,
+            } => self.instructions.push(I::HeapStoreByteOffsetMasked(
+                self.reg(*ptr),
+                self.reg(*val),
+                self.reg(*temp1),
+                self.reg(*temp2),
+                *offset,
+                *byte_offset,
+                *mask,
+            )),
+
+            // ---- Atomic ----
+            Op::AtomicLoad { dst, src } => self
+                .instructions
+                .push(I::AtomicLoad(self.reg(*dst), self.reg(*src))),
+            Op::AtomicStore { addr, src } => self
+                .instructions
+                .push(I::AtomicStore(self.reg(*addr), self.reg(*src))),
+            Op::CompareAndSwap {
+                addr,
+                expected,
+                new,
+            } => self.instructions.push(I::CompareAndSwap(
+                self.reg(*addr),
+                self.reg(*expected),
+                self.reg(*new),
+            )),
+
+            // ---- Float storage ----
+            Op::StoreFloatConstant {
+                dest,
+                temp,
+                value_text,
+            } => self.instructions.push(I::StoreFloat(
+                self.reg(*dest),
+                self.reg(*temp),
+                value_text.clone(),
+            )),
+
+            // ---- Stack ----
+            Op::PushStack { src } => self.instructions.push(I::PushStack(self.reg(*src))),
+            Op::PopStack { dst } => self.instructions.push(I::PopStack(self.reg(*dst))),
+            Op::GetStackPointer { dst, offset } => self
+                .instructions
+                .push(I::GetStackPointer(self.reg(*dst), self.reg(*offset))),
+            Op::GetStackPointerImm { dst, offset } => self
+                .instructions
+                .push(I::GetStackPointerImm(self.reg(*dst), *offset)),
+            Op::GetFramePointer { dst } => {
+                self.instructions.push(I::GetFramePointer(self.reg(*dst)))
+            }
+            Op::CurrentStackPosition { dst } => self
+                .instructions
+                .push(I::CurrentStackPosition(self.reg(*dst))),
+
+            // ---- Variadic plumbing ----
+            Op::ReadArgCount { dst } => self.instructions.push(I::ReadArgCount(self.reg(*dst))),
+
+            // ---- Misc no-VReg / lifetime markers ----
+            Op::ExtendLifetime { src } => self.instructions.push(I::ExtendLifeTime(self.reg(*src))),
+            Op::Breakpoint => self.instructions.push(I::Breakpoint),
+            Op::RecordGcSafepoint => self.instructions.push(I::RecordGcSafepoint),
+            Op::FeedbackOr { slot_addr, bits } => {
+                self.instructions.push(I::FeedbackOr(*slot_addr, *bits))
+            }
+            Op::TierUpCheck {
+                counter_addr,
+                name_c_str_ptr,
+                trampoline_fn_ptr,
+            } => self.instructions.push(I::TierUpCheck(
+                *counter_addr,
+                *name_c_str_ptr,
+                *trampoline_fn_ptr,
+            )),
+
+            // ---- Calls ----
+            Op::Call {
+                dst,
+                target,
+                args,
+                is_builtin,
+                clobbers: ClobberSet::AllCallerSaved,
+            } => {
+                let fn_value = match target {
+                    CallTarget::Register(vr) => self.reg(*vr),
+                    CallTarget::FunctionId(id) => Value::Function(*id),
+                    CallTarget::Pointer(p) => Value::Pointer(*p),
+                    CallTarget::Raw(v) => Value::RawValue(*v as usize),
+                };
+                let arg_values: Vec<Value> = args.iter().map(|v| self.reg(*v)).collect();
+                self.instructions
+                    .push(I::Call(self.reg(*dst), fn_value, arg_values, *is_builtin));
+            }
+            Op::Recurse {
+                dst,
+                args,
+                clobbers: ClobberSet::AllCallerSaved,
+            } => {
+                let arg_values: Vec<Value> = args.iter().map(|v| self.reg(*v)).collect();
+                self.instructions
+                    .push(I::Recurse(self.reg(*dst), arg_values));
+            }
+
+            // Everything else: bail so the gate falls back to legacy.
+            other => {
+                return Err(SsaCompileError::UnsupportedOp(op_tag(other).to_string()));
+            }
         }
+        Ok(())
     }
 
-    fn emit_terminator(&mut self, term: &Terminator, next_in_order: Option<BlockId>) {
+    fn emit_terminator(
+        &mut self,
+        term: &Terminator,
+        next_in_order: Option<BlockId>,
+    ) -> Result<(), SsaCompileError> {
         use Instruction as I;
         match term {
             Terminator::Ret { value } => {
                 self.instructions.push(I::Ret(self.reg(*value)));
             }
             Terminator::Jump { target, .. } => {
-                // Fall-through if target is the next block in linearization.
-                if Some(*target) == next_in_order {
-                    return;
+                if Some(*target) != next_in_order {
+                    let label = self.block_label[target];
+                    self.instructions.push(I::Jump(label));
                 }
-                let label = self.block_label[target];
-                self.instructions.push(I::Jump(label));
             }
             Terminator::Branch {
                 cond,
@@ -227,27 +487,149 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
                 let t_label = self.block_label[t_target];
                 self.instructions
                     .push(I::JumpIf(t_label, *cond, lhs_v, rhs_v));
-                // Fall-through to f_target if it's next; otherwise emit Jump.
                 if Some(*f_target) != next_in_order {
                     let f_label = self.block_label[f_target];
                     self.instructions.push(I::Jump(f_label));
                 }
             }
             Terminator::InlineBranch { op, .. } => {
-                todo!(
-                    "emit_legacy: Terminator::InlineBranch({:?}) not yet translated",
+                // 4f-2c bring-up: the structural translation is
+                // straightforward (legacy `Instruction::Sub` already
+                // encodes guard+untag+sub+retag+bail in a single op),
+                // but enabling it tripped wrong-output bugs across
+                // stdlib functions that haven't been root-caused yet.
+                // Leaving as Err so the gate falls back to legacy;
+                // diagnosis and fix lands in 4f-2d (likely an
+                // interference / coloring miss around the mutation
+                // semantics of the bailing-arithmetic operand regs).
+                return Err(SsaCompileError::UnsupportedTerminator(format!(
+                    "InlineBranch({})",
                     inline_op_tag(op)
-                );
+                )));
             }
             Terminator::Throw { .. } => {
-                todo!("emit_legacy: Terminator::Throw not yet translated");
+                return Err(SsaCompileError::UnsupportedTerminator("Throw".to_string()));
             }
             Terminator::Unreachable => {
                 // No instruction; verifier should have caught any
                 // surviving Unreachable in a reachable block before us.
             }
         }
+        Ok(())
     }
+}
+
+// =========================================================================
+// Driver: compile_via_ssa
+// =========================================================================
+
+/// Error from [`compile_via_ssa`] — caller may fall back to the
+/// legacy pipeline if the SSA path can't handle the function yet.
+#[derive(Debug)]
+pub enum SsaCompileError {
+    /// `build_cfg` rejected the legacy IR (e.g. unsupported instruction
+    /// shape).
+    BuildFailed(String),
+    /// Greedy coloring exceeded the allocator pool and Phase 4d
+    /// spilling can't currently cover it. Includes the function name
+    /// for debugging.
+    SpillOverflow(String),
+    /// Op variant has no translation yet. Phase 4f-2d adds these as
+    /// they're hit by real corpus runs.
+    UnsupportedOp(String),
+    /// Terminator variant has no translation yet (InlineBranch's
+    /// checked-arithmetic family, Throw).
+    UnsupportedTerminator(String),
+}
+
+/// Compile `ir` through the SSA pipeline:
+///
+/// 1. `build_cfg` → CFG with verified I1-I8.
+/// 2. liveness → interference → chordal coloring.
+/// 3. `assign_physical_registers` → physical-index coloring.
+/// 4. `lower_to_allocated` (Phase 4f-1) — rewrites VRegs to physical
+///    indices in place, materializes edge transfers as Moves.
+/// 5. `translate` (Phase 4f-2a/b) → flat `Vec<Instruction>`.
+/// 6. Installs the translated program on `ir` and runs the legacy
+///    `compile_instructions` loop (which already handles every op's
+///    backend lowering).
+///
+/// Returns the populated backend on success, or `SsaCompileError`
+/// on bail so the caller can fall back to legacy.
+pub fn compile_via_ssa<B: CodegenBackend>(
+    ir: &mut Ir,
+    mut backend: B,
+) -> Result<B, (SsaCompileError, B)> {
+    use crate::cfg::builder::build_cfg;
+    use crate::cfg::regalloc::color::color as color_fn;
+    use crate::cfg::regalloc::edge::Scratch;
+    use crate::cfg::regalloc::emit::lower_to_allocated;
+    use crate::cfg::regalloc::interference::build_interference;
+    use crate::cfg::regalloc::liveness::compute_liveness;
+    use crate::cfg::regalloc::physical::{assign_physical_registers, current_layout, has_overflow};
+
+    let mut cfg = match build_cfg(ir) {
+        Ok(c) => c,
+        Err(e) => return Err((SsaCompileError::BuildFailed(format!("{:?}", e)), backend)),
+    };
+
+    let liveness = compute_liveness(&cfg);
+    let ig = build_interference(&cfg, &liveness);
+    let coloring = color_fn(&cfg, &ig);
+    let layout = current_layout();
+    let physical = assign_physical_registers(&cfg, &coloring, layout);
+
+    if has_overflow(&physical) {
+        let name = ir.debug_name.clone().unwrap_or_else(|| "<anon>".into());
+        return Err((SsaCompileError::SpillOverflow(name), backend));
+    }
+
+    // Scratch registers for edge resolution's cycle breaks. Pick
+    // values OUTSIDE the allocator pool so they can't collide with
+    // any colored VReg. X9 (arg-count) and D31 are both reserved/
+    // non-allocated.
+    let scratch = Scratch { gp: 9, fp: 31 };
+    lower_to_allocated(&mut cfg, &physical, scratch);
+
+    // After lower_to_allocated, each VReg.index is its physical
+    // register index. Translator's color_to_physical is identity.
+    let translated = match translate(&cfg, |v, _| v as usize) {
+        Ok(t) => t,
+        Err(e) => return Err((e, backend)),
+    };
+
+    // Install translated program in `ir` and drive the legacy
+    // compile_instructions loop. This is the bridge between the
+    // SSA pipeline and the backend's per-op lowering.
+    ir.install_translated_program(translated);
+
+    backend.set_max_locals(ir.num_locals);
+    if let Some(mark_idx) = ir.mark_local_index {
+        backend.set_mark_local_index(mark_idx);
+    }
+
+    // Mark callee-saved registers in use. After physical assignment,
+    // any VReg whose physical index is in the callee-saved set must
+    // be saved/restored by the prologue/epilogue per AAPCS / SysV.
+    backend.reset_callee_saved_tracking();
+    for &phys in physical.colors.values() {
+        backend.mark_callee_saved_register_used(phys as usize);
+    }
+
+    let before_prelude = backend.new_label("before_prelude");
+    backend.write_label(before_prelude);
+    backend.prelude();
+    let after_prelude = backend.new_label("after_prelude");
+    backend.write_label(after_prelude);
+    let exit = backend.new_label("exit");
+
+    ir.compile_via_legacy_emit(&mut backend, exit, before_prelude, after_prelude);
+
+    backend.write_label(exit);
+    backend.epilogue();
+    backend.ret();
+
+    Ok(backend)
 }
 
 fn op_tag(op: &Op) -> &'static str {
@@ -369,7 +751,7 @@ mod tests {
         f.block_mut(entry).body.push(Op::Move { dst: y, src: x });
         f.block_mut(entry).terminator = Terminator::Ret { value: y };
 
-        let t = translate(&f, identity_color);
+        let t = translate(&f, identity_color).expect("trivial CFG translates");
 
         // bb0 label + Assign(y, x) + Ret(y) = 3 instructions.
         assert_eq!(t.instructions.len(), 3);
@@ -415,7 +797,7 @@ mod tests {
         f.block_mut(tail).terminator = Terminator::Ret { value: sum };
         f.block_mut(tail).predecessors.push(entry);
 
-        let t = translate(&f, identity_color);
+        let t = translate(&f, identity_color).expect("trivial CFG translates");
 
         // bb0_label + AddInt + bb1_label + Ret  (no Jump because fall-through)
         assert_eq!(t.instructions.len(), 4, "got: {:?}", t.instructions);
@@ -449,7 +831,7 @@ mod tests {
         f.block_mut(t_block).predecessors.push(entry);
         f.block_mut(f_block).predecessors.push(entry);
 
-        let t = translate(&f, identity_color);
+        let t = translate(&f, identity_color).expect("trivial CFG translates");
 
         // RPO is entry, then one of {t_block, f_block} first based on DFS order;
         // successors are walked in source order so t_block comes first → that
