@@ -32,3 +32,4 @@
 pub mod color;
 pub mod interference;
 pub mod liveness;
+pub mod stats;

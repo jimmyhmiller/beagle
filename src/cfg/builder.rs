@@ -1745,24 +1745,37 @@ fn def_class_of(inst: &Instruction) -> Vec<(u32, RegClass)> {
 /// so callers can hand it to mem2reg / regalloc once those land. Never
 /// aborts compilation — diagnostics go to stderr.
 pub fn try_build_and_verify(ir: &Ir) -> Option<CfgFunction> {
-    let enabled = std::env::var("BEAGLE_SSA_VERIFY")
+    // Either verify mode OR regalloc-stats mode triggers building the
+    // CFG. They share the same build path; stats reads the verified
+    // CFG.
+    let verify_enabled = std::env::var("BEAGLE_SSA_VERIFY")
         .map(|v| !v.is_empty() && v != "0")
         .unwrap_or(false);
-    if !enabled {
+    let stats_enabled = std::env::var("BEAGLE_SSA_REGALLOC_STATS")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false);
+    if !verify_enabled && !stats_enabled {
         return None;
     }
     let name = ir.debug_name.as_deref().unwrap_or("<anonymous>");
     match build_cfg(ir) {
         Err(e) => {
-            eprintln!("[cfg-build] {name}: {:?}", e);
+            if verify_enabled {
+                eprintln!("[cfg-build] {name}: {:?}", e);
+            }
             None
         }
         Ok(cfg) => match crate::cfg::verify::verify(&cfg) {
             Err(e) => {
-                eprintln!("[cfg-verify] {name}: {:?}", e);
+                if verify_enabled {
+                    eprintln!("[cfg-verify] {name}: {:?}", e);
+                }
                 None
             }
-            Ok(()) => Some(cfg),
+            Ok(()) => {
+                crate::cfg::regalloc::stats::record(&cfg);
+                Some(cfg)
+            }
         },
     }
 }
