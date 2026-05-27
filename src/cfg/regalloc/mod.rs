@@ -30,6 +30,7 @@
 #![allow(dead_code)]
 
 pub mod color;
+pub mod edge;
 pub mod interference;
 pub mod liveness;
 pub mod spill;
