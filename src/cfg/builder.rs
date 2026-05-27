@@ -27,7 +27,9 @@
 
 use std::collections::HashMap;
 
-use crate::cfg::{BlockId, CfgFunction, Op, RegClass, SlotId, Terminator, VReg};
+use crate::cfg::{
+    BlockId, CfgFunction, ClobberSet, InlineBranchOp, Op, RegClass, SlotId, Terminator, VReg,
+};
 use crate::common::Label;
 use crate::ir::{Instruction, Ir, Value, VirtualRegister};
 
@@ -84,11 +86,18 @@ pub fn compute_leaders(instructions: &[Instruction]) -> Vec<usize> {
 
 /// True for instructions that end a basic block.
 ///
-/// True for: `Jump`, `JumpIf`, `Ret`, `Throw`, `TailRecurse`. False for
-/// everything else — including `Recurse` (which returns and continues),
-/// the math bail-out ops (which transfer to the slow path only on
-/// failure), and the exception-handler-push ops (which register a handler
-/// without transferring control).
+/// Includes:
+/// - True terminators: `Jump`, `JumpIf`, `Ret`, `Throw`, `TailRecurse`.
+/// - Bail-out arithmetic and guards (Sub, Mul, Div, Modulo, Shifts,
+///   GuardInt, GuardFloat) — these have two successors (fall-through
+///   and bail) and end a block in the CFG. The CFG layer models them
+///   as `Terminator::InlineBranch`. The legacy IR runs them straight
+///   line and lets the bail be a sibling block; we make the split
+///   explicit so I1 holds.
+/// - `InlineBumpAllocate` — same bail/fall-through structure.
+///
+/// False for: `Recurse` (returns and continues), exception-handler-push
+/// ops (register a handler without transferring control), etc.
 pub fn is_terminator(inst: &Instruction) -> bool {
     matches!(
         inst,
@@ -97,6 +106,17 @@ pub fn is_terminator(inst: &Instruction) -> bool {
             | Instruction::Ret(_)
             | Instruction::Throw(_, _, _, _)
             | Instruction::TailRecurse(_, _)
+            | Instruction::Sub(_, _, _, _)
+            | Instruction::Mul(_, _, _, _)
+            | Instruction::Div(_, _, _, _)
+            | Instruction::Modulo(_, _, _, _)
+            | Instruction::ShiftLeft(_, _, _, _)
+            | Instruction::ShiftRight(_, _, _, _)
+            | Instruction::ShiftRightZero(_, _, _, _)
+            | Instruction::ShiftRightImm(_, _, _, _)
+            | Instruction::GuardInt(_, _, _)
+            | Instruction::GuardFloat(_, _, _)
+            | Instruction::InlineBumpAllocate(_, _, _, _)
     )
 }
 
@@ -289,7 +309,8 @@ fn fill_block(
         }
 
         if is_terminator(inst) {
-            let term = translate_terminator(inst, idx, leader_to_block, label_pos, classes)?;
+            let term =
+                translate_terminator(inst, idx, leader_to_block, label_pos, classes, f.entry)?;
             f.block_mut(block_id).terminator = term;
             idx += 1;
             continue;
@@ -597,6 +618,117 @@ fn translate_op(
             target: resolve_label(l)?,
         }),
 
+        // ---- Calls (I7: per-call clobber set) --------------------------
+        I::Call(Value::Register(dst), Value::Register(fn_ptr), args, is_builtin) => Ok(Op::Call {
+            dst: v(dst),
+            fn_ptr: v(fn_ptr),
+            args: translate_value_args(args, position, classes)?,
+            is_builtin: *is_builtin,
+            clobbers: ClobberSet::AllCallerSaved,
+        }),
+        I::Recurse(Value::Register(dst), args) => Ok(Op::Recurse {
+            dst: v(dst),
+            args: translate_value_args(args, position, classes)?,
+            clobbers: ClobberSet::AllCallerSaved,
+        }),
+
+        // ---- Exception handling ----------------------------------------
+        I::PushExceptionHandler(handler_label, Value::Local(slot), builtin_fn_ptr) => {
+            Ok(Op::PushExceptionHandler {
+                handler: resolve_label(handler_label)?,
+                result_slot: SlotId(*slot as u32),
+                builtin_fn_ptr: *builtin_fn_ptr,
+            })
+        }
+        I::PushResumableExceptionHandler(
+            Value::Register(dst),
+            catch_label,
+            Value::Local(exc_slot),
+            Value::Local(res_slot),
+            builtin_fn_ptr,
+        ) => Ok(Op::PushResumableExceptionHandler {
+            dst: v(dst),
+            catch_block: resolve_label(catch_label)?,
+            exception_slot: SlotId(*exc_slot as u32),
+            resume_slot: SlotId(*res_slot as u32),
+            builtin_fn_ptr: *builtin_fn_ptr,
+        }),
+        I::PopExceptionHandler(builtin_fn_ptr) => Ok(Op::PopExceptionHandler {
+            builtin_fn_ptr: *builtin_fn_ptr,
+        }),
+        I::PopExceptionHandlerById(Value::Register(id), builtin_fn_ptr) => {
+            Ok(Op::PopExceptionHandlerById {
+                handler_id: v(id),
+                builtin_fn_ptr: *builtin_fn_ptr,
+            })
+        }
+
+        // ---- Delimited continuations & prompts -------------------------
+        I::PushPromptHandler(handler_label, Value::Local(slot), builtin_fn_ptr) => {
+            Ok(Op::PushPromptHandler {
+                handler: resolve_label(handler_label)?,
+                result_slot: SlotId(*slot as u32),
+                builtin_fn_ptr: *builtin_fn_ptr,
+            })
+        }
+        I::PopPromptHandler(Value::Register(result), builtin_fn_ptr) => Ok(Op::PopPromptHandler {
+            result: v(result),
+            builtin_fn_ptr: *builtin_fn_ptr,
+        }),
+        I::PushPromptTag(Value::Register(tag), abort_label, Value::Local(slot), builtin_fn_ptr) => {
+            Ok(Op::PushPromptTag {
+                tag: v(tag),
+                abort_block: resolve_label(abort_label)?,
+                result_slot: SlotId(*slot as u32),
+                builtin_fn_ptr: *builtin_fn_ptr,
+            })
+        }
+        I::CaptureContinuation(Value::Register(dst), resume_label, res_slot, builtin_fn_ptr) => {
+            Ok(Op::CaptureContinuation {
+                dst: v(dst),
+                resume_block: resolve_label(resume_label)?,
+                result_slot: SlotId(*res_slot as u32),
+                builtin_fn_ptr: *builtin_fn_ptr,
+            })
+        }
+        I::CaptureContinuationTagged(
+            Value::Register(dst),
+            resume_label,
+            res_slot,
+            builtin_fn_ptr,
+            Value::Register(tag),
+        ) => Ok(Op::CaptureContinuationTagged {
+            dst: v(dst),
+            resume_block: resolve_label(resume_label)?,
+            result_slot: SlotId(*res_slot as u32),
+            builtin_fn_ptr: *builtin_fn_ptr,
+            tag: v(tag),
+        }),
+
+        // ---- Algebraic effects -----------------------------------------
+        I::PerformEffect(
+            Value::Register(handler),
+            Value::Register(enum_type),
+            Value::Register(op_value),
+            resume_label,
+            res_slot,
+            builtin_fn_ptr,
+        ) => Ok(Op::PerformEffect {
+            handler: v(handler),
+            enum_type: v(enum_type),
+            op_value: v(op_value),
+            resume_block: resolve_label(resume_label)?,
+            result_slot: SlotId(*res_slot as u32),
+            builtin_fn_ptr: *builtin_fn_ptr,
+        }),
+        I::ReturnFromShift(Value::Register(value), Value::Register(cont_ptr), builtin_fn_ptr) => {
+            Ok(Op::ReturnFromShift {
+                value: v(value),
+                cont_ptr: v(cont_ptr),
+                builtin_fn_ptr: *builtin_fn_ptr,
+            })
+        }
+
         // ---- Mis-shaped operands on otherwise supported ops ------------
         I::LoadLocal(..)
         | I::StoreLocal(..)
@@ -643,7 +775,19 @@ fn translate_op(
         | I::CurrentStackPosition(..)
         | I::ReadArgCount(..)
         | I::ExtendLifeTime(..)
-        | I::LoadLabelAddress(..) => Err(BuildError::UnsupportedValueKind {
+        | I::LoadLabelAddress(..)
+        | I::Call(..)
+        | I::Recurse(..)
+        | I::PushExceptionHandler(..)
+        | I::PushResumableExceptionHandler(..)
+        | I::PopExceptionHandlerById(..)
+        | I::PushPromptHandler(..)
+        | I::PopPromptHandler(..)
+        | I::PushPromptTag(..)
+        | I::CaptureContinuation(..)
+        | I::CaptureContinuationTagged(..)
+        | I::PerformEffect(..)
+        | I::ReturnFromShift(..) => Err(BuildError::UnsupportedValueKind {
             position,
             msg: format!("operand shape not handled for {}", instruction_name(inst)),
         }),
@@ -713,6 +857,7 @@ fn translate_terminator(
     leader_to_block: &HashMap<usize, BlockId>,
     label_pos: &HashMap<usize, usize>,
     classes: &HashMap<u32, RegClass>,
+    entry: BlockId,
 ) -> Result<Terminator, BuildError> {
     let v = |vr: &VirtualRegister| -> VReg { to_cfg_vreg(vr, classes) };
     let resolve_label = |label: &Label| -> Result<BlockId, BuildError> {
@@ -730,40 +875,241 @@ fn translate_terminator(
                 label: label.index,
             })
     };
+    // For InlineBranch ops, the fall-through is the position right after
+    // this op. We require it to be a leader (it always is — see Phase 1a
+    // rule 3).
+    let fall_through = || -> Result<BlockId, BuildError> {
+        leader_to_block
+            .get(&(position + 1))
+            .copied()
+            .ok_or(BuildError::FallThroughNotLeader { position })
+    };
+    use Instruction as I;
     match inst {
-        Instruction::Ret(Value::Register(vr)) => Ok(Terminator::Ret { value: v(vr) }),
-        Instruction::Jump(l) => Ok(Terminator::Jump {
+        // ---- True terminators -----------------------------------------
+        I::Ret(Value::Register(vr)) => Ok(Terminator::Ret { value: v(vr) }),
+        I::Jump(l) => Ok(Terminator::Jump {
             target: resolve_label(l)?,
             args: vec![],
         }),
-        Instruction::JumpIf(l, cond, lhs, rhs) => {
+        I::JumpIf(l, cond, lhs, rhs) => {
             let lhs_vr = require_register(lhs, position)?;
             let rhs_vr = require_register(rhs, position)?;
-            let t_target = resolve_label(l)?;
-            let f_target = leader_to_block
-                .get(&(position + 1))
-                .copied()
-                .ok_or(BuildError::FallThroughNotLeader { position })?;
             Ok(Terminator::Branch {
                 cond: *cond,
                 lhs: v(lhs_vr),
                 rhs: v(rhs_vr),
-                t_target,
+                t_target: resolve_label(l)?,
                 t_args: vec![],
-                f_target,
+                f_target: fall_through()?,
                 f_args: vec![],
             })
         }
-        Instruction::Ret(..) => Err(BuildError::UnsupportedValueKind {
-            position,
-            msg: "Ret operand was not a Value::Register".to_string(),
+        // I8: tail self-call rewrites directly to a jump-to-entry. The
+        // dst register is discarded (no return on a tail call).
+        I::TailRecurse(_dst, args) => {
+            let arg_vregs = translate_value_args(args, position, classes)?;
+            Ok(Terminator::Jump {
+                target: entry,
+                args: arg_vregs,
+            })
+        }
+        I::Throw(Value::Register(value), resume_label, resume_local_idx, builtin_fn_ptr) => {
+            Ok(Terminator::Throw {
+                value: v(value),
+                resume: resolve_label(resume_label)?,
+                resume_args: vec![],
+                resume_local: SlotId(*resume_local_idx as u32),
+                builtin_fn_ptr: *builtin_fn_ptr,
+            })
+        }
+
+        // ---- InlineBranch family: bail-out arithmetic + guards + bump-
+        //      allocate. fall_through is position+1; bail is the named
+        //      label.
+        I::Sub(Value::Register(d), Value::Register(l), Value::Register(r), bail) => {
+            Ok(Terminator::InlineBranch {
+                op: InlineBranchOp::SubChecked {
+                    dst: v(d),
+                    lhs: v(l),
+                    rhs: v(r),
+                },
+                fall_through: fall_through()?,
+                fall_args: vec![],
+                bail: resolve_label(bail)?,
+                bail_args: vec![],
+            })
+        }
+        I::Mul(Value::Register(d), Value::Register(l), Value::Register(r), bail) => {
+            Ok(Terminator::InlineBranch {
+                op: InlineBranchOp::MulChecked {
+                    dst: v(d),
+                    lhs: v(l),
+                    rhs: v(r),
+                },
+                fall_through: fall_through()?,
+                fall_args: vec![],
+                bail: resolve_label(bail)?,
+                bail_args: vec![],
+            })
+        }
+        I::Div(Value::Register(d), Value::Register(l), Value::Register(r), bail) => {
+            Ok(Terminator::InlineBranch {
+                op: InlineBranchOp::DivChecked {
+                    dst: v(d),
+                    lhs: v(l),
+                    rhs: v(r),
+                },
+                fall_through: fall_through()?,
+                fall_args: vec![],
+                bail: resolve_label(bail)?,
+                bail_args: vec![],
+            })
+        }
+        I::Modulo(Value::Register(d), Value::Register(l), Value::Register(r), bail) => {
+            Ok(Terminator::InlineBranch {
+                op: InlineBranchOp::ModuloChecked {
+                    dst: v(d),
+                    lhs: v(l),
+                    rhs: v(r),
+                },
+                fall_through: fall_through()?,
+                fall_args: vec![],
+                bail: resolve_label(bail)?,
+                bail_args: vec![],
+            })
+        }
+        I::ShiftLeft(Value::Register(d), Value::Register(l), Value::Register(r), bail) => {
+            Ok(Terminator::InlineBranch {
+                op: InlineBranchOp::ShiftLeftChecked {
+                    dst: v(d),
+                    lhs: v(l),
+                    rhs: v(r),
+                },
+                fall_through: fall_through()?,
+                fall_args: vec![],
+                bail: resolve_label(bail)?,
+                bail_args: vec![],
+            })
+        }
+        I::ShiftRight(Value::Register(d), Value::Register(l), Value::Register(r), bail) => {
+            Ok(Terminator::InlineBranch {
+                op: InlineBranchOp::ShiftRightChecked {
+                    dst: v(d),
+                    lhs: v(l),
+                    rhs: v(r),
+                },
+                fall_through: fall_through()?,
+                fall_args: vec![],
+                bail: resolve_label(bail)?,
+                bail_args: vec![],
+            })
+        }
+        I::ShiftRightZero(Value::Register(d), Value::Register(l), Value::Register(r), bail) => {
+            Ok(Terminator::InlineBranch {
+                op: InlineBranchOp::ShiftRightZeroChecked {
+                    dst: v(d),
+                    lhs: v(l),
+                    rhs: v(r),
+                },
+                fall_through: fall_through()?,
+                fall_args: vec![],
+                bail: resolve_label(bail)?,
+                bail_args: vec![],
+            })
+        }
+        I::ShiftRightImm(Value::Register(d), Value::Register(s), imm, bail) => {
+            Ok(Terminator::InlineBranch {
+                op: InlineBranchOp::ShiftRightImmChecked {
+                    dst: v(d),
+                    src: v(s),
+                    imm: *imm,
+                },
+                fall_through: fall_through()?,
+                fall_args: vec![],
+                bail: resolve_label(bail)?,
+                bail_args: vec![],
+            })
+        }
+        I::GuardInt(Value::Register(d), Value::Register(s), bail) => Ok(Terminator::InlineBranch {
+            op: InlineBranchOp::GuardInt {
+                dst: v(d),
+                src: v(s),
+            },
+            fall_through: fall_through()?,
+            fall_args: vec![],
+            bail: resolve_label(bail)?,
+            bail_args: vec![],
         }),
-        // Throw, TailRecurse land in later sub-phases.
+        I::GuardFloat(Value::Register(d), Value::Register(s), bail) => {
+            Ok(Terminator::InlineBranch {
+                op: InlineBranchOp::GuardFloat {
+                    dst: v(d),
+                    src: v(s),
+                },
+                fall_through: fall_through()?,
+                fall_args: vec![],
+                bail: resolve_label(bail)?,
+                bail_args: vec![],
+            })
+        }
+        I::InlineBumpAllocate(Value::Register(d), size_bytes, header, bail) => {
+            Ok(Terminator::InlineBranch {
+                op: InlineBranchOp::InlineBumpAllocate {
+                    dst: v(d),
+                    size_bytes: *size_bytes,
+                    header: *header,
+                },
+                fall_through: fall_through()?,
+                fall_args: vec![],
+                bail: resolve_label(bail)?,
+                bail_args: vec![],
+            })
+        }
+
+        // ---- Mis-shaped operands on supported terminators ------------
+        I::Ret(..)
+        | I::Throw(..)
+        | I::Sub(..)
+        | I::Mul(..)
+        | I::Div(..)
+        | I::Modulo(..)
+        | I::ShiftLeft(..)
+        | I::ShiftRight(..)
+        | I::ShiftRightZero(..)
+        | I::ShiftRightImm(..)
+        | I::GuardInt(..)
+        | I::GuardFloat(..)
+        | I::InlineBumpAllocate(..) => Err(BuildError::UnsupportedValueKind {
+            position,
+            msg: format!("operand shape not handled for {}", instruction_name(inst)),
+        }),
+
         _ => Err(BuildError::UnsupportedInstruction {
             position,
             variant: instruction_name(inst),
         }),
     }
+}
+
+/// Translate a `Vec<Value>` of args into a `Vec<VReg>`. Every Value must
+/// be a `Value::Register` — non-register args (literals, locals, etc.)
+/// are not supported in this position and surface as
+/// `UnsupportedValueKind`. Used by TailRecurse and the call ops.
+fn translate_value_args(
+    args: &[Value],
+    position: usize,
+    classes: &HashMap<u32, RegClass>,
+) -> Result<Vec<VReg>, BuildError> {
+    args.iter()
+        .map(|a| match a {
+            Value::Register(vr) => Ok(to_cfg_vreg(vr, classes)),
+            other => Err(BuildError::UnsupportedValueKind {
+                position,
+                msg: format!("call/recurse arg expected Register, got {:?}", other),
+            }),
+        })
+        .collect()
 }
 
 fn require_register<'a>(
@@ -914,7 +1260,31 @@ fn def_class_of(inst: &Instruction) -> Vec<(u32, RegClass)> {
         | I::GetStackPointerImm(dst, _)
         | I::ReadArgCount(dst)
         | I::LoadLabelAddress(dst, _)
-        | I::FmovFloatToGeneral(dst, _) => out.extend(as_class(dst, Gp)),
+        | I::FmovFloatToGeneral(dst, _)
+        // Bail-out arithmetic terminators (Phase 1b-3 InlineBranch ops):
+        | I::Sub(dst, _, _, _)
+        | I::Mul(dst, _, _, _)
+        | I::Div(dst, _, _, _)
+        | I::Modulo(dst, _, _, _)
+        | I::ShiftLeft(dst, _, _, _)
+        | I::ShiftRight(dst, _, _, _)
+        | I::ShiftRightZero(dst, _, _, _)
+        | I::ShiftRightImm(dst, _, _, _)
+        // GuardInt / GuardFloat: dst is a GP scratch used for the tag-bit
+        // compare. Its value after the guard is junk, not the untagged
+        // result — callers rely on the original src register going forward.
+        | I::GuardInt(dst, _, _)
+        | I::GuardFloat(dst, _, _)
+        // InlineBumpAllocate: dst is a tagged HeapObject pointer (GP).
+        | I::InlineBumpAllocate(dst, _, _, _)
+        // Calls and recursion: dst holds the return value (tagged, GP).
+        | I::Call(dst, _, _, _)
+        | I::Recurse(dst, _)
+        | I::TailRecurse(dst, _)
+        // Exception / continuation handle defs (all tagged GP values).
+        | I::PushResumableExceptionHandler(dst, _, _, _, _)
+        | I::CaptureContinuation(dst, _, _, _)
+        | I::CaptureContinuationTagged(dst, _, _, _, _) => out.extend(as_class(dst, Gp)),
 
         // FP defs ----------------------------------------------------
         I::AddFloat(dst, _, _)
@@ -1137,15 +1507,16 @@ mod tests {
     }
 
     /// The real-world orphan pattern from the prior `ssa` branch's
-    /// orphan-blocks memo: a macro emits `Jump done; Label slow_path; ...`
-    /// where Label slow_path is a *different* label from Jump's target.
-    /// Without rule 4, post-Jump would be a leader at the Label position,
-    /// producing a 1-instruction orphan wrapper before the slow body.
+    /// orphan-blocks memo: a macro emits `Jump done; Label slow_path; ...`.
+    /// With Sub now modeled as an InlineBranch terminator (Phase 1b-3),
+    /// the post-Sub position is also a leader (the fast-path continuation
+    /// is its own block). Rule 4 still prevents the post-Jump position
+    /// from doubling up the L_slow leader.
     #[test]
     fn jump_done_then_label_slowpath_produces_no_orphan() {
-        // 0: <fast op with bail label L_slow>
-        // 1: Jump L_done            (terminator)
-        // 2: Label L_slow           (start of slow path — also a label target)
+        // 0: Sub vr0 vr1 vr2 L_slow   (InlineBranch terminator)
+        // 1: Jump L_done              (terminator)
+        // 2: Label L_slow             (slow path)
         // 3: <slow body>
         // 4: Label L_done
         // 5: Ret
@@ -1158,14 +1529,12 @@ mod tests {
             Instruction::Ret(vr(3)),
         ];
         // Expected leaders:
-        //  0 (start; Sub at pos 0 is straight-line, not a terminator)
-        //  2 (L_slow target; post-Jump-at-1 would otherwise also point here,
-        //     but rule 4 suppresses that because pos 2 is a Label)
-        //  4 (L_done target; post-AddInt-at-3 is pos 4 which is a Label —
-        //     AddInt isn't a terminator anyway so rule 3 doesn't trigger)
-        // Position 1 is NOT a leader (Sub didn't add it; rule 3 doesn't fire
-        // on Sub because Sub isn't a terminator).
-        assert_eq!(compute_leaders(&insts), vec![0, 2, 4]);
+        //  0 (start)
+        //  1 (post-Sub terminator; pos 1 = Jump, not a Label)
+        //  2 (L_slow target; post-Jump-at-1 would also point here but
+        //     rule 4 suppresses it because pos 2 is a Label)
+        //  4 (L_done target; pos 4 is Label)
+        assert_eq!(compute_leaders(&insts), vec![0, 1, 2, 4]);
     }
 
     #[test]
@@ -1251,12 +1620,14 @@ mod tests {
     }
 
     /// Bail-out ops (Sub with overflow label, GuardInt with type-mismatch
-    /// label, etc.) are NOT terminators — they continue on success. But
-    /// their bail-out label IS a leader (the slow path is its own block).
+    /// label, etc.) are modeled as `Terminator::InlineBranch` in Phase
+    /// 1b-3, so post-bail positions are leaders (rule 3) AND the bail
+    /// label is a leader (rule 2). The split makes the fast-path
+    /// continuation its own block, preserving I1.
     #[test]
-    fn guardint_bail_label_is_leader_but_guard_is_not_terminator() {
-        // 0: GuardInt vr0 vr1 L_bail
-        // 1: AddInt (continuation of fast path)
+    fn guardint_is_terminator_with_bail_and_fallthrough_leaders() {
+        // 0: GuardInt vr0 vr1 L_bail   (InlineBranch terminator)
+        // 1: AddInt                    (fast-path continuation block)
         // 2: Jump L_done
         // 3: Label L_bail
         // 4: AddInt (slow path body)
@@ -1272,10 +1643,12 @@ mod tests {
             Instruction::Ret(vr(2)),
         ];
         // Leaders:
-        //   0 (start; GuardInt is not a terminator so it doesn't fire rule 3)
-        //   3 (L_bail target; post-Jump-at-2 is pos 3 = Label, suppressed)
+        //   0 (start)
+        //   1 (post-GuardInt terminator; pos 1 = AddInt, not a Label)
+        //   3 (L_bail target; post-Jump-at-2 lands on pos 3 = Label,
+        //      suppressed by rule 4)
         //   5 (L_done target; pos 5 = Label)
-        assert_eq!(compute_leaders(&insts), vec![0, 3, 5]);
+        assert_eq!(compute_leaders(&insts), vec![0, 1, 3, 5]);
     }
 
     /// PushExceptionHandler doesn't transfer control, but its handler
@@ -1432,25 +1805,21 @@ mod tests {
         );
     }
 
-    /// Unsupported instruction → clear Err with the variant name.
-    /// Recurse is deferred to 1b-4 (calls) per the no-stubs rule.
+    /// Mis-shaped operand on a supported op → clear UnsupportedValueKind
+    /// with a description. Phase 1b-3 has translator arms for every legacy
+    /// Instruction variant, so UnsupportedInstruction is unreachable on
+    /// well-formed IR; UnsupportedValueKind is the remaining error path
+    /// (e.g. for Spill / Stack values that Phase 1 doesn't model).
     #[test]
-    fn unsupported_instruction_returns_error() {
-        let ir = ir_with(
-            vec![
-                Instruction::Recurse(vr(0), vec![vr(1)]),
-                Instruction::Ret(vr(0)),
-            ],
-            0,
-            "with_recurse",
+    fn mis_shaped_operand_returns_error() {
+        // Ret expects Value::Register; pass Value::Null instead.
+        let ir = ir_with(vec![Instruction::Ret(Value::Null)], 0, "ret_with_null");
+        let err = build_cfg(&ir).expect_err("Ret(Null) is malformed");
+        assert!(
+            matches!(err, BuildError::UnsupportedValueKind { .. }),
+            "expected UnsupportedValueKind, got {:?}",
+            err
         );
-        let err = build_cfg(&ir).expect_err("Recurse not yet supported");
-        match err {
-            BuildError::UnsupportedInstruction { variant, .. } => {
-                assert_eq!(variant, "Recurse");
-            }
-            other => panic!("expected UnsupportedInstruction, got {:?}", other),
-        }
     }
 
     /// Empty IR produces an empty CfgFunction (no blocks).

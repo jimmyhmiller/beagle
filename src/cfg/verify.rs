@@ -155,16 +155,31 @@ fn check_arg_arity(f: &CfgFunction) -> Result<(), VerifyError> {
                 )?;
             }
             Terminator::Throw {
-                handler,
-                handler_args,
+                resume,
+                resume_args,
                 ..
             } => {
                 expect_arity(
                     from,
-                    *handler,
-                    handler_args.len(),
-                    f.block(*handler).params.len(),
+                    *resume,
+                    resume_args.len(),
+                    f.block(*resume).params.len(),
                 )?;
+            }
+            Terminator::InlineBranch {
+                fall_through,
+                fall_args,
+                bail,
+                bail_args,
+                ..
+            } => {
+                expect_arity(
+                    from,
+                    *fall_through,
+                    fall_args.len(),
+                    f.block(*fall_through).params.len(),
+                )?;
+                expect_arity(from, *bail, bail_args.len(), f.block(*bail).params.len())?;
             }
             Terminator::Ret { .. } | Terminator::Unreachable => {}
         }
@@ -281,6 +296,14 @@ fn check_dominance(f: &CfgFunction) -> Result<(), VerifyError> {
             for d in op.defs() {
                 def_site.insert(d, (bid, i + 1));
             }
+        }
+        // Terminator-defined VRegs (e.g. InlineBranch's dst) are defined
+        // at the end of the source block (`body.len() + 1`). They are
+        // live only on the fall-through path; the bail path is responsible
+        // for not reading them. The verifier flags any use that isn't
+        // dominated by this block.
+        for d in block.terminator.defs() {
+            def_site.insert(d, (bid, block.body.len() + 1));
         }
     }
 

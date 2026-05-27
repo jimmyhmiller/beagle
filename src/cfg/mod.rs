@@ -368,6 +368,105 @@ pub enum Op {
         name_c_str_ptr: usize,
         trampoline_fn_ptr: usize,
     },
+
+    // ---- Calls (I7 — carry an explicit clobber set) ----
+    /// General function call (direct or builtin).
+    Call {
+        dst: VReg,
+        fn_ptr: VReg,
+        args: Vec<VReg>,
+        is_builtin: bool,
+        clobbers: ClobberSet,
+    },
+    /// Self-recursive call that returns (NOT tail). Tail self-calls are
+    /// rewritten to `Terminator::Jump(entry, args)` per **I8** during
+    /// construction.
+    Recurse {
+        dst: VReg,
+        args: Vec<VReg>,
+        clobbers: ClobberSet,
+    },
+
+    // ---- Exception handling ----
+    PushExceptionHandler {
+        handler: BlockId,
+        result_slot: SlotId,
+        builtin_fn_ptr: usize,
+    },
+    PushResumableExceptionHandler {
+        dst: VReg,
+        catch_block: BlockId,
+        exception_slot: SlotId,
+        resume_slot: SlotId,
+        builtin_fn_ptr: usize,
+    },
+    PopExceptionHandler {
+        builtin_fn_ptr: usize,
+    },
+    PopExceptionHandlerById {
+        handler_id: VReg,
+        builtin_fn_ptr: usize,
+    },
+
+    // ---- Delimited continuations & prompts ----
+    PushPromptHandler {
+        handler: BlockId,
+        result_slot: SlotId,
+        builtin_fn_ptr: usize,
+    },
+    PopPromptHandler {
+        result: VReg,
+        builtin_fn_ptr: usize,
+    },
+    PushPromptTag {
+        tag: VReg,
+        abort_block: BlockId,
+        result_slot: SlotId,
+        builtin_fn_ptr: usize,
+    },
+    CaptureContinuation {
+        dst: VReg,
+        resume_block: BlockId,
+        result_slot: SlotId,
+        builtin_fn_ptr: usize,
+    },
+    CaptureContinuationTagged {
+        dst: VReg,
+        resume_block: BlockId,
+        result_slot: SlotId,
+        builtin_fn_ptr: usize,
+        tag: VReg,
+    },
+
+    // ---- Algebraic effects ----
+    PerformEffect {
+        handler: VReg,
+        enum_type: VReg,
+        op_value: VReg,
+        resume_block: BlockId,
+        result_slot: SlotId,
+        builtin_fn_ptr: usize,
+    },
+    /// Return from a `shift` — calls return_from_shift with current SP/FP.
+    /// No def — execution does not continue normally.
+    ReturnFromShift {
+        value: VReg,
+        cont_ptr: VReg,
+        builtin_fn_ptr: usize,
+    },
+}
+
+/// Set of physical registers that a Call op may clobber, used by the
+/// Phase 4 regalloc to decide per live-value how to survive the call
+/// (callee-saved placement, spill to a root slot, or rematerialize) per
+/// **I7**. Phase 1b uses the conservative default for every call;
+/// specific clobber sets are added later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClobberSet {
+    /// All caller-saved registers in both pools may be clobbered. This is
+    /// Beagle's default ABI assumption for any call across the Rust/JIT
+    /// boundary or to another Beagle function.
+    AllCallerSaved,
 }
 
 /// Block terminator. Exactly one per block (**I1**). All control transfer
@@ -387,20 +486,129 @@ pub enum Terminator {
         f_target: BlockId,
         f_args: Vec<VReg>,
     },
+    /// Two-successor terminator for ops that may bail to a slow path.
+    /// On success the op writes `op`'s `dst` and execution flows to
+    /// `fall_through`. On failure (overflow, type mismatch, bump
+    /// overflow) execution jumps to `bail` without writing `dst`. Covers
+    /// the bail-out arithmetic family (Sub/Mul/Div/Modulo/Shifts), the
+    /// type guards (GuardInt, GuardFloat), and InlineBumpAllocate.
+    InlineBranch {
+        op: InlineBranchOp,
+        fall_through: BlockId,
+        fall_args: Vec<VReg>,
+        bail: BlockId,
+        bail_args: Vec<VReg>,
+    },
     Ret {
         value: VReg,
     },
-    /// Exception path. The handler edge is explicit so the verifier can
-    /// dominance-check both the normal and the exception path (**I5**).
+    /// Exception throw. `resume` is the resume label that the runtime
+    /// returns control to after a handler catches and resumes; if no
+    /// handler catches, control never returns there.
     Throw {
         value: VReg,
-        handler: BlockId,
-        handler_args: Vec<VReg>,
+        resume: BlockId,
+        resume_args: Vec<VReg>,
+        resume_local: SlotId,
+        builtin_fn_ptr: usize,
     },
     /// Block must not execute. Used for newly created empty blocks before
     /// their terminator is filled in, and as a poison value the verifier
     /// reports rather than silently passing.
     Unreachable,
+}
+
+/// Inner op-data for `Terminator::InlineBranch`. Each variant has its
+/// own def (`dst`) which is written only on the fall-through path.
+#[derive(Debug, Clone)]
+pub enum InlineBranchOp {
+    SubChecked {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+    MulChecked {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+    DivChecked {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+    ModuloChecked {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+    ShiftLeftChecked {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+    ShiftRightChecked {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+    ShiftRightZeroChecked {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+    ShiftRightImmChecked {
+        dst: VReg,
+        src: VReg,
+        imm: i32,
+    },
+    GuardInt {
+        dst: VReg,
+        src: VReg,
+    },
+    GuardFloat {
+        dst: VReg,
+        src: VReg,
+    },
+    InlineBumpAllocate {
+        dst: VReg,
+        size_bytes: u32,
+        header: u64,
+    },
+}
+
+impl InlineBranchOp {
+    pub fn dst(&self) -> VReg {
+        match self {
+            InlineBranchOp::SubChecked { dst, .. }
+            | InlineBranchOp::MulChecked { dst, .. }
+            | InlineBranchOp::DivChecked { dst, .. }
+            | InlineBranchOp::ModuloChecked { dst, .. }
+            | InlineBranchOp::ShiftLeftChecked { dst, .. }
+            | InlineBranchOp::ShiftRightChecked { dst, .. }
+            | InlineBranchOp::ShiftRightZeroChecked { dst, .. }
+            | InlineBranchOp::ShiftRightImmChecked { dst, .. }
+            | InlineBranchOp::GuardInt { dst, .. }
+            | InlineBranchOp::GuardFloat { dst, .. }
+            | InlineBranchOp::InlineBumpAllocate { dst, .. } => *dst,
+        }
+    }
+
+    pub fn uses(&self) -> Vec<VReg> {
+        match self {
+            InlineBranchOp::SubChecked { lhs, rhs, .. }
+            | InlineBranchOp::MulChecked { lhs, rhs, .. }
+            | InlineBranchOp::DivChecked { lhs, rhs, .. }
+            | InlineBranchOp::ModuloChecked { lhs, rhs, .. }
+            | InlineBranchOp::ShiftLeftChecked { lhs, rhs, .. }
+            | InlineBranchOp::ShiftRightChecked { lhs, rhs, .. }
+            | InlineBranchOp::ShiftRightZeroChecked { lhs, rhs, .. } => vec![*lhs, *rhs],
+            InlineBranchOp::ShiftRightImmChecked { src, .. }
+            | InlineBranchOp::GuardInt { src, .. }
+            | InlineBranchOp::GuardFloat { src, .. } => vec![*src],
+            InlineBranchOp::InlineBumpAllocate { .. } => vec![],
+        }
+    }
 }
 
 /// A function in the SSA pipeline. Built from a legacy `Ir` in Phase 1.
@@ -481,7 +689,10 @@ impl Terminator {
             Terminator::Branch {
                 t_target, f_target, ..
             } => vec![*t_target, *f_target],
-            Terminator::Throw { handler, .. } => vec![*handler],
+            Terminator::InlineBranch {
+                fall_through, bail, ..
+            } => vec![*fall_through, *bail],
+            Terminator::Throw { resume, .. } => vec![*resume],
             Terminator::Ret { .. } | Terminator::Unreachable => vec![],
         }
     }
@@ -504,18 +715,40 @@ impl Terminator {
                 v.extend_from_slice(f_args);
                 v
             }
-            Terminator::Ret { value } => vec![*value],
-            Terminator::Throw {
-                value,
-                handler_args,
+            Terminator::InlineBranch {
+                op,
+                fall_args,
+                bail_args,
                 ..
             } => {
-                let mut v = Vec::with_capacity(1 + handler_args.len());
+                let inner = op.uses();
+                let mut v = Vec::with_capacity(inner.len() + fall_args.len() + bail_args.len());
+                v.extend(inner);
+                v.extend_from_slice(fall_args);
+                v.extend_from_slice(bail_args);
+                v
+            }
+            Terminator::Ret { value } => vec![*value],
+            Terminator::Throw {
+                value, resume_args, ..
+            } => {
+                let mut v = Vec::with_capacity(1 + resume_args.len());
                 v.push(*value);
-                v.extend_from_slice(handler_args);
+                v.extend_from_slice(resume_args);
                 v
             }
             Terminator::Unreachable => vec![],
+        }
+    }
+
+    /// VRegs DEFINED by this terminator. Only `InlineBranch` defines a
+    /// VReg from a terminator position; the result is live on the
+    /// `fall_through` path only. The verifier treats this def as
+    /// happening at `body.len() + 1` of the source block.
+    pub fn defs(&self) -> Vec<VReg> {
+        match self {
+            Terminator::InlineBranch { op, .. } => vec![op.dst()],
+            _ => vec![],
         }
     }
 }
@@ -591,6 +824,23 @@ impl Op {
             Op::RecordGcSafepoint => vec![],
             Op::FeedbackOr { .. } => vec![],
             Op::TierUpCheck { .. } => vec![],
+
+            Op::Call { dst, .. } => vec![*dst],
+            Op::Recurse { dst, .. } => vec![*dst],
+
+            Op::PushExceptionHandler { .. } => vec![],
+            Op::PushResumableExceptionHandler { dst, .. } => vec![*dst],
+            Op::PopExceptionHandler { .. } => vec![],
+            Op::PopExceptionHandlerById { .. } => vec![],
+
+            Op::PushPromptHandler { .. } => vec![],
+            Op::PopPromptHandler { .. } => vec![],
+            Op::PushPromptTag { .. } => vec![],
+            Op::CaptureContinuation { dst, .. } => vec![*dst],
+            Op::CaptureContinuationTagged { dst, .. } => vec![*dst],
+
+            Op::PerformEffect { .. } => vec![],
+            Op::ReturnFromShift { .. } => vec![],
         }
     }
 
@@ -668,6 +918,35 @@ impl Op {
             Op::RecordGcSafepoint => vec![],
             Op::FeedbackOr { .. } => vec![],
             Op::TierUpCheck { .. } => vec![],
+
+            Op::Call { fn_ptr, args, .. } => {
+                let mut v = Vec::with_capacity(1 + args.len());
+                v.push(*fn_ptr);
+                v.extend_from_slice(args);
+                v
+            }
+            Op::Recurse { args, .. } => args.clone(),
+
+            Op::PushExceptionHandler { .. } => vec![],
+            Op::PushResumableExceptionHandler { .. } => vec![],
+            Op::PopExceptionHandler { .. } => vec![],
+            Op::PopExceptionHandlerById { handler_id, .. } => vec![*handler_id],
+
+            Op::PushPromptHandler { .. } => vec![],
+            Op::PopPromptHandler { result, .. } => vec![*result],
+            Op::PushPromptTag { tag, .. } => vec![*tag],
+            Op::CaptureContinuation { .. } => vec![],
+            Op::CaptureContinuationTagged { tag, .. } => vec![*tag],
+
+            Op::PerformEffect {
+                handler,
+                enum_type,
+                op_value,
+                ..
+            } => vec![*handler, *enum_type, *op_value],
+            Op::ReturnFromShift {
+                value, cont_ptr, ..
+            } => vec![*value, *cont_ptr],
         }
     }
 }
