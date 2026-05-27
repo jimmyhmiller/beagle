@@ -20,6 +20,7 @@
 
 pub mod builder;
 pub mod dom;
+pub mod dump;
 pub mod lift_vregs;
 pub mod mem2reg;
 pub mod verify;
@@ -673,6 +674,30 @@ impl InlineBranchOp {
             InlineBranchOp::InlineBumpAllocate { .. } => {}
         }
     }
+
+    /// Mirror of `rename_uses` but for the `dst` def. Used by the lift
+    /// pass to give each multi-def site its own unique VReg name so the
+    /// result is true SSA.
+    pub fn rename_defs(&mut self, rename: &std::collections::HashMap<VReg, VReg>) {
+        let apply = |v: &mut VReg| {
+            if let Some(&new) = rename.get(v) {
+                *v = new;
+            }
+        };
+        match self {
+            InlineBranchOp::SubChecked { dst, .. }
+            | InlineBranchOp::MulChecked { dst, .. }
+            | InlineBranchOp::DivChecked { dst, .. }
+            | InlineBranchOp::ModuloChecked { dst, .. }
+            | InlineBranchOp::ShiftLeftChecked { dst, .. }
+            | InlineBranchOp::ShiftRightChecked { dst, .. }
+            | InlineBranchOp::ShiftRightZeroChecked { dst, .. }
+            | InlineBranchOp::ShiftRightImmChecked { dst, .. }
+            | InlineBranchOp::GuardInt { dst, .. }
+            | InlineBranchOp::GuardFloat { dst, .. }
+            | InlineBranchOp::InlineBumpAllocate { dst, .. } => apply(dst),
+        }
+    }
 }
 
 /// A function in the SSA pipeline. Built from a legacy `Ir` in Phase 1.
@@ -874,6 +899,14 @@ impl Terminator {
             _ => vec![],
         }
     }
+
+    /// Rename `dst` defs (only `InlineBranch` has any). Mirror of
+    /// `rename_uses` for def positions.
+    pub fn rename_defs(&mut self, rename: &std::collections::HashMap<VReg, VReg>) {
+        if let Terminator::InlineBranch { op, .. } = self {
+            op.rename_defs(rename);
+        }
+    }
 }
 
 impl Op {
@@ -964,6 +997,101 @@ impl Op {
 
             Op::PerformEffect { .. } => vec![],
             Op::ReturnFromShift { .. } => vec![],
+        }
+    }
+
+    /// Rewrite every DEF of any VReg in `rename` to its renamed value.
+    /// Uses are NOT touched. Mirror of `rename_uses` for def positions.
+    /// Used by the lift pass to give each multi-def site its own unique
+    /// VReg name (so the resulting IR is true SSA — one def per VReg).
+    pub fn rename_defs(&mut self, rename: &std::collections::HashMap<VReg, VReg>) {
+        let apply = |v: &mut VReg| {
+            if let Some(&new) = rename.get(v) {
+                *v = new;
+            }
+        };
+        match self {
+            Op::SlotLoad { dst, .. } => apply(dst),
+            Op::SlotStore { .. } => {}
+
+            Op::Move { dst, .. } => apply(dst),
+            Op::ConstTaggedInt { dst, .. } => apply(dst),
+            Op::ConstStringPtr { dst, .. } => apply(dst),
+            Op::ConstKeywordPtr { dst, .. } => apply(dst),
+            Op::ConstFunctionId { dst, .. } => apply(dst),
+            Op::ConstPointer { dst, .. } => apply(dst),
+            Op::ConstRawValue { dst, .. } => apply(dst),
+            Op::ConstTrue { dst } => apply(dst),
+            Op::ConstFalse { dst } => apply(dst),
+            Op::ConstNull { dst } => apply(dst),
+            Op::ConstLabelAddress { dst, .. } => apply(dst),
+
+            Op::AddInt { dst, .. }
+            | Op::Compare { dst, .. }
+            | Op::CompareFloat { dst, .. }
+            | Op::AddFloat { dst, .. }
+            | Op::SubFloat { dst, .. }
+            | Op::MulFloat { dst, .. }
+            | Op::DivFloat { dst, .. }
+            | Op::IntToFloat { dst, .. }
+            | Op::FRoundToZero { dst, .. }
+            | Op::FmovGpToFp { dst, .. }
+            | Op::FmovFpToGp { dst, .. }
+            | Op::Tag { dst, .. }
+            | Op::Untag { dst, .. }
+            | Op::GetTag { dst, .. }
+            | Op::And { dst, .. }
+            | Op::Or { dst, .. }
+            | Op::Xor { dst, .. }
+            | Op::AndImm { dst, .. }
+            | Op::ShiftRightImmRaw { dst, .. } => apply(dst),
+
+            Op::HeapLoad { dst, .. } => apply(dst),
+            Op::HeapLoadReg { dst, .. } => apply(dst),
+            Op::HeapLoadByteReg { dst, .. } => apply(dst),
+            Op::HeapStore { .. }
+            | Op::HeapStoreOffset { .. }
+            | Op::HeapStoreOffsetReg { .. }
+            | Op::HeapStoreByteOffsetReg { .. } => {}
+            Op::HeapStoreByteOffsetMasked { temp1, temp2, .. } => {
+                apply(temp1);
+                apply(temp2);
+            }
+
+            Op::AtomicLoad { dst, .. } => apply(dst),
+            Op::AtomicStore { .. } | Op::CompareAndSwap { .. } => {}
+
+            Op::StoreFloatConstant { temp, .. } => apply(temp),
+
+            Op::PushStack { .. } => {}
+            Op::PopStack { dst } => apply(dst),
+            Op::GetStackPointer { dst, .. } => apply(dst),
+            Op::GetStackPointerImm { dst, .. } => apply(dst),
+            Op::GetFramePointer { dst } => apply(dst),
+            Op::CurrentStackPosition { dst } => apply(dst),
+
+            Op::ReadArgCount { dst } => apply(dst),
+
+            Op::Breakpoint
+            | Op::ExtendLifetime { .. }
+            | Op::RecordGcSafepoint
+            | Op::FeedbackOr { .. }
+            | Op::TierUpCheck { .. } => {}
+
+            Op::Call { dst, .. } => apply(dst),
+            Op::Recurse { dst, .. } => apply(dst),
+
+            Op::PushExceptionHandler { .. } => {}
+            Op::PushResumableExceptionHandler { dst, .. } => apply(dst),
+            Op::PopExceptionHandler { .. } | Op::PopExceptionHandlerById { .. } => {}
+
+            Op::PushPromptHandler { .. }
+            | Op::PopPromptHandler { .. }
+            | Op::PushPromptTag { .. } => {}
+            Op::CaptureContinuation { dst, .. } => apply(dst),
+            Op::CaptureContinuationTagged { dst, .. } => apply(dst),
+
+            Op::PerformEffect { .. } | Op::ReturnFromShift { .. } => {}
         }
     }
 

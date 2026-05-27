@@ -89,6 +89,33 @@ fn find_lift_candidates(
     idom: &HashMap<BlockId, BlockId>,
 ) -> HashSet<VReg> {
     let mut needs_lift: HashSet<VReg> = HashSet::new();
+
+    // Multi-def: any VReg with more than one def site needs slot
+    // routing, regardless of dominance. The legacy IR has these in the
+    // form `v11 = ConstA; ... v11 = Move v_other` across different
+    // blocks (formatter / sequence builtins do this routinely). True
+    // SSA requires one def per VReg name, so the lift renames each def
+    // to a fresh VReg and routes through a slot.
+    let mut def_count: HashMap<VReg, usize> = HashMap::new();
+    for block in &f.blocks {
+        for op in &block.body {
+            for d in op.defs() {
+                *def_count.entry(d).or_insert(0) += 1;
+            }
+        }
+        for d in block.terminator.defs() {
+            *def_count.entry(d).or_insert(0) += 1;
+        }
+    }
+    for (v, count) in &def_count {
+        if *count > 1 {
+            needs_lift.insert(*v);
+        }
+    }
+
+    // Non-dominated use: a single-def VReg whose def doesn't dominate
+    // one of its uses (typical "value defined in one branch, used after
+    // the merge" pattern).
     let mut visit_use = |u: VReg, use_block: BlockId| {
         if let Some(&(def_b, _)) = def_site.get(&u) {
             if def_b != use_block && !dominates(idom, def_b, use_block) {
@@ -140,10 +167,8 @@ fn rewrite_body_and_terminator(f: &mut CfgFunction, vreg_slot: &HashMap<VReg, Sl
         let body = std::mem::take(&mut f.block_mut(bid).body);
         let mut new_body: Vec<Op> = Vec::with_capacity(body.len() * 2);
         for mut op in body {
-            // Handle uses: SlotLoad each lifted use; rename the op's
-            // uses to point at the load result. The op's DEFS keep
-            // their original VReg names — those are the lifted values
-            // we'll capture via SlotStore.
+            // Step A: lifted uses get SlotLoads prepended; op's uses
+            // renamed to the load results.
             let lifted_uses: Vec<VReg> = op
                 .uses()
                 .into_iter()
@@ -154,18 +179,40 @@ fn rewrite_body_and_terminator(f: &mut CfgFunction, vreg_slot: &HashMap<VReg, Sl
                 op.rename_uses(&rename);
             }
 
-            // Emit the (possibly use-rewritten) op.
-            let lifted_defs: Vec<(VReg, SlotId)> = op
+            // Step B: lifted defs get unique fresh VReg names so the
+            // resulting IR is true SSA (one def per VReg). Build a
+            // per-op def rename map; rewrite the op's defs in place;
+            // record (fresh_vr, slot) pairs to emit SlotStore after.
+            let lifted_defs: Vec<VReg> = op
                 .defs()
                 .into_iter()
-                .filter_map(|d| vreg_slot.get(&d).map(|&s| (d, s)))
+                .filter(|d| vreg_slot.contains_key(d))
                 .collect();
+            let mut store_pairs: Vec<(VReg, SlotId)> = Vec::new();
+            if !lifted_defs.is_empty() {
+                let mut def_rename: HashMap<VReg, VReg> = HashMap::new();
+                for d in &lifted_defs {
+                    if def_rename.contains_key(d) {
+                        continue;
+                    }
+                    let fresh = f.new_vreg(d.class);
+                    let slot = vreg_slot[d];
+                    def_rename.insert(*d, fresh);
+                    store_pairs.push((fresh, slot));
+                }
+                op.rename_defs(&def_rename);
+            }
+
+            // Emit the (possibly use-and-def-renamed) op.
             new_body.push(op);
 
-            // Capture any lifted defs into their slots, using the
-            // ORIGINAL def VRegs (which are still what the op writes).
-            for (vr, slot) in lifted_defs {
-                new_body.push(Op::SlotStore { slot, src: vr });
+            // Capture each lifted def into its slot using the fresh
+            // VReg the def now writes to.
+            for (fresh_vr, slot) in store_pairs {
+                new_body.push(Op::SlotStore {
+                    slot,
+                    src: fresh_vr,
+                });
             }
         }
         f.block_mut(bid).body = new_body;
@@ -186,15 +233,21 @@ fn rewrite_body_and_terminator(f: &mut CfgFunction, vreg_slot: &HashMap<VReg, Sl
 }
 
 /// Terminator-defined VRegs (InlineBranchOp::dst) live only on the
-/// fall-through edge. The SlotStore goes at the start of fall_through;
-/// after critical-edge splitting (Phase 1c), source dominates
-/// fall_through and the VReg is in scope there.
+/// fall-through edge. For each lifted such def: rename the def to a
+/// fresh VReg (so the result stays single-def per name), then insert a
+/// `SlotStore(slot, fresh_vr)` at the start of fall_through. After
+/// critical-edge splitting (Phase 1c) source dominates fall_through and
+/// the fresh VReg is in scope.
 fn insert_terminator_def_stores(f: &mut CfgFunction, vreg_slot: &HashMap<VReg, SlotId>) {
     let num_blocks = f.blocks.len();
     for bid_idx in 0..num_blocks {
         let bid = BlockId(bid_idx as u32);
         let term_defs = f.block(bid).terminator.defs();
-        if term_defs.is_empty() {
+        let lifted: Vec<VReg> = term_defs
+            .into_iter()
+            .filter(|d| vreg_slot.contains_key(d))
+            .collect();
+        if lifted.is_empty() {
             continue;
         }
         let fall_through = match &f.block(bid).terminator {
@@ -203,17 +256,23 @@ fn insert_terminator_def_stores(f: &mut CfgFunction, vreg_slot: &HashMap<VReg, S
         };
         let Some(ft) = fall_through else { continue };
 
+        // Build def rename and apply to terminator.
+        let mut def_rename: HashMap<VReg, VReg> = HashMap::new();
         let mut prepend: Vec<Op> = Vec::new();
-        for d in term_defs {
-            if let Some(&slot) = vreg_slot.get(&d) {
-                prepend.push(Op::SlotStore { slot, src: d });
+        for d in &lifted {
+            if def_rename.contains_key(d) {
+                continue;
             }
+            let fresh = f.new_vreg(d.class);
+            let slot = vreg_slot[d];
+            def_rename.insert(*d, fresh);
+            prepend.push(Op::SlotStore { slot, src: fresh });
         }
-        if !prepend.is_empty() {
-            let existing = std::mem::take(&mut f.block_mut(ft).body);
-            prepend.extend(existing);
-            f.block_mut(ft).body = prepend;
-        }
+        f.block_mut(bid).terminator.rename_defs(&def_rename);
+
+        let existing = std::mem::take(&mut f.block_mut(ft).body);
+        prepend.extend(existing);
+        f.block_mut(ft).body = prepend;
     }
 }
 
@@ -314,11 +373,25 @@ mod tests {
         // A fresh slot should have been allocated for v.
         assert!(f.num_slots > slots_before, "lift should allocate >=1 slot");
 
-        // then-branch should have AddInt + SlotStore.
+        // then-branch should have AddInt + SlotStore. The AddInt's dst
+        // was originally `v`, but lift renames each lifted def to a
+        // fresh VReg so the result is true SSA — so AddInt now writes
+        // to some fresh VReg (call it `v_fresh`) and the SlotStore
+        // captures `v_fresh`.
         let then_body = &f.block(then_b).body;
         assert_eq!(then_body.len(), 2, "then has AddInt + SlotStore");
-        assert!(matches!(then_body[0], Op::AddInt { .. }));
-        assert!(matches!(then_body[1], Op::SlotStore { src, .. } if src == v));
+        let (add_dst, store_src) = match (&then_body[0], &then_body[1]) {
+            (Op::AddInt { dst, .. }, Op::SlotStore { src, .. }) => (*dst, *src),
+            other => panic!("expected AddInt then SlotStore, got {:?}", other),
+        };
+        assert_eq!(
+            add_dst, store_src,
+            "AddInt's dst and SlotStore's src must be the same fresh VReg"
+        );
+        assert_ne!(
+            add_dst, v,
+            "lift should have renamed the def away from the original VReg"
+        );
 
         // join should have a prepended SlotLoad and a Ret of its dst.
         // Body has one SlotLoad; terminator references the load's dst.

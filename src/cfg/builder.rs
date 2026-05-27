@@ -280,11 +280,15 @@ pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
     }
 
     rebuild_predecessors(&mut f);
+    crate::cfg::dump::maybe_dump_phase("00-after-cfg-ize", &f, false);
+    crate::cfg::dump::maybe_verify_stage("00-after-cfg-ize", &f);
 
     // Phase 1c: split critical edges so I2 holds at every post-
     // construction phase boundary. Runs unconditionally — the spec
     // requires no critical edges to survive any pass.
     split_critical_edges(&mut f);
+    crate::cfg::dump::maybe_dump_phase("01-after-split-critical-edges", &f, false);
+    crate::cfg::dump::maybe_verify_stage("01-after-split-critical-edges", &f);
 
     // Phase 1d (light DCE): wipe out unreachable blocks. mem2reg's
     // dom-tree DFS only visits reachable blocks, so unreachable
@@ -294,6 +298,8 @@ pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
     // terminators with `Unreachable` removes their phantom edges from
     // the predecessor map.
     dce_unreachable_blocks(&mut f);
+    crate::cfg::dump::maybe_dump_phase("02-after-dce", &f, false);
+    crate::cfg::dump::maybe_verify_stage("02-after-dce", &f);
 
     // Phase 2a: lift cross-block legacy VRegs to slots. The legacy IR
     // emits VRegs whose def doesn't dominate every use (single-def, but
@@ -303,6 +309,8 @@ pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
     // mem2reg run will lift back to SSA values + phi-params at
     // dominance frontiers.
     crate::cfg::lift_vregs::lift_cross_block_vregs(&mut f);
+    crate::cfg::dump::maybe_dump_phase("03-after-lift", &f, false);
+    crate::cfg::dump::maybe_verify_stage("03-after-lift", &f);
 
     // Phase 2b: mem2reg. Promotes profitable stack slots to SSA values
     // + block params at iterated dominance frontiers (Cytron-style).
@@ -311,6 +319,8 @@ pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
     // SlotLoad / SlotStore. Preserves I1–I8 by construction; phi
     // placement is "block params" not "Phi op" per I3 / F10.
     crate::cfg::mem2reg::promote_slots(&mut f);
+    crate::cfg::dump::maybe_dump_phase("04-after-mem2reg", &f, true);
+    crate::cfg::dump::maybe_verify_stage("04-after-mem2reg", &f);
 
     Ok(f)
 }
