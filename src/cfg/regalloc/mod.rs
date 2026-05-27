@@ -31,6 +31,7 @@
 
 pub mod color;
 pub mod edge;
+pub mod emit;
 pub mod interference;
 pub mod liveness;
 pub mod spill;
