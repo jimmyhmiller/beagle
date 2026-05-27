@@ -24,6 +24,7 @@ pub mod dump;
 pub mod lift_vregs;
 pub mod mem2reg;
 pub mod opt;
+pub mod regalloc;
 pub mod verify;
 
 use crate::ir::Condition;
