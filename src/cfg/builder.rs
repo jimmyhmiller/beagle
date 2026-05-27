@@ -508,14 +508,39 @@ fn fill_block(
         }
 
         if is_terminator(inst) {
-            let term =
-                translate_terminator(inst, idx, leader_to_block, label_pos, classes, f.entry)?;
+            let entry = f.entry;
+            let mut pre_ops: Vec<Op> = Vec::new();
+            let term = translate_terminator(
+                inst,
+                idx,
+                leader_to_block,
+                label_pos,
+                classes,
+                entry,
+                f,
+                &mut pre_ops,
+            )?;
+            for pre in pre_ops {
+                f.block_mut(block_id).body.push(pre);
+            }
             f.block_mut(block_id).terminator = term;
             idx += 1;
             continue;
         }
 
-        let op = translate_op(inst, idx, leader_to_block, label_pos, classes)?;
+        let mut pre_ops: Vec<Op> = Vec::new();
+        let op = translate_op(
+            inst,
+            idx,
+            leader_to_block,
+            label_pos,
+            classes,
+            f,
+            &mut pre_ops,
+        )?;
+        for pre in pre_ops {
+            f.block_mut(block_id).body.push(pre);
+        }
         f.block_mut(block_id).body.push(op);
         idx += 1;
     }
@@ -541,6 +566,8 @@ fn translate_op(
     leader_to_block: &HashMap<usize, BlockId>,
     label_pos: &HashMap<usize, usize>,
     classes: &HashMap<u32, RegClass>,
+    f: &mut CfgFunction,
+    pre_ops: &mut Vec<Op>,
 ) -> Result<Op, BuildError> {
     let v = |vr: &VirtualRegister| -> VReg { to_cfg_vreg(vr, classes) };
     let resolve_label = |label: &Label| -> Result<BlockId, BuildError> {
@@ -818,18 +845,25 @@ fn translate_op(
         }),
 
         // ---- Calls (I7: per-call clobber set) --------------------------
-        I::Call(Value::Register(dst), fn_ptr, args, is_builtin) => Ok(Op::Call {
-            dst: v(dst),
-            target: extract_call_target(fn_ptr, position, classes)?,
-            args: translate_value_args(args, position, classes)?,
-            is_builtin: *is_builtin,
-            clobbers: ClobberSet::AllCallerSaved,
-        }),
-        I::Recurse(Value::Register(dst), args) => Ok(Op::Recurse {
-            dst: v(dst),
-            args: translate_value_args(args, position, classes)?,
-            clobbers: ClobberSet::AllCallerSaved,
-        }),
+        I::Call(Value::Register(dst), fn_ptr, args, is_builtin) => {
+            let target = extract_call_target(fn_ptr, position, classes)?;
+            let translated_args = translate_value_args(args, position, classes, f, pre_ops)?;
+            Ok(Op::Call {
+                dst: v(dst),
+                target,
+                args: translated_args,
+                is_builtin: *is_builtin,
+                clobbers: ClobberSet::AllCallerSaved,
+            })
+        }
+        I::Recurse(Value::Register(dst), args) => {
+            let translated_args = translate_value_args(args, position, classes, f, pre_ops)?;
+            Ok(Op::Recurse {
+                dst: v(dst),
+                args: translated_args,
+                clobbers: ClobberSet::AllCallerSaved,
+            })
+        }
 
         // ---- Exception handling ----------------------------------------
         I::PushExceptionHandler(handler_label, Value::Local(slot), builtin_fn_ptr) => {
@@ -1057,6 +1091,8 @@ fn translate_terminator(
     label_pos: &HashMap<usize, usize>,
     classes: &HashMap<u32, RegClass>,
     entry: BlockId,
+    f: &mut CfgFunction,
+    pre_ops: &mut Vec<Op>,
 ) -> Result<Terminator, BuildError> {
     let v = |vr: &VirtualRegister| -> VReg { to_cfg_vreg(vr, classes) };
     let resolve_label = |label: &Label| -> Result<BlockId, BuildError> {
@@ -1086,7 +1122,10 @@ fn translate_terminator(
     use Instruction as I;
     match inst {
         // ---- True terminators -----------------------------------------
-        I::Ret(Value::Register(vr)) => Ok(Terminator::Ret { value: v(vr) }),
+        I::Ret(value) => {
+            let vr = value_to_vreg(value, position, classes, f, pre_ops)?;
+            Ok(Terminator::Ret { value: vr })
+        }
         I::Jump(l) => Ok(Terminator::Jump {
             target: resolve_label(l)?,
             args: vec![],
@@ -1096,8 +1135,8 @@ fn translate_terminator(
             let rhs_vr = require_register(rhs, position)?;
             Ok(Terminator::Branch {
                 cond: *cond,
-                lhs: v(lhs_vr),
-                rhs: v(rhs_vr),
+                lhs: to_cfg_vreg(lhs_vr, classes),
+                rhs: to_cfg_vreg(rhs_vr, classes),
                 t_target: resolve_label(l)?,
                 t_args: vec![],
                 f_target: fall_through()?,
@@ -1107,7 +1146,7 @@ fn translate_terminator(
         // I8: tail self-call rewrites directly to a jump-to-entry. The
         // dst register is discarded (no return on a tail call).
         I::TailRecurse(_dst, args) => {
-            let arg_vregs = translate_value_args(args, position, classes)?;
+            let arg_vregs = translate_value_args(args, position, classes, f, pre_ops)?;
             Ok(Terminator::Jump {
                 target: entry,
                 args: arg_vregs,
@@ -1267,8 +1306,7 @@ fn translate_terminator(
         }
 
         // ---- Mis-shaped operands on supported terminators ------------
-        I::Ret(..)
-        | I::Throw(..)
+        I::Throw(..)
         | I::Sub(..)
         | I::Mul(..)
         | I::Div(..)
@@ -1293,22 +1331,104 @@ fn translate_terminator(
 
 /// Translate a `Vec<Value>` of args into a `Vec<VReg>`. Every Value must
 /// be a `Value::Register` — non-register args (literals, locals, etc.)
-/// are not supported in this position and surface as
-/// `UnsupportedValueKind`. Used by TailRecurse and the call ops.
+/// Translate a `&[Value]` of args into `Vec<VReg>`. Values that aren't
+/// already registers (`Local`, common constants) get materialized into
+/// fresh VRegs via prepended ops on `pre_ops`. Used by TailRecurse and
+/// the call ops.
 fn translate_value_args(
     args: &[Value],
     position: usize,
     classes: &HashMap<u32, RegClass>,
+    f: &mut CfgFunction,
+    pre_ops: &mut Vec<Op>,
 ) -> Result<Vec<VReg>, BuildError> {
     args.iter()
-        .map(|a| match a {
-            Value::Register(vr) => Ok(to_cfg_vreg(vr, classes)),
-            other => Err(BuildError::UnsupportedValueKind {
-                position,
-                msg: format!("call/recurse arg expected Register, got {:?}", other),
-            }),
-        })
+        .map(|a| value_to_vreg(a, position, classes, f, pre_ops))
         .collect()
+}
+
+/// Resolve a `Value` to a `VReg`. If `value` is already a `Register`,
+/// just look up its class. Otherwise materialize it into a fresh VReg
+/// by prepending an appropriate op (`SlotLoad` for `Local`, `Const*`
+/// for the common constant kinds). The prepended ops go onto
+/// `pre_ops` — the caller (translate_op / translate_terminator)
+/// arranges for those to land in the block body before the using op.
+fn value_to_vreg(
+    value: &Value,
+    position: usize,
+    classes: &HashMap<u32, RegClass>,
+    f: &mut CfgFunction,
+    pre_ops: &mut Vec<Op>,
+) -> Result<VReg, BuildError> {
+    match value {
+        Value::Register(vr) => Ok(to_cfg_vreg(vr, classes)),
+        Value::Local(idx) => {
+            let dst = f.new_vreg(RegClass::Gp);
+            pre_ops.push(Op::SlotLoad {
+                dst,
+                slot: SlotId(*idx as u32),
+            });
+            Ok(dst)
+        }
+        Value::TaggedConstant(n) => {
+            let dst = f.new_vreg(RegClass::Gp);
+            pre_ops.push(Op::ConstTaggedInt {
+                dst,
+                value: *n as i64,
+            });
+            Ok(dst)
+        }
+        Value::True => {
+            let dst = f.new_vreg(RegClass::Gp);
+            pre_ops.push(Op::ConstTrue { dst });
+            Ok(dst)
+        }
+        Value::False => {
+            let dst = f.new_vreg(RegClass::Gp);
+            pre_ops.push(Op::ConstFalse { dst });
+            Ok(dst)
+        }
+        Value::Null => {
+            let dst = f.new_vreg(RegClass::Gp);
+            pre_ops.push(Op::ConstNull { dst });
+            Ok(dst)
+        }
+        Value::StringConstantPtr(p) => {
+            let dst = f.new_vreg(RegClass::Gp);
+            pre_ops.push(Op::ConstStringPtr { dst, ptr: *p });
+            Ok(dst)
+        }
+        Value::KeywordConstantPtr(p) => {
+            let dst = f.new_vreg(RegClass::Gp);
+            pre_ops.push(Op::ConstKeywordPtr { dst, ptr: *p });
+            Ok(dst)
+        }
+        Value::Function(id) => {
+            let dst = f.new_vreg(RegClass::Gp);
+            pre_ops.push(Op::ConstFunctionId {
+                dst,
+                function_id: *id,
+            });
+            Ok(dst)
+        }
+        Value::Pointer(p) => {
+            let dst = f.new_vreg(RegClass::Gp);
+            pre_ops.push(Op::ConstPointer { dst, ptr: *p });
+            Ok(dst)
+        }
+        Value::RawValue(v) => {
+            let dst = f.new_vreg(RegClass::Gp);
+            pre_ops.push(Op::ConstRawValue {
+                dst,
+                value: *v as u64,
+            });
+            Ok(dst)
+        }
+        Value::Spill(..) | Value::Stack(..) => Err(BuildError::UnsupportedValueKind {
+            position,
+            msg: format!("cannot materialize {:?} as a VReg", value),
+        }),
+    }
 }
 
 fn require_register<'a>(
@@ -2108,16 +2228,17 @@ mod tests {
         );
     }
 
-    /// Mis-shaped operand on a supported op → clear UnsupportedValueKind
-    /// with a description. Phase 1b-3 has translator arms for every legacy
-    /// Instruction variant, so UnsupportedInstruction is unreachable on
-    /// well-formed IR; UnsupportedValueKind is the remaining error path
-    /// (e.g. for Spill / Stack values that Phase 1 doesn't model).
+    /// Mis-shaped operand → clear UnsupportedValueKind. After operand-
+    /// shape widening, most non-Register kinds are accepted and
+    /// materialized into a fresh VReg via a prepended op (Local →
+    /// SlotLoad, Null/True/False → Const*). The remaining unsupported
+    /// kinds — Spill, Stack — are explicitly rejected.
     #[test]
     fn mis_shaped_operand_returns_error() {
-        // Ret expects Value::Register; pass Value::Null instead.
-        let ir = ir_with(vec![Instruction::Ret(Value::Null)], 0, "ret_with_null");
-        let err = build_cfg(&ir).expect_err("Ret(Null) is malformed");
+        // Ret of a Stack-positioned value isn't materializable in the
+        // CFG layer (Stack is for stack-frame addressing, not a value).
+        let ir = ir_with(vec![Instruction::Ret(Value::Stack(0))], 0, "ret_with_stack");
+        let err = build_cfg(&ir).expect_err("Ret(Stack(_)) is malformed");
         assert!(
             matches!(err, BuildError::UnsupportedValueKind { .. }),
             "expected UnsupportedValueKind, got {:?}",
