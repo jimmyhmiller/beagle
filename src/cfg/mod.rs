@@ -18,6 +18,7 @@
 
 #![allow(dead_code)]
 
+pub mod builder;
 pub mod verify;
 
 use crate::ir::Condition;
