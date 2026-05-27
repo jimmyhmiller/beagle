@@ -36,3 +36,7 @@ pub mod interference;
 pub mod liveness;
 pub mod spill;
 pub mod stats;
+
+// emit_legacy lives one level up (in `src/cfg/`) — it bridges the SSA
+// pipeline to the legacy Ir::compile_instructions and so isn't part of
+// the regalloc-only submodule tree.
