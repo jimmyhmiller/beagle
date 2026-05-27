@@ -319,8 +319,17 @@ pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
     // SlotLoad / SlotStore. Preserves I1–I8 by construction; phi
     // placement is "block params" not "Phi op" per I3 / F10.
     crate::cfg::mem2reg::promote_slots(&mut f);
-    crate::cfg::dump::maybe_dump_phase("04-after-mem2reg", &f, true);
+    crate::cfg::dump::maybe_dump_phase("04-after-mem2reg", &f, false);
     crate::cfg::dump::maybe_verify_stage("04-after-mem2reg", &f);
+
+    // Phase 3: SSA optimizations — trivial-block-param elimination,
+    // copy coalesce, and DCE, run to fixpoint. Cleans up the
+    // redundant Moves that lift + mem2reg produce, folds phi-style
+    // block params whose incoming args are all the same, and removes
+    // pure ops whose defs are unused. Preserves I1–I8.
+    crate::cfg::opt::optimize(&mut f);
+    crate::cfg::dump::maybe_dump_phase("05-after-opts", &f, true);
+    crate::cfg::dump::maybe_verify_stage("05-after-opts", &f);
 
     Ok(f)
 }

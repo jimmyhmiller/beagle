@@ -23,6 +23,7 @@ pub mod dom;
 pub mod dump;
 pub mod lift_vregs;
 pub mod mem2reg;
+pub mod opt;
 pub mod verify;
 
 use crate::ir::Condition;
@@ -910,6 +911,89 @@ impl Terminator {
 }
 
 impl Op {
+    /// True for ops the SSA-opt DCE pass MUST keep regardless of
+    /// whether their dst (if any) is used. Side effects include memory
+    /// writes, calls, exception/continuation/effect state changes,
+    /// stack-frame manipulation, GC safepoint marks, runtime feedback
+    /// updates, and debug-only instrumentation (`Breakpoint`,
+    /// `ExtendLifetime`, `RecordGcSafepoint`).
+    pub fn has_side_effect(&self) -> bool {
+        match self {
+            // Pure ops — DCE removes if no use.
+            Op::SlotLoad { .. }
+            | Op::Move { .. }
+            | Op::ConstTaggedInt { .. }
+            | Op::ConstStringPtr { .. }
+            | Op::ConstKeywordPtr { .. }
+            | Op::ConstFunctionId { .. }
+            | Op::ConstPointer { .. }
+            | Op::ConstRawValue { .. }
+            | Op::ConstTrue { .. }
+            | Op::ConstFalse { .. }
+            | Op::ConstNull { .. }
+            | Op::ConstLabelAddress { .. }
+            | Op::AddInt { .. }
+            | Op::Compare { .. }
+            | Op::CompareFloat { .. }
+            | Op::AddFloat { .. }
+            | Op::SubFloat { .. }
+            | Op::MulFloat { .. }
+            | Op::DivFloat { .. }
+            | Op::IntToFloat { .. }
+            | Op::FRoundToZero { .. }
+            | Op::FmovGpToFp { .. }
+            | Op::FmovFpToGp { .. }
+            | Op::Tag { .. }
+            | Op::Untag { .. }
+            | Op::GetTag { .. }
+            | Op::And { .. }
+            | Op::Or { .. }
+            | Op::Xor { .. }
+            | Op::AndImm { .. }
+            | Op::ShiftRightImmRaw { .. }
+            | Op::HeapLoad { .. }
+            | Op::HeapLoadReg { .. }
+            | Op::HeapLoadByteReg { .. }
+            | Op::AtomicLoad { .. }
+            | Op::GetStackPointer { .. }
+            | Op::GetStackPointerImm { .. }
+            | Op::GetFramePointer { .. }
+            | Op::CurrentStackPosition { .. }
+            | Op::ReadArgCount { .. } => false,
+
+            // Side-effecting.
+            Op::SlotStore { .. }
+            | Op::HeapStore { .. }
+            | Op::HeapStoreOffset { .. }
+            | Op::HeapStoreOffsetReg { .. }
+            | Op::HeapStoreByteOffsetReg { .. }
+            | Op::HeapStoreByteOffsetMasked { .. }
+            | Op::AtomicStore { .. }
+            | Op::CompareAndSwap { .. }
+            | Op::StoreFloatConstant { .. }
+            | Op::PushStack { .. }
+            | Op::PopStack { .. }
+            | Op::Breakpoint
+            | Op::ExtendLifetime { .. }
+            | Op::RecordGcSafepoint
+            | Op::FeedbackOr { .. }
+            | Op::TierUpCheck { .. }
+            | Op::Call { .. }
+            | Op::Recurse { .. }
+            | Op::PushExceptionHandler { .. }
+            | Op::PushResumableExceptionHandler { .. }
+            | Op::PopExceptionHandler { .. }
+            | Op::PopExceptionHandlerById { .. }
+            | Op::PushPromptHandler { .. }
+            | Op::PopPromptHandler { .. }
+            | Op::PushPromptTag { .. }
+            | Op::CaptureContinuation { .. }
+            | Op::CaptureContinuationTagged { .. }
+            | Op::PerformEffect { .. }
+            | Op::ReturnFromShift { .. } => true,
+        }
+    }
+
     pub fn defs(&self) -> Vec<VReg> {
         match self {
             Op::SlotLoad { dst, .. } => vec![*dst],
