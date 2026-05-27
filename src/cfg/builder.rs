@@ -201,10 +201,10 @@ pub enum BuildError {
 pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
     let mut f = CfgFunction::new(ir.debug_name.clone(), ir.num_locals as u32);
 
-    // Register every VReg this function references, with its inferred
-    // class. Phase 1b-1 has only GP-producing ops, so the table will be
-    // all-GP today; 1b-2 adds FP-producing ops and the class inference
-    // will start mattering.
+    // Classify every VReg the function references. The class table is the
+    // single source of truth for what register class each VReg has, and is
+    // consulted by `to_cfg_vreg` at every translation site so a VReg has
+    // the same class everywhere it appears.
     let class_table = classify_vregs(&ir.instructions);
     let max_vreg = class_table.keys().copied().max().unwrap_or(0);
     for idx in 0..=max_vreg {
@@ -237,6 +237,7 @@ pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
             end,
             &leader_to_block,
             &label_pos,
+            &class_table,
         )?;
     }
 
@@ -254,6 +255,7 @@ fn fill_block(
     end: usize,
     leader_to_block: &HashMap<usize, BlockId>,
     label_pos: &HashMap<usize, usize>,
+    classes: &HashMap<u32, RegClass>,
 ) -> Result<(), BuildError> {
     let mut idx = start;
 
@@ -263,11 +265,7 @@ fn fill_block(
     if block_id == f.entry {
         while idx < end {
             if let Instruction::RegisterArgument(Value::Register(vr)) = &ir.instructions[idx] {
-                let v = VReg {
-                    index: vr.index as u32,
-                    class: RegClass::Gp,
-                };
-                f.block_mut(block_id).params.push(v);
+                f.block_mut(block_id).params.push(to_cfg_vreg(vr, classes));
                 idx += 1;
             } else {
                 break;
@@ -278,36 +276,34 @@ fn fill_block(
     while idx < end {
         let inst = &ir.instructions[idx];
 
-        // Skip Label markers — they served their purpose in leader
-        // computation; I1 forbids them inside block bodies.
+        // Skip Label markers — I1 forbids them inside block bodies. Their
+        // role was establishing leaders.
         if matches!(inst, Instruction::Label(_)) {
             idx += 1;
             continue;
         }
-        // Skip RegisterArgument that didn't make it into the entry-param
-        // run (e.g. a later block somehow contains one — shouldn't happen
-        // in well-formed IR, but defensively ignore rather than translate).
+        // Skip RegisterArgument outside the entry-param run.
         if matches!(inst, Instruction::RegisterArgument(_)) {
             idx += 1;
             continue;
         }
 
         if is_terminator(inst) {
-            let term = translate_terminator(inst, idx, leader_to_block, label_pos)?;
+            let term = translate_terminator(inst, idx, leader_to_block, label_pos, classes)?;
             f.block_mut(block_id).terminator = term;
             idx += 1;
             continue;
         }
 
-        let op = translate_op(inst, idx)?;
+        let op = translate_op(inst, idx, leader_to_block, label_pos, classes)?;
         f.block_mut(block_id).body.push(op);
         idx += 1;
     }
 
     // Implicit fall-through: legacy IR can let one block run into the
-    // next without a terminator (e.g. when the last instruction of a
-    // block is straight-line and the next instruction is a Label that
-    // started a new leader). Synthesize a Jump to the fall-through block.
+    // next without a terminator. Synthesize a Jump to the fall-through
+    // block. If no next leader exists, leave Unreachable — the verifier
+    // will flag it with UnfilledTerminator.
     if matches!(f.block(block_id).terminator, Terminator::Unreachable) {
         if let Some(&next_bid) = leader_to_block.get(&end) {
             f.block_mut(block_id).terminator = Terminator::Jump {
@@ -315,47 +311,398 @@ fn fill_block(
                 args: vec![],
             };
         }
-        // No next leader => the function ends without a terminator on the
-        // last block. The verifier will flag this with UnfilledTerminator.
     }
     Ok(())
 }
 
-fn translate_op(inst: &Instruction, position: usize) -> Result<Op, BuildError> {
-    match inst {
-        Instruction::LoadLocal(Value::Register(dst), Value::Local(idx)) => Ok(Op::SlotLoad {
-            dst: VReg {
-                index: dst.index as u32,
-                class: RegClass::Gp,
-            },
-            slot: SlotId(*idx as u32),
-        }),
-        Instruction::StoreLocal(Value::Local(idx), Value::Register(src)) => Ok(Op::SlotStore {
-            slot: SlotId(*idx as u32),
-            src: VReg {
-                index: src.index as u32,
-                class: RegClass::Gp,
-            },
-        }),
-        Instruction::AddInt(Value::Register(dst), Value::Register(lhs), Value::Register(rhs)) => {
-            Ok(Op::AddInt {
-                dst: gp_vreg(dst),
-                lhs: gp_vreg(lhs),
-                rhs: gp_vreg(rhs),
-            })
-        }
-        // Explicit failure modes for mis-shaped values on otherwise
-        // supported ops — surfaces them with the position rather than
-        // matching a wider pattern and silently producing wrong CFG.
-        Instruction::LoadLocal(..) | Instruction::StoreLocal(..) | Instruction::AddInt(..) => {
-            Err(BuildError::UnsupportedValueKind {
+fn translate_op(
+    inst: &Instruction,
+    position: usize,
+    leader_to_block: &HashMap<usize, BlockId>,
+    label_pos: &HashMap<usize, usize>,
+    classes: &HashMap<u32, RegClass>,
+) -> Result<Op, BuildError> {
+    let v = |vr: &VirtualRegister| -> VReg { to_cfg_vreg(vr, classes) };
+    let resolve_label = |label: &Label| -> Result<BlockId, BuildError> {
+        let pos = label_pos
+            .get(&label.index)
+            .ok_or(BuildError::UnknownLabel {
                 position,
-                msg: format!("operand shape not handled for {}", instruction_name(inst)),
+                label: label.index,
+            })?;
+        leader_to_block
+            .get(pos)
+            .copied()
+            .ok_or(BuildError::LabelTargetNotLeader {
+                position,
+                label: label.index,
+            })
+    };
+    use Instruction as I;
+    match inst {
+        // ---- Slots (I6) -------------------------------------------------
+        I::LoadLocal(Value::Register(dst), Value::Local(idx)) => Ok(Op::SlotLoad {
+            dst: v(dst),
+            slot: SlotId(*idx as u32),
+        }),
+        I::StoreLocal(Value::Local(idx), Value::Register(src)) => Ok(Op::SlotStore {
+            slot: SlotId(*idx as u32),
+            src: v(src),
+        }),
+
+        // ---- Assign / LoadConstant: split by source kind ----------------
+        I::Assign(Value::Register(dst), val) => translate_assign(dst, val, position, classes),
+        I::LoadConstant(Value::Register(dst), val) => translate_assign(dst, val, position, classes),
+        I::LoadTrue(Value::Register(dst)) => Ok(Op::ConstTrue { dst: v(dst) }),
+        I::LoadFalse(Value::Register(dst)) => Ok(Op::ConstFalse { dst: v(dst) }),
+
+        // ---- Integer arithmetic (no bail) ------------------------------
+        I::AddInt(Value::Register(d), Value::Register(l), Value::Register(r)) => Ok(Op::AddInt {
+            dst: v(d),
+            lhs: v(l),
+            rhs: v(r),
+        }),
+
+        // ---- Comparisons -----------------------------------------------
+        I::Compare(Value::Register(d), Value::Register(l), Value::Register(r), cond) => {
+            Ok(Op::Compare {
+                dst: v(d),
+                lhs: v(l),
+                rhs: v(r),
+                cond: *cond,
             })
         }
+        I::CompareFloat(Value::Register(d), Value::Register(l), Value::Register(r), cond) => {
+            Ok(Op::CompareFloat {
+                dst: v(d),
+                lhs: v(l),
+                rhs: v(r),
+                cond: *cond,
+            })
+        }
+
+        // ---- FP arithmetic ---------------------------------------------
+        I::AddFloat(Value::Register(d), Value::Register(l), Value::Register(r)) => {
+            Ok(Op::AddFloat {
+                dst: v(d),
+                lhs: v(l),
+                rhs: v(r),
+            })
+        }
+        I::SubFloat(Value::Register(d), Value::Register(l), Value::Register(r)) => {
+            Ok(Op::SubFloat {
+                dst: v(d),
+                lhs: v(l),
+                rhs: v(r),
+            })
+        }
+        I::MulFloat(Value::Register(d), Value::Register(l), Value::Register(r)) => {
+            Ok(Op::MulFloat {
+                dst: v(d),
+                lhs: v(l),
+                rhs: v(r),
+            })
+        }
+        I::DivFloat(Value::Register(d), Value::Register(l), Value::Register(r)) => {
+            Ok(Op::DivFloat {
+                dst: v(d),
+                lhs: v(l),
+                rhs: v(r),
+            })
+        }
+
+        // ---- Conversions / bit-moves between classes -------------------
+        I::IntToFloat(Value::Register(d), Value::Register(s)) => Ok(Op::IntToFloat {
+            dst: v(d),
+            src: v(s),
+        }),
+        I::FRoundToZero(Value::Register(d), Value::Register(s)) => Ok(Op::FRoundToZero {
+            dst: v(d),
+            src: v(s),
+        }),
+        I::FmovGeneralToFloat(Value::Register(d), Value::Register(s)) => Ok(Op::FmovGpToFp {
+            dst: v(d),
+            src: v(s),
+        }),
+        I::FmovFloatToGeneral(Value::Register(d), Value::Register(s)) => Ok(Op::FmovFpToGp {
+            dst: v(d),
+            src: v(s),
+        }),
+
+        // ---- Tag bit manipulation --------------------------------------
+        I::Tag(Value::Register(d), Value::Register(s), tag) => Ok(Op::Tag {
+            dst: v(d),
+            src: v(s),
+            tag_bits: extract_imm_u64(tag, position)?,
+        }),
+        I::Untag(Value::Register(d), Value::Register(s)) => Ok(Op::Untag {
+            dst: v(d),
+            src: v(s),
+        }),
+        I::GetTag(Value::Register(d), Value::Register(s)) => Ok(Op::GetTag {
+            dst: v(d),
+            src: v(s),
+        }),
+
+        // ---- Bit ops ---------------------------------------------------
+        I::And(Value::Register(d), Value::Register(l), Value::Register(r)) => Ok(Op::And {
+            dst: v(d),
+            lhs: v(l),
+            rhs: v(r),
+        }),
+        I::Or(Value::Register(d), Value::Register(l), Value::Register(r)) => Ok(Op::Or {
+            dst: v(d),
+            lhs: v(l),
+            rhs: v(r),
+        }),
+        I::Xor(Value::Register(d), Value::Register(l), Value::Register(r)) => Ok(Op::Xor {
+            dst: v(d),
+            lhs: v(l),
+            rhs: v(r),
+        }),
+        I::AndImm(Value::Register(d), Value::Register(s), imm) => Ok(Op::AndImm {
+            dst: v(d),
+            src: v(s),
+            imm: *imm,
+        }),
+        I::ShiftRightImmRaw(Value::Register(d), Value::Register(s), imm) => {
+            Ok(Op::ShiftRightImmRaw {
+                dst: v(d),
+                src: v(s),
+                imm: *imm,
+            })
+        }
+
+        // ---- Heap memory -----------------------------------------------
+        I::HeapLoad(Value::Register(d), Value::Register(b), off) => Ok(Op::HeapLoad {
+            dst: v(d),
+            base: v(b),
+            offset: *off,
+        }),
+        I::HeapLoadReg(Value::Register(d), Value::Register(b), Value::Register(o)) => {
+            Ok(Op::HeapLoadReg {
+                dst: v(d),
+                base: v(b),
+                offset: v(o),
+            })
+        }
+        I::HeapLoadByteReg(Value::Register(d), Value::Register(b), Value::Register(o)) => {
+            Ok(Op::HeapLoadByteReg {
+                dst: v(d),
+                base: v(b),
+                offset: v(o),
+            })
+        }
+        I::HeapStore(Value::Register(a), Value::Register(s)) => Ok(Op::HeapStore {
+            addr: v(a),
+            src: v(s),
+        }),
+        I::HeapStoreOffset(Value::Register(b), Value::Register(s), off) => {
+            Ok(Op::HeapStoreOffset {
+                base: v(b),
+                src: v(s),
+                offset: *off,
+            })
+        }
+        I::HeapStoreOffsetReg(Value::Register(b), Value::Register(s), Value::Register(o)) => {
+            Ok(Op::HeapStoreOffsetReg {
+                base: v(b),
+                src: v(s),
+                offset: v(o),
+            })
+        }
+        I::HeapStoreByteOffsetReg(Value::Register(b), Value::Register(s), Value::Register(o)) => {
+            Ok(Op::HeapStoreByteOffsetReg {
+                base: v(b),
+                src: v(s),
+                offset: v(o),
+            })
+        }
+        I::HeapStoreByteOffsetMasked(
+            Value::Register(p),
+            Value::Register(va),
+            Value::Register(t1),
+            Value::Register(t2),
+            offset,
+            byte_offset,
+            mask,
+        ) => Ok(Op::HeapStoreByteOffsetMasked {
+            ptr: v(p),
+            val: v(va),
+            temp1: v(t1),
+            temp2: v(t2),
+            offset: *offset,
+            byte_offset: *byte_offset,
+            mask: *mask,
+        }),
+
+        // ---- Atomic ----------------------------------------------------
+        I::AtomicLoad(Value::Register(d), Value::Register(s)) => Ok(Op::AtomicLoad {
+            dst: v(d),
+            src: v(s),
+        }),
+        I::AtomicStore(Value::Register(a), Value::Register(s)) => Ok(Op::AtomicStore {
+            addr: v(a),
+            src: v(s),
+        }),
+        I::CompareAndSwap(Value::Register(a), Value::Register(e), Value::Register(n)) => {
+            Ok(Op::CompareAndSwap {
+                addr: v(a),
+                expected: v(e),
+                new: v(n),
+            })
+        }
+
+        // ---- Float storage (parse string at compile time) --------------
+        I::StoreFloat(Value::Register(d), Value::Register(t), text) => Ok(Op::StoreFloatConstant {
+            dest: v(d),
+            temp: v(t),
+            value_text: text.clone(),
+        }),
+
+        // ---- Stack pointer manipulation --------------------------------
+        I::PushStack(Value::Register(s)) => Ok(Op::PushStack { src: v(s) }),
+        I::PopStack(Value::Register(d)) => Ok(Op::PopStack { dst: v(d) }),
+        I::GetStackPointer(Value::Register(d), Value::Register(o)) => Ok(Op::GetStackPointer {
+            dst: v(d),
+            offset: v(o),
+        }),
+        I::GetStackPointerImm(Value::Register(d), off) => Ok(Op::GetStackPointerImm {
+            dst: v(d),
+            offset: *off,
+        }),
+        I::GetFramePointer(Value::Register(d)) => Ok(Op::GetFramePointer { dst: v(d) }),
+        I::CurrentStackPosition(Value::Register(d)) => Ok(Op::CurrentStackPosition { dst: v(d) }),
+
+        // ---- Variadic plumbing -----------------------------------------
+        I::ReadArgCount(Value::Register(d)) => Ok(Op::ReadArgCount { dst: v(d) }),
+
+        // ---- Misc no-VReg ops & lifetime markers -----------------------
+        I::Breakpoint => Ok(Op::Breakpoint),
+        I::ExtendLifeTime(Value::Register(s)) => Ok(Op::ExtendLifetime { src: v(s) }),
+        I::RecordGcSafepoint => Ok(Op::RecordGcSafepoint),
+        I::FeedbackOr(addr, bits) => Ok(Op::FeedbackOr {
+            slot_addr: *addr,
+            bits: *bits,
+        }),
+        I::TierUpCheck(c, n, t) => Ok(Op::TierUpCheck {
+            counter_addr: *c,
+            name_c_str_ptr: *n,
+            trampoline_fn_ptr: *t,
+        }),
+
+        // ---- LoadLabelAddress: resolve to a BlockId --------------------
+        I::LoadLabelAddress(Value::Register(d), l) => Ok(Op::ConstLabelAddress {
+            dst: v(d),
+            target: resolve_label(l)?,
+        }),
+
+        // ---- Mis-shaped operands on otherwise supported ops ------------
+        I::LoadLocal(..)
+        | I::StoreLocal(..)
+        | I::AddInt(..)
+        | I::Assign(..)
+        | I::LoadConstant(..)
+        | I::LoadTrue(..)
+        | I::LoadFalse(..)
+        | I::Compare(..)
+        | I::CompareFloat(..)
+        | I::AddFloat(..)
+        | I::SubFloat(..)
+        | I::MulFloat(..)
+        | I::DivFloat(..)
+        | I::IntToFloat(..)
+        | I::FRoundToZero(..)
+        | I::FmovGeneralToFloat(..)
+        | I::FmovFloatToGeneral(..)
+        | I::Tag(..)
+        | I::Untag(..)
+        | I::GetTag(..)
+        | I::And(..)
+        | I::Or(..)
+        | I::Xor(..)
+        | I::AndImm(..)
+        | I::ShiftRightImmRaw(..)
+        | I::HeapLoad(..)
+        | I::HeapLoadReg(..)
+        | I::HeapLoadByteReg(..)
+        | I::HeapStore(..)
+        | I::HeapStoreOffset(..)
+        | I::HeapStoreOffsetReg(..)
+        | I::HeapStoreByteOffsetReg(..)
+        | I::HeapStoreByteOffsetMasked(..)
+        | I::AtomicLoad(..)
+        | I::AtomicStore(..)
+        | I::CompareAndSwap(..)
+        | I::StoreFloat(..)
+        | I::PushStack(..)
+        | I::PopStack(..)
+        | I::GetStackPointer(..)
+        | I::GetStackPointerImm(..)
+        | I::GetFramePointer(..)
+        | I::CurrentStackPosition(..)
+        | I::ReadArgCount(..)
+        | I::ExtendLifeTime(..)
+        | I::LoadLabelAddress(..) => Err(BuildError::UnsupportedValueKind {
+            position,
+            msg: format!("operand shape not handled for {}", instruction_name(inst)),
+        }),
+
         _ => Err(BuildError::UnsupportedInstruction {
             position,
             variant: instruction_name(inst),
+        }),
+    }
+}
+
+/// Split a legacy `Assign` or `LoadConstant` into the appropriate Op
+/// variant based on the source kind.
+fn translate_assign(
+    dst: &VirtualRegister,
+    val: &Value,
+    position: usize,
+    classes: &HashMap<u32, RegClass>,
+) -> Result<Op, BuildError> {
+    let dst_v = to_cfg_vreg(dst, classes);
+    match val {
+        Value::Register(src) => Ok(Op::Move {
+            dst: dst_v,
+            src: to_cfg_vreg(src, classes),
+        }),
+        Value::TaggedConstant(n) => Ok(Op::ConstTaggedInt {
+            dst: dst_v,
+            value: *n as i64,
+        }),
+        Value::StringConstantPtr(p) => Ok(Op::ConstStringPtr {
+            dst: dst_v,
+            ptr: *p,
+        }),
+        Value::KeywordConstantPtr(p) => Ok(Op::ConstKeywordPtr {
+            dst: dst_v,
+            ptr: *p,
+        }),
+        Value::Function(id) => Ok(Op::ConstFunctionId {
+            dst: dst_v,
+            function_id: *id,
+        }),
+        Value::Pointer(p) => Ok(Op::ConstPointer {
+            dst: dst_v,
+            ptr: *p,
+        }),
+        Value::RawValue(v_imm) => Ok(Op::ConstRawValue {
+            dst: dst_v,
+            value: *v_imm as u64,
+        }),
+        Value::True => Ok(Op::ConstTrue { dst: dst_v }),
+        Value::False => Ok(Op::ConstFalse { dst: dst_v }),
+        Value::Null => Ok(Op::ConstNull { dst: dst_v }),
+        Value::Local(idx) => Ok(Op::SlotLoad {
+            dst: dst_v,
+            slot: SlotId(*idx as u32),
+        }),
+        Value::Spill(..) | Value::Stack(..) => Err(BuildError::UnsupportedValueKind {
+            position,
+            msg: format!("Assign/LoadConstant from {:?} not handled", val),
         }),
     }
 }
@@ -365,7 +712,9 @@ fn translate_terminator(
     position: usize,
     leader_to_block: &HashMap<usize, BlockId>,
     label_pos: &HashMap<usize, usize>,
+    classes: &HashMap<u32, RegClass>,
 ) -> Result<Terminator, BuildError> {
+    let v = |vr: &VirtualRegister| -> VReg { to_cfg_vreg(vr, classes) };
     let resolve_label = |label: &Label| -> Result<BlockId, BuildError> {
         let pos = label_pos
             .get(&label.index)
@@ -382,7 +731,7 @@ fn translate_terminator(
             })
     };
     match inst {
-        Instruction::Ret(Value::Register(v)) => Ok(Terminator::Ret { value: gp_vreg(v) }),
+        Instruction::Ret(Value::Register(vr)) => Ok(Terminator::Ret { value: v(vr) }),
         Instruction::Jump(l) => Ok(Terminator::Jump {
             target: resolve_label(l)?,
             args: vec![],
@@ -397,20 +746,19 @@ fn translate_terminator(
                 .ok_or(BuildError::FallThroughNotLeader { position })?;
             Ok(Terminator::Branch {
                 cond: *cond,
-                lhs: gp_vreg(lhs_vr),
-                rhs: gp_vreg(rhs_vr),
+                lhs: v(lhs_vr),
+                rhs: v(rhs_vr),
                 t_target,
                 t_args: vec![],
                 f_target,
                 f_args: vec![],
             })
         }
-        // Operand-shape mismatch on a supported terminator.
         Instruction::Ret(..) => Err(BuildError::UnsupportedValueKind {
             position,
             msg: "Ret operand was not a Value::Register".to_string(),
         }),
-        // Other terminators (Throw, TailRecurse) land in later sub-phases.
+        // Throw, TailRecurse land in later sub-phases.
         _ => Err(BuildError::UnsupportedInstruction {
             position,
             variant: instruction_name(inst),
@@ -431,10 +779,30 @@ fn require_register<'a>(
     }
 }
 
-fn gp_vreg(vr: &VirtualRegister) -> VReg {
+/// Build a `VReg` from a legacy `VirtualRegister`, looking up its class
+/// from the classification table. The table is computed once via
+/// `classify_vregs` and is authoritative for every VReg's class.
+fn to_cfg_vreg(vr: &VirtualRegister, classes: &HashMap<u32, RegClass>) -> VReg {
+    let class = classes
+        .get(&(vr.index as u32))
+        .copied()
+        .unwrap_or(RegClass::Gp);
     VReg {
         index: vr.index as u32,
-        class: RegClass::Gp,
+        class,
+    }
+}
+
+/// Extract a 64-bit immediate from a `Value` that's expected to encode a
+/// compile-time constant. Used for the tag-bits argument of `Tag`.
+fn extract_imm_u64(value: &Value, position: usize) -> Result<u64, BuildError> {
+    match value {
+        Value::TaggedConstant(n) => Ok(*n as u64),
+        Value::RawValue(v) => Ok(*v as u64),
+        _ => Err(BuildError::UnsupportedValueKind {
+            position,
+            msg: format!("expected constant immediate, got {:?}", value),
+        }),
     }
 }
 
@@ -456,29 +824,117 @@ fn rebuild_predecessors(f: &mut CfgFunction) {
 
 /// Infer the RegClass of every VReg by scanning def sites.
 ///
-/// Phase 1b-1: every translated op produces a GP value, so the table is
-/// uniform GP. 1b-2 adds FP-producing ops (AddFloat, IntToFloat,
-/// FmovGeneralToFloat, etc.) and the inference becomes meaningful.
+/// Two-pass algorithm:
+///
+/// 1. **Definite-class pass.** Every Instruction that unambiguously
+///    determines its def's class (AddInt → GP, AddFloat → FP, etc.) sets
+///    that class in the table.
+/// 2. **Fixpoint pass.** `Assign`/`LoadConstant` of one VReg from another
+///    propagates the source's class to the destination. Iterates until
+///    stable, which handles chains like `vrA = AddFloat(...); vrB = vrA;
+///    vrC = vrB` where the FP class flows from vrA through vrB to vrC.
+///
+/// VRegs not classified by either pass default to GP at `to_cfg_vreg`
+/// lookup time. In practice this only happens for VRegs that the legacy
+/// IR uses as undefined-elsewhere (which is malformed anyway) — the
+/// verifier flags any mismatch when a downstream op disagrees.
 fn classify_vregs(instructions: &[Instruction]) -> HashMap<u32, RegClass> {
     let mut classes = HashMap::new();
+
+    // Pass 1: definite-class defs.
     for inst in instructions {
         for (vr, class) in def_class_of(inst) {
             classes.insert(vr, class);
         }
     }
+
+    // Pass 2: fixpoint over reg-to-reg Assign / LoadConstant moves.
+    loop {
+        let mut changed = false;
+        for inst in instructions {
+            let (dst_vr, src_vr) = match inst {
+                Instruction::Assign(Value::Register(d), Value::Register(s)) => (d, s),
+                Instruction::LoadConstant(Value::Register(d), Value::Register(s)) => (d, s),
+                _ => continue,
+            };
+            if let Some(&src_class) = classes.get(&(src_vr.index as u32)) {
+                let dst_idx = dst_vr.index as u32;
+                if classes.get(&dst_idx) != Some(&src_class) {
+                    classes.insert(dst_idx, src_class);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
     classes
 }
 
+/// For each Instruction, return `(vreg_index, RegClass)` for every VReg
+/// the instruction definitively defines with a known class. Assign and
+/// LoadConstant are handled by the fixpoint in `classify_vregs`.
 fn def_class_of(inst: &Instruction) -> Vec<(u32, RegClass)> {
-    let as_gp = |v: &Value| match v {
-        Value::Register(vr) => Some((vr.index as u32, RegClass::Gp)),
-        _ => None,
+    let as_class = |val: &Value, c: RegClass| -> Option<(u32, RegClass)> {
+        match val {
+            Value::Register(vr) => Some((vr.index as u32, c)),
+            _ => None,
+        }
     };
     let mut out = Vec::new();
+    use Instruction as I;
+    use RegClass::*;
     match inst {
-        Instruction::AddInt(dst, _, _) => out.extend(as_gp(dst)),
-        Instruction::LoadLocal(dst, _) => out.extend(as_gp(dst)),
-        Instruction::RegisterArgument(dst) => out.extend(as_gp(dst)),
+        // GP defs ----------------------------------------------------
+        I::AddInt(dst, _, _)
+        | I::LoadLocal(dst, _)
+        | I::RegisterArgument(dst)
+        | I::Compare(dst, _, _, _)
+        | I::CompareFloat(dst, _, _, _)
+        | I::LoadTrue(dst)
+        | I::LoadFalse(dst)
+        | I::Tag(dst, _, _)
+        | I::Untag(dst, _)
+        | I::GetTag(dst, _)
+        | I::And(dst, _, _)
+        | I::Or(dst, _, _)
+        | I::Xor(dst, _, _)
+        | I::AndImm(dst, _, _)
+        | I::ShiftRightImmRaw(dst, _, _)
+        | I::HeapLoad(dst, _, _)
+        | I::HeapLoadReg(dst, _, _)
+        | I::HeapLoadByteReg(dst, _, _)
+        | I::AtomicLoad(dst, _)
+        | I::PopStack(dst)
+        | I::GetFramePointer(dst)
+        | I::CurrentStackPosition(dst)
+        | I::GetStackPointer(dst, _)
+        | I::GetStackPointerImm(dst, _)
+        | I::ReadArgCount(dst)
+        | I::LoadLabelAddress(dst, _)
+        | I::FmovFloatToGeneral(dst, _) => out.extend(as_class(dst, Gp)),
+
+        // FP defs ----------------------------------------------------
+        I::AddFloat(dst, _, _)
+        | I::SubFloat(dst, _, _)
+        | I::MulFloat(dst, _, _)
+        | I::DivFloat(dst, _, _)
+        | I::IntToFloat(dst, _)
+        | I::FRoundToZero(dst, _)
+        | I::FmovGeneralToFloat(dst, _) => out.extend(as_class(dst, Fp)),
+
+        // Multi-def ops ----------------------------------------------
+        I::HeapStoreByteOffsetMasked(_, _, t1, t2, _, _, _) => {
+            out.extend(as_class(t1, Gp));
+            out.extend(as_class(t2, Gp));
+        }
+        I::StoreFloat(_, temp, _) => out.extend(as_class(temp, Gp)),
+
+        // Everything else (terminators, stores, Assign, LoadConstant,
+        // bail-out arithmetic, calls, exception/continuation, etc.)
+        // defines nothing for class-inference purposes here.
         _ => {}
     }
     out
@@ -977,17 +1433,21 @@ mod tests {
     }
 
     /// Unsupported instruction → clear Err with the variant name.
+    /// Recurse is deferred to 1b-4 (calls) per the no-stubs rule.
     #[test]
     fn unsupported_instruction_returns_error() {
         let ir = ir_with(
-            vec![Instruction::Breakpoint, Instruction::Ret(vr(0))],
+            vec![
+                Instruction::Recurse(vr(0), vec![vr(1)]),
+                Instruction::Ret(vr(0)),
+            ],
             0,
-            "with_breakpoint",
+            "with_recurse",
         );
-        let err = build_cfg(&ir).expect_err("Breakpoint not yet supported");
+        let err = build_cfg(&ir).expect_err("Recurse not yet supported");
         match err {
             BuildError::UnsupportedInstruction { variant, .. } => {
-                assert_eq!(variant, "Breakpoint");
+                assert_eq!(variant, "Recurse");
             }
             other => panic!("expected UnsupportedInstruction, got {:?}", other),
         }

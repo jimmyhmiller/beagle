@@ -73,15 +73,301 @@ pub struct Block {
 /// CFG-layer op. Variants are added as Phase 1b lowers their legacy IR
 /// counterparts. Per the project rule, every variant corresponds to a
 /// real, fully-translated legacy op — no catch-all `Legacy(_)` stub.
+///
+/// Bail-out arithmetic (Sub, Mul, Div, Modulo, Shifts, GuardInt, GuardFloat)
+/// is not in this enum — they need a two-successor terminator variant and
+/// land in Phase 1b-3. Calls, exception/continuation ops, and inline bump
+/// allocation are deferred to 1b-4 / 1b-5.
 #[derive(Debug, Clone)]
 pub enum Op {
-    /// Read a stack-slot local into a fresh VReg.
-    SlotLoad { dst: VReg, slot: SlotId },
-    /// Write a VReg into a stack-slot local.
-    SlotStore { slot: SlotId, src: VReg },
-    /// Tagged-integer addition. Two-input, one-output. Both operands and
-    /// the destination are GP-class.
-    AddInt { dst: VReg, lhs: VReg, rhs: VReg },
+    // ---- Slots (I6 — locals stay materialized until mem2reg) ----
+    SlotLoad {
+        dst: VReg,
+        slot: SlotId,
+    },
+    SlotStore {
+        slot: SlotId,
+        src: VReg,
+    },
+
+    // ---- Moves & constants ----
+    /// Register-to-register copy. SSA copy-coalescing may eliminate.
+    Move {
+        dst: VReg,
+        src: VReg,
+    },
+    /// Tagged integer constant materialization.
+    ConstTaggedInt {
+        dst: VReg,
+        value: i64,
+    },
+    /// Pointer to a string in the string-constants region.
+    ConstStringPtr {
+        dst: VReg,
+        ptr: usize,
+    },
+    /// Pointer to a keyword in the keyword-constants region.
+    ConstKeywordPtr {
+        dst: VReg,
+        ptr: usize,
+    },
+    /// Function id, materialized as a tagged function pointer at runtime.
+    ConstFunctionId {
+        dst: VReg,
+        function_id: usize,
+    },
+    /// Raw pointer constant (untagged).
+    ConstPointer {
+        dst: VReg,
+        ptr: usize,
+    },
+    /// Raw 64-bit constant — no tagging applied.
+    ConstRawValue {
+        dst: VReg,
+        value: u64,
+    },
+    ConstTrue {
+        dst: VReg,
+    },
+    ConstFalse {
+        dst: VReg,
+    },
+    /// Tagged null (legacy uses bit pattern 0b111).
+    ConstNull {
+        dst: VReg,
+    },
+    /// Address of a CFG block, used by handler / continuation setup.
+    ConstLabelAddress {
+        dst: VReg,
+        target: BlockId,
+    },
+
+    // ---- Integer arithmetic (no bail) ----
+    AddInt {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+
+    // ---- Comparisons (produce GP 0/1) ----
+    Compare {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+        cond: Condition,
+    },
+    CompareFloat {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+        cond: Condition,
+    },
+
+    // ---- Floating-point arithmetic ----
+    AddFloat {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+    SubFloat {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+    MulFloat {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+    DivFloat {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+
+    // ---- Conversions / bit-moves between classes ----
+    IntToFloat {
+        dst: VReg,
+        src: VReg,
+    },
+    FRoundToZero {
+        dst: VReg,
+        src: VReg,
+    },
+    /// GP→FP bit move (bits of an int reg become bits of an FP reg).
+    FmovGpToFp {
+        dst: VReg,
+        src: VReg,
+    },
+    /// FP→GP bit move.
+    FmovFpToGp {
+        dst: VReg,
+        src: VReg,
+    },
+
+    // ---- Tag bit manipulation (low 3 bits on tagged values) ----
+    Tag {
+        dst: VReg,
+        src: VReg,
+        tag_bits: u64,
+    },
+    Untag {
+        dst: VReg,
+        src: VReg,
+    },
+    GetTag {
+        dst: VReg,
+        src: VReg,
+    },
+
+    // ---- Bit ops ----
+    And {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+    Or {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+    Xor {
+        dst: VReg,
+        lhs: VReg,
+        rhs: VReg,
+    },
+    AndImm {
+        dst: VReg,
+        src: VReg,
+        imm: u64,
+    },
+    ShiftRightImmRaw {
+        dst: VReg,
+        src: VReg,
+        imm: i32,
+    },
+
+    // ---- Heap memory ----
+    HeapLoad {
+        dst: VReg,
+        base: VReg,
+        offset: i32,
+    },
+    HeapLoadReg {
+        dst: VReg,
+        base: VReg,
+        offset: VReg,
+    },
+    HeapLoadByteReg {
+        dst: VReg,
+        base: VReg,
+        offset: VReg,
+    },
+    HeapStore {
+        addr: VReg,
+        src: VReg,
+    },
+    HeapStoreOffset {
+        base: VReg,
+        src: VReg,
+        offset: usize,
+    },
+    HeapStoreOffsetReg {
+        base: VReg,
+        src: VReg,
+        offset: VReg,
+    },
+    HeapStoreByteOffsetReg {
+        base: VReg,
+        src: VReg,
+        offset: VReg,
+    },
+    /// Read-modify-write of a single byte at `ptr + offset + byte_offset`,
+    /// using `mask` to clear the target byte before ORing `val` in.
+    /// `temp1` / `temp2` are scratch defs (the original IR pre-allocates
+    /// them as VRegs; we treat them as defs so the verifier sees their
+    /// dataflow correctly).
+    HeapStoreByteOffsetMasked {
+        ptr: VReg,
+        val: VReg,
+        temp1: VReg,
+        temp2: VReg,
+        offset: usize,
+        byte_offset: usize,
+        mask: usize,
+    },
+
+    // ---- Atomic memory ----
+    AtomicLoad {
+        dst: VReg,
+        src: VReg,
+    },
+    AtomicStore {
+        addr: VReg,
+        src: VReg,
+    },
+    /// 3-operand CAS — no result, just side-effect.
+    CompareAndSwap {
+        addr: VReg,
+        expected: VReg,
+        new: VReg,
+    },
+
+    /// Parse a float constant from a string at compile time and store its
+    /// bits at offset 1 of `dest`. `temp` is a GP scratch used to hold
+    /// the bit pattern between mov-imm and store-on-heap.
+    StoreFloatConstant {
+        dest: VReg,
+        temp: VReg,
+        value_text: String,
+    },
+
+    // ---- Stack pointer manipulation ----
+    PushStack {
+        src: VReg,
+    },
+    PopStack {
+        dst: VReg,
+    },
+    GetStackPointer {
+        dst: VReg,
+        offset: VReg,
+    },
+    GetStackPointerImm {
+        dst: VReg,
+        offset: isize,
+    },
+    GetFramePointer {
+        dst: VReg,
+    },
+    CurrentStackPosition {
+        dst: VReg,
+    },
+
+    // ---- Variadic plumbing ----
+    ReadArgCount {
+        dst: VReg,
+    },
+
+    // ---- Misc no-VReg ops & lifetime markers ----
+    Breakpoint,
+    /// Keeps a VReg live for regalloc bookkeeping; no semantic effect.
+    ExtendLifetime {
+        src: VReg,
+    },
+    RecordGcSafepoint,
+    /// Inline-feedback bit-mask OR into a runtime feedback word at a
+    /// known absolute address. All arguments are compile-time immediates.
+    FeedbackOr {
+        slot_addr: usize,
+        bits: u64,
+    },
+    /// Per-function entry tier-up check. All immediates.
+    TierUpCheck {
+        counter_addr: usize,
+        name_c_str_ptr: usize,
+        trampoline_fn_ptr: usize,
+    },
 }
 
 /// Block terminator. Exactly one per block (**I1**). All control transfer
@@ -239,7 +525,72 @@ impl Op {
         match self {
             Op::SlotLoad { dst, .. } => vec![*dst],
             Op::SlotStore { .. } => vec![],
+
+            Op::Move { dst, .. } => vec![*dst],
+            Op::ConstTaggedInt { dst, .. } => vec![*dst],
+            Op::ConstStringPtr { dst, .. } => vec![*dst],
+            Op::ConstKeywordPtr { dst, .. } => vec![*dst],
+            Op::ConstFunctionId { dst, .. } => vec![*dst],
+            Op::ConstPointer { dst, .. } => vec![*dst],
+            Op::ConstRawValue { dst, .. } => vec![*dst],
+            Op::ConstTrue { dst } => vec![*dst],
+            Op::ConstFalse { dst } => vec![*dst],
+            Op::ConstNull { dst } => vec![*dst],
+            Op::ConstLabelAddress { dst, .. } => vec![*dst],
+
             Op::AddInt { dst, .. } => vec![*dst],
+            Op::Compare { dst, .. } => vec![*dst],
+            Op::CompareFloat { dst, .. } => vec![*dst],
+
+            Op::AddFloat { dst, .. } => vec![*dst],
+            Op::SubFloat { dst, .. } => vec![*dst],
+            Op::MulFloat { dst, .. } => vec![*dst],
+            Op::DivFloat { dst, .. } => vec![*dst],
+
+            Op::IntToFloat { dst, .. } => vec![*dst],
+            Op::FRoundToZero { dst, .. } => vec![*dst],
+            Op::FmovGpToFp { dst, .. } => vec![*dst],
+            Op::FmovFpToGp { dst, .. } => vec![*dst],
+
+            Op::Tag { dst, .. } => vec![*dst],
+            Op::Untag { dst, .. } => vec![*dst],
+            Op::GetTag { dst, .. } => vec![*dst],
+
+            Op::And { dst, .. } => vec![*dst],
+            Op::Or { dst, .. } => vec![*dst],
+            Op::Xor { dst, .. } => vec![*dst],
+            Op::AndImm { dst, .. } => vec![*dst],
+            Op::ShiftRightImmRaw { dst, .. } => vec![*dst],
+
+            Op::HeapLoad { dst, .. } => vec![*dst],
+            Op::HeapLoadReg { dst, .. } => vec![*dst],
+            Op::HeapLoadByteReg { dst, .. } => vec![*dst],
+            Op::HeapStore { .. } => vec![],
+            Op::HeapStoreOffset { .. } => vec![],
+            Op::HeapStoreOffsetReg { .. } => vec![],
+            Op::HeapStoreByteOffsetReg { .. } => vec![],
+            Op::HeapStoreByteOffsetMasked { temp1, temp2, .. } => vec![*temp1, *temp2],
+
+            Op::AtomicLoad { dst, .. } => vec![*dst],
+            Op::AtomicStore { .. } => vec![],
+            Op::CompareAndSwap { .. } => vec![],
+
+            Op::StoreFloatConstant { temp, .. } => vec![*temp],
+
+            Op::PushStack { .. } => vec![],
+            Op::PopStack { dst } => vec![*dst],
+            Op::GetStackPointer { dst, .. } => vec![*dst],
+            Op::GetStackPointerImm { dst, .. } => vec![*dst],
+            Op::GetFramePointer { dst } => vec![*dst],
+            Op::CurrentStackPosition { dst } => vec![*dst],
+
+            Op::ReadArgCount { dst } => vec![*dst],
+
+            Op::Breakpoint => vec![],
+            Op::ExtendLifetime { .. } => vec![],
+            Op::RecordGcSafepoint => vec![],
+            Op::FeedbackOr { .. } => vec![],
+            Op::TierUpCheck { .. } => vec![],
         }
     }
 
@@ -247,7 +598,76 @@ impl Op {
         match self {
             Op::SlotLoad { .. } => vec![],
             Op::SlotStore { src, .. } => vec![*src],
+
+            Op::Move { src, .. } => vec![*src],
+            Op::ConstTaggedInt { .. }
+            | Op::ConstStringPtr { .. }
+            | Op::ConstKeywordPtr { .. }
+            | Op::ConstFunctionId { .. }
+            | Op::ConstPointer { .. }
+            | Op::ConstRawValue { .. }
+            | Op::ConstTrue { .. }
+            | Op::ConstFalse { .. }
+            | Op::ConstNull { .. }
+            | Op::ConstLabelAddress { .. } => vec![],
+
             Op::AddInt { lhs, rhs, .. } => vec![*lhs, *rhs],
+            Op::Compare { lhs, rhs, .. } => vec![*lhs, *rhs],
+            Op::CompareFloat { lhs, rhs, .. } => vec![*lhs, *rhs],
+
+            Op::AddFloat { lhs, rhs, .. } => vec![*lhs, *rhs],
+            Op::SubFloat { lhs, rhs, .. } => vec![*lhs, *rhs],
+            Op::MulFloat { lhs, rhs, .. } => vec![*lhs, *rhs],
+            Op::DivFloat { lhs, rhs, .. } => vec![*lhs, *rhs],
+
+            Op::IntToFloat { src, .. } => vec![*src],
+            Op::FRoundToZero { src, .. } => vec![*src],
+            Op::FmovGpToFp { src, .. } => vec![*src],
+            Op::FmovFpToGp { src, .. } => vec![*src],
+
+            Op::Tag { src, .. } => vec![*src],
+            Op::Untag { src, .. } => vec![*src],
+            Op::GetTag { src, .. } => vec![*src],
+
+            Op::And { lhs, rhs, .. } => vec![*lhs, *rhs],
+            Op::Or { lhs, rhs, .. } => vec![*lhs, *rhs],
+            Op::Xor { lhs, rhs, .. } => vec![*lhs, *rhs],
+            Op::AndImm { src, .. } => vec![*src],
+            Op::ShiftRightImmRaw { src, .. } => vec![*src],
+
+            Op::HeapLoad { base, .. } => vec![*base],
+            Op::HeapLoadReg { base, offset, .. } => vec![*base, *offset],
+            Op::HeapLoadByteReg { base, offset, .. } => vec![*base, *offset],
+            Op::HeapStore { addr, src } => vec![*addr, *src],
+            Op::HeapStoreOffset { base, src, .. } => vec![*base, *src],
+            Op::HeapStoreOffsetReg { base, src, offset } => vec![*base, *src, *offset],
+            Op::HeapStoreByteOffsetReg { base, src, offset } => vec![*base, *src, *offset],
+            Op::HeapStoreByteOffsetMasked { ptr, val, .. } => vec![*ptr, *val],
+
+            Op::AtomicLoad { src, .. } => vec![*src],
+            Op::AtomicStore { addr, src } => vec![*addr, *src],
+            Op::CompareAndSwap {
+                addr,
+                expected,
+                new,
+            } => vec![*addr, *expected, *new],
+
+            Op::StoreFloatConstant { dest, .. } => vec![*dest],
+
+            Op::PushStack { src } => vec![*src],
+            Op::PopStack { .. } => vec![],
+            Op::GetStackPointer { offset, .. } => vec![*offset],
+            Op::GetStackPointerImm { .. } => vec![],
+            Op::GetFramePointer { .. } => vec![],
+            Op::CurrentStackPosition { .. } => vec![],
+
+            Op::ReadArgCount { .. } => vec![],
+
+            Op::Breakpoint => vec![],
+            Op::ExtendLifetime { src } => vec![*src],
+            Op::RecordGcSafepoint => vec![],
+            Op::FeedbackOr { .. } => vec![],
+            Op::TierUpCheck { .. } => vec![],
         }
     }
 }
