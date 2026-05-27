@@ -20,6 +20,7 @@
 
 pub mod builder;
 pub mod dom;
+pub mod lift_vregs;
 pub mod mem2reg;
 pub mod verify;
 
@@ -646,6 +647,32 @@ impl InlineBranchOp {
             InlineBranchOp::InlineBumpAllocate { .. } => vec![],
         }
     }
+
+    pub fn rename_uses(&mut self, rename: &std::collections::HashMap<VReg, VReg>) {
+        let apply = |v: &mut VReg| {
+            if let Some(&new) = rename.get(v) {
+                *v = new;
+            }
+        };
+        match self {
+            InlineBranchOp::SubChecked { lhs, rhs, .. }
+            | InlineBranchOp::MulChecked { lhs, rhs, .. }
+            | InlineBranchOp::DivChecked { lhs, rhs, .. }
+            | InlineBranchOp::ModuloChecked { lhs, rhs, .. }
+            | InlineBranchOp::ShiftLeftChecked { lhs, rhs, .. }
+            | InlineBranchOp::ShiftRightChecked { lhs, rhs, .. }
+            | InlineBranchOp::ShiftRightZeroChecked { lhs, rhs, .. } => {
+                apply(lhs);
+                apply(rhs);
+            }
+            InlineBranchOp::ShiftRightImmChecked { src, .. }
+            | InlineBranchOp::GuardInt { src, .. }
+            | InlineBranchOp::GuardFloat { src, .. } => {
+                apply(src);
+            }
+            InlineBranchOp::InlineBumpAllocate { .. } => {}
+        }
+    }
 }
 
 /// A function in the SSA pipeline. Built from a legacy `Ir` in Phase 1.
@@ -775,6 +802,65 @@ impl Terminator {
                 v
             }
             Terminator::Unreachable => vec![],
+        }
+    }
+
+    /// Rewrite every use of any VReg in `rename` to the renamed VReg.
+    /// Defs (e.g. fall-through-edge-only `InlineBranchOp::dst`) are left
+    /// alone — only use positions are touched. Used by the lift-VRegs
+    /// pass to redirect cross-block uses through a slot.
+    pub fn rename_uses(&mut self, rename: &std::collections::HashMap<VReg, VReg>) {
+        let apply = |v: &mut VReg, rename: &std::collections::HashMap<VReg, VReg>| {
+            if let Some(&new) = rename.get(v) {
+                *v = new;
+            }
+        };
+        match self {
+            Terminator::Jump { args, .. } => {
+                for a in args.iter_mut() {
+                    apply(a, rename);
+                }
+            }
+            Terminator::Branch {
+                lhs,
+                rhs,
+                t_args,
+                f_args,
+                ..
+            } => {
+                apply(lhs, rename);
+                apply(rhs, rename);
+                for a in t_args.iter_mut() {
+                    apply(a, rename);
+                }
+                for a in f_args.iter_mut() {
+                    apply(a, rename);
+                }
+            }
+            Terminator::InlineBranch {
+                op,
+                fall_args,
+                bail_args,
+                ..
+            } => {
+                op.rename_uses(rename);
+                for a in fall_args.iter_mut() {
+                    apply(a, rename);
+                }
+                for a in bail_args.iter_mut() {
+                    apply(a, rename);
+                }
+            }
+            Terminator::Ret { value } => apply(value, rename),
+            Terminator::Throw {
+                value, resume_args, ..
+            } => {
+                apply(value, rename);
+                for a in resume_args.iter_mut() {
+                    apply(a, rename);
+                }
+            }
+            Terminator::Unreachable => {}
         }
     }
 
@@ -991,6 +1077,162 @@ impl Op {
             Op::ReturnFromShift {
                 value, cont_ptr, ..
             } => vec![*value, *cont_ptr],
+        }
+    }
+
+    /// Rewrite every use of any VReg listed in `rename` to its renamed
+    /// counterpart. Defs are NOT touched — this is the inverse rewriting
+    /// the lift-VRegs pass needs to redirect uses through a slot without
+    /// disturbing the original def.
+    pub fn rename_uses(&mut self, rename: &std::collections::HashMap<VReg, VReg>) {
+        let apply = |v: &mut VReg| {
+            if let Some(&new) = rename.get(v) {
+                *v = new;
+            }
+        };
+        match self {
+            Op::SlotLoad { .. } => {}
+            Op::SlotStore { src, .. } => apply(src),
+
+            Op::Move { src, .. } => apply(src),
+            Op::ConstTaggedInt { .. }
+            | Op::ConstStringPtr { .. }
+            | Op::ConstKeywordPtr { .. }
+            | Op::ConstFunctionId { .. }
+            | Op::ConstPointer { .. }
+            | Op::ConstRawValue { .. }
+            | Op::ConstTrue { .. }
+            | Op::ConstFalse { .. }
+            | Op::ConstNull { .. }
+            | Op::ConstLabelAddress { .. } => {}
+
+            Op::AddInt { lhs, rhs, .. }
+            | Op::Compare { lhs, rhs, .. }
+            | Op::CompareFloat { lhs, rhs, .. }
+            | Op::AddFloat { lhs, rhs, .. }
+            | Op::SubFloat { lhs, rhs, .. }
+            | Op::MulFloat { lhs, rhs, .. }
+            | Op::DivFloat { lhs, rhs, .. }
+            | Op::And { lhs, rhs, .. }
+            | Op::Or { lhs, rhs, .. }
+            | Op::Xor { lhs, rhs, .. } => {
+                apply(lhs);
+                apply(rhs);
+            }
+
+            Op::IntToFloat { src, .. }
+            | Op::FRoundToZero { src, .. }
+            | Op::FmovGpToFp { src, .. }
+            | Op::FmovFpToGp { src, .. }
+            | Op::Untag { src, .. }
+            | Op::GetTag { src, .. }
+            | Op::AndImm { src, .. }
+            | Op::ShiftRightImmRaw { src, .. } => apply(src),
+
+            Op::Tag {
+                src, tag_source, ..
+            } => {
+                apply(src);
+                if let TagSource::Register(t) = tag_source {
+                    apply(t);
+                }
+            }
+
+            Op::HeapLoad { base, .. } => apply(base),
+            Op::HeapLoadReg { base, offset, .. } | Op::HeapLoadByteReg { base, offset, .. } => {
+                apply(base);
+                apply(offset);
+            }
+            Op::HeapStore { addr, src } => {
+                apply(addr);
+                apply(src);
+            }
+            Op::HeapStoreOffset { base, src, .. } => {
+                apply(base);
+                apply(src);
+            }
+            Op::HeapStoreOffsetReg { base, src, offset }
+            | Op::HeapStoreByteOffsetReg { base, src, offset } => {
+                apply(base);
+                apply(src);
+                apply(offset);
+            }
+            Op::HeapStoreByteOffsetMasked { ptr, val, .. } => {
+                apply(ptr);
+                apply(val);
+            }
+
+            Op::AtomicLoad { src, .. } => apply(src),
+            Op::AtomicStore { addr, src } => {
+                apply(addr);
+                apply(src);
+            }
+            Op::CompareAndSwap {
+                addr,
+                expected,
+                new,
+            } => {
+                apply(addr);
+                apply(expected);
+                apply(new);
+            }
+
+            Op::StoreFloatConstant { dest, .. } => apply(dest),
+
+            Op::PushStack { src } => apply(src),
+            Op::PopStack { .. } => {}
+            Op::GetStackPointer { offset, .. } => apply(offset),
+            Op::GetStackPointerImm { .. }
+            | Op::GetFramePointer { .. }
+            | Op::CurrentStackPosition { .. }
+            | Op::ReadArgCount { .. } => {}
+
+            Op::Breakpoint
+            | Op::RecordGcSafepoint
+            | Op::FeedbackOr { .. }
+            | Op::TierUpCheck { .. } => {}
+            Op::ExtendLifetime { src } => apply(src),
+
+            Op::Call { target, args, .. } => {
+                if let CallTarget::Register(fp) = target {
+                    apply(fp);
+                }
+                for a in args.iter_mut() {
+                    apply(a);
+                }
+            }
+            Op::Recurse { args, .. } => {
+                for a in args.iter_mut() {
+                    apply(a);
+                }
+            }
+
+            Op::PushExceptionHandler { .. }
+            | Op::PushResumableExceptionHandler { .. }
+            | Op::PopExceptionHandler { .. }
+            | Op::PushPromptHandler { .. }
+            | Op::CaptureContinuation { .. } => {}
+            Op::PopExceptionHandlerById { handler_id, .. } => apply(handler_id),
+            Op::PopPromptHandler { result, .. } => apply(result),
+            Op::PushPromptTag { tag, .. } => apply(tag),
+            Op::CaptureContinuationTagged { tag, .. } => apply(tag),
+
+            Op::PerformEffect {
+                handler,
+                enum_type,
+                op_value,
+                ..
+            } => {
+                apply(handler);
+                apply(enum_type);
+                apply(op_value);
+            }
+            Op::ReturnFromShift {
+                value, cont_ptr, ..
+            } => {
+                apply(value);
+                apply(cont_ptr);
+            }
         }
     }
 }

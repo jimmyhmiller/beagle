@@ -295,10 +295,20 @@ pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
     // the predecessor map.
     dce_unreachable_blocks(&mut f);
 
-    // Phase 2: mem2reg. Promotes profitable stack slots to SSA values +
-    // block params at iterated dominance frontiers (Cytron-style). Runs
-    // unconditionally; slots that don't pay (fewer than 2 reads) stay
-    // as SlotLoad / SlotStore. Preserves I1–I8 by construction; phi
+    // Phase 2a: lift cross-block legacy VRegs to slots. The legacy IR
+    // emits VRegs whose def doesn't dominate every use (single-def, but
+    // used across control-flow merges); SSA can't model this directly
+    // (I5). The pass converts each such VReg's def to a SlotStore and
+    // each use to a SlotLoad, producing slots that the subsequent
+    // mem2reg run will lift back to SSA values + phi-params at
+    // dominance frontiers.
+    crate::cfg::lift_vregs::lift_cross_block_vregs(&mut f);
+
+    // Phase 2b: mem2reg. Promotes profitable stack slots to SSA values
+    // + block params at iterated dominance frontiers (Cytron-style).
+    // Runs after lift so the slots created in Phase 2a are eligible for
+    // promotion. Slots that don't pay (fewer than 2 reads) stay as
+    // SlotLoad / SlotStore. Preserves I1–I8 by construction; phi
     // placement is "block params" not "Phi op" per I3 / F10.
     crate::cfg::mem2reg::promote_slots(&mut f);
 
