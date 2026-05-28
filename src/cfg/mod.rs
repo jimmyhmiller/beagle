@@ -1045,7 +1045,21 @@ impl Op {
             Op::HeapStoreOffset { .. } => vec![],
             Op::HeapStoreOffsetReg { .. } => vec![],
             Op::HeapStoreByteOffsetReg { .. } => vec![],
-            Op::HeapStoreByteOffsetMasked { temp1, temp2, .. } => vec![*temp1, *temp2],
+            // Scratch operands are NOT defs: the legacy IR builder
+            // emits `temp1 = ConstRawValue(0); temp2 = ConstRawValue(0)`
+            // right before HeapStoreByteOffsetMasked so their registers
+            // start initialized. The op then uses those registers as
+            // scratch (load/mask/or). Treating temp1/temp2 as defs here
+            // would make the lift see them as multi-def (with the prior
+            // ConstRawValue) and rename them — but the op needs to use
+            // the SAME vreg-as-scratch the prior Assign produced, so
+            // the rename leaves SlotStores referencing scratch VRegs
+            // whose names came from a different def site. Caught by
+            // sort_timsort_test.bg SIGSEGV in tim-allocate-array.
+            // Modeling temp1/temp2 as uses-only keeps SSA invariants
+            // sound — the scratch mutation is invisible to readers
+            // because nothing reads temp1/temp2 after this op.
+            Op::HeapStoreByteOffsetMasked { .. } => vec![],
 
             Op::AtomicLoad { dst, .. } => vec![*dst],
             Op::AtomicStore { .. } => vec![],
@@ -1140,10 +1154,9 @@ impl Op {
             | Op::HeapStoreOffset { .. }
             | Op::HeapStoreOffsetReg { .. }
             | Op::HeapStoreByteOffsetReg { .. } => {}
-            Op::HeapStoreByteOffsetMasked { temp1, temp2, .. } => {
-                apply(temp1);
-                apply(temp2);
-            }
+            // No defs — temp1/temp2 are scratch uses (see comment in
+            // `defs` above).
+            Op::HeapStoreByteOffsetMasked { .. } => {}
 
             Op::AtomicLoad { dst, .. } => apply(dst),
             Op::AtomicStore { .. } | Op::CompareAndSwap { .. } => {}
@@ -1235,7 +1248,16 @@ impl Op {
             Op::HeapStoreOffset { base, src, .. } => vec![*base, *src],
             Op::HeapStoreOffsetReg { base, src, offset } => vec![*base, *src, *offset],
             Op::HeapStoreByteOffsetReg { base, src, offset } => vec![*base, *src, *offset],
-            Op::HeapStoreByteOffsetMasked { ptr, val, .. } => vec![*ptr, *val],
+            // temp1/temp2 are scratch uses; the op reads them on
+            // entry (legacy ConstRawValue(0) initializer flows in) and
+            // overwrites them internally. See defs() comment above.
+            Op::HeapStoreByteOffsetMasked {
+                ptr,
+                val,
+                temp1,
+                temp2,
+                ..
+            } => vec![*ptr, *val, *temp1, *temp2],
 
             Op::AtomicLoad { src, .. } => vec![*src],
             Op::AtomicStore { addr, src } => vec![*addr, *src],
@@ -1372,9 +1394,17 @@ impl Op {
                 apply(src);
                 apply(offset);
             }
-            Op::HeapStoreByteOffsetMasked { ptr, val, .. } => {
+            Op::HeapStoreByteOffsetMasked {
+                ptr,
+                val,
+                temp1,
+                temp2,
+                ..
+            } => {
                 apply(ptr);
                 apply(val);
+                apply(temp1);
+                apply(temp2);
             }
 
             Op::AtomicLoad { src, .. } => apply(src),

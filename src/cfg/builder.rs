@@ -308,7 +308,9 @@ pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
     // each use to a SlotLoad, producing slots that the subsequent
     // mem2reg run will lift back to SSA values + phi-params at
     // dominance frontiers.
-    crate::cfg::lift_vregs::lift_cross_block_vregs(&mut f);
+    if std::env::var("BEAGLE_SSA_NO_LIFT").is_err() {
+        crate::cfg::lift_vregs::lift_cross_block_vregs(&mut f);
+    }
     crate::cfg::dump::maybe_dump_phase("03-after-lift", &f, false);
     crate::cfg::dump::maybe_verify_stage("03-after-lift", &f);
 
