@@ -318,7 +318,9 @@ pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
     // promotion. Slots that don't pay (fewer than 2 reads) stay as
     // SlotLoad / SlotStore. Preserves I1–I8 by construction; phi
     // placement is "block params" not "Phi op" per I3 / F10.
-    crate::cfg::mem2reg::promote_slots(&mut f);
+    if std::env::var("BEAGLE_SSA_NO_MEM2REG").is_err() {
+        crate::cfg::mem2reg::promote_slots(&mut f);
+    }
     crate::cfg::dump::maybe_dump_phase("04-after-mem2reg", &f, false);
     crate::cfg::dump::maybe_verify_stage("04-after-mem2reg", &f);
 

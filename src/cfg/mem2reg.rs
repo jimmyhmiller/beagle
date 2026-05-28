@@ -47,16 +47,50 @@ pub fn promote_slots(f: &mut CfgFunction) {
     }
 
     let (slot_writes, slot_reads) = collect_slot_sites(f);
-    let promotable: HashSet<SlotId> = slot_writes
+    let read_filtered: HashSet<SlotId> = slot_writes
         .keys()
         .copied()
         .filter(|s| slot_reads.get(s).copied().unwrap_or(0) >= 2)
         .collect();
-    if promotable.is_empty() {
+    if read_filtered.is_empty() {
         return;
     }
 
-    let slot_class = infer_slot_classes(f, &promotable);
+    let slot_class = infer_slot_classes(f, &read_filtered);
+
+    // I9 gate: GP slots whose live range crosses a GC-safepoint op
+    // MUST stay materialized — Beagle's GC scans frame slots, not
+    // registers. A promoted GP slot whose value lives in a register
+    // across a Call is invisible to GC and (under compacting GC) goes
+    // stale when the heap object is relocated. FP values are never
+    // tagged heap pointers so they're exempt.
+    //
+    // See `docs/SSA_ARCHITECTURE.md` §I9 and `src/cfg/gc_safety.rs`.
+    let log_mem2reg = std::env::var("BEAGLE_SSA_LOG_MEM2REG").is_ok();
+    let mut promotable: HashSet<SlotId> = HashSet::new();
+    let mut rejected: Vec<SlotId> = Vec::new();
+    for s in &read_filtered {
+        let class = slot_class.get(s).copied().unwrap_or(RegClass::Gp);
+        let safe =
+            class == RegClass::Fp || crate::cfg::gc_safety::slot_is_gc_safe_to_promote(f, *s);
+        if safe {
+            promotable.insert(*s);
+        } else {
+            rejected.push(*s);
+        }
+    }
+    if log_mem2reg {
+        eprintln!(
+            "[mem2reg] {} candidates={} promoted={} rejected_i9={:?}",
+            f.debug_name.as_deref().unwrap_or("<anon>"),
+            read_filtered.len(),
+            promotable.len(),
+            rejected,
+        );
+    }
+    if promotable.is_empty() {
+        return;
+    }
 
     let rpo = reverse_postorder(f);
     let idom = compute_idoms(f, &rpo);

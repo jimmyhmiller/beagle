@@ -100,6 +100,39 @@ logs and skips SSA codegen for that function (falls back to legacy IR).
   AST→IR path does this implicitly via `TailRecurse`; the SSA path must do
   it explicitly.
 
+### I9 — GC sees roots through slots, not registers
+
+- Beagle's GC scans `header.size` frame slots starting at `[FP-24]` per
+  the layout in `src/gc/stack_walker.rs`. **It does not scan registers
+  or the callee-saved spill area below the slots.** Compacting GC
+  rewrites in-place at scanned slot addresses; it cannot update a
+  value held only in a register.
+- Therefore: **any GP-class SSA value live across a GC-safepoint op
+  must also live in a slot at that point.** Failure → freed/relocated
+  pointer in a register → SIGBUS or wrong-output bug.
+- GC-safepoint ops in the CFG layer: `Op::Call`, `Op::Recurse`,
+  `Op::InlineBumpAllocate`'s `Terminator::InlineBranch`, `Op::Throw`'s
+  `Terminator::Throw`, all exception/handler/continuation/effect ops
+  (each calls a builtin that may allocate), and `Op::RecordGcSafepoint`.
+- The legacy IR satisfies I9 by AST-compiler discipline: every
+  evaluated arg is pushed to a local-stack slot via `push_to_stack`
+  before the next is evaluated. So the input CFG has no GP VReg live
+  across a safepoint — until an optimization violates it.
+- **`mem2reg` is the most dangerous violator** because it removes
+  `SlotStore` ops, leaving the value only in SSA / registers. The
+  promotion gate must therefore also enforce I9: a GP slot is
+  promotable only if no `SlotStore→SlotLoad` path crosses a safepoint
+  op. FP slots are exempt — FP values aren't tagged heap pointers and
+  GC ignores them.
+- `src/cfg/gc_safety.rs` is the single source of truth for the
+  safepoint set and the per-slot dataflow. Other passes that extend
+  SSA-value lifetimes (trivial-param elim, copy coalesce) must
+  consult the same module before extending across a safepoint.
+- **Forbidden:** any optimization that takes a `SlotStore`-backed GP
+  value and removes the store without first checking
+  `slot_is_gc_safe_to_promote`. Tier-1 SSA attempts crashed
+  `gc_stress_single_thread.bg` because `mem2reg` violated this.
+
 ---
 
 ## The pipeline
