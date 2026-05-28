@@ -31,21 +31,35 @@ use crate::cfg::{CfgFunction, Op, Terminator, VReg};
 /// form (see module docs). Mutates in place.
 pub fn lower_to_allocated(f: &mut CfgFunction, coloring: &Coloring, scratch: Scratch) {
     // 1. Compute edge transfers per the (still-SSA) CFG + coloring.
+    //    Resolves to PhysMoves keyed by physical color indices —
+    //    independent of any original VReg's index.
     let transfers = resolve_edges(f, coloring, scratch);
 
-    // 2. Insert each EdgeTransfers as Op::Move ops at the right
-    //    location, per terminator arity.
+    // 2. Rewrite every VReg in the function to its color. Defs, uses,
+    //    block params, terminator args — all get renamed. MUST run
+    //    BEFORE step 3 so the rename map (whose keys are original
+    //    VRegs) doesn't accidentally hit a Move we inserted whose
+    //    src/dst VReg happens to have an index that coincides with
+    //    an original VReg's index (e.g. Move{src:VReg{index:22}} and
+    //    original v22 — apply_color_rename would erroneously rewrite
+    //    the Move's src to v22's color, sending the wrong physical
+    //    register through the edge). Manifested as `dec2/dec`
+    //    infinite-looping on `dec(7, 5)` because the back-edge Move
+    //    `X1 ← v185_color` was rewritten to `X1 ← X0`, so n never
+    //    actually decremented.
+    let rename = build_color_rename(f, coloring);
+    apply_color_rename(f, &rename);
+
+    // 3. Insert each EdgeTransfers as Op::Move ops at the right
+    //    location, per terminator arity. Inserted AFTER step 2 so
+    //    their VRegs (with `index` already at physical color level)
+    //    aren't subject to the rename pass.
     for et in transfers {
         insert_transfers(f, et);
     }
 
-    // 3. Rewrite every VReg in the function to its color. Defs, uses,
-    //    block params, terminator args — all get renamed.
-    let rename = build_color_rename(f, coloring);
-    apply_color_rename(f, &rename);
-
     // 4. Drop block params and terminator args. The Moves inserted in
-    //    step 2 carry the data; params/args are vestigial structure
+    //    step 3 carry the data; params/args are vestigial structure
     //    that the verifier would now flag as arity-mismatched (zero on
     //    each side after this clear keeps it consistent).
     for block in f.blocks.iter_mut() {

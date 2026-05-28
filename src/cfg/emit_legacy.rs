@@ -493,15 +493,14 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
                 }
             }
             Terminator::InlineBranch { op, .. } => {
-                // 4f-2c bring-up: the structural translation is
-                // straightforward (legacy `Instruction::Sub` already
-                // encodes guard+untag+sub+retag+bail in a single op),
-                // but enabling it tripped wrong-output bugs across
-                // stdlib functions that haven't been root-caused yet.
-                // Leaving as Err so the gate falls back to legacy;
-                // diagnosis and fix lands in 4f-2d (likely an
-                // interference / coloring miss around the mutation
-                // semantics of the bailing-arithmetic operand regs).
+                // 4f-2d bring-up: enabling InlineBranch surfaced a
+                // parallel-copy edge-resolution bug (fixed in 4f-2d-3
+                // via `lower_to_allocated` reorder) — but still hits
+                // ~74 regressions on the SSA-on suite, concentrated in
+                // async/continuation/effect tests. Likely interaction
+                // with the bail-path register state expected by the
+                // continuation save/restore machinery. Tracked as a
+                // separate follow-up; gated behind a future flag.
                 return Err(SsaCompileError::UnsupportedTerminator(format!(
                     "InlineBranch({})",
                     inline_op_tag(op)
@@ -590,6 +589,7 @@ pub fn compile_via_ssa<B: CodegenBackend>(
     // non-allocated.
     let scratch = Scratch { gp: 9, fp: 31 };
     lower_to_allocated(&mut cfg, &physical, scratch);
+    crate::cfg::dump::maybe_dump_phase("06-after-lower-to-allocated", &cfg, false);
 
     // After lower_to_allocated, each VReg.index is its physical
     // register index. Translator's color_to_physical is identity.
