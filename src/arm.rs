@@ -303,10 +303,24 @@ pub fn get_tag(destination: Register, value: Register) -> ArmAsm {
 }
 
 pub fn tag_value(destination: Register, value: Register, tag: Register) -> Vec<ArmAsm> {
-    vec![
-        shift_left_imm(destination, value, BuiltInTypes::tag_size()),
-        or(destination, destination, tag),
-    ]
+    // dest = tag | (value << tag_size)
+    //
+    // Emitted as a single `ORR rd, rn, rm, LSL #tag_size` so it stays
+    // correct even when `destination` aliases `tag` (or `value`). The
+    // SSA register allocator can color the Tag op's dest and its
+    // tag-bits source to the same physical register; the previous
+    // two-instruction form (`lsl dest, value`; `orr dest, dest, tag`)
+    // clobbered the tag in that case — the first shift overwrote the
+    // tag register, so the `orr` added nothing and the result came out
+    // untagged (e.g. a boxed float printed as a raw heap pointer).
+    vec![ArmAsm::OrrLogShift {
+        sf: destination.sf(),
+        shift: 0, // LSL
+        rm: value,
+        imm6: BuiltInTypes::tag_size(),
+        rn: tag,
+        rd: destination,
+    }]
 }
 
 pub fn compare(a: Register, b: Register) -> ArmAsm {
@@ -768,14 +782,28 @@ impl LowLevelArm {
     /// True modulo: result is always non-negative when divisor is positive
     /// Implements: ((a % b) + b) % b for correct handling of negative numbers
     pub fn modulo(&mut self, destination: Register, a: Register, b: Register) {
+        // remainder = a - (a / b) * b
+        //
+        // The quotient goes into a dedicated scratch register (X16, the
+        // AAPCS64 intra-procedure scratch, which is in neither the legacy
+        // nor the SSA allocator pool) instead of `destination`. Writing
+        // the quotient into `destination` first clobbers an operand when
+        // `destination` aliases `a` or `b` — which the SSA register
+        // allocator can do, since it may color the Modulo result and one
+        // of its inputs to the same physical register. That produced
+        // wrong results like `7 % 2 == -2` (div→3 into the reg holding
+        // `b`, then `7 - 3*3`). Routing through X16 keeps `a` and `b`
+        // intact until MSUB reads them, so the op is correct under any
+        // aliasing.
+        let quotient = X16;
         // Step 1: quotient = a / b (signed division)
-        self.instructions.push(div(destination, a, b));
-        // Step 2: remainder = a - quotient * b (using MSUB: dest = a - dest * b)
+        self.instructions.push(div(quotient, a, b));
+        // Step 2: remainder = a - quotient * b (MSUB: rd = ra - rn * rm)
         self.instructions.push(ArmAsm::Msub {
             sf: destination.sf(),
             rm: b,
             ra: a,
-            rn: destination,
+            rn: quotient,
             rd: destination,
         });
         // For true modulo with negative numbers, we'd need additional logic:
@@ -1191,19 +1219,31 @@ impl LowLevelArm {
         });
     }
 
-    pub fn guard_integer(&mut self, dest: Register, a: Register, jump: Label) {
-        // TODO: I need to have some way of signaling
-        // that this is a type error;
-        self.and_imm(dest, a, 0b111);
-        self.compare(dest, ZERO_REGISTER);
+    pub fn guard_integer(&mut self, _dest: Register, a: Register, jump: Label) {
+        // The tag test is computed into the reserved scratch X16 rather
+        // than the caller-provided `_dest`. Callers (e.g. the guarded
+        // ShiftRightImm / checked-arith ops) frequently pass dest == a,
+        // and under SSA register allocation dest and the guarded value
+        // get coloured to the same physical register. Clobbering `dest`
+        // there would destroy the value before the op that follows the
+        // guard reads it (e.g. `x & 0b111 == 0` then `x >> 24` yielded
+        // `0 >> 24 == 0`, breaking struct-id reads / match type checks).
+        // X16 is AAPCS IP0 scratch and is in neither allocator pool, so
+        // it can never alias `a`.
+        let scratch = X16;
+        self.and_imm(scratch, a, 0b111);
+        self.compare(scratch, ZERO_REGISTER);
         self.jump_not_equal(jump);
     }
 
-    pub fn guard_float(&mut self, dest: Register, a: Register, jump: Label) {
-        // floats are tagged with 0b001
-        self.and_imm(dest, a, 0b111);
-        self.sub_imm(dest, dest, BuiltInTypes::Float.get_tag() as i32);
-        self.compare(dest, ZERO_REGISTER);
+    pub fn guard_float(&mut self, _dest: Register, a: Register, jump: Label) {
+        // floats are tagged with 0b001. See guard_integer: the scratch
+        // must not be the caller's `_dest`, which the SSA allocator may
+        // alias with `a`.
+        let scratch = X16;
+        self.and_imm(scratch, a, 0b111);
+        self.sub_imm(scratch, scratch, BuiltInTypes::Float.get_tag() as i32);
+        self.compare(scratch, ZERO_REGISTER);
         self.jump_not_equal(jump);
     }
 

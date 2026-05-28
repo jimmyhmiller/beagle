@@ -59,6 +59,18 @@ impl Value {
     }
 }
 
+/// True when two operands resolve to the same physical/virtual register.
+/// Used by guarded ops that untag operands in place and must avoid
+/// "restoring" an operand that has been allocated to the same register as
+/// the destination (which would clobber the result). Only register-vs-
+/// register aliasing matters here; spills/constants get their own temp.
+fn values_same_register(x: &Value, y: &Value) -> bool {
+    matches!(
+        (x, y),
+        (Value::Register(rx), Value::Register(ry)) if rx.index == ry.index
+    )
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Encode, Decode, Serialize)]
 pub struct VirtualRegister {
     pub argument: Option<usize>,
@@ -2421,6 +2433,14 @@ impl Ir {
                     self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::ShiftLeft(dest, a, b, error_label) => {
+                    // If `dest` shares a register with an operand (the SSA
+                    // allocator does this when the operand is dead after
+                    // this op), the post-shift "restore tag" of that
+                    // operand would clobber the result — leaving it shifted
+                    // an extra `tag_size`, i.e. 8x too large. Skip the
+                    // restore for any operand that aliases `dest`.
+                    let a_aliases_dest = values_same_register(a, dest);
+                    let b_aliases_dest = values_same_register(b, dest);
                     let a = self.value_to_register(a, backend);
                     let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
@@ -2434,11 +2454,17 @@ impl Ir {
                     backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
                     backend.shift_left(dest, a, b);
                     backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
-                    backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
-                    backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    if !a_aliases_dest {
+                        backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
+                    }
+                    if !b_aliases_dest {
+                        backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    }
                     self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::ShiftRight(dest, a, b, error_label) => {
+                    let a_aliases_dest = values_same_register(a, dest);
+                    let b_aliases_dest = values_same_register(b, dest);
                     let a = self.value_to_register(a, backend);
                     let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
@@ -2452,11 +2478,17 @@ impl Ir {
                     backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
                     backend.shift_right(dest, a, b);
                     backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
-                    backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
-                    backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    if !a_aliases_dest {
+                        backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
+                    }
+                    if !b_aliases_dest {
+                        backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    }
                     self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::ShiftRightZero(dest, a, b, error_label) => {
+                    let a_aliases_dest = values_same_register(a, dest);
+                    let b_aliases_dest = values_same_register(b, dest);
                     let a = self.value_to_register(a, backend);
                     let b = self.value_to_register(b, backend);
                     let dest_spill = self.dest_spill(dest);
@@ -2471,8 +2503,12 @@ impl Ir {
                     backend.and_imm(a, a, 0xFFFFFFFF);
                     backend.shift_right_zero(dest, a, b);
                     backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
-                    backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
-                    backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    if !a_aliases_dest {
+                        backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
+                    }
+                    if !b_aliases_dest {
+                        backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
+                    }
                     self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::And(dest, a, b) => {

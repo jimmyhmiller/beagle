@@ -58,6 +58,31 @@ pub fn promote_slots(f: &mut CfgFunction) {
 
     let slot_class = infer_slot_classes(f, &read_filtered);
 
+    // Handler-block gate: blocks reached only through the runtime
+    // exception / continuation mechanism (handler / resume / abort
+    // blocks) have no normal CFG predecessors, so they are absent from
+    // the dominator tree that the rename walk (Phase 2) follows. For such
+    // a block mem2reg would drop a promoted slot's `SlotStore` (in the
+    // reachable region) but leave the block's `SlotLoad` un-rewritten —
+    // the handler then reads an uninitialised (null) slot. Symptom: a
+    // `catch` body that reads >=2 distinct closure free vars segfaults on
+    // a null closure pointer (`load(untag(arg0), 4+idx)` with arg0 read
+    // back from slot 0, which was promoted away). Any slot loaded in a
+    // block unreachable from entry via normal edges must stay
+    // materialized — regardless of class.
+    let reachable: HashSet<BlockId> = reverse_postorder(f).into_iter().collect();
+    let mut read_in_unreachable: HashSet<SlotId> = HashSet::new();
+    for (idx, block) in f.blocks.iter().enumerate() {
+        if reachable.contains(&BlockId(idx as u32)) {
+            continue;
+        }
+        for op in &block.body {
+            if let Op::SlotLoad { slot, .. } = op {
+                read_in_unreachable.insert(*slot);
+            }
+        }
+    }
+
     // I9 gate: GP slots whose live range crosses a GC-safepoint op
     // MUST stay materialized — Beagle's GC scans frame slots, not
     // registers. A promoted GP slot whose value lives in a register
@@ -71,8 +96,8 @@ pub fn promote_slots(f: &mut CfgFunction) {
     let mut rejected: Vec<SlotId> = Vec::new();
     for s in &read_filtered {
         let class = slot_class.get(s).copied().unwrap_or(RegClass::Gp);
-        let safe =
-            class == RegClass::Fp || crate::cfg::gc_safety::slot_is_gc_safe_to_promote(f, *s);
+        let safe = !read_in_unreachable.contains(s)
+            && (class == RegClass::Fp || crate::cfg::gc_safety::slot_is_gc_safe_to_promote(f, *s));
         if safe {
             promotable.insert(*s);
         } else {

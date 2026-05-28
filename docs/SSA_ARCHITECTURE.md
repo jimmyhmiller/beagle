@@ -22,7 +22,7 @@ this file is a blocking review failure.
 
 ---
 
-## The eight invariants
+## The invariants
 
 Each invariant has a verifier. A verifier failure aborts the compile under
 `debug_assertions` and under `BEAGLE_SSA_VERIFY=1`. In release builds it
@@ -133,6 +133,24 @@ logs and skips SSA codegen for that function (falls back to legacy IR).
   `slot_is_gc_safe_to_promote`. Tier-1 SSA attempts crashed
   `gc_stress_single_thread.bg` because `mem2reg` violated this.
 
+### I10 — Slots read by soft-edge (handler) blocks stay materialized
+
+- Handler / resume / abort blocks are reached only through the runtime
+  exception / continuation mechanism, never through a terminator. They
+  have no normal CFG predecessors (`preds = []`) and are therefore
+  absent from the dominator tree the `mem2reg` rename walk follows.
+- A pass that drops a `SlotStore` (promotion) but cannot rewrite the
+  corresponding `SlotLoad` inside such a block leaves the handler reading
+  an uninitialised (null) slot. Real bug: the closure pointer (`arg0`)
+  lives in slot 0; promoting it away made a `catch` body that reads ≥2
+  distinct closure free vars (`load(untag(arg0), 4+idx)`) segfault on a
+  null base (`exception_*thread*`, `repl_resume`).
+- **Forbidden:** promoting (or otherwise lifetime-extending in registers)
+  any slot that has a `SlotLoad` in a block unreachable from `entry` via
+  normal terminator edges. `mem2reg` gates on the `reverse_postorder`
+  reachable set; regardless of `RegClass`. This is the dominance-tree
+  analogue of I9.
+
 ---
 
 ## The pipeline
@@ -220,6 +238,8 @@ historical bug.
 | F8 | Disabling a verifier check "just for this test"                                               | Verifiers are the contract; fix the bug instead        |
 | F9 | AST→SSA / IR→SSA lowering without tail-call rewriting                                         | 1M-iter benchmarks SIGBUS (I8)                         |
 | F10| `Phi` op or `insert_phi` helper in the SSA IR                                                 | Violates I3                                            |
+| F11| A backend emit helper that writes `dest` before reading all sources, when `dest` may equal a source | SSA coalesces dest with a dead source; the legacy allocator never did. Broke `tag_value` (dest==tag → untagged float), `modulo` (dest==b → `7%2==-2`), `guard_integer/float` (dest==value → value zeroed → `match`/`read_struct_id`), register shifts (dest==a → result re-shifted 8×). Use a reserved scratch (X16/X17) or a single read-all-then-write instruction; or skip the dead-operand restore. |
+| F12| Promoting / register-lifetime-extending a slot read by a soft-edge (handler) block            | Violates I10 — handler reads a null slot              |
 
 ---
 
