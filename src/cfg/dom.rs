@@ -26,9 +26,22 @@ pub fn compute_reachable(f: &CfgFunction) -> HashSet<BlockId> {
     queue.push_back(f.entry);
     reached.insert(f.entry);
     while let Some(b) = queue.pop_front() {
+        // Normal CFG successors via the block's terminator.
         for s in f.block(b).terminator.successors() {
             if reached.insert(s) {
                 queue.push_back(s);
+            }
+        }
+        // "Soft" successors: handler/resume/abort blocks referenced by
+        // exception, continuation, prompt, and effect ops. The runtime
+        // jumps to these via the handler stack — they're not normal
+        // CFG successors, but DCE must not wipe them or `emit_legacy`
+        // will produce unbound labels for the runtime to jump to.
+        for op in &f.block(b).body {
+            for s in op.block_refs() {
+                if reached.insert(s) {
+                    queue.push_back(s);
+                }
             }
         }
     }

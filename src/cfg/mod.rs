@@ -997,6 +997,26 @@ impl Op {
         }
     }
 
+    /// Blocks this op may transfer control to OUTSIDE the normal
+    /// terminator-successor flow. Used by reachability (so DCE doesn't
+    /// wipe handler/resume/abort blocks that the runtime jumps to via
+    /// the handler stack) and by emit_legacy (so all referenced labels
+    /// have machine-code positions). Ops that don't reference a
+    /// BlockId return an empty vec.
+    pub fn block_refs(&self) -> Vec<BlockId> {
+        match self {
+            Op::ConstLabelAddress { target, .. } => vec![*target],
+            Op::PushExceptionHandler { handler, .. } => vec![*handler],
+            Op::PushResumableExceptionHandler { catch_block, .. } => vec![*catch_block],
+            Op::PushPromptHandler { handler, .. } => vec![*handler],
+            Op::PushPromptTag { abort_block, .. } => vec![*abort_block],
+            Op::CaptureContinuation { resume_block, .. } => vec![*resume_block],
+            Op::CaptureContinuationTagged { resume_block, .. } => vec![*resume_block],
+            Op::PerformEffect { resume_block, .. } => vec![*resume_block],
+            _ => vec![],
+        }
+    }
+
     pub fn defs(&self) -> Vec<VReg> {
         match self {
             Op::SlotLoad { dst, .. } => vec![*dst],

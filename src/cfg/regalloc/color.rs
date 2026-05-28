@@ -101,6 +101,38 @@ pub fn color(f: &CfgFunction, ig: &InterferenceGraph) -> Coloring {
         }
     }
 
+    // Fallback: color any block the dominator-tree walk didn't reach.
+    // These are handler / continuation-resume / prompt-abort blocks
+    // referenced by `Op::PushExceptionHandler`, `Op::CaptureContinuation`,
+    // etc. — the runtime enters them via the handler stack, not via a
+    // normal CFG terminator edge, so they have `preds=[]` and aren't in
+    // the dominator tree from `entry`. Their VRegs still need colors or
+    // `emit_legacy` emits raw SSA-VReg indices as physical registers
+    // (e.g. index 28 → X28, the reserved mutator-state register → SIGILL).
+    //
+    // Coloring them after the main walk is sound: by **I9**, every value
+    // crossing into a handler block goes through a stack slot (the AST
+    // compiler spills before any safepoint, and mem2reg's I9 gate keeps
+    // it that way), so a handler block has no SSA-value live-in from the
+    // protected region. Its VRegs can be colored independently, greedily,
+    // respecting the interference edges the interference pass already
+    // recorded for them.
+    for bid_idx in 0..f.num_blocks() {
+        let bid = BlockId(bid_idx as u32);
+        let block = f.block(bid);
+        for &p in &block.params {
+            assign_color(p, ig, &mut colors, &mut max_used_or_zero);
+        }
+        for op in &block.body {
+            for d in op.defs() {
+                assign_color(d, ig, &mut colors, &mut max_used_or_zero);
+            }
+        }
+        for d in block.terminator.defs() {
+            assign_color(d, ig, &mut colors, &mut max_used_or_zero);
+        }
+    }
+
     Coloring {
         colors,
         max_color_used: max_used,

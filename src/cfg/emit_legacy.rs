@@ -28,7 +28,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::backend::CodegenBackend;
 use crate::cfg::{
@@ -109,11 +109,21 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
             label_locations: HashMap::new(),
             color_to_physical,
         };
-        // Allocate labels and record positions up front so terminator
-        // translation can resolve any block id.
-        for (pos, &bid) in order.iter().enumerate() {
+        // Allocate labels for ALL blocks (not just RPO-reachable ones):
+        // exception handler / continuation resume / prompt abort blocks
+        // are referenced by `Op::PushExceptionHandler`, `Op::Throw`,
+        // `Op::CaptureContinuation`, etc. — they're not normal CFG
+        // successors so `reverse_postorder` doesn't visit them, but
+        // their labels still need to exist for the LoadLabelAddress
+        // emit at the call site (and for the runtime to jump to them
+        // on throw/resume). Record position only for blocks in `order`
+        // so the fall-through optimization in `emit_terminator` works.
+        for bid_idx in 0..cfg.num_blocks() {
+            let bid = BlockId(bid_idx as u32);
             let label = t.alloc_label(&format!("bb{}", bid.0));
             t.block_label.insert(bid, label);
+        }
+        for (pos, &bid) in order.iter().enumerate() {
             t.block_position.insert(bid, pos);
         }
         t
@@ -139,6 +149,8 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
     }
 
     fn run(&mut self) -> Result<(), SsaCompileError> {
+        // Phase A: emit blocks in RPO so fall-through optimization
+        // applies to the common path.
         for (i, &bid) in self.order.iter().enumerate() {
             let label = self.block_label[&bid];
             self.emit_label(label);
@@ -148,6 +160,33 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
             }
             let next_in_order = self.order.get(i + 1).copied();
             self.emit_terminator(&block.terminator, next_in_order)?;
+        }
+        // Phase B: emit any blocks that aren't in RPO. These are
+        // exception handler / continuation resume / prompt abort
+        // blocks referenced by `Op::PushExceptionHandler` etc. — the
+        // runtime jumps to them via the handler stack, not via normal
+        // CFG edges, so RPO from entry skips them. Their labels still
+        // need actual machine-code positions. Fall-through opt does
+        // not apply here (every terminator emits its explicit Jump).
+        let in_order: HashSet<BlockId> = self.order.iter().copied().collect();
+        for bid_idx in 0..self.cfg.num_blocks() {
+            let bid = BlockId(bid_idx as u32);
+            if in_order.contains(&bid) {
+                continue;
+            }
+            // Skip blocks whose terminator is `Unreachable` AND have
+            // an empty body — those are RPO-dead placeholders left by
+            // `dce_unreachable_blocks` and have nothing to emit.
+            let block = self.cfg.block(bid);
+            if matches!(block.terminator, Terminator::Unreachable) && block.body.is_empty() {
+                continue;
+            }
+            let label = self.block_label[&bid];
+            self.emit_label(label);
+            for op in &block.body {
+                self.emit_op(op)?;
+            }
+            self.emit_terminator(&block.terminator, None)?;
         }
         Ok(())
     }
@@ -422,6 +461,119 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
                 *trampoline_fn_ptr,
             )),
 
+            // ---- Exception handlers ----
+            Op::PushExceptionHandler {
+                handler,
+                result_slot,
+                builtin_fn_ptr,
+            } => self.instructions.push(I::PushExceptionHandler(
+                self.block_label[handler],
+                Value::Local(result_slot.0 as usize),
+                *builtin_fn_ptr,
+            )),
+            Op::PushResumableExceptionHandler {
+                dst,
+                catch_block,
+                exception_slot,
+                resume_slot,
+                builtin_fn_ptr,
+            } => self.instructions.push(I::PushResumableExceptionHandler(
+                self.reg(*dst),
+                self.block_label[catch_block],
+                Value::Local(exception_slot.0 as usize),
+                Value::Local(resume_slot.0 as usize),
+                *builtin_fn_ptr,
+            )),
+            Op::PopExceptionHandler { builtin_fn_ptr } => {
+                self.instructions
+                    .push(I::PopExceptionHandler(*builtin_fn_ptr));
+            }
+            Op::PopExceptionHandlerById {
+                handler_id,
+                builtin_fn_ptr,
+            } => self.instructions.push(I::PopExceptionHandlerById(
+                self.reg(*handler_id),
+                *builtin_fn_ptr,
+            )),
+
+            // ---- Delimited continuations / prompts ----
+            Op::PushPromptHandler {
+                handler,
+                result_slot,
+                builtin_fn_ptr,
+            } => self.instructions.push(I::PushPromptHandler(
+                self.block_label[handler],
+                Value::Local(result_slot.0 as usize),
+                *builtin_fn_ptr,
+            )),
+            Op::PopPromptHandler {
+                result,
+                builtin_fn_ptr,
+            } => self
+                .instructions
+                .push(I::PopPromptHandler(self.reg(*result), *builtin_fn_ptr)),
+            Op::PushPromptTag {
+                tag,
+                abort_block,
+                result_slot,
+                builtin_fn_ptr,
+            } => self.instructions.push(I::PushPromptTag(
+                self.reg(*tag),
+                self.block_label[abort_block],
+                Value::Local(result_slot.0 as usize),
+                *builtin_fn_ptr,
+            )),
+            Op::CaptureContinuation {
+                dst,
+                resume_block,
+                result_slot,
+                builtin_fn_ptr,
+            } => self.instructions.push(I::CaptureContinuation(
+                self.reg(*dst),
+                self.block_label[resume_block],
+                result_slot.0 as usize,
+                *builtin_fn_ptr,
+            )),
+            Op::CaptureContinuationTagged {
+                dst,
+                resume_block,
+                result_slot,
+                builtin_fn_ptr,
+                tag,
+            } => self.instructions.push(I::CaptureContinuationTagged(
+                self.reg(*dst),
+                self.block_label[resume_block],
+                result_slot.0 as usize,
+                *builtin_fn_ptr,
+                self.reg(*tag),
+            )),
+
+            // ---- Algebraic effects ----
+            Op::PerformEffect {
+                handler,
+                enum_type,
+                op_value,
+                resume_block,
+                result_slot,
+                builtin_fn_ptr,
+            } => self.instructions.push(I::PerformEffect(
+                self.reg(*handler),
+                self.reg(*enum_type),
+                self.reg(*op_value),
+                self.block_label[resume_block],
+                result_slot.0 as usize,
+                *builtin_fn_ptr,
+            )),
+            Op::ReturnFromShift {
+                value,
+                cont_ptr,
+                builtin_fn_ptr,
+            } => self.instructions.push(I::ReturnFromShift(
+                self.reg(*value),
+                self.reg(*cont_ptr),
+                *builtin_fn_ptr,
+            )),
+
             // ---- Calls ----
             Op::Call {
                 dst,
@@ -448,11 +600,6 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
                 let arg_values: Vec<Value> = args.iter().map(|v| self.reg(*v)).collect();
                 self.instructions
                     .push(I::Recurse(self.reg(*dst), arg_values));
-            }
-
-            // Everything else: bail so the gate falls back to legacy.
-            other => {
-                return Err(SsaCompileError::UnsupportedOp(op_tag(other).to_string()));
             }
         }
         Ok(())
@@ -492,22 +639,132 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
                     self.instructions.push(I::Jump(f_label));
                 }
             }
-            Terminator::InlineBranch { op, .. } => {
-                // 4f-2d bring-up: enabling InlineBranch surfaced a
-                // parallel-copy edge-resolution bug (fixed in 4f-2d-3
-                // via `lower_to_allocated` reorder) — but still hits
-                // ~74 regressions on the SSA-on suite, concentrated in
-                // async/continuation/effect tests. Likely interaction
-                // with the bail-path register state expected by the
-                // continuation save/restore machinery. Tracked as a
-                // separate follow-up; gated behind a future flag.
-                return Err(SsaCompileError::UnsupportedTerminator(format!(
-                    "InlineBranch({})",
-                    inline_op_tag(op)
-                )));
+            Terminator::InlineBranch {
+                op,
+                fall_through,
+                bail,
+                ..
+            } => {
+                let bail_label = self.block_label[bail];
+                match op {
+                    InlineBranchOp::SubChecked { dst, lhs, rhs } => {
+                        self.instructions.push(I::Sub(
+                            self.reg(*dst),
+                            self.reg(*lhs),
+                            self.reg(*rhs),
+                            bail_label,
+                        ));
+                    }
+                    InlineBranchOp::MulChecked { dst, lhs, rhs } => {
+                        self.instructions.push(I::Mul(
+                            self.reg(*dst),
+                            self.reg(*lhs),
+                            self.reg(*rhs),
+                            bail_label,
+                        ));
+                    }
+                    InlineBranchOp::DivChecked { dst, lhs, rhs } => {
+                        self.instructions.push(I::Div(
+                            self.reg(*dst),
+                            self.reg(*lhs),
+                            self.reg(*rhs),
+                            bail_label,
+                        ));
+                    }
+                    InlineBranchOp::ModuloChecked { dst, lhs, rhs } => {
+                        self.instructions.push(I::Modulo(
+                            self.reg(*dst),
+                            self.reg(*lhs),
+                            self.reg(*rhs),
+                            bail_label,
+                        ));
+                    }
+                    InlineBranchOp::ShiftLeftChecked { dst, lhs, rhs } => {
+                        self.instructions.push(I::ShiftLeft(
+                            self.reg(*dst),
+                            self.reg(*lhs),
+                            self.reg(*rhs),
+                            bail_label,
+                        ));
+                    }
+                    InlineBranchOp::ShiftRightChecked { dst, lhs, rhs } => {
+                        self.instructions.push(I::ShiftRight(
+                            self.reg(*dst),
+                            self.reg(*lhs),
+                            self.reg(*rhs),
+                            bail_label,
+                        ));
+                    }
+                    InlineBranchOp::ShiftRightZeroChecked { dst, lhs, rhs } => {
+                        self.instructions.push(I::ShiftRightZero(
+                            self.reg(*dst),
+                            self.reg(*lhs),
+                            self.reg(*rhs),
+                            bail_label,
+                        ));
+                    }
+                    InlineBranchOp::ShiftRightImmChecked { dst, src, imm } => {
+                        self.instructions.push(I::ShiftRightImm(
+                            self.reg(*dst),
+                            self.reg(*src),
+                            *imm,
+                            bail_label,
+                        ));
+                    }
+                    InlineBranchOp::GuardInt { dst, src } => {
+                        self.instructions.push(I::GuardInt(
+                            self.reg(*dst),
+                            self.reg(*src),
+                            bail_label,
+                        ));
+                    }
+                    InlineBranchOp::GuardFloat { dst, src } => {
+                        self.instructions.push(I::GuardFloat(
+                            self.reg(*dst),
+                            self.reg(*src),
+                            bail_label,
+                        ));
+                    }
+                    InlineBranchOp::InlineBumpAllocate {
+                        dst,
+                        size_bytes,
+                        header,
+                    } => {
+                        self.instructions.push(I::InlineBumpAllocate(
+                            self.reg(*dst),
+                            *size_bytes,
+                            *header,
+                            bail_label,
+                        ));
+                    }
+                }
+                // Fall-through: if fall_through is the next block in
+                // linearization, emit nothing; otherwise an explicit
+                // Jump. The legacy semantics is "instruction succeeded,
+                // control flows to the next address."
+                if Some(*fall_through) != next_in_order {
+                    let fall_label = self.block_label[fall_through];
+                    self.instructions.push(I::Jump(fall_label));
+                }
             }
-            Terminator::Throw { .. } => {
-                return Err(SsaCompileError::UnsupportedTerminator("Throw".to_string()));
+            Terminator::Throw {
+                value,
+                resume,
+                resume_local,
+                builtin_fn_ptr,
+                ..
+            } => {
+                // `resume_args` are SSA edge transfers — cleared by
+                // Phase 4f-1 `lower_to_allocated` and materialized as
+                // Move ops at the resume target. Here we just emit the
+                // Throw with the resume label and result-slot index.
+                let resume_label = self.block_label[resume];
+                self.instructions.push(I::Throw(
+                    self.reg(*value),
+                    resume_label,
+                    resume_local.0 as usize,
+                    *builtin_fn_ptr,
+                ));
             }
             Terminator::Unreachable => {
                 // No instruction; verifier should have caught any
