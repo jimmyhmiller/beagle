@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use crate::cfg::dom::{compute_idoms, dominator_tree_children, reverse_postorder};
 use crate::cfg::regalloc::interference::InterferenceGraph;
-use crate::cfg::{BlockId, CfgFunction, RegClass, VReg};
+use crate::cfg::{BlockId, CfgFunction, RegClass, Terminator, VReg};
 
 #[derive(Debug, Clone)]
 pub struct Coloring {
@@ -66,6 +66,8 @@ pub fn color(f: &CfgFunction, ig: &InterferenceGraph) -> Coloring {
         };
     }
 
+    let hints = build_copy_hints(f);
+
     // Build dominator tree.
     let rpo = reverse_postorder(f);
     let idom = compute_idoms(f, &rpo);
@@ -80,17 +82,17 @@ pub fn color(f: &CfgFunction, ig: &InterferenceGraph) -> Coloring {
 
         // Block params first (they become live at block entry).
         for &p in &block.params {
-            assign_color(p, ig, &mut colors, &mut max_used_or_zero);
+            assign_color(p, ig, &hints, &mut colors, &mut max_used_or_zero);
         }
         // Body op defs in forward order.
         for op in &block.body {
             for d in op.defs() {
-                assign_color(d, ig, &mut colors, &mut max_used_or_zero);
+                assign_color(d, ig, &hints, &mut colors, &mut max_used_or_zero);
             }
         }
         // Terminator def (if any — only InlineBranch defines).
         for d in block.terminator.defs() {
-            assign_color(d, ig, &mut colors, &mut max_used_or_zero);
+            assign_color(d, ig, &hints, &mut colors, &mut max_used_or_zero);
         }
 
         // Recurse to dominator-tree children.
@@ -121,15 +123,15 @@ pub fn color(f: &CfgFunction, ig: &InterferenceGraph) -> Coloring {
         let bid = BlockId(bid_idx as u32);
         let block = f.block(bid);
         for &p in &block.params {
-            assign_color(p, ig, &mut colors, &mut max_used_or_zero);
+            assign_color(p, ig, &hints, &mut colors, &mut max_used_or_zero);
         }
         for op in &block.body {
             for d in op.defs() {
-                assign_color(d, ig, &mut colors, &mut max_used_or_zero);
+                assign_color(d, ig, &hints, &mut colors, &mut max_used_or_zero);
             }
         }
         for d in block.terminator.defs() {
-            assign_color(d, ig, &mut colors, &mut max_used_or_zero);
+            assign_color(d, ig, &hints, &mut colors, &mut max_used_or_zero);
         }
     }
 
@@ -142,6 +144,7 @@ pub fn color(f: &CfgFunction, ig: &InterferenceGraph) -> Coloring {
 fn assign_color(
     v: VReg,
     ig: &InterferenceGraph,
+    hints: &HashMap<VReg, Vec<VReg>>,
     colors: &mut HashMap<VReg, u32>,
     max_used: &mut impl FnMut(RegClass, u32),
 ) {
@@ -158,6 +161,32 @@ fn assign_color(
         .collect();
     forbidden.sort_unstable();
     forbidden.dedup();
+
+    // Coalesce hint: if `v` is copy-related to an already-colored VReg
+    // (a block param and the arg flowing into it across an edge), prefer
+    // that VReg's color when it's free. Giving both the same color makes
+    // the edge's parallel-copy move a no-op, which edge resolution then
+    // drops — eliminating the register shuffles at merge blocks (the
+    // dominant SSA-vs-legacy runtime overhead on call-heavy code).
+    //
+    // This never picks a forbidden (interfering) color, so the result is
+    // always a valid coloring — the hint only changes *which* free color
+    // is chosen, never correctness.
+    if let Some(related) = hints.get(&v) {
+        for &r in related {
+            if r.class != v.class {
+                continue;
+            }
+            if let Some(&rc) = colors.get(&r) {
+                if forbidden.binary_search(&rc).is_err() {
+                    colors.insert(v, rc);
+                    max_used(v.class, rc);
+                    return;
+                }
+            }
+        }
+    }
+
     // Pick smallest non-forbidden color.
     let mut c = 0u32;
     for &f in &forbidden {
@@ -169,6 +198,50 @@ fn assign_color(
     }
     colors.insert(v, c);
     max_used(v.class, c);
+}
+
+/// Build the copy-relation: each block param is copy-related to the arg
+/// flowing into it from every predecessor's terminator. Coalescing a
+/// copy-related pair onto the same color removes the edge's move.
+fn build_copy_hints(f: &CfgFunction) -> HashMap<VReg, Vec<VReg>> {
+    let mut hints: HashMap<VReg, Vec<VReg>> = HashMap::new();
+    for block in &f.blocks {
+        let edges: Vec<(BlockId, &Vec<VReg>)> = match &block.terminator {
+            Terminator::Jump { target, args } => vec![(*target, args)],
+            Terminator::Branch {
+                t_target,
+                t_args,
+                f_target,
+                f_args,
+                ..
+            } => vec![(*t_target, t_args), (*f_target, f_args)],
+            Terminator::InlineBranch {
+                fall_through,
+                fall_args,
+                bail,
+                bail_args,
+                ..
+            } => vec![(*fall_through, fall_args), (*bail, bail_args)],
+            Terminator::Throw {
+                resume,
+                resume_args,
+                ..
+            } => vec![(*resume, resume_args)],
+            Terminator::Ret { .. } | Terminator::Unreachable => vec![],
+        };
+        for (target, args) in edges {
+            let params = &f.block(target).params;
+            for (i, &arg) in args.iter().enumerate() {
+                if let Some(&param) = params.get(i) {
+                    if arg != param {
+                        hints.entry(arg).or_default().push(param);
+                        hints.entry(param).or_default().push(arg);
+                    }
+                }
+            }
+        }
+    }
+    hints
 }
 
 // =========================================================================
