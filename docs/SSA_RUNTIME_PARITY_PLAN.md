@@ -194,16 +194,26 @@ spiller isn't wired into `compile_via_ssa`, so nothing emits unscanned slots;
 full suite 364/364 green under legacy and SSA, no `SlotRegionError` across the
 corpus (verified `build_cfg` never stores an FP value to a root slot).
 
-**Increment 2 remaining — backend frame decoupling + reuse port.** Still to do:
-(a) a `Value`-level unscanned-slot addressing mode placed *below* the eval-stack
-region in both backends, with `header.size` = `max_locals + max_stack_size`
-(naturally excluding it) and SP reservation including it; (b) wire
-`cfg.num_unscanned_slots` to the backend; (c) port the `assign_root_slots`
-free-list reuse so spilled values share slots. Frame facts confirmed: GC scans a
-*contiguous* prefix from `[FP-24]` and the SSA path *does* use the eval stack
-(`PushStack`/`PopStack`), so unscanned slots must sit below it — there is no
-existing non-scanned region to reuse (the legacy "spill area" = root slots =
-scanned).
+**Increment 2 — deferred to Phase 3 (decision 2026-05-29).** The backend
+frame-emit support — a `Value`-level unscanned-slot addressing mode placed
+*below* the eval-stack region, SP reservation including it, and the
+`assign_root_slots` free-list reuse port — will be co-developed with the spiller
+in Phase 3, its only producer, so it is validated against real FP spills rather
+than synthetic tests alone. The committed model + verifier already guarantee the
+spiller cannot introduce an I9 violation at the model level (FP→unscanned,
+GP→root enforced; `translate` hard-errors on an unscanned slot until the backend
+addressing lands), which is the prerequisite Phase 3 needs.
+
+Frame facts confirmed for Phase 3: total frame =
+`2 + max_stack_size + max_locals + num_callee_saved` words; GC scans a
+*contiguous* `header.size = max_locals + max_stack_size` prefix from `[FP-24]`;
+callee-saved sit SP-relative at the bottom. The SSA path *does* use the eval
+stack (`PushStack`/`PopStack`), so unscanned slots must sit below it — there is
+no existing non-scanned region to reuse (the legacy "spill area" = root slots =
+scanned). The catch Phase 3 must handle: an unscanned slot's FP-relative offset
+depends on the *final* `max_stack_size`, which isn't known at body-emit time, so
+it needs offset finalization (the codebase patches only the prologue `SUB SP`
+today, not body load/store offsets).
 
 ---
 
