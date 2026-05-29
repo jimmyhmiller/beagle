@@ -846,14 +846,14 @@ pub fn compile_via_ssa<B: CodegenBackend>(
     mut backend: B,
 ) -> Result<B, (SsaCompileError, B)> {
     use crate::cfg::builder::build_cfg;
-    use crate::cfg::regalloc::color::{ClobberConstraints, color_with_constraints};
     use crate::cfg::regalloc::edge::Scratch;
     use crate::cfg::regalloc::emit::lower_to_allocated;
-    use crate::cfg::regalloc::interference::{build_interference, cross_safepoint_values};
+    use crate::cfg::regalloc::interference::cross_safepoint_values;
     use crate::cfg::regalloc::liveness::compute_liveness;
     use crate::cfg::regalloc::physical::{
         assign_physical_registers, current_layout, has_overflow, verify_clobber_safety,
     };
+    use crate::cfg::regalloc::spill::{Budget, allocate_with_spilling};
 
     let mut cfg = match build_cfg(ir) {
         Ok(c) => c,
@@ -873,26 +873,55 @@ pub fn compile_via_ssa<B: CodegenBackend>(
         ));
     }
 
-    let liveness = compute_liveness(&cfg);
-    let ig = build_interference(&cfg, &liveness);
     let layout = current_layout();
 
-    // Per-call clobber model (I7): forbid caller-saved colors for values
-    // live across a safepoint, so the grown pool (caller-saved X13-X15)
-    // is safe — a cross-call value can never land in a clobbered reg.
-    let cross_safepoint = cross_safepoint_values(&cfg, &liveness);
-    let constraints = ClobberConstraints {
-        cross_safepoint: &cross_safepoint,
-        callee_saved_gp: layout.callee_saved_gp,
-        pool_gp: layout.allocator_gp.len() as u32,
+    // Phase 3: the real spiller. Color under the I7 clobber model and,
+    // wherever register pressure exceeds the pool, spill the Belady
+    // furthest-next-use value at the worst point — until the coloring
+    // fits. GP spills go to GC-scanned root slots; the clobber model
+    // keeps cross-safepoint values in callee-saved registers or root
+    // slots (I9). `allocate_with_spilling` mutates `cfg` with the spill
+    // SlotStore/SlotLoad rewrites.
+    let budget = Budget {
+        gp: layout.allocator_gp.len() as u32,
+        fp: layout.allocator_fp.len() as u32,
     };
-    let coloring = color_with_constraints(&cfg, &ig, Some(&constraints));
+    let spill_result = allocate_with_spilling(&mut cfg, budget, layout.callee_saved_gp);
+    if !spill_result.fits {
+        // Pressure the body-op spiller can't lower (e.g. concentrated in
+        // block params / loop-carried values) or that exceeded the spill
+        // cap. Bail to legacy until block-param spilling / live-range
+        // splitting lands. Tracked by the diff harness.
+        let name = ir.debug_name.clone().unwrap_or_else(|| "<anon>".into());
+        return Err((
+            SsaCompileError::SpillOverflow(format!(
+                "{} (spilled={} iters={})",
+                name,
+                spill_result.spilled.len(),
+                spill_result.iterations
+            )),
+            backend,
+        ));
+    }
+    let coloring = spill_result.coloring;
     let physical = assign_physical_registers(&cfg, &coloring, layout);
 
+    // Postcondition (Phase 3): a fitting coloring can never overflow the
+    // physical pool. If it does, the spiller's fit check and the pool
+    // sizes disagree — a bug, not a spill situation.
+    debug_assert!(
+        !has_overflow(&physical),
+        "spiller reported fit but physical assignment overflowed"
+    );
     if has_overflow(&physical) {
         let name = ir.debug_name.clone().unwrap_or_else(|| "<anon>".into());
         return Err((SsaCompileError::SpillOverflow(name), backend));
     }
+
+    // Cross-safepoint set on the post-spill CFG, for the clobber-safety
+    // verifier below.
+    let liveness = compute_liveness(&cfg);
+    let cross_safepoint = cross_safepoint_values(&cfg, &liveness);
 
     // Verifier: no cross-safepoint GP value may have landed in a
     // caller-saved physical register (it would be clobbered by the

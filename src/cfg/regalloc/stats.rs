@@ -108,7 +108,9 @@ pub fn record(f: &CfgFunction) {
 
     let mut spill_target = f.clone();
     let budget = Budget { gp: 24, fp: 32 };
-    let result = allocate_with_spilling(&mut spill_target, budget);
+    // Simulation budget: treat all GP as callee-saved (no clobber
+    // constraint) so this probe reports raw spill demand.
+    let result = allocate_with_spilling(&mut spill_target, budget, budget.gp);
     let fits = fits_budget(&result.coloring, budget);
     eprintln!(
         "[regalloc-stats] {} blocks={} vregs={} maxlive_gp={} maxlive_fp={} \

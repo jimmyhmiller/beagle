@@ -296,6 +296,35 @@ double-compile for the ~15–23% of functions that bail today.
 verifier on, spill counts ≤ legacy ± tolerance, runtime ≤ legacy on functions
 that previously bailed.
 
+**Landed (2026-05-29) — spiller in, but "zero bails" deferred to Phase 7 (plan
+deviation, see below).** `allocate_with_spilling` is now a clobber-aware Belady
+spiller wired into `compile_via_ssa` in place of the old color-once→bail. Each
+iteration colors under the I7 constraint (recomputing the cross-safepoint set,
+since spilling changes liveness) and, while over budget, spills the **batch** of
+furthest-next-use values at the worst pressure point — one recompute per
+high-pressure region, not per value (per-value recompute was pathologically slow:
+a function needing ~25 spills did 25 full liveness+interference+color passes;
+fib didn't finish compiling in 180s). GP spills → GC-scanned root slots
+(`spill_one` routes by class, I9); the fit check covers both budgets (total GP
+≤ pool, cross-safepoint GP ≤ callee-saved) because the constraint pushes an
+un-colorable cross-safepoint value past the pool size. Postcondition: `has_overflow`
+after a reported fit is a `debug_assert!(false)`.
+
+**Deviation from "delete the bail path."** The bail path is *kept*, not deleted.
+The basic `spill_one` reloads at every use, so heavily-over-pressure functions
+**cascade** (reloads re-create pressure and never converge) and bail at a
+`spill_cap`; and ~11/53 bails are pressure concentrated in **block params**, which
+`spill_one` can't spill at all. Eliminating those needs **live-range splitting
+(Phase 7)** and block-param spilling — so true "zero bails" moves to Phase 7, not
+Phase 3. Measured: a low `spill_cap` (default 8) is strictly best — it captures
+the cheap-spill wins (bails **67→59 / 61→53** across the benchmark compile sets,
+~8 functions now fit) while bailing cascade/block-param cases *fast* (no wasted
+compile, no runtime regression). A higher cap fits a few more but their
+reload-heavy code regresses vs the legacy fallback, so it's not used. Runtime is
+≈ parity (SSA/legacy ratios: nbody 0.99, btrees 1.01, fib 1.12); 364/364 with the
+spiller actively rewriting CFGs. The unscanned-FP-slot backend work stays deferred
+— no function in the corpus FP-overflows (`maxlive_fp` is always 2).
+
 ---
 
 ### Phase 4 — Rematerialization

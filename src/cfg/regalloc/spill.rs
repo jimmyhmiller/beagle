@@ -12,24 +12,36 @@
 //! Net effect: `v` and each per-use load result have minimal live
 //! ranges, slashing the simultaneous-live count at the pressure
 //! point. Recomputing liveness + interference + coloring after the
-//! rewrite typically reduces `max_color` by 1 per spill.
+//! rewrite reduces `max_color` toward the budget.
 //!
-//! **Scope limits (Phase 4d-1):**
+//! **Phase 3 driver (`allocate_with_spilling`):** clobber-aware Belady.
+//! Each iteration colors under the I7 clobber model; while over budget,
+//! it spills the *batch* of furthest-next-use values at the worst
+//! pressure point (one recompute per high-pressure region, not per
+//! value — large functions made per-value recompute pathologically
+//! slow). GP spills land in GC-scanned root slots, FP in the unscanned
+//! region (`spill_one` routes by class, I9).
+//!
+//! **Scope limits:**
 //! - Body-op def sites only. Block params and `InlineBranchOp::dst`
-//!   are not currently spillable — those require more care
-//!   (entry-block params represent the calling convention; terminator
-//!   defs would need SlotStore at the fall-through successor's
-//!   start, like `lift_vregs::insert_terminator_def_stores`).
-//! - One spill per iteration. Multiple high-pressure VRegs are
-//!   handled by re-iterating the whole allocate-then-spill loop.
+//!   are not spillable — those need other machinery (entry-block params
+//!   are the calling convention; terminator defs would need SlotStore
+//!   at the fall-through successor's start). Pressure concentrated in
+//!   block params makes the function bail to legacy.
+//! - `spill_one` reloads at *every* use, so heavily-over-pressure
+//!   functions cascade (reloads re-create pressure). A `spill_cap`
+//!   bails those fast; eliminating them needs live-range splitting
+//!   (Phase 7), which keeps a value in a register across a region and
+//!   reloads only across the gap.
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::cfg::regalloc::color::{Coloring, color};
-use crate::cfg::regalloc::interference::build_interference;
-use crate::cfg::regalloc::liveness::compute_liveness;
+use crate::cfg::dom::reverse_postorder;
+use crate::cfg::regalloc::color::{ClobberConstraints, Coloring, color_with_constraints};
+use crate::cfg::regalloc::interference::{build_interference, cross_safepoint_values};
+use crate::cfg::regalloc::liveness::{Liveness, compute_liveness};
 use crate::cfg::{BlockId, CfgFunction, Op, RegClass, SlotId, VReg};
 
 /// Per-class budget of physical registers available to color into.
@@ -58,126 +70,335 @@ pub struct AllocationResult {
     /// Number of allocator iterations (= initial coloring + 1 per
     /// spill).
     pub iterations: u32,
+    /// True if the final coloring fits the budget. False means the
+    /// spiller ran out of spillable candidates while still over budget
+    /// (e.g. pressure concentrated in block params, which `spill_one`
+    /// can't lower) — the driver bails to legacy in that case.
+    pub fits: bool,
 }
 
-/// Coloring with spilling: iterate compute_coloring → pick over-budget
-/// candidate → spill (rewrite the CFG) → re-color, until everything
-/// fits or no further candidate is available. The `f` is mutated by
-/// the spilling rewrites; the returned `Coloring` applies to the
-/// final state.
-pub fn allocate_with_spilling(f: &mut CfgFunction, budget: Budget) -> AllocationResult {
-    // Hard cap so a degenerate input (e.g. a function whose pressure
-    // can't be reduced by body-op spilling alone) doesn't burn
-    // unbounded compile time. The Phase 4d-2 work will improve the
-    // spill heuristic to make progress detection more precise.
+/// Phase 3 spiller — clobber-aware Belady. Iterates
+/// color → (over budget?) → spill the live value at the worst pressure
+/// point with the **furthest next use** (Belady MIN) → re-color, until
+/// the coloring fits the pool. `f` is mutated by the spill rewrites.
+///
+/// `callee_saved_gp` is the number of callee-saved GP colors (the
+/// caller-saved sub-pool starts there). It feeds the I7 clobber model:
+/// each iteration recomputes the cross-safepoint set (spilling changes
+/// liveness) and colors under the constraint, so the fit check naturally
+/// accounts for both budgets — total GP ≤ `budget.gp` and cross-safepoint
+/// GP ≤ `callee_saved_gp` (a cross-safepoint value that can't get a
+/// callee-saved color overflows past `budget.gp`, which the check sees).
+///
+/// GP spills land in **root slots** (GC-scanned) and FP spills in the
+/// **unscanned region** — `spill_one` routes by class (I9). For the
+/// current corpus only GP pressure ever overflows, so the unscanned-slot
+/// backend support isn't on the critical path.
+pub fn allocate_with_spilling(
+    f: &mut CfgFunction,
+    budget: Budget,
+    callee_saved_gp: u32,
+) -> AllocationResult {
+    // Per-recompute the spiller is O(liveness + interference + color),
+    // which is expensive on large functions — so spill a *batch* (the
+    // whole excess at the worst point) per recompute, not one value.
+    // That bounds recomputes to roughly the number of independent
+    // high-pressure regions (a handful) instead of one-per-spilled-value.
+    //
+    // `spill_cap` bounds total spills. The basic `spill_one` mechanism
+    // reloads at every use, so a heavily-over-pressure function cascades
+    // (reloads re-create pressure) and never converges — and even when it
+    // does, that many reloads lose to the legacy fallback. Measured: a
+    // low cap captures the cheap-spill wins (the functions that fit in a
+    // handful of spills, which run ≈ legacy) while bailing the cascade /
+    // block-param cases *fast* — no wasted compile, no runtime
+    // regression. Eliminating the remaining bails needs live-range
+    // splitting (Phase 7) and block-param spilling, not a higher cap
+    // (a higher cap fits a few more functions but their reload-heavy code
+    // regresses vs legacy).
     let max_iter: u32 = std::env::var("BEAGLE_SSA_SPILL_MAX_ITER")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(50);
+        .unwrap_or(200);
+    let spill_cap: usize = std::env::var("BEAGLE_SSA_SPILL_CAP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
 
     let mut spilled: Vec<VReg> = Vec::new();
     let mut iterations: u32 = 0;
-    let mut prev_max_gp: Option<u32> = None;
-    let mut prev_max_fp: Option<u32> = None;
     loop {
         iterations += 1;
         let liveness = compute_liveness(f);
         let ig = build_interference(f, &liveness);
-        let coloring = color(f, &ig);
+        let cross = cross_safepoint_values(f, &liveness);
+        let constraints = ClobberConstraints {
+            cross_safepoint: &cross,
+            callee_saved_gp,
+            pool_gp: budget.gp,
+        };
+        let coloring = color_with_constraints(f, &ig, Some(&constraints));
         if fits_budget(&coloring, budget) {
             return AllocationResult {
                 coloring,
                 spilled,
                 iterations,
+                fits: true,
             };
         }
-        if iterations >= max_iter {
+        if iterations >= max_iter || spilled.len() >= spill_cap {
             return AllocationResult {
                 coloring,
                 spilled,
                 iterations,
+                fits: false,
             };
         }
-        // No-progress check: if neither max_color budged after the
-        // previous spill, our heuristic isn't making the function
-        // colorable — bail rather than loop. The current naive
-        // heuristic ("spill the over-budget vreg") often hits this
-        // because the over-budget def's own site is the worst
-        // pressure point.
-        let cur_gp = coloring.max_color(crate::cfg::RegClass::Gp);
-        let cur_fp = coloring.max_color(crate::cfg::RegClass::Fp);
-        if let (Some(pg), Some(pf)) = (prev_max_gp, prev_max_fp) {
-            if cur_gp >= pg && cur_fp >= pf {
-                return AllocationResult {
-                    coloring,
-                    spilled,
-                    iterations,
-                };
-            }
-        }
-        prev_max_gp = Some(cur_gp);
-        prev_max_fp = Some(cur_fp);
 
-        let Some(victim) = pick_spill_candidate(f, &coloring, budget) else {
+        let batch = pick_belady_victims(f, &liveness, &cross, budget, callee_saved_gp);
+        if batch.is_empty() {
+            // No spillable value at the over-pressure point (all block
+            // params / used-at-op). Can't make progress — bail.
             return AllocationResult {
                 coloring,
                 spilled,
                 iterations,
+                fits: false,
             };
-        };
-        let _slot = spill_one(f, victim);
-        spilled.push(victim);
+        }
+        for victim in batch {
+            spill_one(f, victim);
+            spilled.push(victim);
+        }
     }
 }
 
-/// True if every VReg's color fits within its class's budget.
+/// True if every VReg's color fits within its class's budget. With the
+/// clobber constraint applied during coloring, a cross-safepoint GP
+/// value that can't get a callee-saved color is pushed to a color
+/// `>= budget.gp`, so this single check covers both the total-GP and
+/// cross-safepoint-GP budgets.
 pub fn fits_budget(coloring: &Coloring, budget: Budget) -> bool {
     coloring.max_color(RegClass::Gp) < budget.gp && coloring.max_color(RegClass::Fp) < budget.fp
 }
 
-/// Pick a body-op-defined VReg whose color exceeds its class's budget.
-/// Heuristic: lowest spill cost (= total uses + defs), then highest
-/// color (the one most over budget). Returns None when no spillable
-/// candidate exists.
-fn pick_spill_candidate(f: &CfgFunction, coloring: &Coloring, budget: Budget) -> Option<VReg> {
-    // Restrict to body-op-defined VRegs. Build the eligible set.
-    let mut eligible: std::collections::HashSet<VReg> = std::collections::HashSet::new();
+/// Belady victim selection. Finds the program point whose register
+/// pressure most exceeds the binding budget and returns a **batch** of
+/// spillable values live there, the furthest-next-use first (Belady —
+/// the ones we'll need last). The batch size is the point's excess over
+/// budget, so one recompute clears the worst point. Returns an empty
+/// vec if no spillable (body-op-defined, not used at that point) value
+/// is live there.
+///
+/// Two budgets bind (per the I7 clobber model): total GP ≤ `budget.gp`
+/// and cross-safepoint GP ≤ `callee_saved_gp`. We relieve whichever is
+/// worse — preferring to spill cross-safepoint values when the
+/// callee-saved budget is the violated one (only those compete for it).
+fn pick_belady_victims(
+    f: &CfgFunction,
+    liveness: &Liveness,
+    cross: &HashSet<VReg>,
+    budget: Budget,
+    callee_saved_gp: u32,
+) -> Vec<VReg> {
+    // Body-op-defined GP vregs are the spillable set (`spill_one` only
+    // handles those — block params and entry args need other machinery).
+    let mut spillable: HashSet<VReg> = HashSet::new();
     for block in &f.blocks {
         for op in &block.body {
             for d in op.defs() {
-                eligible.insert(d);
+                if d.class == RegClass::Gp {
+                    spillable.insert(d);
+                }
             }
         }
     }
+    if spillable.is_empty() {
+        return Vec::new();
+    }
 
-    // Count uses + defs per VReg as a cheap spill-cost proxy.
-    let mut cost: HashMap<VReg, u32> = HashMap::new();
-    for block in &f.blocks {
-        for op in &block.body {
+    // Linear RPO position of every op, and per-vreg sorted use positions
+    // (for next-use distance). Terminator uses sit just past the body.
+    let order = reverse_postorder(f);
+    let mut op_pos: HashMap<(BlockId, usize), usize> = HashMap::new();
+    let mut use_positions: HashMap<VReg, Vec<usize>> = HashMap::new();
+    let mut next_idx = 0usize;
+    for &bid in &order {
+        let block = f.block(bid);
+        for (i, op) in block.body.iter().enumerate() {
+            op_pos.insert((bid, i), next_idx);
             for u in op.uses() {
-                *cost.entry(u).or_insert(0) += 1;
+                use_positions.entry(u).or_default().push(next_idx);
             }
-            for d in op.defs() {
-                *cost.entry(d).or_insert(0) += 1;
-            }
+            next_idx += 1;
+        }
+        // Terminator position.
+        for u in block.terminator.uses() {
+            use_positions.entry(u).or_default().push(next_idx);
+        }
+        next_idx += 1;
+    }
+    for v in use_positions.values_mut() {
+        v.sort_unstable();
+    }
+
+    // Find the worst pressure point: walk each block backward (the same
+    // walk `build_interference` uses), tracking the live set after each
+    // op. Record the point that most violates the binding budget.
+    let mut worst: Option<WorstPoint> = None;
+
+    for &bid in &order {
+        let block = f.block(bid);
+        let mut live: HashSet<VReg> = liveness.live_out(bid).clone();
+
+        // Terminator first.
+        for &d in &block.terminator.defs() {
+            live.remove(&d);
         }
         for u in block.terminator.uses() {
-            *cost.entry(u).or_insert(0) += 1;
+            live.insert(u);
+        }
+
+        for (i, op) in block.body.iter().enumerate().rev() {
+            // `live` here = values live after this op = the clique at the
+            // op's program point. Defs born here join that clique.
+            let mut here: HashSet<VReg> = live.clone();
+            for &d in &op.defs() {
+                here.insert(d);
+            }
+            let pos = op_pos[&(bid, i)];
+            let used_here: HashSet<VReg> = op
+                .uses()
+                .into_iter()
+                .filter(|u| u.class == RegClass::Gp)
+                .collect();
+            consider_point(
+                &here,
+                &used_here,
+                cross,
+                budget,
+                callee_saved_gp,
+                pos,
+                &mut worst,
+            );
+
+            for &d in &op.defs() {
+                live.remove(&d);
+            }
+            for u in op.uses() {
+                live.insert(u);
+            }
         }
     }
 
-    // Filter to eligible AND over-budget; sort by (cost asc, color desc).
-    let mut candidates: Vec<(u32, u32, VReg)> = eligible
-        .into_iter()
-        .filter(|v| coloring.color_of(*v) >= budget.for_class(v.class))
-        .map(|v| (cost.get(&v).copied().unwrap_or(0), coloring.color_of(v), v))
-        .collect();
-    if candidates.is_empty() {
-        return None;
+    let Some(worst) = worst else {
+        return Vec::new();
+    };
+    if !worst.over_budget {
+        return Vec::new();
     }
-    // Lowest cost first; if tied, highest color (= worst over-budget).
-    candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
-    Some(candidates[0].2)
+
+    // Candidates: spillable GP values live at the worst point that are
+    // NOT used by the op there (those must be in a register). When
+    // relieving the callee-saved budget, only cross-safepoint values
+    // count — spilling a non-cross value wouldn't lower cross-safepoint
+    // pressure.
+    let used_here = &worst.used_here;
+    let mut candidates: Vec<(usize, VReg)> = worst
+        .live_gp
+        .iter()
+        .copied()
+        .filter(|v| spillable.contains(v) && !used_here.contains(v))
+        .filter(|v| !worst.relieve_callee_saved || cross.contains(v))
+        .map(|v| {
+            let next_use = use_positions
+                .get(&v)
+                .and_then(|ps| ps.iter().find(|&&p| p > worst.pos).copied())
+                .unwrap_or(usize::MAX);
+            (next_use, v)
+        })
+        .collect();
+
+    // Furthest next use first (Belady MIN). Tie-break on vreg index for
+    // determinism.
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.index.cmp(&b.1.index)));
+
+    // Spill the whole excess at this point in one batch, so a single
+    // recompute clears it.
+    let batch_size = (worst.severity.max(0) as usize).min(candidates.len());
+    candidates
+        .into_iter()
+        .take(batch_size)
+        .map(|(_, v)| v)
+        .collect()
+}
+
+/// The worst pressure point found so far during the backward walk.
+struct WorstPoint {
+    pos: usize,
+    live_gp: Vec<VReg>,
+    used_here: HashSet<VReg>,
+    over_budget: bool,
+    /// True if the violated budget is the callee-saved (cross-safepoint)
+    /// one rather than the total-GP one.
+    relieve_callee_saved: bool,
+    /// Severity used to pick the single worst point.
+    severity: i64,
+}
+
+/// Score one program point and update `worst` if it's the new worst
+/// budget violation.
+fn consider_point(
+    here: &HashSet<VReg>,
+    used_here: &HashSet<VReg>,
+    cross: &HashSet<VReg>,
+    budget: Budget,
+    callee_saved_gp: u32,
+    pos: usize,
+    worst: &mut Option<WorstPoint>,
+) {
+    let mut total_gp = 0i64;
+    let mut cs_gp = 0i64;
+    for &v in here {
+        if v.class == RegClass::Gp {
+            total_gp += 1;
+            if cross.contains(&v) {
+                cs_gp += 1;
+            }
+        }
+    }
+    let total_excess = total_gp - budget.gp as i64;
+    let cs_excess = cs_gp - callee_saved_gp as i64;
+    // The binding violation is the larger excess. Cross-safepoint excess
+    // is relieved by spilling a cross-safepoint value specifically.
+    let (severity, relieve_callee_saved) = if cs_excess >= total_excess && cs_excess > 0 {
+        (cs_excess, true)
+    } else {
+        (total_excess, false)
+    };
+    let over_budget = severity > 0;
+    if !over_budget {
+        return;
+    }
+    let better = match worst {
+        None => true,
+        Some(w) => severity > w.severity,
+    };
+    if better {
+        let live_gp: Vec<VReg> = here
+            .iter()
+            .copied()
+            .filter(|v| v.class == RegClass::Gp)
+            .collect();
+        *worst = Some(WorstPoint {
+            pos,
+            live_gp,
+            used_here: used_here.clone(),
+            over_budget,
+            relieve_callee_saved,
+            severity,
+        });
+    }
 }
 
 /// Rewrite `f` to route `vreg` through a fresh stack slot. Returns
@@ -326,9 +547,10 @@ mod tests {
         });
         f.block_mut(entry).terminator = Terminator::Ret { value: r };
 
-        let result = allocate_with_spilling(&mut f, Budget { gp: 8, fp: 8 });
+        let result = allocate_with_spilling(&mut f, Budget { gp: 8, fp: 8 }, 8);
         assert_eq!(result.spilled.len(), 0, "no spill needed");
         assert_eq!(result.iterations, 1, "single coloring pass");
+        assert!(result.fits, "fits the budget");
         assert_eq!(f.block(entry).body.len(), 1);
     }
 
@@ -383,10 +605,61 @@ mod tests {
         });
         f.block_mut(entry).terminator = Terminator::Ret { value: u };
 
-        let result = allocate_with_spilling(&mut f, Budget { gp: 4, fp: 8 });
-        // Terminated. May have a spill or not, but didn't infinite-
-        // loop. The over-budget situation is reflected in the
-        // returned coloring's max_color.
+        let result = allocate_with_spilling(&mut f, Budget { gp: 4, fp: 8 }, 4);
+        // Terminated. The 5 simultaneously-live entry params can't be
+        // spilled (body-op defs only), so the spiller runs out of
+        // candidates and returns fits=false rather than looping forever.
         assert!(result.iterations < 100, "should terminate quickly");
+        assert!(!result.fits, "unsatisfiable: params can't be spilled");
+    }
+
+    /// Belady core: six body-op values all live simultaneously, budget
+    /// of 4 GP. The spiller must spill enough (furthest-next-use first)
+    /// to bring the coloring under budget — and it succeeds (fits=true)
+    /// because these are all spillable body-op defs.
+    #[test]
+    fn belady_spills_high_pressure_to_fit() {
+        let mut f = CfgFunction::new(Some("pressure".into()), 0);
+        let entry = f.new_block();
+        f.entry = entry;
+        // Six constants, then a chain that keeps them all live to the
+        // end (each AddInt consumes the running sum + the next const, so
+        // every const is live until its turn). The six consts are
+        // simultaneously live across the first AddInt → pressure 6+.
+        let consts: Vec<VReg> = (0..6).map(|_| f.new_vreg(RegClass::Gp)).collect();
+        for (i, &c) in consts.iter().enumerate() {
+            f.block_mut(entry).body.push(Op::ConstTaggedInt {
+                dst: c,
+                value: i as i64,
+            });
+        }
+        // Build a tree that uses all six near the end so they stay live.
+        let mut acc = consts[0];
+        for &c in &consts[1..] {
+            let next = f.new_vreg(RegClass::Gp);
+            f.block_mut(entry).body.push(Op::AddInt {
+                dst: next,
+                lhs: acc,
+                rhs: c,
+            });
+            acc = next;
+        }
+        f.block_mut(entry).terminator = Terminator::Ret { value: acc };
+
+        // Sanity: unspilled pressure exceeds the budget.
+        let before = {
+            let l = compute_liveness(&f);
+            let (gp, _) = crate::cfg::regalloc::liveness::max_live(&f, &l);
+            gp
+        };
+        assert!(before > 4, "test needs pressure > budget, got {}", before);
+
+        let result = allocate_with_spilling(&mut f, Budget { gp: 4, fp: 8 }, 4);
+        assert!(result.fits, "spiller should bring it under budget");
+        assert!(!result.spilled.is_empty(), "some values were spilled");
+        assert!(
+            result.coloring.max_color(RegClass::Gp) < 4,
+            "final coloring fits 4 GP colors"
+        );
     }
 }
