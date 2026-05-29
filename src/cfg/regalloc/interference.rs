@@ -178,9 +178,11 @@ pub fn cross_safepoint_values(f: &CfgFunction, liveness: &Liveness) -> HashSet<V
         let mut live: HashSet<VReg> = liveness.live_out(bid).clone();
 
         // A safepoint terminator (Throw / InlineBumpAllocate bail) calls
-        // the runtime; everything live out of the block survives it.
+        // the runtime; values live *across* it = live-out minus the
+        // terminator's own defs (a def is born at the op, not across it).
         if is_gc_safepoint_terminator(&block.terminator) {
-            cross.extend(live.iter().copied());
+            let defs = block.terminator.defs();
+            cross.extend(live.iter().copied().filter(|v| !defs.contains(v)));
         }
         for &d in &block.terminator.defs() {
             live.remove(&d);
@@ -190,10 +192,13 @@ pub fn cross_safepoint_values(f: &CfgFunction, liveness: &Liveness) -> HashSet<V
         }
 
         for op in block.body.iter().rev() {
-            // `live` is the live-after set for this op. If the op is a
-            // safepoint, those values live across it.
+            // `live` is the live-after set for this op. A safepoint's own
+            // result is born at the op (returned in the result register),
+            // not live across it — exclude defs, or every call's result
+            // would be (wrongly) counted as cross-safepoint.
             if is_gc_safepoint_op(op) {
-                cross.extend(live.iter().copied());
+                let defs = op.defs();
+                cross.extend(live.iter().copied().filter(|v| !defs.contains(v)));
             }
             for &d in &op.defs() {
                 live.remove(&d);
