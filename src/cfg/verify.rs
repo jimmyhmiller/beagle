@@ -11,6 +11,7 @@
 //! | `check_vreg_classes`      | I4 (RegClass)       |
 //! | `check_no_critical_edges` | I2                  |
 //! | `check_dominance`         | I5                  |
+//! | `check_gc_slot_regions`   | I9 (slot regions)   |
 //!
 //! I1's "exactly one terminator per block" is enforced by the type system
 //! (`Block::terminator` is a single `Terminator`, not a `Vec`). I6 (locals
@@ -69,6 +70,15 @@ pub enum VerifyError {
     /// construction code should have filled this in before invoking the
     /// verifier.
     UnfilledTerminator { block: BlockId },
+    /// I9 (slot-region split): a slot is used in a way that breaks the
+    /// scanned/unscanned partition — an FP value in a GC-scanned slot
+    /// (would be misread as a heap pointer), a GP value in an unscanned
+    /// slot (the GC wouldn't see the pointer), a slot used with two
+    /// different classes, or an out-of-range region index.
+    SlotRegionError {
+        slot: crate::cfg::SlotId,
+        msg: String,
+    },
 }
 
 /// Run every check, returning the first failure.
@@ -83,6 +93,88 @@ pub fn verify(f: &CfgFunction) -> Result<(), VerifyError> {
     check_vreg_classes(f)?;
     check_no_critical_edges(f)?;
     check_dominance(f)?;
+    check_gc_slot_regions(f)?;
+    Ok(())
+}
+
+/// I9 slot-region split (Phase 1 of the runtime-parity plan). The frame
+/// slot space is partitioned into a GC-scanned root region (GP values
+/// that may be live across a safepoint) and an unscanned region (FP
+/// spills + raw scratch). The frame header's `size` counts only the
+/// root region, so a value's class must match its slot's region:
+///
+/// - An FP value must live in an **unscanned** slot — a raw `f64` in a
+///   scanned slot can be misread as a heap pointer (the documented
+///   risk this split exists to remove).
+/// - A GP value must live in a **root** slot — an unscanned slot is not
+///   scanned, so the GC would miss the pointer.
+/// - A single slot must not be used with two different classes.
+/// - Region indices must be within the allocated counts.
+fn check_gc_slot_regions(f: &CfgFunction) -> Result<(), VerifyError> {
+    use crate::cfg::{Op, RegClass, SlotId};
+
+    let mut seen: HashMap<SlotId, RegClass> = HashMap::new();
+
+    let mut check = |slot: SlotId, class: RegClass| -> Result<(), VerifyError> {
+        // Unscanned region bounds. The root region's upper bound
+        // (`< num_slots`) is established by `build_cfg` from the legacy
+        // local count, not re-checked here — hand-built test CFGs
+        // routinely use root slot ids without bumping `num_slots`, and
+        // that's harmless. The unscanned region is allocated only via
+        // `alloc_unscanned_slot`, so its count is always exact and a
+        // stray index there is a real spiller bug.
+        if slot.is_unscanned() && slot.region_index() >= f.num_unscanned_slots {
+            return Err(VerifyError::SlotRegionError {
+                slot,
+                msg: format!(
+                    "unscanned slot index {} >= num_unscanned_slots {}",
+                    slot.region_index(),
+                    f.num_unscanned_slots
+                ),
+            });
+        }
+        // Class ↔ region.
+        match class {
+            RegClass::Fp if !slot.is_unscanned() => {
+                return Err(VerifyError::SlotRegionError {
+                    slot,
+                    msg: "FP value stored in a GC-scanned slot (would be \
+                          misread as a heap pointer); use an unscanned slot"
+                        .into(),
+                });
+            }
+            RegClass::Gp if slot.is_unscanned() => {
+                return Err(VerifyError::SlotRegionError {
+                    slot,
+                    msg: "GP value stored in an unscanned slot (the GC would \
+                          not see the pointer); use a root slot"
+                        .into(),
+                });
+            }
+            _ => {}
+        }
+        // Single class per slot.
+        match seen.get(&slot) {
+            Some(prev) if *prev != class => Err(VerifyError::SlotRegionError {
+                slot,
+                msg: format!("slot used with two classes: {:?} then {:?}", prev, class),
+            }),
+            _ => {
+                seen.insert(slot, class);
+                Ok(())
+            }
+        }
+    };
+
+    for block in &f.blocks {
+        for op in &block.body {
+            match op {
+                Op::SlotStore { slot, src } => check(*slot, src.class)?,
+                Op::SlotLoad { dst, slot } => check(*slot, dst.class)?,
+                _ => {}
+            }
+        }
+    }
     Ok(())
 }
 
@@ -582,5 +674,94 @@ mod tests {
         f.block_mut(join).predecessors.push(else_b);
         f.block_mut(join).terminator = Terminator::Ret { value: v };
         verify(&f).expect("split-edge diamond should verify");
+    }
+
+    /// An FP value spilled to a properly-allocated unscanned slot
+    /// verifies; the GP/root and FP/unscanned mapping is the happy path.
+    /// `g` and `x` are entry params (clean defs that dominate all uses).
+    #[test]
+    fn fp_in_unscanned_and_gp_in_root_verifies() {
+        let mut f = fresh("regions_ok");
+        let entry = f.new_block();
+        f.entry = entry;
+        let g = f.new_vreg(RegClass::Gp);
+        let x = f.new_vreg(RegClass::Fp);
+        f.block_mut(entry).params.push(g);
+        f.block_mut(entry).params.push(x);
+        let root = f.alloc_root_slot();
+        let un = f.alloc_unscanned_slot();
+        f.block_mut(entry)
+            .body
+            .push(Op::SlotStore { slot: root, src: g });
+        f.block_mut(entry)
+            .body
+            .push(Op::SlotStore { slot: un, src: x });
+        f.block_mut(entry).terminator = Terminator::Ret { value: g };
+        verify(&f).expect("GP→root, FP→unscanned should verify");
+    }
+
+    /// An FP value in a GC-scanned (root) slot is the exact bug the
+    /// region split exists to prevent — the GC would misread the f64.
+    #[test]
+    fn fp_in_scanned_slot_is_caught() {
+        let mut f = fresh("fp_scanned");
+        let entry = f.new_block();
+        f.entry = entry;
+        let x = f.new_vreg(RegClass::Fp);
+        f.block_mut(entry).params.push(x);
+        f.block_mut(entry).body.push(Op::SlotStore {
+            slot: SlotId::root(0),
+            src: x,
+        });
+        f.block_mut(entry).terminator = Terminator::Ret { value: x };
+        let err = verify(&f).expect_err("FP in scanned slot must fail");
+        assert!(
+            matches!(err, VerifyError::SlotRegionError { .. }),
+            "{:?}",
+            err
+        );
+    }
+
+    /// A GP value in an unscanned slot — the GC wouldn't see the pointer.
+    #[test]
+    fn gp_in_unscanned_slot_is_caught() {
+        let mut f = fresh("gp_unscanned");
+        let entry = f.new_block();
+        f.entry = entry;
+        let g = f.new_vreg(RegClass::Gp);
+        f.block_mut(entry).params.push(g);
+        let un = f.alloc_unscanned_slot();
+        f.block_mut(entry)
+            .body
+            .push(Op::SlotStore { slot: un, src: g });
+        f.block_mut(entry).terminator = Terminator::Ret { value: g };
+        let err = verify(&f).expect_err("GP in unscanned slot must fail");
+        assert!(
+            matches!(err, VerifyError::SlotRegionError { .. }),
+            "{:?}",
+            err
+        );
+    }
+
+    /// An unscanned slot id past `num_unscanned_slots` is a spiller bug.
+    #[test]
+    fn out_of_range_unscanned_slot_is_caught() {
+        let mut f = fresh("oob_unscanned");
+        let entry = f.new_block();
+        f.entry = entry;
+        let x = f.new_vreg(RegClass::Fp);
+        f.block_mut(entry).params.push(x);
+        // No alloc_unscanned_slot call, so num_unscanned_slots == 0.
+        f.block_mut(entry).body.push(Op::SlotStore {
+            slot: SlotId::unscanned(0),
+            src: x,
+        });
+        f.block_mut(entry).terminator = Terminator::Ret { value: x };
+        let err = verify(&f).expect_err("out-of-range unscanned slot must fail");
+        assert!(
+            matches!(err, VerifyError::SlotRegionError { .. }),
+            "{:?}",
+            err
+        );
     }
 }

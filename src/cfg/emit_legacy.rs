@@ -347,12 +347,41 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
             }
 
             // ---- Slots (locals) ----
-            Op::SlotLoad { dst, slot } => self
-                .instructions
-                .push(I::LoadLocal(self.reg(*dst), Value::Local(slot.0 as usize))),
-            Op::SlotStore { slot, src } => self
-                .instructions
-                .push(I::StoreLocal(Value::Local(slot.0 as usize), self.reg(*src))),
+            // Root slots map to `Value::Local(index)` (GC-scanned). The
+            // unscanned region (FP spills / raw scratch) has no backend
+            // addressing yet; emit a clear hard error rather than a
+            // bogus `Local(UNSCANNED_SLOT_BASE + i)` index. Nothing
+            // produces unscanned slots on the wired path today (the
+            // spiller isn't in `compile_via_ssa`), so this is the
+            // forward guard for when Phase 1's backend support lands.
+            Op::SlotLoad { dst, slot } => {
+                if slot.is_unscanned() {
+                    return Err(SsaCompileError::UnsupportedOp(format!(
+                        "SlotLoad from unscanned slot {:?}: backend addressing \
+                         for the non-scanned FP/raw region is not implemented \
+                         yet (Phase 1 backend support pending)",
+                        slot
+                    )));
+                }
+                self.instructions.push(I::LoadLocal(
+                    self.reg(*dst),
+                    Value::Local(slot.region_index() as usize),
+                ));
+            }
+            Op::SlotStore { slot, src } => {
+                if slot.is_unscanned() {
+                    return Err(SsaCompileError::UnsupportedOp(format!(
+                        "SlotStore to unscanned slot {:?}: backend addressing \
+                         for the non-scanned FP/raw region is not implemented \
+                         yet (Phase 1 backend support pending)",
+                        slot
+                    )));
+                }
+                self.instructions.push(I::StoreLocal(
+                    Value::Local(slot.region_index() as usize),
+                    self.reg(*src),
+                ));
+            }
 
             // ---- Heap memory ----
             Op::HeapLoad { dst, base, offset } => {

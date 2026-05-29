@@ -181,6 +181,30 @@ GC foundation.
 **Done when:** slot layout is split, `header.size` excludes FP/raw slots,
 verifier passes, GC-stress green.
 
+**Increment 1 landed — slot-region model + verifier.** `SlotId` now carries a
+region (`UNSCANNED_SLOT_BASE` high-bit split; `is_unscanned()` /
+`region_index()`); `CfgFunction` grows `num_unscanned_slots` and
+`alloc_root_slot` / `alloc_unscanned_slot` / `alloc_slot_for(class)` (GP→root,
+FP→unscanned). `spill_one` routes spills by class so FP spills are GC-correct by
+construction. New verifier `check_gc_slot_regions` (I9) rejects FP-in-scanned,
+GP-in-unscanned, mixed-class, and out-of-range unscanned slots; wired into
+`verify()`. `translate` hard-errors on an unscanned slot (no silent bad
+`Local` index) since backend addressing isn't in yet. No behavior change: the
+spiller isn't wired into `compile_via_ssa`, so nothing emits unscanned slots;
+full suite 364/364 green under legacy and SSA, no `SlotRegionError` across the
+corpus (verified `build_cfg` never stores an FP value to a root slot).
+
+**Increment 2 remaining — backend frame decoupling + reuse port.** Still to do:
+(a) a `Value`-level unscanned-slot addressing mode placed *below* the eval-stack
+region in both backends, with `header.size` = `max_locals + max_stack_size`
+(naturally excluding it) and SP reservation including it; (b) wire
+`cfg.num_unscanned_slots` to the backend; (c) port the `assign_root_slots`
+free-list reuse so spilled values share slots. Frame facts confirmed: GC scans a
+*contiguous* prefix from `[FP-24]` and the SSA path *does* use the eval stack
+(`PushStack`/`PopStack`), so unscanned slots must sit below it — there is no
+existing non-scanned region to reuse (the legacy "spill area" = root slots =
+scanned).
+
 ---
 
 ### Phase 2 — Grow the pool + per-call clobber interference (I7)

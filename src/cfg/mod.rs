@@ -54,8 +54,57 @@ pub struct VReg {
 /// `SlotId(n)` here. Slots stay materialized as `SlotLoad` / `SlotStore`
 /// at construction time (I6); mem2reg promotes hot slots to SSA values
 /// only when profitable.
+///
+/// The slot space is split into two **regions** (Phase 1 of the SSA
+/// runtime-parity plan), distinguished by the high bit of the index:
+///
+/// - **Root region** (`id.0 < UNSCANNED_SLOT_BASE`): the GC-scanned
+///   frame slots. Every legacy `Value::Local(n)` is a root slot
+///   `SlotId(n)`. Any GP value live across a GC-safepoint must live in
+///   a root slot (**I9**), and the frame header's scanned `size`
+///   counts exactly these.
+/// - **Unscanned region** (`id.0 >= UNSCANNED_SLOT_BASE`): frame slots
+///   the GC does **not** scan, reserved for FP spills and raw
+///   non-pointer scratch. A raw `f64` in a scanned slot can be misread
+///   as a heap pointer; these live outside the scanned range so it
+///   can't be. `unscanned_index()` recovers the 0-based index within
+///   the region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SlotId(pub u32);
+
+/// Base index marking a slot as belonging to the non-scanned region.
+/// Root slots are `[0, UNSCANNED_SLOT_BASE)`; unscanned slots encode
+/// their region index as `UNSCANNED_SLOT_BASE + index`.
+pub const UNSCANNED_SLOT_BASE: u32 = 1 << 31;
+
+impl SlotId {
+    /// A root (GC-scanned) slot with the given index.
+    pub fn root(index: u32) -> SlotId {
+        debug_assert!(index < UNSCANNED_SLOT_BASE, "root slot index overflow");
+        SlotId(index)
+    }
+
+    /// An unscanned (FP / raw scratch) slot with the given region index.
+    pub fn unscanned(index: u32) -> SlotId {
+        debug_assert!(index < UNSCANNED_SLOT_BASE, "unscanned slot index overflow");
+        SlotId(UNSCANNED_SLOT_BASE + index)
+    }
+
+    /// True if this slot is in the non-scanned region.
+    pub fn is_unscanned(self) -> bool {
+        self.0 >= UNSCANNED_SLOT_BASE
+    }
+
+    /// The 0-based index of this slot within its region (root index if
+    /// scanned, region index if unscanned).
+    pub fn region_index(self) -> u32 {
+        if self.is_unscanned() {
+            self.0 - UNSCANNED_SLOT_BASE
+        } else {
+            self.0
+        }
+    }
+}
 
 /// Block identifier within a single function's CFG.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -714,10 +763,17 @@ pub struct CfgFunction {
     /// every used VReg appears here and matches the class on the VReg
     /// itself (**I4**).
     pub vreg_classes: Vec<RegClass>,
-    /// Number of stack slots reserved for `Value::Local` storage. Stays
-    /// stable across mem2reg so GC-root machinery and debug info stay
-    /// valid (**I6**).
+    /// Number of **root** (GC-scanned) stack slots reserved for
+    /// `Value::Local` storage. Stays stable across mem2reg so GC-root
+    /// machinery and debug info stay valid (**I6**). This is the slot
+    /// count the frame header's scanned `size` is derived from.
     pub num_slots: u32,
+    /// Number of **unscanned** stack slots (FP spills + raw scratch).
+    /// These live below the scanned region and are excluded from the
+    /// frame header's `size`, so the GC never misreads a raw `f64` as a
+    /// heap pointer (Phase 1 of the runtime-parity plan). Allocated via
+    /// [`CfgFunction::alloc_unscanned_slot`].
+    pub num_unscanned_slots: u32,
 }
 
 impl CfgFunction {
@@ -728,6 +784,35 @@ impl CfgFunction {
             blocks: Vec::new(),
             vreg_classes: Vec::new(),
             num_slots,
+            num_unscanned_slots: 0,
+        }
+    }
+
+    /// Allocate a fresh **root** (GC-scanned) slot. Use for GP values
+    /// that may be live across a GC-safepoint (**I9**).
+    pub fn alloc_root_slot(&mut self) -> SlotId {
+        let id = SlotId::root(self.num_slots);
+        self.num_slots += 1;
+        id
+    }
+
+    /// Allocate a fresh **unscanned** slot (FP spill / raw scratch).
+    /// Use for `RegClass::Fp` values and any raw non-pointer scratch —
+    /// these must NOT land in the scanned region (the GC would misread
+    /// the bit pattern as a heap pointer).
+    pub fn alloc_unscanned_slot(&mut self) -> SlotId {
+        let id = SlotId::unscanned(self.num_unscanned_slots);
+        self.num_unscanned_slots += 1;
+        id
+    }
+
+    /// Allocate a slot appropriate for `class`: GP → root (scanned),
+    /// FP → unscanned. This is the single decision point the spiller
+    /// uses so FP spills are GC-correct by construction.
+    pub fn alloc_slot_for(&mut self, class: RegClass) -> SlotId {
+        match class {
+            RegClass::Gp => self.alloc_root_slot(),
+            RegClass::Fp => self.alloc_unscanned_slot(),
         }
     }
 

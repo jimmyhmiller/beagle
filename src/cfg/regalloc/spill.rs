@@ -184,8 +184,11 @@ fn pick_spill_candidate(f: &CfgFunction, coloring: &Coloring, budget: Budget) ->
 /// the slot id allocated. Caller is responsible for re-running
 /// liveness / interference / coloring.
 pub fn spill_one(f: &mut CfgFunction, vreg: VReg) -> SlotId {
-    let slot = SlotId(f.num_slots);
-    f.num_slots += 1;
+    // Route by class so the destination is GC-correct (I9): GP spills
+    // go to a scanned root slot (the GC must see the pointer), FP spills
+    // go to the unscanned region (a raw f64 must not be misread as a
+    // heap pointer). See `CfgFunction::alloc_slot_for`.
+    let slot = f.alloc_slot_for(vreg.class);
 
     let num_blocks = f.blocks.len();
     for bid_idx in 0..num_blocks {
