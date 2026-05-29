@@ -1130,17 +1130,27 @@ impl PrettyPrint for ArmAsm {
                 rn,
                 rd,
             } => {
-                // shift: 0,
-                // imm6: 0,
-                if *shift != 0 || *imm6 != 0 {
-                    panic!("Need to deal with shift and imm6 since I'm using it now");
-                }
-                format!(
+                // `shift` selects the shift type applied to Rm; `imm6`
+                // is the shift amount. Render the `, <type> #<amt>`
+                // suffix when present (omitted for the common LSL #0).
+                let base = format!(
                     "orr {}, {}, {}",
                     rd.pretty_print(),
                     rn.pretty_print(),
                     rm.pretty_print()
-                )
+                );
+                if *shift == 0 && *imm6 == 0 {
+                    base
+                } else {
+                    let shift_type = match *shift {
+                        0b00 => "lsl",
+                        0b01 => "lsr",
+                        0b10 => "asr",
+                        0b11 => "ror",
+                        _ => "lsl",
+                    };
+                    format!("{}, {} #{}", base, shift_type, imm6)
+                }
             }
             ArmAsm::Ret { rn } => {
                 format!("ret {}", rn.pretty_print())

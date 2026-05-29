@@ -139,6 +139,74 @@ pub fn compute_liveness(f: &CfgFunction) -> Liveness {
     Liveness { live_in, live_out }
 }
 
+/// Maximum register pressure (MaxLive) per `RegClass`: the largest
+/// number of values simultaneously live at any single program point.
+///
+/// Returned as `(gp, fp)`. Computed by the same backward walk
+/// `build_interference` uses, so for SSA (a chordal interference
+/// graph) this equals the maximum clique size, which in turn equals
+/// the number of colors an optimal chordal coloring assigns. Reporting
+/// MaxLive alongside the coloring's `max_color` is therefore a
+/// cross-check: a divergence signals a coloring or interference bug.
+///
+/// The pressure at an instruction is the size of `live ∪ defs` at that
+/// point — the clique the interference graph forms there.
+pub fn max_live(f: &CfgFunction, liveness: &Liveness) -> (usize, usize) {
+    let mut max_gp = 0usize;
+    let mut max_fp = 0usize;
+
+    let mut record = |live: &HashSet<VReg>, defs: &[VReg]| {
+        let mut gp = 0usize;
+        let mut fp = 0usize;
+        let mut count = |v: VReg| match v.class {
+            crate::cfg::RegClass::Gp => gp += 1,
+            crate::cfg::RegClass::Fp => fp += 1,
+        };
+        for &v in live {
+            count(v);
+        }
+        // Defs not already in the live-after set add to the clique.
+        for &d in defs {
+            if !live.contains(&d) {
+                count(d);
+            }
+        }
+        max_gp = max_gp.max(gp);
+        max_fp = max_fp.max(fp);
+    };
+
+    for (idx, block) in f.blocks.iter().enumerate() {
+        let bid = BlockId(idx as u32);
+        let mut live: HashSet<VReg> = liveness.live_out(bid).clone();
+
+        let term_defs = block.terminator.defs();
+        record(&live, &term_defs);
+        for &d in &term_defs {
+            live.remove(&d);
+        }
+        for u in block.terminator.uses() {
+            live.insert(u);
+        }
+
+        for op in block.body.iter().rev() {
+            let defs = op.defs();
+            record(&live, &defs);
+            for &d in &defs {
+                live.remove(&d);
+            }
+            for u in op.uses() {
+                live.insert(u);
+            }
+        }
+
+        // Block entry: params are all live simultaneously with whatever
+        // is live into the block.
+        record(&live, &block.params);
+    }
+
+    (max_gp, max_fp)
+}
+
 // =========================================================================
 // Tests
 // =========================================================================
@@ -300,5 +368,57 @@ mod tests {
         // (computed by the interference walker in Phase 4b) will see
         // y as live AT body's terminator.
         assert!(!l.live_out(body).contains(&x), "x killed by header's param");
+    }
+
+    /// MaxLive equals the optimal chordal coloring's color count: this
+    /// is the cross-check the regalloc-stats line reports. Here three
+    /// params are all live at the AddInt summing the first two while the
+    /// third is carried to the return — peak GP pressure is 3.
+    #[test]
+    fn max_live_matches_pressure() {
+        use crate::cfg::regalloc::color::color;
+        use crate::cfg::regalloc::interference::build_interference;
+
+        let mut f = CfgFunction::new(Some("pressure".into()), 0);
+        let entry = f.new_block();
+        f.entry = entry;
+        let a = f.new_vreg(RegClass::Gp);
+        let b = f.new_vreg(RegClass::Gp);
+        let c = f.new_vreg(RegClass::Gp);
+        let r = f.new_vreg(RegClass::Gp);
+        let s = f.new_vreg(RegClass::Gp);
+        f.block_mut(entry).params.push(a);
+        f.block_mut(entry).params.push(b);
+        f.block_mut(entry).params.push(c);
+        // r = a + b; a,b die here. c is still live (used below).
+        f.block_mut(entry).body.push(Op::AddInt {
+            dst: r,
+            lhs: a,
+            rhs: b,
+        });
+        // s = r + c; r and c both live at this point alongside... nothing
+        // else, so peak GP pressure is 3 (the three params at entry).
+        f.block_mut(entry).body.push(Op::AddInt {
+            dst: s,
+            lhs: r,
+            rhs: c,
+        });
+        f.block_mut(entry).terminator = Terminator::Ret { value: s };
+
+        let l = compute_liveness(&f);
+        let (gp, fp) = max_live(&f, &l);
+        assert_eq!(gp, 3, "three params simultaneously live at entry");
+        assert_eq!(fp, 0, "no FP values");
+
+        // Cross-check: chordal coloring uses exactly MaxLive colors.
+        let ig = build_interference(&f, &l);
+        let coloring = color(&f, &ig);
+        let distinct: std::collections::HashSet<u32> = coloring
+            .colors
+            .iter()
+            .filter(|(v, _)| v.class == RegClass::Gp)
+            .map(|(_, c)| *c)
+            .collect();
+        assert_eq!(distinct.len(), gp, "colors == MaxLive (chordal optimality)");
     }
 }
