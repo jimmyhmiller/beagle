@@ -56,8 +56,16 @@ pub struct PhysicalLayout {
     pub arg_regs_gp: &'static [u32],
     pub arg_regs_fp: &'static [u32],
     /// Allocator pool — physical indices available for non-arg VRegs.
+    /// **Ordered callee-saved first, then caller-saved** (Phase 2): the
+    /// first `callee_saved_gp` entries are callee-saved (survive a call
+    /// for free), the rest are caller-saved (clobbered across a call).
+    /// A value live across a GC-safepoint must take a callee-saved
+    /// color; the clobber model in `color.rs` enforces that.
     pub allocator_gp: &'static [u32],
     pub allocator_fp: &'static [u32],
+    /// Number of leading callee-saved registers in `allocator_gp`.
+    /// Colors `>= callee_saved_gp` map to caller-saved registers.
+    pub callee_saved_gp: u32,
 }
 
 #[cfg(not(any(
@@ -69,13 +77,22 @@ pub static ARM64_LAYOUT: PhysicalLayout = PhysicalLayout {
     arg_regs_gp: &[0, 1, 2, 3, 4, 5, 6, 7],
     // D0..D7
     arg_regs_fp: &[0, 1, 2, 3, 4, 5, 6, 7],
-    // X19..X27 (allocator pool per `abi::arm64::ABI`).
-    allocator_gp: &[19, 20, 21, 22, 23, 24, 25, 26, 27],
+    // Callee-saved X19..X27 (the long-standing pool, all survive a
+    // call), then caller-saved X13, X14, X15 (Phase 2). X13/X14/X15 are
+    // AAPCS temporaries used by nothing in the backend's scratch
+    // convention (temps are X10/X11/X12, scratch X16/X17, X9=arg-count,
+    // X28=MutatorState), so they are free to allocate. A value live
+    // across a safepoint must NOT land in X13/X14/X15 (it'd be
+    // clobbered) — `color.rs`'s clobber model keeps cross-safepoint
+    // values in the callee-saved prefix.
+    allocator_gp: &[19, 20, 21, 22, 23, 24, 25, 26, 27, 13, 14, 15],
     // D8..D15 (callee-saved low-64 of V8..V15). Legacy doesn't have
     // a distinct FP pool; this matches the de-facto "ARM FP is safe
     // here" usage. If a function actually needs FP across calls,
     // spilling kicks in.
     allocator_fp: &[8, 9, 10, 11, 12, 13, 14, 15],
+    // X19..X27 are callee-saved; X13..X15 (the tail) are caller-saved.
+    callee_saved_gp: 9,
 };
 
 #[cfg(any(
@@ -91,6 +108,9 @@ pub static X86_64_LAYOUT: PhysicalLayout = PhysicalLayout {
     allocator_gp: &[12, 13, 14, 15, 16],
     // No XMM callee-saved on SysV; allocator must spill FP across calls
     allocator_fp: &[],
+    // All five SysV allocator GPs (R12-R15, RBX) are callee-saved; no
+    // caller-saved sub-pool added on x86-64 yet (Phase 2 targets ARM64).
+    callee_saved_gp: 5,
 };
 
 /// Get the layout for the current build target.
@@ -182,6 +202,46 @@ pub fn has_overflow(coloring: &Coloring) -> bool {
     coloring.colors.values().any(|&c| c == PHYSICAL_OVERFLOW)
 }
 
+/// I7 clobber-safety verifier. Returns `Err(v)` for the first
+/// cross-safepoint GP value `v` that was assigned a **caller-saved**
+/// physical register — a bug, because the call would clobber it. The
+/// clobber model in `color.rs` should make this impossible; this is the
+/// end-to-end check that it did.
+///
+/// Caller-saved GP registers are (a) the tail of `allocator_gp` (indices
+/// `>= callee_saved_gp`) and (b) the argument registers `arg_regs_gp` —
+/// entry params are pinned to those by `assign_physical_registers`,
+/// bypassing the color constraint, so a cross-safepoint entry param in
+/// an arg reg is the documented "clobber a live entry-param" bug and is
+/// flagged here too. Overflow assignments are ignored (the driver bails
+/// on them separately). FP is not checked: its pool is entirely
+/// callee-saved.
+pub fn verify_clobber_safety(
+    physical: &Coloring,
+    cross_safepoint: &std::collections::HashSet<VReg>,
+    layout: &PhysicalLayout,
+) -> Result<(), VReg> {
+    let is_caller_saved = |phys: u32| {
+        layout.allocator_gp[layout.callee_saved_gp as usize..].contains(&phys)
+            || layout.arg_regs_gp.contains(&phys)
+    };
+    for &v in cross_safepoint {
+        if v.class != RegClass::Gp {
+            continue;
+        }
+        let Some(&phys) = physical.colors.get(&v) else {
+            continue;
+        };
+        if phys == PHYSICAL_OVERFLOW {
+            continue;
+        }
+        if is_caller_saved(phys) {
+            return Err(v);
+        }
+    }
+    Ok(())
+}
+
 // =========================================================================
 // Tests
 // =========================================================================
@@ -196,6 +256,7 @@ mod tests {
 
     fn test_layout() -> PhysicalLayout {
         PhysicalLayout {
+            callee_saved_gp: 9,
             arg_regs_gp: &[0, 1, 2, 3, 4, 5, 6, 7],
             arg_regs_fp: &[0, 1, 2, 3, 4, 5, 6, 7],
             allocator_gp: &[19, 20, 21, 22, 23, 24, 25, 26, 27],
@@ -261,6 +322,7 @@ mod tests {
         // Make a layout with 1 arg reg, then function with 2 entry
         // params — second one overflows.
         let layout = PhysicalLayout {
+            callee_saved_gp: 2,
             arg_regs_gp: &[0],
             arg_regs_fp: &[],
             allocator_gp: &[19, 20],

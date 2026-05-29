@@ -846,27 +846,70 @@ pub fn compile_via_ssa<B: CodegenBackend>(
     mut backend: B,
 ) -> Result<B, (SsaCompileError, B)> {
     use crate::cfg::builder::build_cfg;
-    use crate::cfg::regalloc::color::color as color_fn;
+    use crate::cfg::regalloc::color::{ClobberConstraints, color_with_constraints};
     use crate::cfg::regalloc::edge::Scratch;
     use crate::cfg::regalloc::emit::lower_to_allocated;
-    use crate::cfg::regalloc::interference::build_interference;
+    use crate::cfg::regalloc::interference::{build_interference, cross_safepoint_values};
     use crate::cfg::regalloc::liveness::compute_liveness;
-    use crate::cfg::regalloc::physical::{assign_physical_registers, current_layout, has_overflow};
+    use crate::cfg::regalloc::physical::{
+        assign_physical_registers, current_layout, has_overflow, verify_clobber_safety,
+    };
 
     let mut cfg = match build_cfg(ir) {
         Ok(c) => c,
         Err(e) => return Err((SsaCompileError::BuildFailed(format!("{:?}", e)), backend)),
     };
 
+    // Safety net (spec: a verifier failure falls back to legacy). A use
+    // of a VReg with no def anywhere is a malformed CFG (e.g. the
+    // variadic-prologue rest-array gap surfaced by count_items); emitting
+    // code for it reads an undefined register → garbage. Bail to legacy,
+    // which lowers these correctly.
+    if let Some(v) = crate::cfg::verify::first_undefined_use(&cfg) {
+        let name = ir.debug_name.clone().unwrap_or_else(|| "<anon>".into());
+        return Err((
+            SsaCompileError::BuildFailed(format!("use of undefined vreg {:?} in {}", v, name)),
+            backend,
+        ));
+    }
+
     let liveness = compute_liveness(&cfg);
     let ig = build_interference(&cfg, &liveness);
-    let coloring = color_fn(&cfg, &ig);
     let layout = current_layout();
+
+    // Per-call clobber model (I7): forbid caller-saved colors for values
+    // live across a safepoint, so the grown pool (caller-saved X13-X15)
+    // is safe — a cross-call value can never land in a clobbered reg.
+    let cross_safepoint = cross_safepoint_values(&cfg, &liveness);
+    let constraints = ClobberConstraints {
+        cross_safepoint: &cross_safepoint,
+        callee_saved_gp: layout.callee_saved_gp,
+        pool_gp: layout.allocator_gp.len() as u32,
+    };
+    let coloring = color_with_constraints(&cfg, &ig, Some(&constraints));
     let physical = assign_physical_registers(&cfg, &coloring, layout);
 
     if has_overflow(&physical) {
         let name = ir.debug_name.clone().unwrap_or_else(|| "<anon>".into());
         return Err((SsaCompileError::SpillOverflow(name), backend));
+    }
+
+    // Verifier: no cross-safepoint GP value may have landed in a
+    // caller-saved physical register (it would be clobbered by the
+    // call). The color constraint guarantees this for allocator-pool
+    // values; it can still catch a cross-safepoint *entry param* pinned
+    // to an arg reg (the documented "clobber a live entry-param" case),
+    // which the constraint doesn't control. Either way, bail to legacy
+    // — never emit code that clobbers a live value.
+    if let Err(bad) = verify_clobber_safety(&physical, &cross_safepoint, layout) {
+        let name = ir.debug_name.clone().unwrap_or_else(|| "<anon>".into());
+        return Err((
+            SsaCompileError::BuildFailed(format!(
+                "I7 clobber-safety: cross-safepoint {:?} got a caller-saved reg in {}",
+                bad, name
+            )),
+            backend,
+        ));
     }
 
     // Scratch registers for edge resolution's cycle breaks. Pick

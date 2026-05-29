@@ -13,11 +13,34 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::cfg::dom::{compute_idoms, dominator_tree_children, reverse_postorder};
 use crate::cfg::regalloc::interference::InterferenceGraph;
 use crate::cfg::{BlockId, CfgFunction, RegClass, Terminator, VReg};
+
+/// The per-call clobber model (I7), supplied to the coloring pass.
+///
+/// A value live across a GC-safepoint must not be colored into a
+/// caller-saved register — the call would clobber it. We model this
+/// (per the plan: "every value live across a safepoint interferes with
+/// the entire caller-saved sub-pool") by forbidding the caller-saved
+/// GP color range `[callee_saved_gp, pool_gp)` for every cross-safepoint
+/// GP value. If that leaves no callee-saved color free, the value's
+/// color lands at `pool_gp` (overflow) and the driver spills/bails —
+/// exactly as it did before caller-saved registers existed.
+///
+/// FP is unconstrained: the FP allocator pool is entirely callee-saved,
+/// so any FP value already survives calls.
+pub struct ClobberConstraints<'a> {
+    /// VRegs live across a safepoint (from
+    /// `interference::cross_safepoint_values`).
+    pub cross_safepoint: &'a HashSet<VReg>,
+    /// First caller-saved GP color (= number of callee-saved GP regs).
+    pub callee_saved_gp: u32,
+    /// Total GP allocator pool size; colors `>= pool_gp` overflow.
+    pub pool_gp: u32,
+}
 
 #[derive(Debug, Clone)]
 pub struct Coloring {
@@ -50,6 +73,18 @@ impl Coloring {
 /// For each VReg, picks the lowest color not used by any already-
 /// colored neighbor in the same RegClass.
 pub fn color(f: &CfgFunction, ig: &InterferenceGraph) -> Coloring {
+    color_with_constraints(f, ig, None)
+}
+
+/// Like [`color`], but applies the per-call clobber model (I7): every
+/// cross-safepoint GP value is forbidden the caller-saved color range,
+/// so it cannot be assigned a register the call would clobber. Passing
+/// `None` is identical to [`color`] — the unconstrained chordal optimum.
+pub fn color_with_constraints(
+    f: &CfgFunction,
+    ig: &InterferenceGraph,
+    constraints: Option<&ClobberConstraints>,
+) -> Coloring {
     let mut colors: HashMap<VReg, u32> = HashMap::new();
     let mut max_used: HashMap<RegClass, u32> = HashMap::new();
     let mut max_used_or_zero = |class: RegClass, c: u32| {
@@ -82,17 +117,38 @@ pub fn color(f: &CfgFunction, ig: &InterferenceGraph) -> Coloring {
 
         // Block params first (they become live at block entry).
         for &p in &block.params {
-            assign_color(p, ig, &hints, &mut colors, &mut max_used_or_zero);
+            assign_color(
+                p,
+                ig,
+                &hints,
+                constraints,
+                &mut colors,
+                &mut max_used_or_zero,
+            );
         }
         // Body op defs in forward order.
         for op in &block.body {
             for d in op.defs() {
-                assign_color(d, ig, &hints, &mut colors, &mut max_used_or_zero);
+                assign_color(
+                    d,
+                    ig,
+                    &hints,
+                    constraints,
+                    &mut colors,
+                    &mut max_used_or_zero,
+                );
             }
         }
         // Terminator def (if any — only InlineBranch defines).
         for d in block.terminator.defs() {
-            assign_color(d, ig, &hints, &mut colors, &mut max_used_or_zero);
+            assign_color(
+                d,
+                ig,
+                &hints,
+                constraints,
+                &mut colors,
+                &mut max_used_or_zero,
+            );
         }
 
         // Recurse to dominator-tree children.
@@ -123,15 +179,36 @@ pub fn color(f: &CfgFunction, ig: &InterferenceGraph) -> Coloring {
         let bid = BlockId(bid_idx as u32);
         let block = f.block(bid);
         for &p in &block.params {
-            assign_color(p, ig, &hints, &mut colors, &mut max_used_or_zero);
+            assign_color(
+                p,
+                ig,
+                &hints,
+                constraints,
+                &mut colors,
+                &mut max_used_or_zero,
+            );
         }
         for op in &block.body {
             for d in op.defs() {
-                assign_color(d, ig, &hints, &mut colors, &mut max_used_or_zero);
+                assign_color(
+                    d,
+                    ig,
+                    &hints,
+                    constraints,
+                    &mut colors,
+                    &mut max_used_or_zero,
+                );
             }
         }
         for d in block.terminator.defs() {
-            assign_color(d, ig, &hints, &mut colors, &mut max_used_or_zero);
+            assign_color(
+                d,
+                ig,
+                &hints,
+                constraints,
+                &mut colors,
+                &mut max_used_or_zero,
+            );
         }
     }
 
@@ -145,6 +222,7 @@ fn assign_color(
     v: VReg,
     ig: &InterferenceGraph,
     hints: &HashMap<VReg, Vec<VReg>>,
+    constraints: Option<&ClobberConstraints>,
     colors: &mut HashMap<VReg, u32>,
     max_used: &mut impl FnMut(RegClass, u32),
 ) {
@@ -159,6 +237,18 @@ fn assign_color(
         .filter(|n| n.class == v.class)
         .filter_map(|n| colors.get(&n).copied())
         .collect();
+
+    // Clobber model (I7): a GP value live across a safepoint cannot take
+    // a caller-saved color — forbid the whole caller-saved range. If
+    // every callee-saved color is also taken, the smallest free color
+    // then lands at `pool_gp` (overflow) and the driver spills/bails,
+    // exactly as before caller-saved regs existed.
+    if let Some(c) = constraints {
+        if v.class == RegClass::Gp && c.cross_safepoint.contains(&v) {
+            forbidden.extend(c.callee_saved_gp..c.pool_gp);
+        }
+    }
+
     forbidden.sort_unstable();
     forbidden.dedup();
 
@@ -429,5 +519,91 @@ mod tests {
                 v
             );
         }
+    }
+
+    /// Clobber model: a cross-safepoint value cannot take a caller-saved
+    /// color. With two interfering values, a tiny callee-saved pool
+    /// (`callee_saved_gp = 1`), and BOTH marked cross-safepoint, the
+    /// second can't use the caller-saved color 1 — it overflows to
+    /// `pool_gp`, signalling a spill/bail.
+    #[test]
+    fn cross_safepoint_value_avoids_caller_saved() {
+        let mut f = CfgFunction::new(Some("clobber".into()), 0);
+        let entry = f.new_block();
+        f.entry = entry;
+        let a = f.new_vreg(RegClass::Gp);
+        let b = f.new_vreg(RegClass::Gp);
+        f.block_mut(entry).params.push(a);
+        f.block_mut(entry).params.push(b);
+        // Use both so they're simultaneously live at entry → interfere.
+        let r = f.new_vreg(RegClass::Gp);
+        f.block_mut(entry).body.push(Op::AddInt {
+            dst: r,
+            lhs: a,
+            rhs: b,
+        });
+        f.block_mut(entry).terminator = Terminator::Ret { value: r };
+
+        let liveness = compute_liveness(&f);
+        let ig = build_interference(&f, &liveness);
+        let mut cross = HashSet::new();
+        cross.insert(a);
+        cross.insert(b);
+        let constraints = ClobberConstraints {
+            cross_safepoint: &cross,
+            callee_saved_gp: 1, // only color 0 is callee-saved
+            pool_gp: 2,         // color 1 is caller-saved; >=2 overflows
+        };
+        let coloring = color_with_constraints(&f, &ig, Some(&constraints));
+
+        let ca = coloring.color_of(a);
+        let cb = coloring.color_of(b);
+        // One gets the lone callee-saved color 0; the other can't use
+        // caller-saved color 1, so it overflows to >= pool_gp (2).
+        assert!(
+            ca == 0 || cb == 0,
+            "one cross-call value uses callee-saved 0"
+        );
+        let other = if ca == 0 { cb } else { ca };
+        assert!(
+            other >= 2,
+            "the other cross-call value overflowed past caller-saved, got {}",
+            other
+        );
+    }
+
+    /// Without the cross-safepoint mark, the same two interfering values
+    /// happily use color 0 (callee-saved) and color 1 (caller-saved) —
+    /// the relief the grown pool provides for short-lived values.
+    #[test]
+    fn short_lived_value_uses_caller_saved() {
+        let mut f = CfgFunction::new(Some("short".into()), 0);
+        let entry = f.new_block();
+        f.entry = entry;
+        let a = f.new_vreg(RegClass::Gp);
+        let b = f.new_vreg(RegClass::Gp);
+        f.block_mut(entry).params.push(a);
+        f.block_mut(entry).params.push(b);
+        let r = f.new_vreg(RegClass::Gp);
+        f.block_mut(entry).body.push(Op::AddInt {
+            dst: r,
+            lhs: a,
+            rhs: b,
+        });
+        f.block_mut(entry).terminator = Terminator::Ret { value: r };
+
+        let liveness = compute_liveness(&f);
+        let ig = build_interference(&f, &liveness);
+        let empty = HashSet::new(); // nothing cross-safepoint
+        let constraints = ClobberConstraints {
+            cross_safepoint: &empty,
+            callee_saved_gp: 1,
+            pool_gp: 2,
+        };
+        let coloring = color_with_constraints(&f, &ig, Some(&constraints));
+        let ca = coloring.color_of(a);
+        let cb = coloring.color_of(b);
+        assert_ne!(ca, cb, "interfering values differ");
+        assert!(ca < 2 && cb < 2, "both fit in the 2-reg pool (0 and 1)");
     }
 }

@@ -81,6 +81,54 @@ pub enum VerifyError {
     },
 }
 
+/// Return the first VReg that is **used but never defined** anywhere in
+/// the function (as a block param, body-op def, or terminator def), or
+/// `None` if every use has a def.
+///
+/// This is the narrowest, false-positive-free slice of the dominance
+/// check: a use with no def at all is always a malformed CFG (a
+/// build/lowering bug), regardless of dominance subtleties around
+/// soft-edge handler blocks. `compile_via_ssa` calls this and bails to
+/// the legacy pipeline rather than emit a read of an undefined register
+/// (which the spec mandates: a verifier failure falls back to legacy).
+/// Surfaced by `variadic_recursive_test` once Phase 2's larger pool
+/// stopped `count_items` from bailing on pressure — its variadic
+/// prologue leaves the rest-array vreg undefined in the CFG.
+pub fn first_undefined_use(f: &CfgFunction) -> Option<VReg> {
+    use std::collections::HashSet;
+
+    let mut defined: HashSet<VReg> = HashSet::new();
+    for block in &f.blocks {
+        for &p in &block.params {
+            defined.insert(p);
+        }
+        for op in &block.body {
+            for d in op.defs() {
+                defined.insert(d);
+            }
+        }
+        for d in block.terminator.defs() {
+            defined.insert(d);
+        }
+    }
+
+    for block in &f.blocks {
+        for op in &block.body {
+            for u in op.uses() {
+                if !defined.contains(&u) {
+                    return Some(u);
+                }
+            }
+        }
+        for u in block.terminator.uses() {
+            if !defined.contains(&u) {
+                return Some(u);
+            }
+        }
+    }
+    None
+}
+
 /// Run every check, returning the first failure.
 ///
 /// Call this at every phase boundary in the pipeline. Cheap enough to run
@@ -741,6 +789,28 @@ mod tests {
             "{:?}",
             err
         );
+    }
+
+    /// `first_undefined_use` flags a use of a vreg with no def, and
+    /// returns None for a well-formed function.
+    #[test]
+    fn undefined_use_detected() {
+        // Well-formed: param defines x, Ret uses it.
+        let mut ok = fresh("ok");
+        let e = ok.new_block();
+        ok.entry = e;
+        let x = ok.new_vreg(RegClass::Gp);
+        ok.block_mut(e).params.push(x);
+        ok.block_mut(e).terminator = Terminator::Ret { value: x };
+        assert_eq!(first_undefined_use(&ok), None);
+
+        // Malformed: Ret uses y, which is never defined.
+        let mut bad = fresh("bad");
+        let e2 = bad.new_block();
+        bad.entry = e2;
+        let y = bad.new_vreg(RegClass::Gp);
+        bad.block_mut(e2).terminator = Terminator::Ret { value: y };
+        assert_eq!(first_undefined_use(&bad), Some(y));
     }
 
     /// An unscanned slot id past `num_unscanned_slots` is a spiller bug.

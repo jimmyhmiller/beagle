@@ -1,5 +1,5 @@
 # bench	legacy_ns	ssa_ns	bails	edge_moves	root_slots	maxlive_gp
-bench_fib_specialize	32839292	36660000	142	11	12135	125
-bench_nbody_full	10467542	9227041	148	11	13296	125
-bench_nbody_specialize	285875	314375	148	11	13155	125
-bench_btrees_specialize	121770125	106684292	142	11	12186	125
+bench_fib_specialize	31734084	35740458	61	11	12135	125
+bench_nbody_full	8981041	8777208	67	11	13296	125
+bench_nbody_specialize	274709	286209	67	11	13155	125
+bench_btrees_specialize	29171083	28965458	61	11	12186	125

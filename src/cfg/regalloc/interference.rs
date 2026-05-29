@@ -152,6 +152,61 @@ pub fn build_interference(f: &CfgFunction, liveness: &Liveness) -> InterferenceG
     g
 }
 
+/// Compute the set of VRegs **live across a GC-safepoint op** (I7).
+///
+/// A value live across a safepoint cannot be held in a caller-saved
+/// register — the call clobbers it. This set drives the clobber model
+/// in `color.rs`: every member is forbidden the caller-saved color
+/// range, forcing it into a callee-saved register or a spill.
+///
+/// Conservative by construction: a value is included if it is live
+/// *after* any safepoint op (or any safepoint terminator's block).
+/// Over-approximation is safe (it only forces more values to
+/// callee-saved); under-approximation would let a clobbered value sit
+/// in a caller-saved register. Safepoints come from `gc_safety` — the
+/// single source of truth — so this never diverges from the I9 set.
+pub fn cross_safepoint_values(f: &CfgFunction, liveness: &Liveness) -> HashSet<VReg> {
+    use crate::cfg::gc_safety::{is_gc_safepoint_op, is_gc_safepoint_terminator};
+
+    let mut cross: HashSet<VReg> = HashSet::new();
+
+    for (idx, block) in f.blocks.iter().enumerate() {
+        let bid = BlockId(idx as u32);
+        // `live` starts as live-out of the block (= live after the
+        // terminator) and is rewound op-by-op, so at each step it holds
+        // exactly the values live *after* the current op.
+        let mut live: HashSet<VReg> = liveness.live_out(bid).clone();
+
+        // A safepoint terminator (Throw / InlineBumpAllocate bail) calls
+        // the runtime; everything live out of the block survives it.
+        if is_gc_safepoint_terminator(&block.terminator) {
+            cross.extend(live.iter().copied());
+        }
+        for &d in &block.terminator.defs() {
+            live.remove(&d);
+        }
+        for u in block.terminator.uses() {
+            live.insert(u);
+        }
+
+        for op in block.body.iter().rev() {
+            // `live` is the live-after set for this op. If the op is a
+            // safepoint, those values live across it.
+            if is_gc_safepoint_op(op) {
+                cross.extend(live.iter().copied());
+            }
+            for &d in &op.defs() {
+                live.remove(&d);
+            }
+            for u in op.uses() {
+                live.insert(u);
+            }
+        }
+    }
+
+    cross
+}
+
 // =========================================================================
 // Tests
 // =========================================================================
@@ -277,6 +332,44 @@ mod tests {
         assert!(
             !g.interferes(b, c),
             "b's last use is the AddInt that defines c"
+        );
+    }
+
+    /// `cross_safepoint_values`: a value live across a Call is flagged;
+    /// a value that dies before the call (or is born after it) is not.
+    #[test]
+    fn cross_safepoint_detects_live_across_call() {
+        use crate::cfg::{CallTarget, ClobberSet};
+
+        let mut f = CfgFunction::new(Some("xcall".into()), 0);
+        let entry = f.new_block();
+        f.entry = entry;
+        // survivor: live across the call (used by Ret after it).
+        let survivor = f.new_vreg(RegClass::Gp);
+        // dier: used only by the call, dead after.
+        let dier = f.new_vreg(RegClass::Gp);
+        let call_dst = f.new_vreg(RegClass::Gp);
+        f.block_mut(entry).params.push(survivor);
+        f.block_mut(entry).params.push(dier);
+        f.block_mut(entry).body.push(Op::Call {
+            dst: call_dst,
+            target: CallTarget::Pointer(0x1000),
+            args: vec![dier],
+            is_builtin: true,
+            clobbers: ClobberSet::AllCallerSaved,
+        });
+        f.block_mut(entry).terminator = Terminator::Ret { value: survivor };
+
+        let liveness = compute_liveness(&f);
+        let cross = cross_safepoint_values(&f, &liveness);
+        assert!(cross.contains(&survivor), "survivor lives across the call");
+        assert!(
+            !cross.contains(&dier),
+            "dier is consumed by the call, not across it"
+        );
+        assert!(
+            !cross.contains(&call_dst),
+            "call result is born at the call, not live across it"
         );
     }
 }

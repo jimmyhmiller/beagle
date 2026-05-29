@@ -240,6 +240,35 @@ without spilling in the common case, with cheap caller-saved temps.
 (`variadic_recursive_test` and the GC-stress suite specifically green — the
 exact cases the prior attempt broke), no runtime regression.
 
+**Landed (2026-05-29).** GP pool grown 9→12: `physical.rs` `allocator_gp` now
+`[X19..X27 (callee-saved), X13, X14, X15 (caller-saved)]` with split point
+`callee_saved_gp = 9` (X13–15 are AAPCS temporaries unused by the backend's
+scratch convention — temps X10/X11/X12, scratch X16/X17 — so free to allocate;
+`mark_callee_saved_register_used` no-ops on them → zero prologue cost). The
+clobber model is realized as a **color constraint** (`color.rs`
+`ClobberConstraints` / `color_with_constraints`): every value in
+`interference::cross_safepoint_values` (live after any `gc_safety` safepoint op /
+terminator — the I9 source of truth, conservative) is forbidden the caller-saved
+color range, so a cross-call value gets a callee-saved color or overflows→bails —
+identical to pre-Phase-2 behavior. **Provably non-regressing:** for any function
+fitting in ≤9 GP the constraint never binds and caller-saved colors are never
+reached, so the coloring is byte-identical to before; only previously-bailing
+functions gain X13–15. End-to-end `verify_clobber_safety` (run in
+`compile_via_ssa`, bail-to-legacy on violation) checks no cross-safepoint GP value
+landed in a caller-saved reg *including* the arg regs (the entry-param case).
+
+Result: **bails dropped ~145 → ~64** across the benchmark compile set, no runtime
+regression, 364/364. Baseline re-cut to lock in the bail win.
+
+Surfaced + fixed a latent bug: `variadic_recursive_test/count_items` (which used
+to bail on pool pressure) compiles via SSA under the bigger pool, but
+`build_cfg`'s variadic prologue leaves the rest-array vreg **undefined** in the
+CFG → it printed garbage. Added `verify::first_undefined_use` (a false-positive-
+free slice of the dominance check) wired into `compile_via_ssa` to bail any
+malformed CFG to legacy (spec: a verifier failure falls back to legacy). The
+underlying `build_cfg` variadic-lowering gap is a known limitation — variadic
+functions with a named prefix param bail to legacy until it's fixed.
+
 ---
 
 ### Phase 3 — Real SSA spiller (Belady, decoupled, GC-aware) — the core
