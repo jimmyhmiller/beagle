@@ -32,11 +32,11 @@ use std::collections::{HashMap, HashSet};
 
 use crate::backend::CodegenBackend;
 use crate::cfg::{
-    BlockId, CallTarget, CfgFunction, ClobberSet, InlineBranchOp, Op, RegClass, TagSource,
+    BlockId, CallTarget, CfgFunction, ClobberSet, InlineBranchOp, Op, RegClass, SlotId, TagSource,
     Terminator, VReg,
 };
 use crate::common::Label;
-use crate::ir::{Instruction, Ir, Value, VirtualRegister};
+use crate::ir::{Condition, Instruction, Ir, Value, VirtualRegister};
 
 /// Output of [`translate`]. Layout matches the four state pieces the
 /// legacy `Ir::compile_instructions` reads.
@@ -89,10 +89,19 @@ struct Translator<'a, F: Fn(u32, RegClass) -> usize> {
     block_label: HashMap<BlockId, Label>,
     /// BlockId → position in `order` (for fall-through optimization).
     block_position: HashMap<BlockId, usize>,
+    /// Empty jump-only blocks that can be bypassed during final linear
+    /// translation. This is a code-layout optimization only; the CFG keeps
+    /// those blocks so earlier phases preserve the no-critical-edge invariant.
+    jump_alias: HashMap<BlockId, BlockId>,
     instructions: Vec<Instruction>,
     labels: Vec<Label>,
     label_names: Vec<String>,
     label_locations: HashMap<usize, usize>,
+    /// Per-block cache for post-allocation slot reload forwarding:
+    /// after `SlotStore S <- v`, a later `SlotLoad S -> dst` can become
+    /// a physical-register move while v's assigned physical register is
+    /// still unmodified and no side-effecting op has intervened.
+    slot_forward: HashMap<SlotId, VReg>,
     color_to_physical: F,
 }
 
@@ -103,10 +112,12 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
             order,
             block_label: HashMap::new(),
             block_position: HashMap::new(),
+            jump_alias: compute_jump_aliases(cfg),
             instructions: Vec::new(),
             labels: Vec::new(),
             label_names: Vec::new(),
             label_locations: HashMap::new(),
+            slot_forward: HashMap::new(),
             color_to_physical,
         };
         // Allocate labels for ALL blocks (not just RPO-reachable ones):
@@ -152,13 +163,17 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
         // Phase A: emit blocks in RPO so fall-through optimization
         // applies to the common path.
         for (i, &bid) in self.order.iter().enumerate() {
+            if self.jump_alias.contains_key(&bid) {
+                continue;
+            }
             let label = self.block_label[&bid];
             self.emit_label(label);
             let block = self.cfg.block(bid);
+            self.slot_forward.clear();
             for op in &block.body {
                 self.emit_op(op)?;
             }
-            let next_in_order = self.order.get(i + 1).copied();
+            let next_in_order = self.next_emitted_block(i);
             self.emit_terminator(&block.terminator, next_in_order)?;
         }
         // Phase B: emit any blocks that aren't in RPO. These are
@@ -174,6 +189,9 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
             if in_order.contains(&bid) {
                 continue;
             }
+            if self.jump_alias.contains_key(&bid) {
+                continue;
+            }
             // Skip blocks whose terminator is `Unreachable` AND have
             // an empty body — those are RPO-dead placeholders left by
             // `dce_unreachable_blocks` and have nothing to emit.
@@ -183,12 +201,32 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
             }
             let label = self.block_label[&bid];
             self.emit_label(label);
+            self.slot_forward.clear();
             for op in &block.body {
                 self.emit_op(op)?;
             }
             self.emit_terminator(&block.terminator, None)?;
         }
         Ok(())
+    }
+
+    fn next_emitted_block(&self, pos: usize) -> Option<BlockId> {
+        self.order
+            .iter()
+            .skip(pos + 1)
+            .copied()
+            .find(|bid| !self.jump_alias.contains_key(bid))
+    }
+
+    fn resolve_jump_alias(&self, mut target: BlockId) -> BlockId {
+        let mut seen = HashSet::new();
+        while let Some(&next) = self.jump_alias.get(&target) {
+            if !seen.insert(target) {
+                break;
+            }
+            target = next;
+        }
+        target
     }
 
     /// VReg → legacy Value::Register with `index` = physical register
@@ -205,8 +243,82 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
         })
     }
 
+    fn physical_key(&self, v: VReg) -> (RegClass, usize) {
+        (v.class, (self.color_to_physical)(v.index, v.class))
+    }
+
+    fn same_physical(&self, a: VReg, b: VReg) -> bool {
+        self.physical_key(a) == self.physical_key(b)
+    }
+
+    fn invalidate_slot_forward_defs(&mut self, defs: &[VReg]) {
+        if defs.is_empty() || self.slot_forward.is_empty() {
+            return;
+        }
+        let def_keys: Vec<(RegClass, usize)> = defs.iter().map(|d| self.physical_key(*d)).collect();
+        let color_to_physical = &self.color_to_physical;
+        self.slot_forward.retain(|_, src| {
+            let src_key = (src.class, color_to_physical(src.index, src.class));
+            !def_keys.contains(&src_key)
+        });
+    }
+
+    fn clear_slot_forward_after_side_effect(&mut self, op: &Op) {
+        if op.has_side_effect() {
+            self.slot_forward.clear();
+        }
+    }
+
     fn emit_op(&mut self, op: &Op) -> Result<(), SsaCompileError> {
         use Instruction as I;
+        match op {
+            Op::SlotLoad { dst, slot } => {
+                if slot.is_unscanned() {
+                    return Err(SsaCompileError::UnsupportedOp(format!(
+                        "SlotLoad from unscanned slot {:?}: backend addressing \
+                         for the non-scanned FP/raw region is not implemented \
+                         yet (Phase 1 backend support pending)",
+                        slot
+                    )));
+                }
+
+                if let Some(src) = self.slot_forward.get(slot).copied()
+                    && src.class == dst.class
+                {
+                    if !self.same_physical(*dst, src) {
+                        self.instructions
+                            .push(I::Assign(self.reg(*dst), self.reg(src)));
+                        self.invalidate_slot_forward_defs(&[*dst]);
+                    }
+                } else {
+                    self.instructions.push(I::LoadLocal(
+                        self.reg(*dst),
+                        Value::Local(slot.region_index() as usize),
+                    ));
+                    self.invalidate_slot_forward_defs(&[*dst]);
+                }
+                self.slot_forward.insert(*slot, *dst);
+                return Ok(());
+            }
+            Op::SlotStore { slot, src } => {
+                if slot.is_unscanned() {
+                    return Err(SsaCompileError::UnsupportedOp(format!(
+                        "SlotStore to unscanned slot {:?}: backend addressing \
+                         for the non-scanned FP/raw region is not implemented \
+                         yet (Phase 1 backend support pending)",
+                        slot
+                    )));
+                }
+                self.instructions.push(I::StoreLocal(
+                    Value::Local(slot.region_index() as usize),
+                    self.reg(*src),
+                ));
+                self.slot_forward.insert(*slot, *src);
+                return Ok(());
+            }
+            _ => {}
+        }
+
         match op {
             // ---- Moves & constants ----
             Op::Move { dst, src } => self
@@ -631,6 +743,9 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
                     .push(I::Recurse(self.reg(*dst), arg_values));
             }
         }
+        let defs = op.defs();
+        self.invalidate_slot_forward_defs(&defs);
+        self.clear_slot_forward_after_side_effect(op);
         Ok(())
     }
 
@@ -644,9 +759,14 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
             Terminator::Ret { value } => {
                 self.instructions.push(I::Ret(self.reg(*value)));
             }
-            Terminator::Jump { target, .. } => {
-                if Some(*target) != next_in_order {
-                    let label = self.block_label[target];
+            Terminator::Jump { target, args } => {
+                let target = if args.is_empty() {
+                    self.resolve_jump_alias(*target)
+                } else {
+                    *target
+                };
+                if Some(target) != next_in_order {
+                    let label = self.block_label[&target];
                     self.instructions.push(I::Jump(label));
                 }
             }
@@ -655,26 +775,65 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
                 lhs,
                 rhs,
                 t_target,
+                t_args,
                 f_target,
+                f_args,
                 ..
             } => {
                 let lhs_v = self.reg(*lhs);
                 let rhs_v = self.reg(*rhs);
-                let t_label = self.block_label[t_target];
-                self.instructions
-                    .push(I::JumpIf(t_label, *cond, lhs_v, rhs_v));
-                if Some(*f_target) != next_in_order {
-                    let f_label = self.block_label[f_target];
-                    self.instructions.push(I::Jump(f_label));
+                let t_target = if t_args.is_empty() {
+                    self.resolve_jump_alias(*t_target)
+                } else {
+                    *t_target
+                };
+                let f_target = if f_args.is_empty() {
+                    self.resolve_jump_alias(*f_target)
+                } else {
+                    *f_target
+                };
+                if t_target == f_target {
+                    if Some(t_target) != next_in_order {
+                        let label = self.block_label[&t_target];
+                        self.instructions.push(I::Jump(label));
+                    }
+                } else if Some(t_target) == next_in_order {
+                    let f_label = self.block_label[&f_target];
+                    self.instructions.push(I::JumpIf(
+                        f_label,
+                        invert_condition(*cond),
+                        lhs_v,
+                        rhs_v,
+                    ));
+                } else {
+                    let t_label = self.block_label[&t_target];
+                    self.instructions
+                        .push(I::JumpIf(t_label, *cond, lhs_v, rhs_v));
+                    if Some(f_target) != next_in_order {
+                        let f_label = self.block_label[&f_target];
+                        self.instructions.push(I::Jump(f_label));
+                    }
                 }
             }
             Terminator::InlineBranch {
                 op,
                 fall_through,
+                fall_args,
                 bail,
+                bail_args,
                 ..
             } => {
-                let bail_label = self.block_label[bail];
+                let fall_through = if fall_args.is_empty() {
+                    self.resolve_jump_alias(*fall_through)
+                } else {
+                    *fall_through
+                };
+                let bail = if bail_args.is_empty() {
+                    self.resolve_jump_alias(*bail)
+                } else {
+                    *bail
+                };
+                let bail_label = self.block_label[&bail];
                 match op {
                     InlineBranchOp::SubChecked { dst, lhs, rhs } => {
                         self.instructions.push(I::Sub(
@@ -771,14 +930,15 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
                 // linearization, emit nothing; otherwise an explicit
                 // Jump. The legacy semantics is "instruction succeeded,
                 // control flows to the next address."
-                if Some(*fall_through) != next_in_order {
-                    let fall_label = self.block_label[fall_through];
+                if Some(fall_through) != next_in_order {
+                    let fall_label = self.block_label[&fall_through];
                     self.instructions.push(I::Jump(fall_label));
                 }
             }
             Terminator::Throw {
                 value,
                 resume,
+                resume_args,
                 resume_local,
                 builtin_fn_ptr,
                 ..
@@ -787,7 +947,12 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
                 // Phase 4f-1 `lower_to_allocated` and materialized as
                 // Move ops at the resume target. Here we just emit the
                 // Throw with the resume label and result-slot index.
-                let resume_label = self.block_label[resume];
+                let resume = if resume_args.is_empty() {
+                    self.resolve_jump_alias(*resume)
+                } else {
+                    *resume
+                };
+                let resume_label = self.block_label[&resume];
                 self.instructions.push(I::Throw(
                     self.reg(*value),
                     resume_label,
@@ -801,6 +966,47 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
             }
         }
         Ok(())
+    }
+}
+
+fn compute_jump_aliases(cfg: &CfgFunction) -> HashMap<BlockId, BlockId> {
+    let mut protected: HashSet<BlockId> = HashSet::new();
+    for block in &cfg.blocks {
+        for op in &block.body {
+            protected.extend(op.block_refs());
+        }
+    }
+
+    let mut aliases = HashMap::new();
+    for bid_idx in 0..cfg.num_blocks() {
+        let bid = BlockId(bid_idx as u32);
+        if bid == cfg.entry || protected.contains(&bid) {
+            continue;
+        }
+
+        let block = cfg.block(bid);
+        if !block.params.is_empty() || !block.body.is_empty() {
+            continue;
+        }
+
+        if let Terminator::Jump { target, args } = &block.terminator
+            && args.is_empty()
+            && *target != bid
+        {
+            aliases.insert(bid, *target);
+        }
+    }
+    aliases
+}
+
+fn invert_condition(cond: Condition) -> Condition {
+    match cond {
+        Condition::LessThanOrEqual => Condition::GreaterThan,
+        Condition::LessThan => Condition::GreaterThanOrEqual,
+        Condition::Equal => Condition::NotEqual,
+        Condition::NotEqual => Condition::Equal,
+        Condition::GreaterThan => Condition::LessThanOrEqual,
+        Condition::GreaterThanOrEqual => Condition::LessThan,
     }
 }
 
@@ -869,6 +1075,60 @@ pub fn compile_via_ssa<B: CodegenBackend>(
         let name = ir.debug_name.clone().unwrap_or_else(|| "<anon>".into());
         return Err((
             SsaCompileError::BuildFailed(format!("use of undefined vreg {:?} in {}", v, name)),
+            backend,
+        ));
+    }
+
+    // Memory-safety guard. The interference graph is O(vregs × maxlive) and
+    // liveness is O(blocks × maxlive); aggressive slot promotion can make a
+    // single large, high-pressure function explode these (~80GB observed
+    // under single-read promotion). Bail such a function to legacy *before*
+    // building any quadratic structure. The principled fix is a
+    // pressure-bounding live-range-splitting spiller (the parity plan's
+    // remaining work); this is the safety valve until then. Caps are
+    // env-tunable (0 disables): `BEAGLE_SSA_MAX_VREGS` (raw size, checked
+    // before liveness), `BEAGLE_SSA_MAX_IG_EDGES` (pressure × size).
+    let name = ir.debug_name.clone().unwrap_or_else(|| "<anon>".into());
+    let nv = cfg.num_vregs();
+    let nb = cfg.num_blocks();
+    let log_size = std::env::var("BEAGLE_SSA_LOG_SIZE").is_ok();
+    if log_size {
+        eprintln!("[ssa-size] {} vregs={} blocks={}", name, nv, nb);
+    }
+    let raw_cap: usize = std::env::var("BEAGLE_SSA_MAX_VREGS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12000);
+    if raw_cap != 0 && (nv > raw_cap || nb > raw_cap) {
+        return Err((
+            SsaCompileError::BuildFailed(format!(
+                "oversized fn ({} vregs, {} blocks) in {} — bailed for memory safety",
+                nv, nb, name
+            )),
+            backend,
+        ));
+    }
+    // Pressure × size bound on the interference graph (liveness here is
+    // bounded by the raw caps above, so it is safe to compute).
+    let pre_liveness = compute_liveness(&cfg);
+    let (mlgp, mlfp) = crate::cfg::regalloc::liveness::max_live(&cfg, &pre_liveness);
+    let est_edges = (mlgp + mlfp).saturating_mul(nv);
+    if log_size {
+        eprintln!(
+            "[ssa-size] {} maxlive_gp={} maxlive_fp={} est_edges={}",
+            name, mlgp, mlfp, est_edges
+        );
+    }
+    let edge_cap: usize = std::env::var("BEAGLE_SSA_MAX_IG_EDGES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20_000_000);
+    if edge_cap != 0 && est_edges > edge_cap {
+        return Err((
+            SsaCompileError::BuildFailed(format!(
+                "interference too large (maxlive {}+{} × {} vregs ≈ {} edges) in {} — bailed for memory safety",
+                mlgp, mlfp, nv, est_edges, name
+            )),
             backend,
         ));
     }
@@ -1087,7 +1347,7 @@ fn inline_op_tag(op: &InlineBranchOp) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cfg::{CfgFunction, Op, RegClass, Terminator};
+    use crate::cfg::{CfgFunction, Op, RegClass, SlotId, Terminator};
 
     /// Trivial identity test color mapping: pretend pool index = color.
     /// Real coloring chooses a physical-register pool per class; here we
@@ -1165,6 +1425,93 @@ mod tests {
         assert!(matches!(t.instructions[3], Instruction::Ret(_)));
     }
 
+    /// Empty jump-only blocks are final-code aliases after edge moves have
+    /// already been materialized. Translation can bypass them without
+    /// mutating the CFG's critical-edge-split shape.
+    #[test]
+    fn empty_jump_block_is_threaded_and_not_emitted() {
+        let mut f = CfgFunction::new(Some("thread_empty_jump".into()), 0);
+        let entry = f.new_block();
+        let mid = f.new_block();
+        let tail = f.new_block();
+        f.entry = entry;
+        let v = f.new_vreg(RegClass::Gp);
+
+        f.block_mut(entry).terminator = Terminator::Jump {
+            target: mid,
+            args: vec![],
+        };
+        f.block_mut(mid).terminator = Terminator::Jump {
+            target: tail,
+            args: vec![],
+        };
+        f.block_mut(tail).terminator = Terminator::Ret { value: v };
+        f.block_mut(mid).predecessors.push(entry);
+        f.block_mut(tail).predecessors.push(mid);
+
+        let t = translate(&f, identity_color).expect("trivial CFG translates");
+
+        assert!(
+            !t.instructions.iter().any(|i| matches!(
+                i,
+                Instruction::Label(label) if label.index == mid.0 as usize
+            )),
+            "alias block label should not be emitted: {:?}",
+            t.instructions
+        );
+        assert!(
+            !t.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::Jump(_))),
+            "entry should fall through to threaded tail: {:?}",
+            t.instructions
+        );
+    }
+
+    /// After allocation, a slot store followed by a same-block reload can use
+    /// a physical register move while keeping the store as the GC root.
+    #[test]
+    fn slot_reload_forwarded_after_store() {
+        let mut f = CfgFunction::new(Some("slot_reload_forward".into()), 1);
+        let entry = f.new_block();
+        f.entry = entry;
+        let src = f.new_vreg(RegClass::Gp);
+        let dst = f.new_vreg(RegClass::Gp);
+        f.block_mut(entry).body.push(Op::SlotStore {
+            slot: SlotId(0),
+            src,
+        });
+        f.block_mut(entry).body.push(Op::SlotLoad {
+            dst,
+            slot: SlotId(0),
+        });
+        f.block_mut(entry).terminator = Terminator::Ret { value: dst };
+
+        let t = translate(&f, identity_color).expect("trivial CFG translates");
+
+        assert!(
+            t.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::StoreLocal(..))),
+            "the root store must remain: {:?}",
+            t.instructions
+        );
+        assert!(
+            !t.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::LoadLocal(..))),
+            "reload should be forwarded to a register move: {:?}",
+            t.instructions
+        );
+        assert!(
+            t.instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::Assign(..))),
+            "expected register move for forwarded reload: {:?}",
+            t.instructions
+        );
+    }
+
     /// Branch with non-adjacent t_target emits a JumpIf + Jump.
     #[test]
     fn branch_emits_jumpif() {
@@ -1202,5 +1549,67 @@ mod tests {
             .filter(|i| matches!(i, Instruction::JumpIf(..)))
             .count();
         assert_eq!(jumpif_count, 1, "exactly one JumpIf for a Branch");
+    }
+
+    /// If the true target is the next linear block, emit the inverted
+    /// condition to the false target and let the true path fall through.
+    #[test]
+    fn branch_inverts_when_true_target_falls_through() {
+        let mut f = CfgFunction::new(Some("br_true_fallthrough".into()), 0);
+        let entry = f.new_block();
+        let t_block = f.new_block();
+        let f_block = f.new_block();
+        f.entry = entry;
+        let cond = f.new_vreg(RegClass::Gp);
+        let v = f.new_vreg(RegClass::Gp);
+
+        f.block_mut(entry).terminator = Terminator::Branch {
+            cond: crate::ir::Condition::Equal,
+            lhs: cond,
+            rhs: cond,
+            t_target: t_block,
+            t_args: vec![],
+            f_target: f_block,
+            f_args: vec![],
+        };
+        // Make `f_block` reachable through the true block too. The side-effect
+        // op keeps `t_block` from being treated as an empty jump alias. RPO
+        // becomes entry, t_block, f_block, so the branch's true target is next.
+        f.block_mut(t_block).body.push(Op::Breakpoint);
+        f.block_mut(t_block).terminator = Terminator::Jump {
+            target: f_block,
+            args: vec![],
+        };
+        f.block_mut(f_block).terminator = Terminator::Ret { value: v };
+        f.block_mut(t_block).predecessors.push(entry);
+        f.block_mut(f_block).predecessors.push(entry);
+        f.block_mut(f_block).predecessors.push(t_block);
+
+        let t = translate(&f, identity_color).expect("trivial CFG translates");
+
+        let jumpifs: Vec<_> = t
+            .instructions
+            .iter()
+            .filter_map(|i| match i {
+                Instruction::JumpIf(label, cond, _, _) => Some((*label, *cond)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(jumpifs.len(), 1, "got: {:?}", t.instructions);
+        assert_eq!(jumpifs[0].0.index, f_block.0 as usize);
+        assert_eq!(jumpifs[0].1, crate::ir::Condition::NotEqual);
+        let jumpif_idx = t
+            .instructions
+            .iter()
+            .position(|i| matches!(i, Instruction::JumpIf(..)))
+            .expect("JumpIf exists");
+        assert!(
+            matches!(
+                t.instructions.get(jumpif_idx + 1),
+                Some(Instruction::Label(label)) if label.index == t_block.0 as usize
+            ),
+            "entry branch should fall through directly to true block: {:?}",
+            t.instructions
+        );
     }
 }

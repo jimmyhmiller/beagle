@@ -12,12 +12,25 @@
 //!    all-incoming-are-the-same" output and the recursive
 //!    self-loop-but-also-V cases.
 //!
-//! 2. **Copy coalesce.** Every `Op::Move { dst, src }` becomes a rename
+//! 2. **Slot store forwarding.** A same-block same-register `SlotLoad(S)`
+//!    after `SlotStore(S, V)` and before any side-effecting op becomes
+//!    `Move(V, V)`. The store remains as the GC root; coalescing removes the
+//!    reload. Forwarding is deliberately block-local, does not introduce new
+//!    VReg aliases, and stops at side effects so it never reuses a
+//!    pre-safepoint register value after the GC may have relocated the object.
+//!
+//! 3. **Copy coalesce.** Every `Op::Move { dst, src }` becomes a rename
 //!    `dst → src`. The rename is resolved transitively then applied to
 //!    every use across the function (body ops + terminators). The Move
 //!    ops are then removed; their old `dst` VRegs become dead.
 //!
-//! 3. **DCE.** Mark-and-sweep over pure ops: side-effecting ops, block
+//! 4. **Dead non-pointer slot stores.** A `SlotStore(S, const-immediate)`
+//!    is removed when slot liveness proves no future `SlotLoad(S)` can
+//!    observe it before another store. Pointer-valued stores are kept even
+//!    when slot-dead because they may be intentional GC roots across a
+//!    safepoint for a value still used through a VReg.
+//!
+//! 5. **DCE.** Mark-and-sweep over pure ops: side-effecting ops, block
 //!    params, and terminator uses are roots; an op whose def is in the
 //!    live set propagates use-liveness; sweep removes pure ops whose
 //!    defs are all dead.
@@ -29,13 +42,15 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::cfg::{BlockId, CfgFunction, Op, Terminator, VReg};
+use crate::cfg::{BlockId, CfgFunction, Op, SlotId, Terminator, VReg};
 
 /// Run all Phase 3 passes to fixpoint. Wired into `build_cfg` after
 /// mem2reg.
 pub fn optimize(f: &mut CfgFunction) {
     let no_trivial = std::env::var("BEAGLE_SSA_NO_TRIVIAL").is_ok();
+    let no_slot_forward = std::env::var("BEAGLE_SSA_NO_SLOT_FORWARD").is_ok();
     let no_coalesce = std::env::var("BEAGLE_SSA_NO_COALESCE").is_ok();
+    let no_dead_slot_stores = std::env::var("BEAGLE_SSA_NO_DEAD_SLOT_STORES").is_ok();
     let no_dce = std::env::var("BEAGLE_SSA_NO_DCE").is_ok();
     let mut changed = true;
     while changed {
@@ -43,12 +58,212 @@ pub fn optimize(f: &mut CfgFunction) {
         if !no_trivial {
             changed |= eliminate_trivial_block_params(f);
         }
+        if !no_slot_forward {
+            changed |= forward_slot_stores(f);
+        }
         if !no_coalesce {
             changed |= coalesce_copies(f);
+        }
+        if !no_dead_slot_stores {
+            changed |= eliminate_dead_non_pointer_slot_stores(f);
         }
         if !no_dce {
             changed |= dead_code_elimination(f);
         }
+    }
+}
+
+// =========================================================================
+// Slot store forwarding
+// =========================================================================
+
+/// Forward a same-block slot store into later same-register slot loads:
+///
+/// ```text
+/// SlotStore slot(S) <- v
+/// ...
+/// v = SlotLoad slot(S)
+/// ```
+///
+/// becomes `v = Move v` when the `...` region contains only pure ops that
+/// cannot trigger GC or mutate local slots. The `SlotStore` is intentionally
+/// kept: for GP values it may be the frame root that keeps `v` visible to the
+/// collector. The same-register restriction is important: a broader
+/// `dst = Move v` form creates a new global alias that copy coalescing may
+/// extend past places where the original slot reload was the intended value
+/// boundary.
+pub fn forward_slot_stores(f: &mut CfgFunction) -> bool {
+    let mut changed = false;
+
+    for block in f.blocks.iter_mut() {
+        let mut available: HashMap<SlotId, VReg> = HashMap::new();
+
+        for op in block.body.iter_mut() {
+            match op {
+                Op::SlotStore { slot, src } => {
+                    available.insert(*slot, *src);
+                    continue;
+                }
+                Op::SlotLoad { dst, slot } => {
+                    if let Some(&src) = available.get(slot) {
+                        if src == *dst {
+                            *op = Op::Move { dst: *dst, src };
+                            changed = true;
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+
+            // A later def of an available source register would make the
+            // cached value ambiguous in malformed/non-SSA input. Valid CFGs
+            // should not hit this, but invalidating keeps the pass local and
+            // conservative.
+            let defs = op.defs();
+            if !defs.is_empty() {
+                available.retain(|_, src| !defs.contains(src));
+            }
+
+            // Calls, heap writes, handler/prompt operations, stack mutation,
+            // and instrumentation may either observe/mutate frame state or
+            // run the GC. Stop forwarding across them; the store remains as
+            // the root, and a post-safepoint load still reloads the possibly
+            // relocated value from the frame.
+            if op.has_side_effect() {
+                available.clear();
+            }
+        }
+    }
+
+    changed
+}
+
+// =========================================================================
+// Dead non-pointer slot store elimination
+// =========================================================================
+
+/// Remove stores that cannot be observed by any later `SlotLoad` before
+/// another store to the same slot, but only when the stored value is a known
+/// non-pointer immediate. This deliberately avoids pointer-valued dead-store
+/// removal: a root slot store may exist solely to keep a VReg-held heap value
+/// visible to GC across a safepoint.
+pub fn eliminate_dead_non_pointer_slot_stores(f: &mut CfgFunction) -> bool {
+    if f.blocks.is_empty() {
+        return false;
+    }
+
+    let (_, live_out) = compute_slot_liveness(f);
+    let non_pointer_defs = known_non_pointer_defs(f);
+    let mut changed = false;
+
+    for (idx, block) in f.blocks.iter_mut().enumerate() {
+        let mut live = live_out[idx].clone();
+        let old_body = std::mem::take(&mut block.body);
+        let mut new_rev = Vec::with_capacity(old_body.len());
+
+        for op in old_body.into_iter().rev() {
+            match &op {
+                Op::SlotLoad { slot, .. } => {
+                    live.insert(*slot);
+                    new_rev.push(op);
+                }
+                Op::SlotStore { slot, src } => {
+                    if !live.contains(slot) && non_pointer_defs.contains(src) {
+                        changed = true;
+                        continue;
+                    }
+                    live.remove(slot);
+                    new_rev.push(op);
+                }
+                _ => new_rev.push(op),
+            }
+        }
+
+        new_rev.reverse();
+        block.body = new_rev;
+    }
+
+    changed
+}
+
+fn compute_slot_liveness(f: &CfgFunction) -> (Vec<HashSet<SlotId>>, Vec<HashSet<SlotId>>) {
+    let n = f.num_blocks();
+    let mut gen_set = vec![HashSet::new(); n];
+    let mut kill = vec![HashSet::new(); n];
+
+    for (idx, block) in f.blocks.iter().enumerate() {
+        for op in &block.body {
+            match op {
+                Op::SlotLoad { slot, .. } => {
+                    if !kill[idx].contains(slot) {
+                        gen_set[idx].insert(*slot);
+                    }
+                }
+                Op::SlotStore { slot, .. } => {
+                    kill[idx].insert(*slot);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut live_in = vec![HashSet::new(); n];
+    let mut live_out = vec![HashSet::new(); n];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for idx in (0..n).rev() {
+            let mut new_out = HashSet::new();
+            for succ in f.blocks[idx].terminator.successors() {
+                new_out.extend(live_in[succ.0 as usize].iter().copied());
+            }
+
+            let mut new_in = gen_set[idx].clone();
+            for slot in &new_out {
+                if !kill[idx].contains(slot) {
+                    new_in.insert(*slot);
+                }
+            }
+
+            if new_in != live_in[idx] || new_out != live_out[idx] {
+                live_in[idx] = new_in;
+                live_out[idx] = new_out;
+                changed = true;
+            }
+        }
+    }
+
+    (live_in, live_out)
+}
+
+fn known_non_pointer_defs(f: &CfgFunction) -> HashSet<VReg> {
+    let mut defs = HashSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in &f.blocks {
+            for op in &block.body {
+                if let Some(dst) = known_non_pointer_def(op, &defs)
+                    && defs.insert(dst)
+                {
+                    changed = true;
+                }
+            }
+        }
+    }
+    defs
+}
+
+fn known_non_pointer_def(op: &Op, known: &HashSet<VReg>) -> Option<VReg> {
+    match op {
+        Op::ConstTaggedInt { dst, .. }
+        | Op::ConstTrue { dst }
+        | Op::ConstFalse { dst }
+        | Op::ConstNull { dst } => Some(*dst),
+        Op::ConstRawValue { dst, value } if *value == 0 => Some(*dst),
+        Op::Move { dst, src } if known.contains(src) => Some(*dst),
+        _ => None,
     }
 }
 
@@ -497,6 +712,225 @@ mod tests {
             1,
             "Move op should still be present"
         );
+    }
+
+    /// Store-to-load forwarding keeps the root store but removes a redundant
+    /// same-register reload when no side effect can run the GC or mutate the
+    /// frame between the store and load.
+    #[test]
+    fn slot_store_forwarding_removes_same_block_reload() {
+        let mut f = CfgFunction::new(Some("slot_forward".into()), 1);
+        let entry = f.new_block();
+        f.entry = entry;
+        let value = f.new_vreg(RegClass::Gp);
+
+        f.block_mut(entry).body.push(Op::ConstTaggedInt {
+            dst: value,
+            value: 42,
+        });
+        f.block_mut(entry).body.push(Op::SlotStore {
+            slot: SlotId(0),
+            src: value,
+        });
+        f.block_mut(entry).body.push(Op::SlotLoad {
+            dst: value,
+            slot: SlotId(0),
+        });
+        f.block_mut(entry).terminator = Terminator::Ret { value };
+
+        let changed = forward_slot_stores(&mut f);
+        assert!(changed, "same-register reload should be forwarded");
+
+        assert!(
+            !f.block(entry)
+                .body
+                .iter()
+                .any(|op| matches!(op, Op::SlotLoad { .. })),
+            "the same-block reload should be forwarded away: {:?}",
+            f.block(entry).body
+        );
+        assert!(
+            f.block(entry)
+                .body
+                .iter()
+                .any(|op| matches!(op, Op::SlotStore { slot, src } if *slot == SlotId(0) && *src == value)),
+            "the SlotStore must remain as the frame root"
+        );
+        match &f.block(entry).terminator {
+            Terminator::Ret { value: ret } => assert_eq!(*ret, value),
+            _ => panic!("expected Ret"),
+        }
+    }
+
+    /// A side-effecting op is a forwarding barrier. In particular, a GC
+    /// safepoint may relocate a heap object, so a later load must read the
+    /// frame slot instead of reusing the pre-safepoint register value.
+    #[test]
+    fn slot_store_forwarding_stops_at_side_effect() {
+        let mut f = CfgFunction::new(Some("slot_forward_barrier".into()), 1);
+        let entry = f.new_block();
+        f.entry = entry;
+        let value = f.new_vreg(RegClass::Gp);
+
+        f.block_mut(entry).body.push(Op::ConstTaggedInt {
+            dst: value,
+            value: 42,
+        });
+        f.block_mut(entry).body.push(Op::SlotStore {
+            slot: SlotId(0),
+            src: value,
+        });
+        f.block_mut(entry).body.push(Op::RecordGcSafepoint);
+        f.block_mut(entry).body.push(Op::SlotLoad {
+            dst: value,
+            slot: SlotId(0),
+        });
+        f.block_mut(entry).terminator = Terminator::Ret { value };
+
+        optimize(&mut f);
+
+        assert!(
+            f.block(entry).body.iter().any(
+                |op| matches!(op, Op::SlotLoad { dst, slot } if *dst == value && *slot == SlotId(0))
+            ),
+            "the post-safepoint load must remain: {:?}",
+            f.block(entry).body
+        );
+    }
+
+    /// Forwarding intentionally does not turn `load S -> other` into
+    /// `Move other, value`: that broader form creates aliases that the global
+    /// coalescer can move past the intended slot boundary.
+    #[test]
+    fn slot_store_forwarding_does_not_alias_distinct_vregs() {
+        let mut f = CfgFunction::new(Some("slot_forward_no_alias".into()), 1);
+        let entry = f.new_block();
+        f.entry = entry;
+        let value = f.new_vreg(RegClass::Gp);
+        let loaded = f.new_vreg(RegClass::Gp);
+
+        f.block_mut(entry).body.push(Op::ConstTaggedInt {
+            dst: value,
+            value: 42,
+        });
+        f.block_mut(entry).body.push(Op::SlotStore {
+            slot: SlotId(0),
+            src: value,
+        });
+        f.block_mut(entry).body.push(Op::SlotLoad {
+            dst: loaded,
+            slot: SlotId(0),
+        });
+        f.block_mut(entry).terminator = Terminator::Ret { value: loaded };
+
+        let changed = forward_slot_stores(&mut f);
+        assert!(!changed, "distinct destination should not be forwarded");
+        assert!(f.block(entry).body.iter().any(
+            |op| matches!(op, Op::SlotLoad { dst, slot } if *dst == loaded && *slot == SlotId(0))
+        ));
+    }
+
+    /// A non-pointer immediate store is dead when no later SlotLoad can
+    /// observe it before another store. The subsequent DCE pass removes the
+    /// now-unused constant too.
+    #[test]
+    fn dead_non_pointer_slot_store_is_removed() {
+        let mut f = CfgFunction::new(Some("dead_slot_store".into()), 1);
+        let entry = f.new_block();
+        f.entry = entry;
+        let zero = f.new_vreg(RegClass::Gp);
+        let ret = f.new_vreg(RegClass::Gp);
+
+        f.block_mut(entry).body.push(Op::ConstTaggedInt {
+            dst: zero,
+            value: 0,
+        });
+        f.block_mut(entry).body.push(Op::SlotStore {
+            slot: SlotId(0),
+            src: zero,
+        });
+        f.block_mut(entry)
+            .body
+            .push(Op::ConstTaggedInt { dst: ret, value: 1 });
+        f.block_mut(entry).terminator = Terminator::Ret { value: ret };
+
+        optimize(&mut f);
+
+        assert!(
+            !f.block(entry)
+                .body
+                .iter()
+                .any(|op| matches!(op, Op::SlotStore { .. })),
+            "dead non-pointer slot store should be removed: {:?}",
+            f.block(entry).body
+        );
+        assert!(
+            !f.block(entry)
+                .body
+                .iter()
+                .any(|op| matches!(op, Op::ConstTaggedInt { dst, .. } if *dst == zero)),
+            "unused zero should be DCE'd after store removal"
+        );
+    }
+
+    /// If a later load can observe the store, slot-liveness keeps it.
+    #[test]
+    fn live_non_pointer_slot_store_is_kept() {
+        let mut f = CfgFunction::new(Some("live_slot_store".into()), 1);
+        let entry = f.new_block();
+        f.entry = entry;
+        let zero = f.new_vreg(RegClass::Gp);
+        let loaded = f.new_vreg(RegClass::Gp);
+
+        f.block_mut(entry).body.push(Op::ConstTaggedInt {
+            dst: zero,
+            value: 0,
+        });
+        f.block_mut(entry).body.push(Op::SlotStore {
+            slot: SlotId(0),
+            src: zero,
+        });
+        f.block_mut(entry).body.push(Op::SlotLoad {
+            dst: loaded,
+            slot: SlotId(0),
+        });
+        f.block_mut(entry).terminator = Terminator::Ret { value: loaded };
+
+        eliminate_dead_non_pointer_slot_stores(&mut f);
+
+        assert!(f.block(entry).body.iter().any(
+            |op| matches!(op, Op::SlotStore { slot, src } if *slot == SlotId(0) && *src == zero)
+        ));
+    }
+
+    /// A pointer-like value may be a GC root even when no later SlotLoad reads
+    /// the slot; this pass only removes known non-pointer stores.
+    #[test]
+    fn dead_pointer_slot_store_is_kept() {
+        let mut f = CfgFunction::new(Some("dead_pointer_slot_store".into()), 1);
+        let entry = f.new_block();
+        f.entry = entry;
+        let ptr = f.new_vreg(RegClass::Gp);
+        let ret = f.new_vreg(RegClass::Gp);
+
+        f.block_mut(entry).body.push(Op::ConstPointer {
+            dst: ptr,
+            ptr: 0x1000,
+        });
+        f.block_mut(entry).body.push(Op::SlotStore {
+            slot: SlotId(0),
+            src: ptr,
+        });
+        f.block_mut(entry)
+            .body
+            .push(Op::ConstTaggedInt { dst: ret, value: 1 });
+        f.block_mut(entry).terminator = Terminator::Ret { value: ret };
+
+        optimize(&mut f);
+
+        assert!(f.block(entry).body.iter().any(
+            |op| matches!(op, Op::SlotStore { slot, src } if *slot == SlotId(0) && *src == ptr)
+        ));
     }
 
     /// A trivial block param: join block where both predecessors pass

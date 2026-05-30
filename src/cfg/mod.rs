@@ -861,6 +861,18 @@ impl CfgFunction {
 // need to walk terminator successors / collect VReg uses uniformly.
 
 impl Terminator {
+    /// Coarse variant name for diagnostics (spill bail analysis).
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Terminator::Jump { .. } => "Jump",
+            Terminator::Branch { .. } => "Branch",
+            Terminator::InlineBranch { .. } => "InlineBranch",
+            Terminator::Throw { .. } => "Throw",
+            Terminator::Ret { .. } => "Ret",
+            Terminator::Unreachable => "Unreachable",
+        }
+    }
+
     pub fn successors(&self) -> Vec<BlockId> {
         match self {
             Terminator::Jump { target, .. } => vec![*target],
@@ -999,6 +1011,24 @@ impl Terminator {
 }
 
 impl Op {
+    /// Coarse variant class for diagnostics (e.g. spill bail analysis).
+    /// Zero-alloc; only distinguishes the categories the spiller cares
+    /// about (the high-arity operand sources), everything else is "op".
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Op::Call {
+                is_builtin: true, ..
+            } => "Call(builtin)",
+            Op::Call { .. } => "Call",
+            Op::Recurse { .. } => "Recurse",
+            Op::PerformEffect { .. } => "PerformEffect",
+            Op::CaptureContinuation { .. } | Op::CaptureContinuationTagged { .. } => {
+                "CaptureContinuation"
+            }
+            _ => "op",
+        }
+    }
+
     /// True for ops the SSA-opt DCE pass MUST keep regardless of
     /// whether their dst (if any) is used. Side effects include memory
     /// writes, calls, exception/continuation/effect state changes,
