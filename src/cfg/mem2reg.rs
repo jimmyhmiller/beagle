@@ -47,10 +47,23 @@ pub fn promote_slots(f: &mut CfgFunction) {
     }
 
     let (slot_writes, slot_reads) = collect_slot_sites(f);
+    // Profitability gate: promote slots with >= `min_reads` reads. Default
+    // is now **1** — promote even single-read slots, eliminating the
+    // store→load round-trips the AST compiler emits for every intermediate.
+    // This is the runtime win: it collapses the slot/memory traffic that made
+    // SSA slower than legacy (specialized fib went 36 slot ops → 7), and is
+    // only viable because pruned SSA (the φ-placement liveness gate) keeps
+    // register pressure sane instead of exploding. Validated 364/364 with
+    // peak ~0.05 GB. `BEAGLE_SSA_PROMOTE_MIN_READS=2` restores the
+    // conservative gate for A/B.
+    let min_reads: usize = std::env::var("BEAGLE_SSA_PROMOTE_MIN_READS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
     let read_filtered: HashSet<SlotId> = slot_writes
         .keys()
         .copied()
-        .filter(|s| slot_reads.get(s).copied().unwrap_or(0) >= 2)
+        .filter(|s| slot_reads.get(s).copied().unwrap_or(0) >= min_reads)
         .collect();
     if read_filtered.is_empty() {
         return;
@@ -122,6 +135,15 @@ pub fn promote_slots(f: &mut CfgFunction) {
     let df = compute_dominance_frontiers(f, &idom);
     let dom_tree = dominator_tree_children(&idom);
 
+    // Pruned SSA: per-block live-in set of promotable slots. A φ is placed
+    // at an IDF block only if the slot is live-in there; otherwise it is a
+    // dead φ that pins its incoming value live across the edge for nothing,
+    // exploding register pressure (a loop header is in the IDF of every
+    // slot written in the loop). See `docs/SSA_PRESSURE_EXPLOSION.md`.
+    // `BEAGLE_SSA_NO_PRUNE=1` reverts to minimal SSA for A/B.
+    let slot_live_in = compute_slot_live_in(f, &rpo, &promotable);
+    let prune = std::env::var("BEAGLE_SSA_NO_PRUNE").is_err();
+
     // Phase 1: insert phi-style block params at IDF of write sites.
     let mut slot_phi_param: HashMap<(SlotId, BlockId), VReg> = HashMap::new();
     let mut phis_at_block: HashMap<BlockId, Vec<SlotId>> = HashMap::new();
@@ -133,6 +155,13 @@ pub fn promote_slots(f: &mut CfgFunction) {
         let mut idf_sorted: Vec<BlockId> = idf.into_iter().collect();
         idf_sorted.sort();
         for block in idf_sorted {
+            if prune
+                && !slot_live_in
+                    .get(&block)
+                    .is_some_and(|live| live.contains(&slot))
+            {
+                continue;
+            }
             let phi_vr = f.new_vreg(class);
             f.block_mut(block).params.push(phi_vr);
             slot_phi_param.insert((slot, block), phi_vr);
@@ -145,15 +174,21 @@ pub fn promote_slots(f: &mut CfgFunction) {
     // top of stack, stores push a new value, exits pop.
     let mut stacks: HashMap<SlotId, Vec<VReg>> = HashMap::new();
 
-    // Synthesize a zero-init at the start of entry for each promoted
-    // slot. Mirrors legacy semantics: frame slots are zero-initialized
-    // on function entry, so a read-before-write reads 0. Without this,
-    // any slot whose first use along some path is a read (not a write)
-    // would leave the rename stack empty and cascade into garbage.
-    // The init values become the initial "current value" on the stacks
-    // and stay there for the duration of the pass.
-    let mut entry_inits: Vec<Op> = Vec::with_capacity(promotable.len());
+    // Synthesize a zero-init at the start of entry for each promoted slot
+    // that is live-in at entry. Legacy zero-initializes frame slots, so a
+    // read-before-write must see 0 — but only slots actually read before
+    // written on some path from entry can observe that. A slot written
+    // before any read on every path never observes the zero, so its init
+    // is dead; skipping it removes the instruction (and seeds nothing —
+    // its rename stack is filled by the dominating store, which by that
+    // same liveness fact precedes every read, so the stack is never empty
+    // at a read or a phi-arg wiring). Uses slot liveness, not read counts.
+    let entry_live = slot_live_in.get(&f.entry);
+    let mut entry_inits: Vec<Op> = Vec::new();
     for &slot in &promotable {
+        if !entry_live.is_some_and(|live| live.contains(&slot)) {
+            continue;
+        }
         let class = slot_class.get(&slot).copied().unwrap_or(RegClass::Gp);
         let init_vr = f.new_vreg(class);
         entry_inits.push(Op::ConstRawValue {
@@ -350,6 +385,68 @@ fn collect_slot_sites(f: &CfgFunction) -> (HashMap<SlotId, Vec<BlockId>>, HashMa
     (writes, reads)
 }
 
+/// Per-block **live-in set of promotable slots** — a standard backward
+/// live-variable dataflow keyed on `SlotId`. A slot is live-in at `B` if
+/// some path from `B` reaches a `SlotLoad` of it before a `SlotStore`.
+/// Turns minimal SSA into **pruned SSA** (see the caller). Restricted to
+/// `promotable` so the live sets stay small.
+fn compute_slot_live_in(
+    f: &CfgFunction,
+    rpo: &[BlockId],
+    promotable: &HashSet<SlotId>,
+) -> HashMap<BlockId, HashSet<SlotId>> {
+    // gen[B] = slots loaded before any store in B (upward-exposed);
+    // kill[B] = slots stored in B.
+    let mut gen_set: HashMap<BlockId, HashSet<SlotId>> = HashMap::new();
+    let mut kill: HashMap<BlockId, HashSet<SlotId>> = HashMap::new();
+    let mut live_in: HashMap<BlockId, HashSet<SlotId>> = HashMap::new();
+    for (idx, block) in f.blocks.iter().enumerate() {
+        let bid = BlockId(idx as u32);
+        let mut g: HashSet<SlotId> = HashSet::new();
+        let mut k: HashSet<SlotId> = HashSet::new();
+        for op in &block.body {
+            match op {
+                Op::SlotLoad { slot, .. } if promotable.contains(slot) => {
+                    if !k.contains(slot) {
+                        g.insert(*slot);
+                    }
+                }
+                Op::SlotStore { slot, .. } if promotable.contains(slot) => {
+                    k.insert(*slot);
+                }
+                _ => {}
+            }
+        }
+        gen_set.insert(bid, g);
+        kill.insert(bid, k);
+        live_in.insert(bid, HashSet::new());
+    }
+
+    // Backward fixpoint: live_in[B] = gen[B] ∪ (⋃succ live_in[succ] − kill[B]).
+    let order: Vec<BlockId> = rpo.iter().rev().copied().collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &bid in &order {
+            let mut new_in = gen_set[&bid].clone();
+            for succ in f.block(bid).terminator.successors() {
+                if let Some(succ_in) = live_in.get(&succ) {
+                    for s in succ_in {
+                        if !kill[&bid].contains(s) {
+                            new_in.insert(*s);
+                        }
+                    }
+                }
+            }
+            if new_in != live_in[&bid] {
+                live_in.insert(bid, new_in);
+                changed = true;
+            }
+        }
+    }
+    live_in
+}
+
 /// Infer the `RegClass` of each promotable slot by looking at the class
 /// of its `SlotLoad` destinations and `SlotStore` sources. They should
 /// all agree — if they don't, default to GP and let the verifier flag
@@ -414,27 +511,25 @@ mod tests {
 
         promote_slots(&mut f);
 
-        // Body now starts with a synthetic ConstRawValue zero-init for
-        // slot 0 (legacy zero-init semantics); SlotStore dropped;
-        // SlotLoads replaced by Move from the stored value. The init's
-        // VReg is dead since the store shadows it before any read — a
-        // later DCE pass would clean it up.
+        // Slot 0 is stored before it is read → not live-in at entry → no
+        // synthetic zero-init is emitted (it would be dead). SlotStore
+        // dropped; SlotLoads become Moves from the stored value. Body is
+        // 2 Moves + AddInt.
         let body = &f.block(entry).body;
         assert_eq!(
             body.len(),
-            4,
-            "init + 2 Moves + AddInt; store dropped: {:?}",
+            3,
+            "2 Moves + AddInt; store dropped, dead init elided: {:?}",
             body
         );
-        assert!(matches!(body[0], Op::ConstRawValue { value: 0, .. }));
+        assert!(matches!(body[0], Op::Move { src, .. } if src == stored));
         assert!(matches!(body[1], Op::Move { src, .. } if src == stored));
-        assert!(matches!(body[2], Op::Move { src, .. } if src == stored));
-        assert!(matches!(body[3], Op::AddInt { .. }));
+        assert!(matches!(body[2], Op::AddInt { .. }));
     }
 
     /// Single read: profitability gate skips promotion.
     #[test]
-    fn single_read_is_not_promoted() {
+    fn single_read_is_promoted_at_default_gate() {
         let mut f = CfgFunction::new(Some("one_read".into()), 1);
         let entry = f.new_block();
         f.entry = entry;
@@ -452,11 +547,24 @@ mod tests {
 
         promote_slots(&mut f);
 
-        // Body unchanged — gate skipped this slot.
+        // The default profitability gate is now `>= 1` read, so even a
+        // single-read slot is promoted: its load becomes a Move from the
+        // stored value and the store is dropped. (Set
+        // `BEAGLE_SSA_PROMOTE_MIN_READS=2` for the old conservative gate.)
         let body = &f.block(entry).body;
-        assert_eq!(body.len(), 2);
-        assert!(matches!(body[0], Op::SlotStore { .. }));
-        assert!(matches!(body[1], Op::SlotLoad { .. }));
+        assert!(
+            body.iter()
+                .any(|op| matches!(op, Op::Move { dst, src } if *dst == loaded && *src == stored)),
+            "single-read slot should promote to a Move at the >=1 default: {:?}",
+            body
+        );
+        assert!(
+            !body
+                .iter()
+                .any(|op| matches!(op, Op::SlotLoad { .. } | Op::SlotStore { .. })),
+            "promoted slot's load/store should be gone: {:?}",
+            body
+        );
     }
 
     /// Diamond: slot is written on both branches, read at the join.
