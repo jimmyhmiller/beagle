@@ -13,9 +13,10 @@ Where this plan touches `src/cfg/`, `src/ssa/`, `src/register_allocation/`,
 `src/ir.rs`, `src/lir/`, `src/compiler.rs`, or backend regalloc/spill code, the
 SSA_ARCHITECTURE invariants (I1–I10) and `/ssa-review` still govern.
 
-Status: **Phase 0 landed; Phases 1–7 not started.** Phases land in order; each
-is independently gated (see "Gating" below). The working-tree gate relaxation
-(Phase 6) has been reverted per "Disposition" and will return last.
+Status: **Phases 0–3 landed (committed on `ssa-foundation`); Phase 4 (remat)
+in progress in the working tree.** Phases land in order; each is independently
+gated (see "Gating" below). The working-tree gate relaxation (Phase 6) has been
+reverted per "Disposition" and will return last.
 
 ---
 

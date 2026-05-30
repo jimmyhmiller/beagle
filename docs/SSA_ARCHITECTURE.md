@@ -132,6 +132,19 @@ logs and skips SSA codegen for that function (falls back to legacy IR).
   value and removes the store without first checking
   `slot_is_gc_safe_to_promote`. Tier-1 SSA attempts crashed
   `gc_stress_single_thread.bg` because `mem2reg` violated this.
+- **Rematerialization exemption.** The regalloc spiller may relieve a
+  cross-safepoint GP value by *rematerializing* it (re-emitting its def
+  at each use) instead of routing it through a root slot — but **only**
+  for defs that produce a non-relocatable value: immediate constants
+  (`ConstTaggedInt`/`ConstTrue`/`ConstFalse`/`ConstNull`/`ConstRawValue`)
+  and pointers into non-moving regions the GC never relocates or frees
+  (`ConstPointer`/`ConstStringPtr`/`ConstKeywordPtr`/`ConstFunctionId`,
+  and `GetFramePointer`). This does not violate I9: remat *removes* the
+  value's cross-safepoint liveness (it is re-derived after the call), so
+  the "must be in a slot while live across a safepoint" clause no longer
+  applies. A value defined by anything that loads or computes a live heap
+  pointer is **not** rematerializable and must still go through a root
+  slot. The rematerializable set lives in `regalloc/spill.rs::remat_op_for`.
 
 ### I10 — Slots read by soft-edge (handler) blocks stay materialized
 
@@ -291,6 +304,22 @@ prerequisite phase is demonstrably green at the time of the skip.
   `dot -Tpng`.
 - `BEAGLE_USE_LEGACY=1` — force the legacy linear-IR path, for differential
   comparison.
+- `BEAGLE_USE_SSA=1` — opt into the SSA pipeline (falls back to legacy per
+  function on any bail). `BEAGLE_SSA_LOG_BAIL=1` logs each function's
+  OK/BAIL outcome; `BEAGLE_SSA_ONLY=<substr>` / `BEAGLE_SSA_DENY=<substr>`
+  restrict the SSA path to / from functions whose name matches.
+- Spiller knobs (`regalloc/spill.rs`): `BEAGLE_SSA_NO_REMAT=1` disables
+  rematerialization (forces slot spills — A/B measurement);
+  `BEAGLE_SSA_SPILL_CAP=<n>` caps real (slot) spills before bailing (0 =
+  uncapped); `BEAGLE_SSA_SPILL_MAX_ROUNDS=<n>` bounds color→spill rounds;
+  `BEAGLE_SSA_BLOCK_PARAM_SPILL=1` enables phi/block-param spilling through
+  memory (off by default — a net loss until remat + coalescing shrink the
+  spilled code); `BEAGLE_SSA_BAIL_DIAG=1` prints the unfixable pressure
+  point behind each bail.
+- Coalescing: `BEAGLE_SSA_NO_REGCOALESCE=1` reverts the regalloc coalescer
+  (`regalloc/coalesce.rs`) to the old pairwise block-param↔arg hints, to
+  isolate Phase 5's effect in A/B. (Distinct from `BEAGLE_SSA_NO_COALESCE`,
+  which disables the *SSA-level* `Op::Move`→rename pass in `cfg/opt.rs`.)
 
 ---
 
