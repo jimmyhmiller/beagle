@@ -239,6 +239,18 @@ pub enum BuildError {
 pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
     let mut f = CfgFunction::new(ir.debug_name.clone(), ir.num_locals as u32);
 
+    // A function is variadic iff it reads its incoming arg count (only
+    // variadic functions do). This gates the I8 tail-call rewrite: a
+    // variadic self-call CANNOT become `Jump(entry, args)` — the entry's
+    // params are the fixed arg registers and a jump never re-establishes
+    // the arg-count register that `ReadArgCount` reads, so the rest-array
+    // would be rebuilt with the wrong length (and the arg arity wouldn't
+    // even match the entry). See the `TailRecurse` arm.
+    let is_variadic = ir
+        .instructions
+        .iter()
+        .any(|i| matches!(i, Instruction::ReadArgCount(_)));
+
     // Classify every VReg the function references. The class table is the
     // single source of truth for what register class each VReg has, and is
     // consulted by `to_cfg_vreg` at every translation site so a VReg has
@@ -276,6 +288,7 @@ pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
             &leader_to_block,
             &label_pos,
             &class_table,
+            is_variadic,
         )?;
     }
 
@@ -486,6 +499,7 @@ fn fill_block(
     leader_to_block: &HashMap<usize, BlockId>,
     label_pos: &HashMap<usize, usize>,
     classes: &HashMap<u32, RegClass>,
+    is_variadic: bool,
 ) -> Result<(), BuildError> {
     let mut idx = start;
 
@@ -530,6 +544,7 @@ fn fill_block(
                 label_pos,
                 classes,
                 entry,
+                is_variadic,
                 f,
                 &mut pre_ops,
             )?;
@@ -1104,6 +1119,7 @@ fn translate_terminator(
     label_pos: &HashMap<usize, usize>,
     classes: &HashMap<u32, RegClass>,
     entry: BlockId,
+    is_variadic: bool,
     f: &mut CfgFunction,
     pre_ops: &mut Vec<Op>,
 ) -> Result<Terminator, BuildError> {
@@ -1156,14 +1172,40 @@ fn translate_terminator(
                 f_args: vec![],
             })
         }
-        // I8: tail self-call rewrites directly to a jump-to-entry. The
-        // dst register is discarded (no return on a tail call).
-        I::TailRecurse(_dst, args) => {
+        // I8: tail self-call rewrites directly to a jump-to-entry.
+        //
+        // EXCEPT for variadic functions. There, the entry block's params
+        // are the fixed incoming arg registers, and the body reads how many
+        // args were actually passed via `ReadArgCount` — a register the
+        // *caller* sets. A `Jump` to entry (a) wouldn't match the entry's
+        // param arity (the tail-call passes only the actual args, not all
+        // arg registers) and (b) never re-establishes the arg-count
+        // register, so `ReadArgCount` would return the original call's
+        // count and rebuild the rest-array with the wrong length. Both
+        // corrupt the function (observed: `variadic_recursive_test`'s
+        // `countdown` looped forever / OOM'd). So for a variadic function we
+        // lower the tail self-call to a real self-`Recurse` (which sets the
+        // full calling convention, incl. the arg count) and return its
+        // result — correct, at the cost of TCO for variadic recursion only.
+        I::TailRecurse(dst, args) => {
             let arg_vregs = translate_value_args(args, position, classes, f, pre_ops)?;
-            Ok(Terminator::Jump {
-                target: entry,
-                args: arg_vregs,
-            })
+            if is_variadic {
+                let ret = match dst {
+                    Value::Register(r) => v(r),
+                    _ => f.new_vreg(RegClass::Gp),
+                };
+                pre_ops.push(Op::Recurse {
+                    dst: ret,
+                    args: arg_vregs,
+                    clobbers: ClobberSet::AllCallerSaved,
+                });
+                Ok(Terminator::Ret { value: ret })
+            } else {
+                Ok(Terminator::Jump {
+                    target: entry,
+                    args: arg_vregs,
+                })
+            }
         }
         I::Throw(Value::Register(value), resume_label, resume_local_idx, builtin_fn_ptr) => {
             Ok(Terminator::Throw {
@@ -2203,9 +2245,17 @@ mod tests {
         let cfg = build_cfg(&ir).expect("load/store should build");
         crate::cfg::verify::verify(&cfg).expect("load/store should verify");
         let entry = cfg.block(cfg.entry);
-        assert!(matches!(entry.body[0], Op::SlotStore { .. }));
-        assert!(matches!(entry.body[1], Op::SlotLoad { .. }));
-        assert_eq!(cfg.num_slots, 1);
+        // With the default `>= 1` promotion gate, this single-read local is
+        // promoted to an SSA value and the resulting copy is coalesced away,
+        // so no slot load/store survives the build_cfg pipeline.
+        assert!(
+            !entry
+                .body
+                .iter()
+                .any(|op| matches!(op, Op::SlotLoad { .. } | Op::SlotStore { .. })),
+            "promoted local should leave no slot ops: {:?}",
+            entry.body
+        );
     }
 
     /// JumpIf produces a Branch terminator with proper t/f targets, and
