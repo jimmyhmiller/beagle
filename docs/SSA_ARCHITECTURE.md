@@ -509,3 +509,33 @@ and both confirm a large architectural build — no sound autonomous-increment s
 This is a deliberate multi-session build needing oversight, not 60s autonomous
 grinding. Pure-float code already wins ~3.5x via SSA-default; this is the
 narrower struct-field-fed case (nbody-shape).
+
+### Stage 3 — architecture pivot (iter 19): do loop-body versioning at the FLAT-IR level, not CFG
+
+Step-2 study finding: cfg/builder.rs builds blocks by LEADER computation over
+the already-label-delimited linear IR (labels + post-terminator positions) — it
+maps existing structure into blocks; it does NOT create new blocks from a single
+op. So making `FloatBinOp` survive into the CFG and lower (boxed) THERE would
+require cfg/builder to expand one op into a guard/fast/slow/merge multi-block
+structure — a large architectural change to the builder. Rejected.
+
+BETTER PATH (pivot): do the loop-body versioning at the FLAT-IR level, in/around
+`unbox_floats` (ir.rs), BEFORE the boxed expansion:
+- The flat IR DOES have loop structure (labels + backward Jump/JumpIf = back-
+  edges) — the iter-18 "no loop structure" claim was wrong.
+- At this point `FloatBinOp`s are still HIGH-LEVEL (not yet expanded), so each
+  version lowers them cleanly (fast = emit_float_arith unboxed; slow =
+  lower_float_binop_boxed) — no fragile boxed-sequence pattern-matching.
+- A loop body is a CONTIGUOUS instruction range (header label .. back-edge
+  jump), so cloning it = copy the range with fresh label ids + renamed temp
+  registers. Non-contiguity was never the real blocker for *whole-body* cloning.
+- Soundness for the bail: GUARD the field-read leaves at iteration TOP, before
+  any field-WRITE side effects, so a guard miss bails to the slow body with no
+  double side effects (nbody reads all fields before writing any).
+Plan: (a) flat-IR loop detection (back-edge = jump to an earlier label that
+dominates); (b) identify a versionable loop (body has speculative field-fed
+FloatBinOps, all field writes after all field reads); (c) clone body → fast
+(leaf guards -> slow; unboxed FloatBinOps; FP slots for float temps) + slow
+(current); entry branch selects; (d) verify bit-identical + measure.
+NOTE: the CFG `natural_loops` util (commit 271ee86) stays as reusable infra
+(LICM/unrolling), but this flat-IR path doesn't depend on it.
