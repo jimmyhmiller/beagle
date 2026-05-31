@@ -138,9 +138,18 @@ deliberately did NOT grind these (the "must not break things" bar):
   docs/SSA_ARCHITECTURE.md stage 3: a `FloatBinOp` operand from a field
   `HeapLoad` becomes *speculatively* float — `GuardFloat` the boxed ptr, unbox
   to FP, mark definitely-float so the chain unboxes; bail = current boxed
-  lowering. Build in smallest gated slices, A/B on the probe each step. NOTE:
-  this does NOT need full body-versioning — per-op guarded unbox (like today's
-  guarded boxed `FloatBinOp`) suffices; reassess if guard density hurts.
+  lowering. Build in smallest gated slices, A/B on the probe each step.
+  **CORRECTED (iter 9): this DOES need region/expression versioning — per-op
+  guarded unbox is unsound for chains.** A float op's bail returns the
+  polymorphic result, which may be non-float, so the per-op fast/slow merge is
+  tagged-but-maybe-non-float — you can't forward an FP value past it or mark
+  the result definitely-float (float_repr.rs already states this rule). The win
+  needs: guard the field-read LEAVES once at region entry, run a bail-free
+  unboxed fast version, box only at escapes (field writes), slow version =
+  today's boxed lowering, entry guard selects. Best done as float
+  expression-tree versioning at AST emission (tree explicit in recursion;
+  bail = current boxed emission of the whole expr). Smallest MEASURABLE slice
+  is a multi-op field-fed expression, NOT a single op. See SSA spec stage 3.
 - **non-pointer → unscanned slots** — sound but the GC already tag-checks
   scanned slots, so the win (smaller scanned frame) is modest and hard to
   measure cleanly.

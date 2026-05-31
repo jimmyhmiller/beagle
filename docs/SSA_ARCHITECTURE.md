@@ -304,6 +304,30 @@ boundary between representations is coerced (`coerce_to_fp` / `coerce_to_tagged`
    Build in the smallest slices (single field-read → single op first), each
    gated + harness-green + bit-identical, A/B on the probe.
 
+   **CORRECTION (iter 9) — per-op guarded unbox is UNSOUND for chains; the win
+   needs region/expression versioning.** Studied the code: a float-specialized
+   op's bail path assigns the *polymorphic* result to `result_register`
+   (ir.rs `lower_float_binop_boxed` slow path) and that result may be a
+   non-float (int+int→int, etc.) — `float_repr.rs` already codifies "result is
+   definitely-float ONLY if both operands are." So at each per-op fast/slow
+   MERGE the value is tagged-but-maybe-non-float: you cannot forward an FP
+   value past it nor mark the result definitely-float. Per-op guard+unbox
+   therefore does NOT compose across a chain (`dx = bi.x-bj.x; dx*dx; …`) — the
+   representation diverges at every bail merge, and a single field op alone has
+   no chain to win (its result must be boxed to store anyway). The 2.44× prize
+   comes from keeping a whole expression/loop-body unboxed, which requires
+   **versioning**: guard all the field-read LEAVES once at region entry; the
+   fast version runs the region with NO per-op bails (every value
+   definitely-float by the entry guards) keeping intermediates in FP regs and
+   boxing only at escapes (field writes); the slow version is today's boxed
+   lowering; a guard miss at entry selects slow. Cleanest granularity = a float
+   EXPRESSION TREE at AST emission (the tree is explicit in the recursion — the
+   "emission-time type inference" path), bailing the whole expression to the
+   current boxed emission on any leaf-guard miss (original tagged operands are
+   still live at the bail point). Smallest MEASURABLE slice is thus a
+   multi-op field-fed expression (e.g. the probe's `dx*dx + c`), not a single
+   op. Build expression-tree versioning at emission, gated, A/B on the probe.
+
 ---
 
 ## Anti-spill checklist (Phase 4)
