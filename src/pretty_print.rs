@@ -426,6 +426,15 @@ impl PrettyPrint for Instruction {
                     value2.pretty_print()
                 )
             }
+            Instruction::FloatBinOp { op, dst, a, b, .. } => {
+                format!(
+                    "float_binop {:?} {}, {}, {}",
+                    op,
+                    dst.pretty_print(),
+                    a.pretty_print(),
+                    b.pretty_print()
+                )
+            }
             Instruction::SubFloat(value, value1, value2) => {
                 format!(
                     "sub_float {}, {}, {}",

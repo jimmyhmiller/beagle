@@ -216,6 +216,63 @@ that point.
 
 ---
 
+## Float unboxing (tier-2 SSA pass)
+
+Floats are heap-boxed: each `f64` lives in a 1-word heap object behind a
+tagged pointer. The feedback-specialized float fast path therefore lowers
+`a + b` to ~12 ops — `GuardFloat ×2`, `InlineBumpAllocate` (a GC
+safepoint), header store, `Untag ×2`, `HeapLoad ×2`, `FmovGpToFp ×2`,
+the one real `AddFloat`, `FmovFpToGp`, `HeapStoreOffset`, `Tag`. In a loop
+every intermediate allocates a fresh box. Measured tax: a float loop runs
+~2.5–3× an identical int loop. Unboxing keeps the `f64` in an FP register
+across chained float ops and boxes only at escapes.
+
+**Why not a post-hoc SSA cancellation pass.** The boxed pointer is forced
+through a **GC root slot** by the time the SSA layer sees it: I9 requires it
+to survive the *next* op's allocation safepoint, so the producer's `Tag` and
+the consumer's `Untag` are separated by `Move → SlotStore(root) → SlotLoad`.
+A def-use peephole that tries to forward `Tag → Untag` therefore fires zero
+times — it is fighting the I9 discipline at the wrong altitude. (Confirmed
+empirically; see `project_float_unboxing` memory.)
+
+**The approach: defer the boxed lowering so a high-level float op survives
+to the SSA layer.** Float arithmetic is lowered to the boxed sequence in
+`ir.rs` *during AST→IR emission* — before SSA, before root-slotting. Instead,
+emission emits a single deferred `Instruction::FloatBinOp { op, dst, a, b,
+feedback_slot, bail_table }`, and the lowering is chosen **per path**:
+- **Legacy** expands it to the byte-identical boxed sequence
+  (`Ir::expand_float_binops` → `lower_float_binop_boxed`).
+- **SSA** lowers it keeping intermediates unboxed in `Fp` registers, boxing
+  only at escapes — done on high-level SSA values *before* root-slotting, so
+  escape = "a use that needs a tagged value" is answerable by def-use and I9
+  only applies to genuine escapes.
+
+This mirrors the SSA-vs-legacy split already in `Ir::compile` (same
+instruction stream, two lowerings). Emission stays uniform: `FloatBinOp` is
+emitted only when the SSA path will run (`want_high_level_float`), so a
+pure-legacy compile is unchanged, and an SSA→legacy bail still works because
+legacy can always expand the op.
+
+**Escape = must box.** Box at: heap/struct stores, any `Call` (incl. the
+bail helper), `Ret`, control-flow merges with a boxed value, and any consumer
+that isn't a float op. Conservative by default; widen as tests confirm.
+
+**Forbidden:** materializing the f64-bits (a `FmovFpToGp` result) in a GP
+register live across a safepoint — those bits are not a pointer; root-slotting
+them (I9) makes the GC trace garbage. Unboxed values stay `Fp`-class
+(GC-exempt); spill them to **unscanned FP slots** when live across a safepoint.
+
+**Stages (each gated, each tested green before the next):**
+1. **Deferred-lowering substrate (done).** `FloatBinOp` + per-path expansion;
+   legacy byte-identical, SSA expands too (behaviour-neutral). No win yet.
+2. **SSA unboxed lowering.** Lower `FloatBinOp` to `Fp` `AddFloat`/… with
+   `Box`/`Unbox` only at boundaries; cancel redundant `Unbox(Box(x))→x`.
+   Straight-line first.
+3. **Loop-carried.** A float accumulator's block-param becomes `Fp`-class and
+   stays unboxed across the back-edge (fixpoint), boxing only on escape.
+
+---
+
 ## Anti-spill checklist (Phase 4)
 
 If a benchmark regresses on spill count, one of these is missing. This list

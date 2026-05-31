@@ -1880,6 +1880,7 @@ fn instruction_name(inst: &Instruction) -> &'static str {
         Instruction::IntToFloat(..) => "IntToFloat",
         Instruction::FRoundToZero(..) => "FRoundToZero",
         Instruction::AddFloat(..) => "AddFloat",
+        Instruction::FloatBinOp { .. } => "FloatBinOp",
         Instruction::SubFloat(..) => "SubFloat",
         Instruction::MulFloat(..) => "MulFloat",
         Instruction::DivFloat(..) => "DivFloat",

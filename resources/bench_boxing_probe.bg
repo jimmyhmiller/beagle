@@ -1,0 +1,56 @@
+namespace bench_boxing_probe
+
+use beagle.core as core
+use beagle.runtime as runtime
+
+// Identical loop shape, int vs float, same number of arithmetic ops.
+// The float/int time ratio (beyond ~1x) is the float-boxing tax: every
+// intermediate float allocates+stores+loads a heap box, ints don't.
+
+fn int_loop(n) {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + i * 2 - 1
+        i = i + 1
+    }
+    acc
+}
+
+fn float_loop(n) {
+    let mut acc = 0.0
+    let mut i = 0.0
+    while i < n {
+        acc = acc + i * 2.0 - 1.0
+        i = i + 1.0
+    }
+    acc
+}
+
+fn measure_int(label, n) {
+    let start = core/time-now()
+    let r = int_loop(n)
+    let elapsed = core/time-now() - start
+    println("${label}: ${elapsed} ns  (r=${r})")
+    elapsed
+}
+
+fn measure_float(label, n) {
+    let start = core/time-now()
+    let r = float_loop(n)
+    let elapsed = core/time-now() - start
+    println("${label}: ${elapsed} ns  (r=${r})")
+    elapsed
+}
+
+fn main() {
+    measure_int("int warmup  ", 1000000)
+    measure_float("flt warmup  ", 1000000.0)
+    let n = runtime/specialize-all()
+    println("specialized ${n} functions")
+    let it = measure_int("int tier2   ", 20000000)
+    let ft = measure_float("flt tier2   ", 20000000.0)
+    if it > 0 {
+        println("float/int ratio x100 = ${ft * 100 / it}")
+    }
+}

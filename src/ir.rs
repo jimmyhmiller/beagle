@@ -123,6 +123,19 @@ pub struct StringValue {
     pub str: String,
 }
 
+/// Which floating-point binary operation a deferred `FloatBinOp` performs.
+/// Lets the boxed-float lowering be deferred to a path-specific step
+/// (legacy expands to the boxed sequence; the SSA path can keep values
+/// unboxed). See `Instruction::FloatBinOp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Serialize)]
+pub enum FloatOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Modulo,
+}
+
 #[derive(Debug, Clone, Encode, Decode, Serialize)]
 #[serde(tag = "kind", content = "args")]
 pub enum Instruction {
@@ -235,6 +248,21 @@ pub enum Instruction {
     /// bounded by the threshold.
     /// Fields: (counter_addr, name_c_str_ptr, trampoline_fn_ptr).
     TierUpCheck(usize, usize, usize),
+    /// Deferred boxed float binary op (tagged operands in, tagged result
+    /// out). Carries everything the boxed lowering needs so the lowering
+    /// decision can be made per-path: the legacy path expands it to the
+    /// guard/allocate/unbox/op/box sequence (`expand_float_binops`); the
+    /// SSA path can lower it keeping intermediates unboxed. `dst`, `a`,
+    /// `b` are pre-allocated at emission so surrounding register numbering
+    /// is unperturbed.
+    FloatBinOp {
+        op: FloatOp,
+        dst: Value,
+        a: Value,
+        b: Value,
+        feedback_slot: usize,
+        bail_table: usize,
+    },
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -392,6 +420,9 @@ impl Instruction {
             }
             Instruction::AddFloat(a, b, c) => {
                 get_registers!(a, b, c)
+            }
+            Instruction::FloatBinOp { dst, a, b, .. } => {
+                get_registers!(dst, a, b)
             }
             Instruction::SubFloat(a, b, c) => {
                 get_registers!(a, b, c)
@@ -632,6 +663,11 @@ impl Instruction {
                 replace_register!(value, old_register, new_register);
                 replace_register!(value1, old_register, new_register);
                 replace_register!(value2, old_register, new_register);
+            }
+            Instruction::FloatBinOp { dst, a, b, .. } => {
+                replace_register!(dst, old_register, new_register);
+                replace_register!(a, old_register, new_register);
+                replace_register!(b, old_register, new_register);
             }
 
             Instruction::HeapLoad(value, value1, _)
@@ -976,7 +1012,13 @@ impl Ir {
         A: Into<Value>,
         B: Into<Value>,
     {
-        self.math_any_float_with_bail(a, b, Self::sub_float, feedback_slot, bail_jump_table_ptr)
+        self.math_any_float_with_bail(
+            a,
+            b,
+            crate::ir::FloatOp::Sub,
+            feedback_slot,
+            bail_jump_table_ptr,
+        )
     }
 
     pub fn sub_int<A, B>(&mut self, a: A, b: B) -> Value
@@ -1118,23 +1160,66 @@ impl Ir {
     /// path on miss (one operand isn't a tagged float) records FB_OTHER
     /// and calls `beagle.bail/<op>`, which goes through the polymorphic
     /// path.
-    pub fn math_any_float_with_bail<A, B, G>(
+    pub fn math_any_float_with_bail<A, B>(
         &mut self,
         a: A,
         b: B,
-        op_float: G,
+        op: FloatOp,
         feedback_slot: usize,
         bail_jump_table_ptr: usize,
     ) -> Value
     where
         A: Into<Value>,
         B: Into<Value>,
-        G: Fn(&mut Ir, Value, Value) -> Value,
     {
         let result_register = self.assign_new(Value::TaggedConstant(0));
         let a: VirtualRegister = self.assign_new(a.into());
         let b: VirtualRegister = self.assign_new(b.into());
 
+        // Deferred lowering. When the SSA path will run, emit a single
+        // high-level `FloatBinOp` and let the path-specific step lower it
+        // (legacy: `expand_float_binops` → the boxed sequence below; SSA:
+        // can keep intermediates unboxed). When SSA won't run, lower the
+        // boxed sequence inline now so the pure-legacy instruction stream
+        // is byte-for-byte unchanged.
+        if self.want_high_level_float() {
+            self.instructions.push(Instruction::FloatBinOp {
+                op,
+                dst: Value::Register(result_register),
+                a: Value::Register(a),
+                b: Value::Register(b),
+                feedback_slot,
+                bail_table: bail_jump_table_ptr,
+            });
+            return Value::Register(result_register);
+        }
+
+        self.lower_float_binop_boxed(
+            op,
+            result_register,
+            a,
+            b,
+            feedback_slot,
+            bail_jump_table_ptr,
+        );
+        Value::Register(result_register)
+    }
+
+    /// Emit the boxed fast-path + bail slow-path for a float binary op into
+    /// the current instruction stream, writing the tagged result into the
+    /// pre-allocated `result_register`. This is the legacy lowering of
+    /// `Instruction::FloatBinOp`; it is emitted inline by
+    /// `math_any_float_with_bail` (pure-legacy) or replayed by
+    /// `expand_float_binops` (when the SSA path bailed).
+    pub fn lower_float_binop_boxed(
+        &mut self,
+        op: FloatOp,
+        result_register: VirtualRegister,
+        a: VirtualRegister,
+        b: VirtualRegister,
+        feedback_slot: usize,
+        bail_jump_table_ptr: usize,
+    ) {
         let miss: Label = self.label("float_bail_miss");
         let after_op = self.label("float_bail_after");
 
@@ -1154,7 +1239,13 @@ impl Ir {
         let b_val = self.load_from_heap(b_untagged, 1);
         let a_float = self.fmov_general_to_float(a_val);
         let b_float = self.fmov_general_to_float(b_val);
-        let float_result = op_float(self, a_float, b_float);
+        let float_result = match op {
+            FloatOp::Add => self.add_float(a_float, b_float),
+            FloatOp::Sub => self.sub_float(a_float, b_float),
+            FloatOp::Mul => self.mul_float(a_float, b_float),
+            FloatOp::Div => self.div_float(a_float, b_float),
+            FloatOp::Modulo => self.modulo_float(a_float, b_float),
+        };
         let float_result_general = self.fmov_float_to_general(float_result);
         self.heap_store_offset(float_pointer_untagged, float_result_general, 1);
         let tagged = self.tag(float_pointer_untagged, BuiltInTypes::Float.get_tag());
@@ -1173,7 +1264,71 @@ impl Ir {
         self.assign(result_register, call_result);
 
         self.write_label(after_op);
-        Value::Register(result_register)
+    }
+
+    /// Whether float arithmetic should be emitted as a deferred high-level
+    /// `FloatBinOp` (lowered per-path) rather than the boxed sequence
+    /// inline. True exactly when the SSA pipeline is going to run for this
+    /// compile — so pure-legacy compiles (no SSA flag) are untouched.
+    fn want_high_level_float(&self) -> bool {
+        let global = std::env::var("BEAGLE_USE_SSA")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false);
+        let tier2 = std::env::var("BEAGLE_SSA_TIER2")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+            && in_tier_up_compile();
+        global || tier2
+    }
+
+    /// Expand every deferred `Instruction::FloatBinOp` into its boxed
+    /// fast/slow sequence, rebuilding the instruction stream and
+    /// `label_locations`. No-op when none are present (the pure-legacy
+    /// path never emits them, so its stream is untouched). Used as the
+    /// legacy lowering of `FloatBinOp` and as the SSA-bail fallback.
+    pub fn expand_float_binops(&mut self) {
+        if !self
+            .instructions
+            .iter()
+            .any(|i| matches!(i, Instruction::FloatBinOp { .. }))
+        {
+            return;
+        }
+        let old = std::mem::take(&mut self.instructions);
+        self.label_locations.clear();
+        for instr in old {
+            match instr {
+                Instruction::Label(label) => {
+                    // Re-record the label at its new position.
+                    self.write_label(label);
+                }
+                Instruction::FloatBinOp {
+                    op,
+                    dst,
+                    a,
+                    b,
+                    feedback_slot,
+                    bail_table,
+                } => {
+                    let result_register: VirtualRegister = (&dst)
+                        .try_into()
+                        .expect("FloatBinOp dst must be a register");
+                    let a_reg: VirtualRegister =
+                        (&a).try_into().expect("FloatBinOp a must be a register");
+                    let b_reg: VirtualRegister =
+                        (&b).try_into().expect("FloatBinOp b must be a register");
+                    self.lower_float_binop_boxed(
+                        op,
+                        result_register,
+                        a_reg,
+                        b_reg,
+                        feedback_slot,
+                        bail_table,
+                    );
+                }
+                other => self.instructions.push(other),
+            }
+        }
     }
 
     /// Slow path for math operations involving floats.
@@ -1344,7 +1499,13 @@ impl Ir {
         A: Into<Value>,
         B: Into<Value>,
     {
-        self.math_any_float_with_bail(a, b, Self::add_float, feedback_slot, bail_jump_table_ptr)
+        self.math_any_float_with_bail(
+            a,
+            b,
+            crate::ir::FloatOp::Add,
+            feedback_slot,
+            bail_jump_table_ptr,
+        )
     }
 
     pub fn add_int<A, B>(&mut self, a: A, b: B) -> Value
@@ -1416,7 +1577,13 @@ impl Ir {
         A: Into<Value>,
         B: Into<Value>,
     {
-        self.math_any_float_with_bail(a, b, Self::mul_float, feedback_slot, bail_jump_table_ptr)
+        self.math_any_float_with_bail(
+            a,
+            b,
+            crate::ir::FloatOp::Mul,
+            feedback_slot,
+            bail_jump_table_ptr,
+        )
     }
 
     pub fn div<A, B>(&mut self, a: A, b: B) -> Value
@@ -1475,7 +1642,13 @@ impl Ir {
         A: Into<Value>,
         B: Into<Value>,
     {
-        self.math_any_float_with_bail(a, b, Self::div_float, feedback_slot, bail_jump_table_ptr)
+        self.math_any_float_with_bail(
+            a,
+            b,
+            crate::ir::FloatOp::Div,
+            feedback_slot,
+            bail_jump_table_ptr,
+        )
     }
 
     pub fn modulo<A, B>(&mut self, a: A, b: B) -> Value
@@ -1534,7 +1707,13 @@ impl Ir {
         A: Into<Value>,
         B: Into<Value>,
     {
-        self.math_any_float_with_bail(a, b, Self::modulo_float, feedback_slot, bail_jump_table_ptr)
+        self.math_any_float_with_bail(
+            a,
+            b,
+            crate::ir::FloatOp::Modulo,
+            feedback_slot,
+            bail_jump_table_ptr,
+        )
     }
 
     pub fn compare(&mut self, a: Value, b: Value, condition: Condition) -> Value {
@@ -2029,6 +2208,13 @@ impl Ir {
     ) -> B {
         debug_assert!(!self.ir_range_to_token_range.is_empty());
 
+        // Step 1-2 of float unboxing: lower any deferred high-level
+        // `FloatBinOp` back to the boxed sequence before either pipeline
+        // runs, so behaviour is identical to today. (Step 3 will move this
+        // to legacy-only and let the SSA path lower FloatBinOp natively,
+        // keeping intermediates unboxed.) No-op when none are present.
+        self.expand_float_binops();
+
         // Opt-in SSA pipeline. Set `BEAGLE_USE_SSA=1` to try the new
         // path for *every* compile; falls back to legacy on bail
         // (unimplemented op, spill overflow, build failure).
@@ -2118,7 +2304,10 @@ impl Ir {
                         .or_else(|| payload.downcast_ref::<String>().cloned())
                         .unwrap_or_else(|| "<non-string panic>".to_string());
                     let name = self.debug_name.as_deref().unwrap_or("<anon>");
-                    eprintln!("[ssa-compile] PANIC {} -- {} (falling back to legacy)", name, msg);
+                    eprintln!(
+                        "[ssa-compile] PANIC {} -- {} (falling back to legacy)",
+                        name, msg
+                    );
                     // Restore Ir state and rebuild a fresh backend, then
                     // fall through to legacy.
                     self.instructions = saved_instructions;
@@ -2651,6 +2840,13 @@ impl Ir {
                     let dest = self.value_to_register(dest, backend);
                     backend.frintz(dest, src);
                     self.store_spill(dest, dest_spill, backend);
+                }
+                Instruction::FloatBinOp { .. } => {
+                    unreachable!(
+                        "FloatBinOp must be lowered by expand_float_binops (legacy) or the \
+                         SSA float path before backend emit; reaching the legacy emitter means \
+                         the expansion step was skipped"
+                    );
                 }
                 Instruction::AddFloat(dest, a, b) => {
                     let a = self.value_to_register(a, backend);
