@@ -252,3 +252,17 @@ iter 15 — verified the SSA-tier2-default-on win (commit 214dab4):
 - Remaining float prize: field-fed (nbody-shape) float unboxing still needs the
   region/loop-body versioning build (the only big lever left).
 LESSON: re-measure before declaring a regression — one run is noise.
+
+iter 16 — perf hunt is now COMPREHENSIVE; broad win landed, only big-build lever left:
+- strings: already optimized — cons strings (O(1) lazy concat, runtime.rs:4702;
+  std.bg:686) + StringBuilder (string_builder.rs). Not a win.
+- Recap of the full hunt (iters 12-16): allocator fast path tight; protocol
+  dispatch IC irreducible (devirt/inline redefinition-gated); GC young gen
+  already ~160MB; all SSA opt passes on by default (BEAGLE_SSA_NO_* disable
+  them); strings cons/builder. NO cheap or medium wins remain.
+- LANDED broad win: SSA tier-2 default-on (3.46x float / 20% int / 23% btrees,
+  verified no regressions). That was the high-ROI move.
+- ONLY remaining lever: field-fed float unboxing (nbody-shape) via region/
+  loop-body versioning — large, narrow, high-risk; no small sound slice exists
+  (confirmed across iters 7-11). This needs a dedicated multi-session build, not
+  autonomous 60s grinding (per the no-whole-program / oversight memory).
