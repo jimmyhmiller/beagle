@@ -83,6 +83,7 @@ pub mod feedback;
 pub mod float_repr;
 mod gc;
 pub mod ir;
+pub mod ir_loops;
 pub mod lir;
 pub mod machine_code;
 pub mod mmap_utils;
