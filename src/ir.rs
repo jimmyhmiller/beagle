@@ -1327,9 +1327,13 @@ impl Ir {
         let global = std::env::var("BEAGLE_USE_SSA")
             .map(|v| !v.is_empty() && v != "0")
             .unwrap_or(false);
+        // Tier-2 SSA is ON by default (opt out with BEAGLE_SSA_TIER2=0).
+        // Measured wins it activates: series −4x, fib −21%, btrees −23%,
+        // 367/367 under the tier-2 harness. Scoped to tier-up recompiles
+        // only — cold first-compiles stay on legacy.
         let tier2 = std::env::var("BEAGLE_SSA_TIER2")
-            .map(|v| !v.is_empty() && v != "0")
-            .unwrap_or(false)
+            .map(|v| v != "0")
+            .unwrap_or(true)
             && in_tier_up_compile();
         global || tier2
     }
@@ -2572,9 +2576,12 @@ impl Ir {
         // SSA, leaving cold first-compiles on legacy. Enabled by
         // `BEAGLE_SSA_TIER2=1` and active only during a tier-up recompile
         // (see `TierUpCompileGuard` in compiler.rs `specialize_function`).
+        // Tier-2 SSA defaults ON (opt out with BEAGLE_SSA_TIER2=0). Routes
+        // only the hot tier-up recompiles through SSA (off the critical
+        // path), activating the measured float-unboxing + regalloc wins.
         let ssa_tier2 = std::env::var("BEAGLE_SSA_TIER2")
-            .map(|v| !v.is_empty() && v != "0")
-            .unwrap_or(false)
+            .map(|v| v != "0")
+            .unwrap_or(true)
             && in_tier_up_compile();
         let ssa_enabled = ssa_global || ssa_tier2;
         let ssa_only_match = std::env::var("BEAGLE_SSA_ONLY")
