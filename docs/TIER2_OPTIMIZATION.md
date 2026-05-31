@@ -96,3 +96,13 @@ plus a parity test per optimization (`resources/ssa_tier2_parity_test.bg`).
   construction). Needs the harness to validate.
 - **later** — Non-pointer values → unscanned slots (smaller GC root set);
   guarded float speculation for struct-fed loops (needs body-versioning).
+
+### Tried, not worth it (don't re-attempt without new evidence)
+
+- **Float-compare unboxing** — loop conditions usually compare a float local
+  against a *parameter* (`while k < terms`), and params aren't provably float,
+  so the compare can't be unboxed soundly. Narrow applicability.
+- **Float-constant unbox CSE** — reusing one unboxed FP value for repeated
+  uses of the same literal in a straight-line region. Implemented + measured:
+  **~1% on `series` (within noise)**. The constants aren't shared enough and
+  the unbox isn't the hot-path bottleneck. Reverted.
