@@ -306,8 +306,20 @@ prerequisite phase is demonstrably green at the time of the skip.
   comparison.
 - `BEAGLE_USE_SSA=1` — opt into the SSA pipeline (falls back to legacy per
   function on any bail). `BEAGLE_SSA_LOG_BAIL=1` logs each function's
-  OK/BAIL outcome; `BEAGLE_SSA_ONLY=<substr>` / `BEAGLE_SSA_DENY=<substr>`
-  restrict the SSA path to / from functions whose name matches.
+  OK/BAIL outcome (and `PANIC … falling back to legacy` for caught panics);
+  `BEAGLE_SSA_ONLY=<substr>` / `BEAGLE_SSA_DENY=<substr>` restrict the SSA
+  path to / from functions whose name matches.
+- `BEAGLE_SSA_TIER2=1` — rollout phase 9 (tier-up SSA path). Routes *only*
+  the hot tier-up / feedback recompiles through SSA, leaving cold
+  first-compiles on legacy; orthogonal to `BEAGLE_USE_SSA`. Implemented by a
+  thread-local `TierUpCompileGuard` (`src/ir.rs`) entered around
+  `compile_ast_with_feedback` in `specialize_function` (`src/compiler.rs`);
+  `Ir::compile` enables SSA when `BEAGLE_USE_SSA` is set globally **or**
+  `BEAGLE_SSA_TIER2` is set *and* the current compile is a tier-up. Because
+  these recompiles run on the shared compiler thread, the SSA attempt is
+  wrapped in `catch_unwind`: a panic is caught, the function degrades to
+  legacy, and the compiler thread survives. Correctness is covered by
+  `resources/ssa_tier2_parity_test.bg` (run it under the flag).
 - Spiller knobs (`regalloc/spill.rs`): `BEAGLE_SSA_NO_REMAT=1` disables
   rematerialization (forces slot spills — A/B measurement);
   `BEAGLE_SSA_SPILL_CAP=<n>` caps real (slot) spills before bailing (0 =

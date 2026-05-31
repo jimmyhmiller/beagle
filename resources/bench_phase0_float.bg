@@ -1,0 +1,43 @@
+namespace bench_phase0_float
+
+use beagle.core as core
+use beagle.runtime as runtime
+
+// Float-heavy kernel: a Leibniz-style series. All arithmetic sites
+// should record float+float feedback after warmup.
+fn series(terms) {
+    let mut sum = 0.0
+    let mut k = 0.0
+    let mut sign = 1.0
+    while k < terms {
+        let denom = 2.0 * k + 1.0
+        sum = sum + sign / denom
+        sign = sign * (0.0 - 1.0)
+        k = k + 1.0
+    }
+    sum * 4.0
+}
+
+fn measure(label, terms, iters) {
+    let start = core/time-now()
+    let mut i = 0
+    let mut last = 0.0
+    while i < iters {
+        last = series(terms)
+        i = i + 1
+    }
+    let elapsed = core/time-now() - start
+    println("${label}: series(${terms}) x ${iters} = ${last}  (${elapsed} ns)")
+    elapsed
+}
+
+fn main() {
+    measure("warmup  ", 200000.0, 3)
+
+    let n = runtime/specialize-all()
+    println("specialized ${n} functions")
+
+    measure("tier2-a ", 500000.0, 3)
+    measure("tier2-b ", 500000.0, 3)
+    measure("tier2-c ", 500000.0, 3)
+}

@@ -775,6 +775,37 @@ impl MachineCodeRange {
     }
 }
 
+thread_local! {
+    /// True while a tier-up (feedback) recompile is running on this
+    /// thread. `Ir::compile` consults it so the hot recompiles can be
+    /// routed through the SSA pipeline independently of the global
+    /// `BEAGLE_USE_SSA` flag — see `BEAGLE_SSA_TIER2`. Scoped by
+    /// `TierUpCompileGuard`; cold first-compiles never set it.
+    static TIER_UP_COMPILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// RAII guard marking the current thread as inside a tier-up recompile.
+/// Restores the prior value on drop, so nested/re-entrant compiles
+/// (e.g. a tier-up that triggers another compile) are safe.
+pub struct TierUpCompileGuard(bool);
+
+impl TierUpCompileGuard {
+    pub fn enter() -> Self {
+        TierUpCompileGuard(TIER_UP_COMPILE.with(|c| c.replace(true)))
+    }
+}
+
+impl Drop for TierUpCompileGuard {
+    fn drop(&mut self) {
+        TIER_UP_COMPILE.with(|c| c.set(self.0));
+    }
+}
+
+/// Whether the current thread is executing a tier-up recompile.
+pub fn in_tier_up_compile() -> bool {
+    TIER_UP_COMPILE.with(|c| c.get())
+}
+
 #[derive(Debug, Clone)]
 pub struct Ir {
     register_index: usize,
@@ -1999,11 +2030,20 @@ impl Ir {
         debug_assert!(!self.ir_range_to_token_range.is_empty());
 
         // Opt-in SSA pipeline. Set `BEAGLE_USE_SSA=1` to try the new
-        // path; falls back to legacy on bail (unimplemented op,
-        // spill overflow, build failure).
-        let ssa_enabled = std::env::var("BEAGLE_USE_SSA")
+        // path for *every* compile; falls back to legacy on bail
+        // (unimplemented op, spill overflow, build failure).
+        let ssa_global = std::env::var("BEAGLE_USE_SSA")
             .map(|v| !v.is_empty() && v != "0")
             .unwrap_or(false);
+        // Tier-2-only SSA: route just the hot tier-up recompiles through
+        // SSA, leaving cold first-compiles on legacy. Enabled by
+        // `BEAGLE_SSA_TIER2=1` and active only during a tier-up recompile
+        // (see `TierUpCompileGuard` in compiler.rs `specialize_function`).
+        let ssa_tier2 = std::env::var("BEAGLE_SSA_TIER2")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+            && in_tier_up_compile();
+        let ssa_enabled = ssa_global || ssa_tier2;
         let ssa_only_match = std::env::var("BEAGLE_SSA_ONLY")
             .ok()
             .map(|sub| {
@@ -2023,24 +2063,42 @@ impl Ir {
             })
             .unwrap_or(false);
         if ssa_enabled && ssa_only_match && !ssa_deny_match {
-            // Clone-and-try: a panic in the SSA path (e.g. an op
-            // hits its `todo!()`) will unwind from compile_via_ssa
-            // and the caller never sees the half-mutated ir. Until
-            // every op is implemented, that's the safe shape.
+            // Clone-and-try. compile_via_ssa writes back exactly these
+            // five fields (see install_translated_program), so saving them
+            // is a complete undo of a failed attempt.
             let saved_instructions = self.instructions.clone();
             let saved_labels = self.labels.clone();
             let saved_label_names = self.label_names.clone();
             let saved_label_locations = self.label_locations.clone();
             let saved_num_locals = self.num_locals;
-            match crate::cfg::emit_legacy::compile_via_ssa(self, backend) {
-                Ok(b) => {
+
+            // A panic in the SSA path (e.g. an op hits a `todo!()`, or an
+            // internal invariant trips) is caught here rather than allowed
+            // to unwind. Tier-up recompiles run on the shared compiler
+            // thread; an escaping panic would skip `work_done.mark_done`,
+            // drop the response channel, and tear the compiler thread down
+            // (every later compile then hits "Compiler thread has
+            // disconnected"). Catching degrades the function to legacy
+            // instead. The default panic hook still prints the message +
+            // backtrace before we catch, so SSA development isn't blinded.
+            //
+            // AssertUnwindSafe is sound: on a caught panic we restore the
+            // five fields above, so no observer sees half-mutated `Ir`.
+            // `backend` is moved into the attempt and lost on panic; it is
+            // always passed in freshly constructed (`Backend::new()` at
+            // every call site), so `B::new()` rebuilds an equivalent one.
+            let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::cfg::emit_legacy::compile_via_ssa(self, backend)
+            }));
+            match attempt {
+                Ok(Ok(b)) => {
                     if std::env::var("BEAGLE_SSA_LOG_BAIL").is_ok() {
                         let name = self.debug_name.as_deref().unwrap_or("<anon>");
                         eprintln!("[ssa-compile] OK    {}", name);
                     }
                     return b;
                 }
-                Err((e, b)) => {
+                Ok(Err((e, b))) => {
                     if std::env::var("BEAGLE_SSA_LOG_BAIL").is_ok() {
                         let name = self.debug_name.as_deref().unwrap_or("<anon>");
                         eprintln!("[ssa-compile] BAIL  {} -- {:?}", name, e);
@@ -2052,6 +2110,23 @@ impl Ir {
                     self.label_locations = saved_label_locations;
                     self.num_locals = saved_num_locals;
                     backend = b;
+                }
+                Err(payload) => {
+                    let msg = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "<non-string panic>".to_string());
+                    let name = self.debug_name.as_deref().unwrap_or("<anon>");
+                    eprintln!("[ssa-compile] PANIC {} -- {} (falling back to legacy)", name, msg);
+                    // Restore Ir state and rebuild a fresh backend, then
+                    // fall through to legacy.
+                    self.instructions = saved_instructions;
+                    self.labels = saved_labels;
+                    self.label_names = saved_label_names;
+                    self.label_locations = saved_label_locations;
+                    self.num_locals = saved_num_locals;
+                    backend = B::new();
                 }
             }
         }

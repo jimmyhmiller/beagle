@@ -1,0 +1,127 @@
+namespace ssa_tier2_parity_test
+
+// Parity coverage for the tier-2 SSA path (BEAGLE_SSA_TIER2=1).
+//
+// Each test warms a function to populate feedback, forces tier-up via
+// `runtime/specialize-all()`, and asserts the specialized version still
+// produces the correct value. The same assertions must hold whether the
+// tier-up recompile went through legacy or SSA — so running this file
+// both ways (default and BEAGLE_SSA_TIER2=1) proves output parity.
+//
+// The shapes exercised, matching the feedback-specialized IR the SSA
+// pipeline must round-trip:
+//   - int-monomorphic arithmetic   → *_int_with_bail fast paths
+//   - float-monomorphic arithmetic → *_float_with_bail fast paths
+//   - bail SLOW path actually taken → guard fails, falls to beagle.bail/*
+//   - struct field access          → baked property cache
+
+use beagle.runtime as runtime
+
+fn warm(f, iters) {
+    let mut i = 0
+    let mut last = 0
+    while i < iters {
+        last = f()
+        i = i + 1
+    }
+    last
+}
+
+// === int-monomorphic: exercise every int arithmetic/compare site ===
+fn int_kernel(a, b) {
+    let add = a + b
+    let sub = a - b
+    let mul = a * b
+    let dv = a / b
+    let md = a % b
+    let cmp = if a < b { 1 } else { 0 }
+    let cmp2 = if a <= b { 10 } else { 0 }
+    let cmp3 = if a == b { 100 } else { 0 }
+    add + sub + mul + dv + md + cmp + cmp2 + cmp3
+}
+
+test "int-monomorphic kernel correct after tier-up" {
+    // a=12, b=4: add16 sub8 mul48 dv3 md0 cmp0 cmp2_0 cmp3_0 = 75
+    let before = int_kernel(12, 4)
+    assert-eq!(before, 75)
+    let _ = warm(fn() { int_kernel(12, 4) }, 1500)
+    let n = runtime/specialize-all()
+    assert!(n > 0)
+    assert-eq!(int_kernel(12, 4), 75)
+    // Different operands through the specialized code.
+    // a=9,b=3: add12 sub6 mul27 dv3 md0 cmp0 cmp2_0 cmp3_0 = 48
+    assert-eq!(int_kernel(9, 3), 48)
+}
+
+// === float-monomorphic: every float arithmetic/compare site ===
+fn float_kernel(a, b) {
+    let add = a + b
+    let sub = a - b
+    let mul = a * b
+    let dv = a / b
+    let cmp = if a < b { 1.0 } else { 0.0 }
+    add + sub + mul + dv + cmp
+}
+
+test "float-monomorphic kernel correct after tier-up" {
+    // a=10.0,b=2.0: add12 sub8 mul20 dv5 cmp0 = 45.0
+    let before = float_kernel(10.0, 2.0)
+    assert-eq!(before, 45.0)
+    let _ = warm(fn() { float_kernel(10.0, 2.0) }, 1500)
+    let n = runtime/specialize-all()
+    assert!(n > 0)
+    assert-eq!(float_kernel(10.0, 2.0), 45.0)
+    // a=6.0,b=3.0: add9 sub3 mul18 dv2 cmp0 = 32.0
+    assert-eq!(float_kernel(6.0, 3.0), 32.0)
+}
+
+// === bail SLOW path taken: specialize as int-mono, then feed floats ===
+// After specialization the site is add_int_with_bail; calling with floats
+// fails the int guard and must fall through to beagle.bail/add with the
+// correct float result. Symmetric float→int case too.
+fn add_site(a, b) { a + b }
+fn mul_site(a, b) { a * b }
+
+test "int-specialized site bails correctly when given floats" {
+    let _ = warm(fn() { add_site(3, 4) }, 1500)
+    let _ = warm(fn() { mul_site(3, 4) }, 1500)
+    let n = runtime/specialize-all()
+    assert!(n > 0)
+    // Fast path (ints) still correct.
+    assert-eq!(add_site(3, 4), 7)
+    assert-eq!(mul_site(3, 4), 12)
+    // Guard fails on floats → bail path → correct float result.
+    assert-eq!(add_site(3.0, 4.0), 7.0)
+    assert-eq!(mul_site(3.0, 4.0), 12.0)
+}
+
+fn fadd_site(a, b) { a + b }
+
+test "float-specialized site bails correctly when given ints" {
+    let _ = warm(fn() { fadd_site(3.0, 4.0) }, 1500)
+    let n = runtime/specialize-all()
+    assert!(n > 0)
+    assert-eq!(fadd_site(3.0, 4.0), 7.0)
+    // Guard fails on ints → bail path → correct int result.
+    assert-eq!(fadd_site(3, 4), 7)
+}
+
+// === struct field access: baked property cache ===
+struct Vec3 { x, y, z }
+
+fn field_sum(v) {
+    v.x + v.y + v.z
+}
+
+test "struct field reads correct after tier-up" {
+    let v = Vec3 { x: 1.0, y: 20.0, z: 300.0 }
+    let before = field_sum(v)
+    assert-eq!(before, 321.0)
+    let _ = warm(fn() { field_sum(v) }, 1500)
+    let n = runtime/specialize-all()
+    assert!(n > 0)
+    assert-eq!(field_sum(v), 321.0)
+    // Fresh instance, same shape, through specialized code.
+    let v2 = Vec3 { x: 5.0, y: 50.0, z: 500.0 }
+    assert-eq!(field_sum(v2), 555.0)
+}

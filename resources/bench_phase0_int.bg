@@ -1,0 +1,38 @@
+namespace bench_phase0_int
+
+use beagle.core as core
+use beagle.runtime as runtime
+
+fn fib(n) {
+    if n <= 1 {
+        n
+    } else {
+        fib(n - 1) + fib(n - 2)
+    }
+}
+
+fn measure(label, n, iters) {
+    let start = core/time-now()
+    let mut i = 0
+    let mut last = 0
+    while i < iters {
+        last = fib(n)
+        i = i + 1
+    }
+    let elapsed = core/time-now() - start
+    println("${label}: fib(${n}) x ${iters} = ${last}  (${elapsed} ns)")
+    elapsed
+}
+
+fn main() {
+    // Warmup populates int+int feedback for fib's 4 arithmetic sites.
+    measure("warmup  ", 30, 3)
+
+    let n = runtime/specialize-all()
+    println("specialized ${n} functions")
+
+    // Steady-state tier-2 measurement (legacy or SSA depending on env).
+    measure("tier2-a ", 32, 3)
+    measure("tier2-b ", 32, 3)
+    measure("tier2-c ", 32, 3)
+}

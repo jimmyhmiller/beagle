@@ -708,17 +708,24 @@ impl Compiler {
         };
         self.defer_function_installs = true;
 
-        let result = self.compile_ast_with_feedback(
-            ast,
-            None,
-            &source_file,
-            token_line_column_map,
-            source_text,
-            token_byte_spans,
-            definition_byte_ranges,
-            feedback_bits,
-            property_feedback,
-        );
+        // Mark this whole recompile (and every nested function compile it
+        // drives) as a tier-up compile, so `Ir::compile` routes it through
+        // SSA when `BEAGLE_SSA_TIER2` is set. First-compiles never enter
+        // this guard, so they stay on legacy.
+        let result = {
+            let _tier_up = crate::ir::TierUpCompileGuard::enter();
+            self.compile_ast_with_feedback(
+                ast,
+                None,
+                &source_file,
+                token_line_column_map,
+                source_text,
+                token_byte_spans,
+                definition_byte_ranges,
+                feedback_bits,
+                property_feedback,
+            )
+        };
 
         if let Some(saved_id) = saved_namespace_id {
             self.set_current_namespace(saved_id);
