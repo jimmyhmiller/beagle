@@ -106,7 +106,15 @@ deliberately did NOT grind these (the "must not break things" bar):
   label-count barrier (reads AND writes deferred so the barrier counts only
   user control flow); immutability via struct_id>>24 → get_struct_by_id →
   is_field_mutable; restrict to non-`mut` object variables (no closure-mutation
-  invalidation needed). Best in a fresh context, not a degraded one.
+  invalidation needed). **Progress:** (1) `lower_field_read` extracted from
+  `Ast::PropertyAccess` — the idiom is now a reusable AST-level method, since
+  the slow-path `call_builtin` forces expansion to live at the AST level, not
+  in `Ir::compile` (commit 625aae2, behaviour-identical). Next steps:
+  (2) `Instruction::FieldRead{dst,object,property_addr,prior,property_name}` +
+  an AST-level `expand_field_reads` post-pass (rebuild calling
+  `lower_field_read`); emit FieldRead only under `in_tier_up_compile()`; verify
+  behaviour-neutral. (3) same for writes. (4) the (object_var, field) CSE with
+  label-count barrier + immutability + non-mut gate; measure nbody.
 - **guarded float speculation** (struct/array-fed loops, e.g. nbody's ~25%
   ceiling) — needs body-versioning (two copies of a region guarded at entry).
   Very large; the biggest remaining win but the riskiest build.
