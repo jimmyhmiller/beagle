@@ -239,3 +239,16 @@ CONCLUSION after iters 12-13: no cheap perf fruit exists; every real prize is a
 substantial build. Committing to the biggest confirmed one with the cleanest
 soundness: FLOAT field-unboxing via versioning (2.44x, guard+bail, no
 redefinition issue). Build it deliberately, smallest sound slices, gated.
+
+iter 15 — verified the SSA-tier2-default-on win (commit 214dab4):
+- Regression sweep DEFAULT vs BEAGLE_SSA_TIER2=0, repeated runs (single runs are
+  noisy — always repeat): series 3.46x, fib +20-21%, btrees +17-23%, nbody
+  NEUTRAL (9.0-9.3ms both ways; phase4 466-468ms both ways). A first-run "12%
+  nbody regression" was warmup noise — gone on repeat. No real regressions; all
+  outputs bit-identical.
+- Dormant-flag hunt: no other flippable wins. BEAGLE_SSA_NO_* flags DISABLE
+  already-on passes (remat/mem2reg/dce/prune/slot-forward); BEAGLE_USE_SSA
+  (global SSA incl. cold compiles) regresses tests — do NOT flip.
+- Remaining float prize: field-fed (nbody-shape) float unboxing still needs the
+  region/loop-body versioning build (the only big lever left).
+LESSON: re-measure before declaring a regression — one run is noise.
