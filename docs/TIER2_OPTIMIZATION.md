@@ -225,3 +225,17 @@ iter 12 — surveyed for low-hanging fruit, found none cheap:
 - Escape analysis pays only on NON-escaping allocations: float intermediates
   (the float work), transient arg-vectors, closures a HOF doesn't retain. Hunt
   these next; measure-first.
+
+iter 13 — measured protocol dispatch (collections_benchmark): dispatched
+"Beagle" path vs direct "Rust" path — Vector Get 28ms vs 11ms (2.5x), Map Get
+85 vs 56. Real prize, but the IC fast path (type-id guard + cache load + indirect
+call, ast.rs ~4250) is mostly IRREDUCIBLE for sound dynamic dispatch. The only
+big win is tier-2 monomorphic DEVIRT/INLINE (guard type, inline the method body
+e.g. vector-get=index), but that BAKES the method body → stale if the method is
+redefined → unsound unless tier-2 code is invalidated/recompiled on redefinition.
+Gated by the function-redefinition-invalidation problem (cf. no-whole-program-
+analysis memory). Deferred — needs an invalidation hook investigation first.
+CONCLUSION after iters 12-13: no cheap perf fruit exists; every real prize is a
+substantial build. Committing to the biggest confirmed one with the cleanest
+soundness: FLOAT field-unboxing via versioning (2.44x, guard+bail, no
+redefinition issue). Build it deliberately, smallest sound slices, gated.
