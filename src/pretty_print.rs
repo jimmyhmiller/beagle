@@ -435,6 +435,12 @@ impl PrettyPrint for Instruction {
                     b.pretty_print()
                 )
             }
+            Instruction::LoadLocalFloat(dst, local) => {
+                format!("load_local_float {}, local{}", dst.pretty_print(), local)
+            }
+            Instruction::StoreLocalFloat(local, src) => {
+                format!("store_local_float local{}, {}", local, src.pretty_print())
+            }
             Instruction::SubFloat(value, value1, value2) => {
                 format!(
                     "sub_float {}, {}, {}",

@@ -625,6 +625,18 @@ fn translate_op(
             src: v(src),
         }),
 
+        // Float locals (SSA float-unbox pass) live in the unscanned slot
+        // region: they hold raw f64 bits, which the GC must not scan as a
+        // pointer (I9). dst/src are Fp-class (see def_class_of).
+        I::LoadLocalFloat(Value::Register(dst), idx) => Ok(Op::SlotLoad {
+            dst: v(dst),
+            slot: SlotId::unscanned(*idx as u32),
+        }),
+        I::StoreLocalFloat(idx, Value::Register(src)) => Ok(Op::SlotStore {
+            slot: SlotId::unscanned(*idx as u32),
+            src: v(src),
+        }),
+
         // ---- Assign / LoadConstant: split by source kind ----------------
         I::Assign(Value::Register(dst), val) => translate_assign(dst, val, position, classes),
         I::LoadConstant(Value::Register(dst), val) => translate_assign(dst, val, position, classes),
@@ -1769,6 +1781,7 @@ fn def_class_of(inst: &Instruction) -> Vec<(u32, RegClass)> {
         | I::DivFloat(dst, _, _)
         | I::IntToFloat(dst, _)
         | I::FRoundToZero(dst, _)
+        | I::LoadLocalFloat(dst, _)
         | I::FmovGeneralToFloat(dst, _) => out.extend(as_class(dst, Fp)),
 
         // Multi-def ops ----------------------------------------------
@@ -1881,6 +1894,8 @@ fn instruction_name(inst: &Instruction) -> &'static str {
         Instruction::FRoundToZero(..) => "FRoundToZero",
         Instruction::AddFloat(..) => "AddFloat",
         Instruction::FloatBinOp { .. } => "FloatBinOp",
+        Instruction::LoadLocalFloat(..) => "LoadLocalFloat",
+        Instruction::StoreLocalFloat(..) => "StoreLocalFloat",
         Instruction::SubFloat(..) => "SubFloat",
         Instruction::MulFloat(..) => "MulFloat",
         Instruction::DivFloat(..) => "DivFloat",

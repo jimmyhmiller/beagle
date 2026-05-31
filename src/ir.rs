@@ -263,6 +263,15 @@ pub enum Instruction {
         feedback_slot: usize,
         bail_table: usize,
     },
+    /// Load a float local as a raw `f64` into an FP register (no untag /
+    /// heap load — the slot holds unboxed bits). Emitted by the SSA
+    /// float-unbox rewrite for `float_locals`; the CFG builder maps it to
+    /// an unscanned-region `SlotLoad` with `Fp` class. Fields: (fp_dst,
+    /// local_index).
+    LoadLocalFloat(Value, usize),
+    /// Store a raw `f64` from an FP register into a float local. Mirror of
+    /// `LoadLocalFloat`. Fields: (local_index, fp_src).
+    StoreLocalFloat(usize, Value),
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -423,6 +432,12 @@ impl Instruction {
             }
             Instruction::FloatBinOp { dst, a, b, .. } => {
                 get_registers!(dst, a, b)
+            }
+            Instruction::LoadLocalFloat(dst, _) => {
+                get_register!(dst)
+            }
+            Instruction::StoreLocalFloat(_, src) => {
+                get_register!(src)
             }
             Instruction::SubFloat(a, b, c) => {
                 get_registers!(a, b, c)
@@ -669,6 +684,12 @@ impl Instruction {
                 replace_register!(a, old_register, new_register);
                 replace_register!(b, old_register, new_register);
             }
+            Instruction::LoadLocalFloat(dst, _) => {
+                replace_register!(dst, old_register, new_register);
+            }
+            Instruction::StoreLocalFloat(_, src) => {
+                replace_register!(src, old_register, new_register);
+            }
 
             Instruction::HeapLoad(value, value1, _)
             | Instruction::HeapStore(value, value1)
@@ -862,6 +883,14 @@ pub struct Ir {
     /// Stack of local indices used by push_to_stack/pop_from_stack.
     /// Values are stored in root-slotted locals instead of the eval stack.
     local_stack: Vec<usize>,
+    /// Local-slot indices that hold only definitely-float values (computed
+    /// by `crate::float_repr::analyze_float_types` for the SSA float-unbox
+    /// pass). These map to unscanned FP slots in the CFG. Empty unless the
+    /// unboxing pass ran.
+    pub float_locals: std::collections::HashSet<usize>,
+    /// Register indices that hold a definitely-float value — safe to unbox
+    /// without a runtime guard. Companion to `float_locals`.
+    pub float_regs: std::collections::HashSet<usize>,
 }
 
 impl Ir {
@@ -893,6 +922,8 @@ impl Ir {
             num_arg_registers,
             mark_local_index: None,
             local_stack: vec![],
+            float_locals: std::collections::HashSet::new(),
+            float_regs: std::collections::HashSet::new(),
         }
     }
 
@@ -1327,6 +1358,237 @@ impl Ir {
                     );
                 }
                 other => self.instructions.push(other),
+            }
+        }
+    }
+
+    // ===================================================================
+    // SSA float-unboxing lowering (tier-2)
+    // ===================================================================
+
+    /// True if `inst` legitimately reads `f64` (FP-class) operands, so the
+    /// rewrite must NOT box its FP inputs.
+    fn float_consuming(inst: &Instruction) -> bool {
+        matches!(
+            inst,
+            Instruction::AddFloat(..)
+                | Instruction::SubFloat(..)
+                | Instruction::MulFloat(..)
+                | Instruction::DivFloat(..)
+                | Instruction::CompareFloat(..)
+                | Instruction::FRoundToZero(..)
+                | Instruction::FmovFloatToGeneral(..)
+                | Instruction::StoreLocalFloat(..)
+        )
+    }
+
+    /// Register indices that `inst` defines with FP class (raw f64).
+    fn fp_defs(inst: &Instruction) -> Vec<usize> {
+        let reg = |v: &Value| match v {
+            Value::Register(r) => Some(r.index),
+            _ => None,
+        };
+        match inst {
+            Instruction::AddFloat(d, _, _)
+            | Instruction::SubFloat(d, _, _)
+            | Instruction::MulFloat(d, _, _)
+            | Instruction::DivFloat(d, _, _)
+            | Instruction::IntToFloat(d, _)
+            | Instruction::FRoundToZero(d, _)
+            | Instruction::FmovGeneralToFloat(d, _)
+            | Instruction::LoadLocalFloat(d, _) => reg(d).into_iter().collect(),
+            _ => vec![],
+        }
+    }
+
+    /// Unbox a tagged float (register or float constant) into a fresh FP
+    /// register: `untag → heap-load → fmov`. If `v` already holds raw f64
+    /// (its index is in `fp`), it is returned unchanged.
+    fn coerce_to_fp(&mut self, v: Value, fp: &mut std::collections::HashSet<usize>) -> Value {
+        if let Value::Register(r) = &v {
+            if fp.contains(&r.index) {
+                return v;
+            }
+        }
+        let untagged = self.untag(v);
+        let loaded = self.load_from_heap(untagged, 1);
+        let fp_val = self.fmov_general_to_float(loaded);
+        if let Value::Register(r) = &fp_val {
+            fp.insert(r.index);
+        }
+        fp_val
+    }
+
+    /// If `v` currently holds raw f64 (its index is in `fp`), box it into a
+    /// tagged float; otherwise return it unchanged. Used when an unboxed
+    /// value flows into a context that needs a tagged float.
+    fn coerce_to_tagged(&mut self, v: Value, fp: &std::collections::HashSet<usize>) -> Value {
+        if let Value::Register(r) = &v {
+            if fp.contains(&r.index) {
+                return self.box_fp(v);
+            }
+        }
+        v
+    }
+
+    /// Box a raw f64 (FP register) into a fresh tagged float object:
+    /// `allocate → header → fmov → store → tag`.
+    fn box_fp(&mut self, fp_val: Value) -> Value {
+        let float_pointer = self.allocate_static(1);
+        let untagged = self.untag(float_pointer);
+        self.write_small_object_header(untagged);
+        let bits = self.fmov_float_to_general(fp_val);
+        self.heap_store_offset(untagged, bits, 1);
+        self.tag(untagged, BuiltInTypes::Float.get_tag())
+    }
+
+    /// Emit the unboxed float arithmetic for `op` into `dst` (all FP regs).
+    fn emit_float_arith(&mut self, op: FloatOp, dst: Value, a: Value, b: Value) {
+        match op {
+            FloatOp::Add => self.instructions.push(Instruction::AddFloat(dst, a, b)),
+            FloatOp::Sub => self.instructions.push(Instruction::SubFloat(dst, a, b)),
+            FloatOp::Mul => self.instructions.push(Instruction::MulFloat(dst, a, b)),
+            FloatOp::Div => self.instructions.push(Instruction::DivFloat(dst, a, b)),
+            FloatOp::Modulo => {
+                // a % b = a - trunc(a/b) * b
+                let q = self.fround_to_zero_div(a, b);
+                let qb = self.volatile_register().into();
+                self.instructions.push(Instruction::MulFloat(qb, q, b));
+                self.instructions.push(Instruction::SubFloat(dst, a, qb));
+            }
+        }
+    }
+
+    /// Helper for modulo: `trunc(a / b)` as an FP value.
+    fn fround_to_zero_div(&mut self, a: Value, b: Value) -> Value {
+        let q = self.volatile_register().into();
+        self.instructions.push(Instruction::DivFloat(q, a, b));
+        let qt = self.volatile_register().into();
+        self.instructions.push(Instruction::FRoundToZero(qt, q));
+        qt
+    }
+
+    /// Rewrite deferred `FloatBinOp`s and float-local accesses to keep
+    /// float values unboxed in FP registers / unscanned FP slots. Runs on
+    /// the SSA path only (legacy uses `expand_float_binops`). Requires
+    /// `self.float_locals` to be populated. Provably-float ops need no
+    /// guard or bail — floatness is established by the analysis — so the
+    /// fast/slow box machinery disappears; values are boxed only where they
+    /// escape to a non-float consumer.
+    pub fn unbox_floats(&mut self) {
+        if self.float_locals.is_empty()
+            && !self
+                .instructions
+                .iter()
+                .any(|i| matches!(i, Instruction::FloatBinOp { .. }))
+        {
+            return;
+        }
+        let float_locals = self.float_locals.clone();
+        let float_regs = self.float_regs.clone();
+        // A value is safe to unbox without a guard only if it is definitely
+        // a float: a float-tagged constant or a definitely-float register.
+        let definitely_float = |v: &Value| match v {
+            Value::Register(r) => float_regs.contains(&r.index),
+            _ => crate::float_repr::is_float_const(v),
+        };
+        let old = std::mem::take(&mut self.instructions);
+        self.label_locations.clear();
+        let mut fp: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+        for instr in old {
+            match instr {
+                Instruction::Label(label) => {
+                    self.write_label(label);
+                }
+                Instruction::FloatBinOp {
+                    op,
+                    dst,
+                    a,
+                    b,
+                    feedback_slot,
+                    bail_table,
+                } => {
+                    if definitely_float(&a) && definitely_float(&b) {
+                        // Provably float → unboxed, guard-free.
+                        let a_fp = self.coerce_to_fp(a, &mut fp);
+                        let b_fp = self.coerce_to_fp(b, &mut fp);
+                        self.emit_float_arith(op, dst, a_fp, b_fp);
+                        if let Value::Register(r) = &dst {
+                            fp.insert(r.index);
+                        }
+                    } else {
+                        // Operands only speculatively float → keep the
+                        // guarded boxed lowering (bails on a type miss).
+                        // Any operand already unboxed (an FP value, e.g. a
+                        // definitely-float local load) must be boxed back so
+                        // the boxed lowering sees tagged operands.
+                        let a_tagged = self.coerce_to_tagged(a, &fp);
+                        let b_tagged = self.coerce_to_tagged(b, &fp);
+                        let result_register: VirtualRegister = (&dst)
+                            .try_into()
+                            .expect("FloatBinOp dst must be a register");
+                        let a_reg: VirtualRegister = (&a_tagged)
+                            .try_into()
+                            .expect("FloatBinOp a must be a register");
+                        let b_reg: VirtualRegister = (&b_tagged)
+                            .try_into()
+                            .expect("FloatBinOp b must be a register");
+                        self.lower_float_binop_boxed(
+                            op,
+                            result_register,
+                            a_reg,
+                            b_reg,
+                            feedback_slot,
+                            bail_table,
+                        );
+                    }
+                }
+                // Float-local load: reg <- Local(n).
+                Instruction::LoadLocal(Value::Register(dst), Value::Local(n))
+                | Instruction::Assign(Value::Register(dst), Value::Local(n))
+                    if float_locals.contains(&n) =>
+                {
+                    self.instructions
+                        .push(Instruction::LoadLocalFloat(Value::Register(dst), n));
+                    fp.insert(dst.index);
+                }
+                // Float-local store: Local(n) <- src.
+                Instruction::StoreLocal(Value::Local(n), src)
+                | Instruction::Assign(Value::Local(n), src)
+                    if float_locals.contains(&n) =>
+                {
+                    let src_fp = self.coerce_to_fp(src, &mut fp);
+                    self.instructions
+                        .push(Instruction::StoreLocalFloat(n, src_fp));
+                }
+                // Return of a float local directly: load FP, box, return.
+                Instruction::Ret(Value::Local(n)) if float_locals.contains(&n) => {
+                    let fp_val: Value = self.volatile_register().into();
+                    self.instructions
+                        .push(Instruction::LoadLocalFloat(fp_val, n));
+                    let boxed = self.box_fp(fp_val);
+                    self.instructions.push(Instruction::Ret(boxed));
+                }
+                mut other => {
+                    // Any non-float consumer that reads an FP value must
+                    // get it boxed back to a tagged float first.
+                    if !Self::float_consuming(&other) {
+                        let fp_reads: Vec<VirtualRegister> = other
+                            .get_registers()
+                            .into_iter()
+                            .filter(|r| fp.contains(&r.index))
+                            .collect();
+                        for r in fp_reads {
+                            let boxed = self.box_fp(Value::Register(r));
+                            other.replace_register(r, boxed);
+                        }
+                    }
+                    for d in Self::fp_defs(&other) {
+                        fp.insert(d);
+                    }
+                    self.instructions.push(other);
+                }
             }
         }
     }
@@ -2208,12 +2470,32 @@ impl Ir {
     ) -> B {
         debug_assert!(!self.ir_range_to_token_range.is_empty());
 
-        // Step 1-2 of float unboxing: lower any deferred high-level
-        // `FloatBinOp` back to the boxed sequence before either pipeline
-        // runs, so behaviour is identical to today. (Step 3 will move this
-        // to legacy-only and let the SSA path lower FloatBinOp natively,
-        // keeping intermediates unboxed.) No-op when none are present.
-        self.expand_float_binops();
+        // Float unboxing: identify the slots that provably hold only float
+        // values, before the deferred `FloatBinOp`s are expanded.
+        if self
+            .instructions
+            .iter()
+            .any(|i| matches!(i, Instruction::FloatBinOp { .. }))
+        {
+            let types = crate::float_repr::analyze_float_types(&self.instructions);
+            self.float_locals = types.locals;
+            self.float_regs = types.regs;
+            if std::env::var("BEAGLE_FLOAT_LOCALS_LOG").is_ok() {
+                let mut v: Vec<_> = self.float_locals.iter().copied().collect();
+                v.sort();
+                eprintln!(
+                    "[float-locals] {} -> {:?}",
+                    self.debug_name.as_deref().unwrap_or("<anon>"),
+                    v
+                );
+            }
+        }
+
+        // Deferred `FloatBinOp` lowering is now path-specific: the SSA
+        // path keeps floats unboxed (`unbox_floats`, in the SSA block
+        // below), the legacy path expands the boxed sequence
+        // (`expand_float_binops`, just before LinearScan). Both are no-ops
+        // when no FloatBinOp is present, so pure-legacy stays untouched.
 
         // Opt-in SSA pipeline. Set `BEAGLE_USE_SSA=1` to try the new
         // path for *every* compile; falls back to legacy on bail
@@ -2257,6 +2539,11 @@ impl Ir {
             let saved_label_names = self.label_names.clone();
             let saved_label_locations = self.label_locations.clone();
             let saved_num_locals = self.num_locals;
+
+            // Keep float values unboxed for the SSA path. On bail we
+            // restore the saved (FloatBinOp) form above and the legacy
+            // expansion runs before LinearScan.
+            self.unbox_floats();
 
             // A panic in the SSA path (e.g. an op hits a `todo!()`, or an
             // internal invariant trips) is caught here rather than allowed
@@ -2321,6 +2608,10 @@ impl Ir {
         }
 
         // backend.breakpoint();
+
+        // Legacy lowering of any deferred `FloatBinOp` (ssa disabled, or
+        // restored after an SSA bail). No-op when none are present.
+        self.expand_float_binops();
 
         let function_name = self.debug_name.as_deref().unwrap_or("<anonymous>");
 
@@ -2846,6 +3137,13 @@ impl Ir {
                         "FloatBinOp must be lowered by expand_float_binops (legacy) or the \
                          SSA float path before backend emit; reaching the legacy emitter means \
                          the expansion step was skipped"
+                    );
+                }
+                Instruction::LoadLocalFloat(..) | Instruction::StoreLocalFloat(..) => {
+                    unreachable!(
+                        "LoadLocalFloat/StoreLocalFloat are emitted only on the SSA float-unbox \
+                         path and consumed by the CFG builder; they must never reach the legacy \
+                         backend emitter"
                     );
                 }
                 Instruction::AddFloat(dest, a, b) => {

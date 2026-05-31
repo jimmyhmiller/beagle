@@ -80,6 +80,7 @@ mod compiler;
 pub mod dump;
 mod eternal;
 pub mod feedback;
+pub mod float_repr;
 mod gc;
 pub mod ir;
 pub mod lir;

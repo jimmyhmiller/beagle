@@ -262,14 +262,32 @@ register live across a safepoint — those bits are not a pointer; root-slotting
 them (I9) makes the GC trace garbage. Unboxed values stay `Fp`-class
 (GC-exempt); spill them to **unscanned FP slots** when live across a safepoint.
 
+**Soundness — only unbox *definitely*-float values (no guard needed).** A
+`FloatBinOp` is float-specialized *speculation*: given non-float operands at
+runtime it bails to the polymorphic helper, whose result may be a non-float
+(e.g. a float-specialized `+` on two ints returns an int). So its result is
+definitely-float **only if both operands are definitely-float**. The only
+unconditional float witnesses are float-tagged constants; args, `HeapLoad`
+(struct fields), and call results are treated as non-float. `analyze_float_types`
+(`src/float_repr.rs`) computes the definitely-float locals/registers as an
+optimistic fixpoint (loop accumulators start float, removed when a store is
+shown non-float). A `FloatBinOp` with definitely-float operands is lowered
+unboxed and **guard-free**; otherwise it keeps the guarded boxed lowering.
+Definitely-float locals become unscanned FP slots; a value crossing the
+boundary between representations is coerced (`coerce_to_fp` / `coerce_to_tagged`).
+
 **Stages (each gated, each tested green before the next):**
 1. **Deferred-lowering substrate (done).** `FloatBinOp` + per-path expansion;
-   legacy byte-identical, SSA expands too (behaviour-neutral). No win yet.
-2. **SSA unboxed lowering.** Lower `FloatBinOp` to `Fp` `AddFloat`/… with
-   `Box`/`Unbox` only at boundaries; cancel redundant `Unbox(Box(x))→x`.
-   Straight-line first.
-3. **Loop-carried.** A float accumulator's block-param becomes `Fp`-class and
-   stays unboxed across the back-edge (fixpoint), boxing only on escape.
+   legacy byte-identical, SSA expands too (behaviour-neutral).
+2. **Sound unboxed lowering (done).** `unbox_floats` (`src/ir.rs`): definitely-
+   float locals → unscanned FP slots; definitely-float `FloatBinOp`s → unboxed
+   guard-free `AddFloat`/…; box at escapes. Measured: series −70%, boxing probe
+   −75%, fib unchanged, suite 365/365. Pure-float loops (const/float-local fed)
+   win big.
+3. **Speculative unboxing (next).** Struct-field-fed float ops (nbody: floats
+   come from `HeapLoad`, so soundly stay boxed today, −2%) need a *guarded*
+   unbox: guard the loaded value is a float, unbox on the fast path, deopt /
+   box on the miss. Unlocks struct/array-heavy float code.
 
 ---
 
