@@ -204,3 +204,24 @@ held to the hard gates below.
   safepoint-free straight-line region, which the benchmarks don't contain.
   Do not re-attempt without a benchmark that actually has repeated same-object
   immutable-field reads between safepoints.
+
+## Perf hunt log (broad, beyond tier-2)
+
+iter 12 — surveyed for low-hanging fruit, found none cheap:
+- **Bump allocator** (arm.rs ~1331, `InlineBumpAllocate`): already tight (~7
+  instrs: load alloc_ptr, add, load alloc_end, cmp, b.hi slow, store, tag). No
+  shave available.
+- **GC young gen** (generational.rs: `Space::new(DEFAULT_PAGE_COUNT*10)`) ~160MB
+  already — not a sizing win.
+- **binary_tree** nodes ALL escape (returned into the tree, kept alive) → not a
+  stack-alloc / escape-analysis target. (User flagged this.)
+- **Float field-unboxing** remains the biggest confirmed prize (2.44x ceiling on
+  bench_field_unbox_probe) but needs loop-body / region versioning (hard — the
+  speculative region routes through locals; see SSA spec stage 3). Refined
+  insight: the float intermediates (dx/dy/dz/mag) are LOOP-LOCAL (dead each
+  iteration, no cross-back-edge carry) and FP slots are GC-exempt (I9), so
+  per-iteration body versioning is cleaner than feared, but still a substantial
+  build. This is THE prize; tackle it as a deliberate multi-iteration build.
+- Escape analysis pays only on NON-escaping allocations: float intermediates
+  (the float work), transient arg-vectors, closures a HOF doesn't retain. Hunt
+  these next; measure-first.
