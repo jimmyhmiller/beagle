@@ -1896,6 +1896,7 @@ fn instruction_name(inst: &Instruction) -> &'static str {
         Instruction::FloatBinOp { .. } => "FloatBinOp",
         Instruction::LoadLocalFloat(..) => "LoadLocalFloat",
         Instruction::StoreLocalFloat(..) => "StoreLocalFloat",
+        Instruction::FieldRead { .. } => "FieldRead",
         Instruction::SubFloat(..) => "SubFloat",
         Instruction::MulFloat(..) => "MulFloat",
         Instruction::DivFloat(..) => "DivFloat",

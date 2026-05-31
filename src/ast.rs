@@ -1210,6 +1210,11 @@ impl AstCompiler<'_> {
         self.tail_position();
         self.call_compile(&Box::new(self.ast.clone()))?;
 
+        // Lower any deferred `FieldRead`s (tier-up only) back to the inline
+        // idiom before the IR pipeline runs. Behaviour-neutral today; the
+        // CSE seam for immutable fields.
+        self.expand_field_reads()?;
+
         let allocate_fn_pointer = self.compiler.allocate_fn_pointer()?;
         let mut ir = Ir::new(allocate_fn_pointer);
         std::mem::swap(&mut ir, &mut self.ir);
@@ -1638,6 +1643,11 @@ impl AstCompiler<'_> {
                     format!("<anonymous>{}", source_loc)
                 };
                 self.ir.debug_name = Some(debug_name);
+                // Lower any deferred `FieldRead`s (tier-up only) before this
+                // inner function's Ir is compiled — `compile()` only covers
+                // the outermost stream, but inner functions are compiled
+                // separately here through their own swapped-in `self.ir`.
+                self.expand_field_reads()?;
                 // SSA-pipeline coverage probe: see compiler.rs sibling
                 // call. Gated on BEAGLE_SSA_VERIFY=1; legacy lowering is
                 // unaffected.
@@ -3358,8 +3368,27 @@ impl AstCompiler<'_> {
                     });
                 };
 
-                let result = self.lower_field_read(object, property_addr, prior, property_name)?;
-                Ok(result.into())
+                if ir::in_tier_up_compile() {
+                    // Tier-up: defer to a high-level `FieldRead` so the
+                    // AST-level `expand_field_reads` pass can CSE redundant
+                    // reads of immutable fields. `dst` is pre-allocated (as
+                    // for `FloatBinOp`) so register numbering is unperturbed;
+                    // the expansion binds it to the read result. Cold / non-
+                    // tier-up compiles keep the proven inline lowering.
+                    let dst = self.ir.assign_new(0);
+                    self.ir.instructions.push(ir::Instruction::FieldRead {
+                        dst: dst.into(),
+                        object: object.into(),
+                        property_addr,
+                        prior,
+                        property_name,
+                    });
+                    Ok(dst.into())
+                } else {
+                    let result =
+                        self.lower_field_read(object, property_addr, prior, property_name)?;
+                    Ok(result.into())
+                }
             }
             Ast::IndexOperator { array, index, .. } => {
                 let (array, index) = self.compile_binop_operands(array.as_ref(), index.as_ref())?;
@@ -6157,6 +6186,48 @@ impl AstCompiler<'_> {
         self.ir.write_label(exit_property_access);
 
         Ok(result)
+    }
+
+    /// Expand every deferred `Instruction::FieldRead` back into the inline
+    /// property-cache idiom (`lower_field_read`), rebuilding the instruction
+    /// stream and `label_locations`. Runs at the end of AST compilation, so
+    /// `FieldRead`s never reach the IR→SSA pipeline. This is the seam where
+    /// immutable-field CSE will live (a later step); for now it is a
+    /// behaviour-neutral re-expansion — each `FieldRead` lowers to exactly
+    /// the code the inline path would have emitted, plus one (coalesced)
+    /// move binding the pre-allocated `dst`. No-op when nothing was deferred
+    /// (only the tier-up path emits `FieldRead`).
+    fn expand_field_reads(&mut self) -> Result<(), CompileError> {
+        if !self.ir.has_field_reads() {
+            return Ok(());
+        }
+        let old = self.ir.take_for_rebuild();
+        for instr in old {
+            match instr {
+                ir::Instruction::Label(label) => self.ir.write_label(label),
+                ir::Instruction::FieldRead {
+                    dst,
+                    object,
+                    property_addr,
+                    prior,
+                    property_name,
+                } => {
+                    let object_reg: VirtualRegister = (&object)
+                        .try_into()
+                        .expect("FieldRead object must be a register");
+                    let dst_reg: VirtualRegister =
+                        (&dst).try_into().expect("FieldRead dst must be a register");
+                    let result =
+                        self.lower_field_read(object_reg, property_addr, prior, property_name)?;
+                    // Downstream instructions reference the pre-allocated
+                    // `dst`; bind it to the read result (regalloc coalesces
+                    // the move away).
+                    self.ir.assign(dst_reg, result);
+                }
+                other => self.ir.instructions.push(other),
+            }
+        }
+        Ok(())
     }
 
     fn first_pass(&mut self, ast: &Ast) -> Result<(), CompileError> {

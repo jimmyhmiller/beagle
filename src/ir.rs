@@ -272,6 +272,21 @@ pub enum Instruction {
     /// Store a raw `f64` from an FP register into a float local. Mirror of
     /// `LoadLocalFloat`. Fields: (local_index, fp_src).
     StoreLocalFloat(usize, Value),
+    /// Deferred struct field read (tier-up only). Carries everything the
+    /// inline property-cache idiom needs so the read can be re-emitted —
+    /// and CSE'd — by an AST-level expansion pass (`expand_field_reads`)
+    /// before the IR→SSA pipeline runs. `dst` is pre-allocated at emission
+    /// so surrounding register numbering is unperturbed; downstream
+    /// instructions reference `dst`, and the expansion assigns the read's
+    /// result into it. Never reaches the CFG builder or backend — it is
+    /// always expanded to `lower_field_read` first.
+    FieldRead {
+        dst: Value,
+        object: Value,
+        property_addr: usize,
+        prior: Option<(u64, u64, u64)>,
+        property_name: String,
+    },
 }
 
 impl TryInto<VirtualRegister> for &Value {
@@ -438,6 +453,9 @@ impl Instruction {
             }
             Instruction::StoreLocalFloat(_, src) => {
                 get_register!(src)
+            }
+            Instruction::FieldRead { dst, object, .. } => {
+                get_registers!(dst, object)
             }
             Instruction::SubFloat(a, b, c) => {
                 get_registers!(a, b, c)
@@ -689,6 +707,10 @@ impl Instruction {
             }
             Instruction::StoreLocalFloat(_, src) => {
                 replace_register!(src, old_register, new_register);
+            }
+            Instruction::FieldRead { dst, object, .. } => {
+                replace_register!(dst, old_register, new_register);
+                replace_register!(object, old_register, new_register);
             }
 
             Instruction::HeapLoad(value, value1, _)
@@ -1310,6 +1332,25 @@ impl Ir {
             .unwrap_or(false)
             && in_tier_up_compile();
         global || tier2
+    }
+
+    /// Take the current instruction stream and reset `label_locations` so a
+    /// caller can rebuild both, re-recording each label via `write_label`.
+    /// Used by AST-level expansion passes (e.g. `expand_field_reads`) that
+    /// must re-emit instructions through `AstCompiler`-level helpers rather
+    /// than from inside `Ir`. Mirrors the `mem::take` + `label_locations
+    /// .clear()` prelude of `expand_float_binops`.
+    pub fn take_for_rebuild(&mut self) -> Vec<Instruction> {
+        self.label_locations.clear();
+        std::mem::take(&mut self.instructions)
+    }
+
+    /// Whether the stream still contains any deferred `FieldRead` — used to
+    /// no-op `expand_field_reads` when nothing was deferred.
+    pub fn has_field_reads(&self) -> bool {
+        self.instructions
+            .iter()
+            .any(|i| matches!(i, Instruction::FieldRead { .. }))
     }
 
     /// Expand every deferred `Instruction::FloatBinOp` into its boxed
@@ -3151,6 +3192,13 @@ impl Ir {
                         "LoadLocalFloat/StoreLocalFloat are emitted only on the SSA float-unbox \
                          path and consumed by the CFG builder; they must never reach the legacy \
                          backend emitter"
+                    );
+                }
+                Instruction::FieldRead { .. } => {
+                    unreachable!(
+                        "FieldRead is a tier-up deferral expanded by expand_field_reads (AST \
+                         level) before the IR pipeline; reaching the backend emitter means the \
+                         expansion step was skipped"
                     );
                 }
                 Instruction::AddFloat(dest, a, b) => {

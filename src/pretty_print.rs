@@ -651,6 +651,19 @@ impl PrettyPrint for Instruction {
                     counter_addr, name_ptr, trampoline_ptr
                 )
             }
+            Instruction::FieldRead {
+                dst,
+                object,
+                property_name,
+                ..
+            } => {
+                format!(
+                    "field_read {}, {}.{}",
+                    dst.pretty_print(),
+                    object.pretty_print(),
+                    property_name
+                )
+            }
         }
     }
 }
