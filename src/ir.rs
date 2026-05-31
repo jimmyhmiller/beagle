@@ -2480,6 +2480,13 @@ impl Ir {
             let types = crate::float_repr::analyze_float_types(&self.instructions);
             self.float_locals = types.locals;
             self.float_regs = types.regs;
+            // Safety gate: if any float local is touched by a form the
+            // rewrite can't convert, fall back to fully-boxed (clear the
+            // sets) so no instruction ever reads the wrong slot region.
+            if !crate::float_repr::unbox_safe(&self.instructions, &self.float_locals) {
+                self.float_locals.clear();
+                self.float_regs.clear();
+            }
             if std::env::var("BEAGLE_FLOAT_LOCALS_LOG").is_ok() {
                 let mut v: Vec<_> = self.float_locals.iter().copied().collect();
                 v.sort();

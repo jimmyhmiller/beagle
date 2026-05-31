@@ -23,6 +23,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ir::{Instruction, Value};
+use crate::pretty_print::PrettyPrint;
 use crate::types::BuiltInTypes;
 
 fn reg_index(v: &Value) -> Option<usize> {
@@ -171,6 +172,63 @@ pub fn analyze_float_types(instructions: &[Instruction]) -> FloatTypes {
         locals: candidate,
         regs: float_regs,
     }
+}
+
+/// Local-slot indices referenced anywhere in `inst`, recovered from its
+/// rendered form (`Value::Local(n)` always prints as `localN`). Used only
+/// by the conservative safety check below, so the string scan is fine.
+fn rendered_local_indices(inst: &Instruction) -> Vec<usize> {
+    let s = inst.pretty_print();
+    let mut out = Vec::new();
+    let mut rest = s.as_str();
+    while let Some(pos) = rest.find("local") {
+        let after = &rest[pos + "local".len()..];
+        let digits: String = after
+            .chars()
+            .take_while(|c: &char| c.is_ascii_digit())
+            .collect();
+        if !digits.is_empty() {
+            if let Ok(n) = digits.parse::<usize>() {
+                out.push(n);
+            }
+        }
+        rest = &after[digits.len()..];
+    }
+    out
+}
+
+/// True if `inst` reads/writes a local only in a form the unboxing rewrite
+/// knows how to convert (`Assign`/`LoadLocal` load, `StoreLocal`/`Assign`
+/// store, `Ret`). Any other shape that touches a float local would read the
+/// wrong slot region, so the rewrite must bail.
+fn is_handled_local_form(inst: &Instruction) -> bool {
+    matches!(
+        inst,
+        Instruction::Assign(Value::Register(_), Value::Local(_))
+            | Instruction::Assign(Value::Local(_), _)
+            | Instruction::LoadLocal(Value::Register(_), Value::Local(_))
+            | Instruction::StoreLocal(Value::Local(_), _)
+            | Instruction::Ret(Value::Local(_))
+    )
+}
+
+/// Conservative safety gate: the unboxing rewrite is safe only if every
+/// reference to a float local is in a handled form. Otherwise the function
+/// must stay fully boxed (clear the float sets). This guarantees no
+/// unhandled instruction ever reads a float local's slot as the wrong
+/// region.
+pub fn unbox_safe(instructions: &[Instruction], float_locals: &HashSet<usize>) -> bool {
+    for inst in instructions {
+        if is_handled_local_form(inst) {
+            continue;
+        }
+        for n in rendered_local_indices(inst) {
+            if float_locals.contains(&n) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]
