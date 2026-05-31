@@ -42,12 +42,24 @@ run (`src/ast.rs`). Useful for benchmarks and long loops; less useful for
 short unit tests (the async recompile may not finish before they end —
 prefer the differential harness for those).
 
-**Growing coverage:** most of the suite is *snapshot* tests (`main()` +
-`println`), which the harness does not yet re-run (a differential `main()`
-re-run needs careful GC-thread handling — the next harness step). The
-highest-leverage way to expand tier-2 coverage today is to add `test "..."`
-blocks (they get the differential pass for free), and to keep a parity test
-per optimization (see `resources/ssa_tier2_parity_test.bg`).
+### 3. Snapshot differential re-run (opt-in: `// @tier2-rerun`)
+
+A snapshot test marked `// @tier2-rerun` re-runs `main()` after
+`specialize-all` under `BEAGLE_TEST_TIER2=1`, and the second (specialized/SSA)
+run's output must match the first. **Opt-in**, because `specialize-all`
+recompiles the whole program (slow — re-running *every* snapshot test made
+the suite hang/crawl), and a re-run is only sound for an idempotent `main()`
+(no file writes, accumulating atoms/state, or un-rejoinable threads). Mark
+only pure-compute tests. `resources/tier2_snapshot_test.bg` is the model.
+
+```
+# fast: only test blocks + opt-in snapshots re-run on tier-2 (~1 min)
+BEAGLE_SSA_TIER2=1 BEAGLE_TEST_TIER2=1 cargo run --release -- test resources/
+```
+
+The highest-leverage way to expand tier-2 coverage: add `test "..."` blocks
+(differential for free) and `// @tier2-rerun` markers to pure snapshot tests,
+plus a parity test per optimization (`resources/ssa_tier2_parity_test.bg`).
 
 ## Adding a tier-2 optimization — the checklist
 
@@ -76,7 +88,7 @@ per optimization (see `resources/ssa_tier2_parity_test.bg`).
   better regalloc.
 - **done** — Float unboxing (sound): definitely-float locals → unscanned FP
   slots, guard-free unboxed `FloatBinOp`s; ~70-75% on float-domain loops.
-- **next** — Snapshot differential in the harness (broad coverage).
+- **done** — Snapshot differential in the harness (opt-in `// @tier2-rerun`).
 - **next** — Immutable-field-load CSE: non-`mut` fields are globally stable,
   so reads are CSE-able. Sound design: AST-level cache keyed on
   `(object_var, field)` with **written-label-count staleness** (reuse only if

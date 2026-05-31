@@ -1,0 +1,39 @@
+namespace tier2_snapshot_test
+
+// Idempotent snapshot test that opts into the tier-2 differential harness:
+// with BEAGLE_TEST_TIER2=1 the runner re-runs main() after specialize-all
+// and asserts the specialized/SSA output matches. Pure compute (no IO, no
+// state), so re-running is sound.
+// @tier2-rerun
+
+fn fib(n) {
+    if n <= 1 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+fn series(terms) {
+    let mut sum = 0.0
+    let mut k = 0.0
+    let mut sign = 1.0
+    while k < terms {
+        sum = sum + sign / (2.0 * k + 1.0)
+        sign = sign * (0.0 - 1.0)
+        k = k + 1.0
+    }
+    sum * 4.0
+}
+
+struct V { x, y, z }
+fn dot(a, b) { a.x * b.x + a.y * b.y + a.z * b.z }
+
+fn main() {
+    println(fib(20))
+    println(series(2000.0))
+    let a = V { x: 1.0, y: 2.0, z: 3.0 }
+    let b = V { x: 4.0, y: 5.0, z: 6.0 }
+    println(dot(a, b))
+}
+
+// @beagle.core.snapshot
+// 6765
+// 3.1410926536210413
+// 32.0

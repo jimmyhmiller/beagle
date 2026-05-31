@@ -2179,8 +2179,10 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 
     let fully_qualified_main = runtime.current_namespace_name() + "/main";
 
-    // Check if main exists and how many arguments it takes
-    if let Some(arity) = runtime.get_function_arity(&fully_qualified_main) {
+    // Run main() once, with the GC thread-registration dance. Factored
+    // into a closure so the tier-2 differential harness can re-run it
+    // after specialize-all (see the snapshot section below).
+    let run_main_once = |runtime: &mut Runtime, arity: usize| {
         // Register main thread so child-triggered GC waits for us.
         // This mirrors what run_thread does for child threads.
         {
@@ -2280,6 +2282,11 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         }
 
         let _ = result; // Silence unused variable warning
+    };
+
+    // Check if main exists and how many arguments it takes
+    if let Some(arity) = runtime.get_function_arity(&fully_qualified_main) {
+        run_main_once(runtime, arity);
     } else if args.debug {
         println!("No main function");
     }
@@ -2419,6 +2426,35 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                 return Err(format!(
                     "Snapshot mismatch:\nExpected:\n{}\nGot:\n{}",
                     expected, printed
+                )
+                .into());
+            }
+        }
+
+        // Tier-2 harness: re-run main() after specialize-all so the
+        // specialized / SSA code path produces the same snapshot. Opt IN
+        // with `// @tier2-rerun` — `specialize-all` recompiles the whole
+        // program (slow), and a re-run is only sound for an idempotent
+        // main() (no file writes / accumulating state / un-rejoinable
+        // threads). Only checked when tier-1 already matched, so a
+        // divergence is unambiguously tier-2's fault.
+        let tier2_mode = std::env::var("BEAGLE_TEST_TIER2")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false);
+        if tier2_mode
+            && printed == expected
+            && source.contains("// @tier2-rerun")
+            && let Some(arity) = runtime.get_function_arity(&fully_qualified_main)
+        {
+            runtime.specialize_all();
+            runtime.printer.clear_output();
+            run_main_once(runtime, arity);
+            let printed2 = runtime.printer.get_output().join("").trim().to_string();
+            if printed2 != printed {
+                return Err(format!(
+                    "Tier-2 snapshot mismatch (re-run after specialize-all):\n\
+                     Tier-1:\n{}\nTier-2:\n{}",
+                    printed, printed2
                 )
                 .into());
             }

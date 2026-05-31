@@ -756,6 +756,10 @@ pub trait Printer: Send + Sync {
     fn print_byte(&mut self, byte: u8);
     // Gross just for testing. I'll need to do better;
     fn get_output(&self) -> Vec<String>;
+    /// Discard captured output. Used by the tier-2 differential test
+    /// harness to compare a fresh (specialized) run's output. Default
+    /// no-op for printers that don't capture.
+    fn clear_output(&mut self) {}
 }
 
 pub struct DefaultPrinter;
@@ -813,6 +817,10 @@ impl Printer for TestPrinter {
 
     fn get_output(&self) -> Vec<String> {
         self.output.clone()
+    }
+
+    fn clear_output(&mut self) {
+        self.output.clear();
     }
 }
 
