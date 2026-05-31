@@ -476,3 +476,36 @@ Before promoting a phase past its rollout step, run the diff harness:
    - Runtime on the benchmark set (must not regress vs legacy).
 3. Any mismatch is a blocker until either the SSA path is fixed or the
    legacy path is shown to be the bug.
+
+### Stage 3 feasibility — explored at BOTH layers (iter 18); it's a multi-session refactor
+
+The field-fed float win (loop-body versioning) was explored at both viable layers
+and both confirm a large architectural build — no sound autonomous-increment slice:
+
+- **Flat-IR layer (unbox_floats, ir.rs):** no loop structure visible; the
+  speculative region routes through loop-local slots interleaved with field-read
+  IC idioms (non-contiguous). Can't cleanly identify or duplicate a loop body.
+- **CFG layer (src/cfg/):** HAS the right structure (SSA blocks with params/
+  terminator/predecessors; dominators in dom.rs; RPO) — but `FloatBinOp` is
+  PRE-LOWERED by unbox_floats before CFG construction, so the CFG only sees
+  `AddFloat`/`SubFloat`/... (unboxed, definitely-float) or the expanded boxed
+  sequence (`Tag`/`Untag`/`HeapLoad`/`InlineBumpAllocate`/`GuardFloat`) for
+  speculative ops. The float region is thus an unidentifiable low-level mess at
+  the CFG layer. Also: no reusable natural-loop utility exists yet (regalloc
+  does loop extension implicitly via dominators+RPO).
+
+**Therefore the sound build is a refactor**, roughly:
+1. Make `FloatBinOp` (and field read/write markers) SURVIVE into the CFG: add
+   them to the CFG `Op` enum; cfg/builder.rs translates the IR `FloatBinOp` to a
+   CFG `FloatBinOp` instead of letting unbox_floats pre-lower it (gate to
+   tier-2/flag so legacy path unaffected).
+2. Add a reusable `natural_loops(cfg)` (dominators + back-edges).
+3. A CFG pass: for a loop whose body has speculative field-fed `FloatBinOp`s,
+   clone the body into fast (leaf `GuardFloat` -> exit-to-slow; intermediates in
+   unscanned FP slots; box at field-write escapes) + slow (current boxed
+   lowering); guard at loop entry / per-iteration selects; merge at loop exit.
+4. Lower surviving `FloatBinOp`s per version, then mem2reg/regalloc/emit.
+
+This is a deliberate multi-session build needing oversight, not 60s autonomous
+grinding. Pure-float code already wins ~3.5x via SSA-default; this is the
+narrower struct-field-fed case (nbody-shape).
