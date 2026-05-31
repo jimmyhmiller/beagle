@@ -119,15 +119,15 @@ deliberately did NOT grind these (the "must not break things" bar):
   (ast.rs:~1651). Top-level fns (weighted/step) compile through the
   `Ast::Function` path, so the inner one is the primary site; missing it leaks
   FieldRead to the backend (the `unreachable!` guards fire). 367/367 both ways.
-  Next steps: (3) the (object_var, field) CSE inside `expand_field_reads`:
-  track a map keyed on (object_register, field_name) → result register; reuse
-  only when (a) the field is immutable (struct_id>>24 → get_struct_by_id →
-  is_field_mutable) AND (b) no barrier since the cached read — bump a barrier
-  counter on every non-FieldRead Label/Jump/Call/StoreLocal-to-object in the
-  rebuild so reuse is dominance-safe by construction. (4) measure nbody A/B.
-  NOTE: object identity is by the FieldRead's `object` register; since reads
-  AND (eventually) writes are deferred, a write to the same field invalidates;
-  for now only immutable fields are reused so writes to OTHER fields are safe.
+  (3) **CSE measured, not built (iter 7):** probed opportunities first — 0 on
+  nbody (structural), ≤1 even on a contrived `b.mass*b.mass` under a sound
+  barrier. See "Tried, not worth it". Immutability decode that DID work and is
+  worth remembering: struct_id = `(prior.0 >> 24) & 0xFFFFFFFF` (Header
+  type_data lives in bits 24-55, see types.rs Header::to_usize); field_index =
+  `prior.1 / 8`; then `self.compiler.get_struct_by_id(id).is_field_mutable(fi)`
+  is authoritative. Do NOT use `prior.2` for read sites — the getter
+  property_access builtin (builtins/objects.rs ~269) writes only 2 of the 3
+  IC words, so the mutability word is unpopulated for reads.
 - **guarded float speculation** (struct/array-fed loops, e.g. nbody's ~25%
   ceiling) — needs body-versioning (two copies of a region guarded at entry).
   Very large; the biggest remaining win but the riskiest build.
@@ -148,11 +148,12 @@ held to the hard gates below.
 - **done** — Float unboxing (sound): definitely-float locals → unscanned FP
   slots, guard-free unboxed `FloatBinOp`s; ~70-75% on float-domain loops.
 - **done** — Snapshot differential in the harness (opt-in `// @tier2-rerun`).
-- **next** — Immutable-field-load CSE: non-`mut` fields are globally stable,
-  so reads are CSE-able. Sound design: AST-level cache keyed on
-  `(object_var, field)` with **written-label-count staleness** (reuse only if
-  no label/call/reassignment occurred between — handles branch dominance by
-  construction). Needs the harness to validate.
+- **measured, not worth it** — Immutable-field-load CSE: probed the actual
+  opportunity (iter 7) and found 0 on nbody (structural — no repeated
+  same-object immutable reads; boxed-float values can't be cached across the
+  safepoints that sit between interleaved field writes). See "Tried, not worth
+  it" below. The `FieldRead` deferral foundation (352535a) is kept but has no
+  consumer yet.
 - **later** — Non-pointer values → unscanned slots (smaller GC root set);
   guarded float speculation for struct-fed loops (needs body-versioning).
 
@@ -165,3 +166,22 @@ held to the hard gates below.
   uses of the same literal in a straight-line region. Implemented + measured:
   **~1% on `series` (within noise)**. The constants aren't shared enough and
   the unbox isn't the hot-path bottleneck. Reverted.
+- **Immutable-field-load CSE** (iter 7) — MEASURED, not worth it; CSE not
+  built. The `FieldRead` deferral foundation (commit 352535a) is kept (sound,
+  behaviour-neutral, could enable other field opts), but a `BEAGLE_PROBE_
+  FIELDCSE` instrumentation counted the actual CSE *opportunities* before
+  building the CSE (checklist item 1) and found **ZERO on nbody**:
+  `bench_phase4_nbody/advance` has 6 immutable field reads but 0 same-field
+  repeats — even under the loosest sound barrier (clear only on
+  control-flow/calls). It is STRUCTURAL: nbody reads each body's `mass` once
+  per interaction; `bi.mass * bj.mass` are *different* objects, not a repeat.
+  Even a contrived `b.mass * b.mass + b.mass` yields only 0–1 candidates under
+  a sound barrier (the `*` is a deferred FloatBinOp = potential safepoint
+  between the reads). Deeper reason it can't pay off on real float code: a
+  cached immutable-field value that is a boxed-float *pointer* cannot survive a
+  GC safepoint in a register (I9), so the cache must clear at every
+  call/write-barrier — exactly where interleaved field writes sit. The win
+  only exists for non-pointer immutable fields repeatedly read in a
+  safepoint-free straight-line region, which the benchmarks don't contain.
+  Do not re-attempt without a benchmark that actually has repeated same-object
+  immutable-field reads between safepoints.
