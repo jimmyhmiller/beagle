@@ -95,8 +95,18 @@ deliberately did NOT grind these (the "must not break things" bar):
 - **field-CSE** — ~6% estimated on nbody (≈4 of ~30 field accesses redundant:
   `bi.mass`/`bj.mass` read 3× each). Requires deferring field *reads and
   writes* through core field-access codegen — a large build with real
-  miscompile risk for a modest win. Needs a deliberate, human-overseen effort
-  + a thorough field-CSE parity test, not an autonomous quick pass.
+  miscompile risk for a modest win. **Safety net is now in place:**
+  `resources/field_access_parity_test.bg` exercises the patterns it must not
+  break (repeated immutable reads, interleaved reads/writes = nbody shape,
+  mutable re-read after write), re-run on tier-2 by the harness. Build design:
+  `Instruction::FieldRead`/`FieldWrite` (FloatBinOp-style deferral) carrying
+  resolved name-const-ptr + property-access builtin fn-ptr (so the slow-path
+  call can be re-emitted from `Ir::expand`, since `call_builtin` is an
+  AST-level method); AST-level CSE keyed on (object_var, field) with
+  label-count barrier (reads AND writes deferred so the barrier counts only
+  user control flow); immutability via struct_id>>24 → get_struct_by_id →
+  is_field_mutable; restrict to non-`mut` object variables (no closure-mutation
+  invalidation needed). Best in a fresh context, not a degraded one.
 - **guarded float speculation** (struct/array-fed loops, e.g. nbody's ~25%
   ceiling) — needs body-versioning (two copies of a region guarded at entry).
   Very large; the biggest remaining win but the riskiest build.
