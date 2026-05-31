@@ -1,0 +1,89 @@
+namespace field_access_parity_test
+
+// Tier-2 parity coverage for struct field access — the safety net for the
+// upcoming immutable-field-load CSE. Exercises the patterns a field-CSE
+// must not break: repeated reads of the same immutable field, mutable
+// field read-modify-write, and reads interleaved with writes (the nbody
+// shape). The harness re-runs every block on specialized/SSA code, so any
+// field-access miscompile under tier-2 fails here.
+
+use beagle.runtime as runtime
+
+struct Body {
+    mut x
+    mut y
+    mut vx
+    mut vy
+    mass
+}
+
+fn warm(f, iters) {
+    let mut i = 0
+    let mut last = 0
+    while i < iters {
+        last = f()
+        i = i + 1
+    }
+    last
+}
+
+// Repeated reads of the SAME immutable field (mass) — the CSE target.
+fn weighted(b) {
+    b.mass * b.mass + b.mass
+}
+
+test "repeated immutable-field reads correct after tier-up" {
+    let b = Body { x: 1.0, y: 2.0, vx: 0.0, vy: 0.0, mass: 3.0 }
+    // 3*3 + 3 = 12
+    assert-eq!(weighted(b), 12.0)
+    let _ = warm(fn() { weighted(b) }, 1500)
+    runtime/specialize-all()
+    assert-eq!(weighted(b), 12.0)
+    let b2 = Body { x: 0.0, y: 0.0, vx: 0.0, vy: 0.0, mass: 5.0 }
+    // 5*5 + 5 = 30
+    assert-eq!(weighted(b2), 30.0)
+}
+
+// Reads of one object's immutable field interleaved with writes to another
+// object's mutable fields — the n-body inner-loop shape. A CSE that wrongly
+// invalidates an immutable read on a mutable write (or fails to) breaks here.
+fn step(a, b) {
+    a.vx = a.vx - b.mass
+    a.vy = a.vy - b.mass
+    b.vx = b.vx + a.mass
+    b.vy = b.vy + a.mass
+    a.vx + a.vy + b.vx + b.vy
+}
+
+test "interleaved reads/writes correct after tier-up (nbody shape)" {
+    let a = Body { x: 0.0, y: 0.0, vx: 10.0, vy: 20.0, mass: 2.0 }
+    let b = Body { x: 0.0, y: 0.0, vx: 100.0, vy: 200.0, mass: 3.0 }
+    // a.vx=10-3=7, a.vy=20-3=17, b.vx=100+2=102, b.vy=200+2=202; sum=328
+    let _ = warm(fn() {
+        let a2 = Body { x: 0.0, y: 0.0, vx: 10.0, vy: 20.0, mass: 2.0 }
+        let b2 = Body { x: 0.0, y: 0.0, vx: 100.0, vy: 200.0, mass: 3.0 }
+        step(a2, b2)
+    }, 1500)
+    runtime/specialize-all()
+    assert-eq!(step(a, b), 328.0)
+}
+
+// Mutable field reassigned then re-read — a field cache must NOT reuse a
+// stale value across the write.
+fn bump_and_read(b) {
+    b.x = b.x + 1.0
+    let after = b.x
+    b.x = b.x + 1.0
+    after + b.x
+}
+
+test "mutable field re-read after write correct after tier-up" {
+    let b = Body { x: 5.0, y: 0.0, vx: 0.0, vy: 0.0, mass: 1.0 }
+    // x:5->6, after=6, x:6->7; 6+7=13
+    let _ = warm(fn() {
+        let b2 = Body { x: 5.0, y: 0.0, vx: 0.0, vy: 0.0, mass: 1.0 }
+        bump_and_read(b2)
+    }, 1500)
+    runtime/specialize-all()
+    assert-eq!(bump_and_read(b), 13.0)
+}
