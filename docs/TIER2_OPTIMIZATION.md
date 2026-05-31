@@ -129,8 +129,18 @@ deliberately did NOT grind these (the "must not break things" bar):
   property_access builtin (builtins/objects.rs ~269) writes only 2 of the 3
   IC words, so the mutability word is unpopulated for reads.
 - **guarded float speculation** (struct/array-fed loops, e.g. nbody's ~25%
-  ceiling) — needs body-versioning (two copies of a region guarded at entry).
-  Very large; the biggest remaining win but the riskiest build.
+  ceiling) — PRIZE CONFIRMED (iter 8). `resources/bench_field_unbox_probe.bg`
+  A/B: identical float arithmetic (bit-identical results) is **2.44× slower**
+  through boxed struct fields (~46 ns/iter) than through unboxed float locals
+  (~19 ns/iter) at tier-2 — field boxing is ~59% of that kernel. Real nbody
+  recovers less (sqrt/array/loop overhead; est. ~25%) but it's the largest
+  remaining win and unlike field-CSE the opportunity is real. Design is in
+  docs/SSA_ARCHITECTURE.md stage 3: a `FloatBinOp` operand from a field
+  `HeapLoad` becomes *speculatively* float — `GuardFloat` the boxed ptr, unbox
+  to FP, mark definitely-float so the chain unboxes; bail = current boxed
+  lowering. Build in smallest gated slices, A/B on the probe each step. NOTE:
+  this does NOT need full body-versioning — per-op guarded unbox (like today's
+  guarded boxed `FloatBinOp`) suffices; reassess if guard density hurts.
 - **non-pointer → unscanned slots** — sound but the GC already tag-checks
   scanned slots, so the win (smaller scanned frame) is modest and hard to
   measure cleanly.

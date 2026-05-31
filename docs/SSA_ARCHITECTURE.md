@@ -284,10 +284,25 @@ boundary between representations is coerced (`coerce_to_fp` / `coerce_to_tagged`
    guard-free `AddFloat`/…; box at escapes. Measured: series −70%, boxing probe
    −75%, fib unchanged, suite 365/365. Pure-float loops (const/float-local fed)
    win big.
-3. **Speculative unboxing (next).** Struct-field-fed float ops (nbody: floats
-   come from `HeapLoad`, so soundly stay boxed today, −2%) need a *guarded*
-   unbox: guard the loaded value is a float, unbox on the fast path, deopt /
-   box on the miss. Unlocks struct/array-heavy float code.
+3. **Speculative unboxing (next — prize CONFIRMED).** Struct-field-fed float
+   ops (nbody: floats come from `HeapLoad`, so soundly stay boxed today, −2%)
+   need a *guarded* unbox: guard the loaded value is a float, unbox on the fast
+   path, fall back to the existing boxed lowering on the miss (per-op guarded
+   branch — NOT OSR). Unlocks struct/array-heavy float code.
+   **Measured prize (`resources/bench_field_unbox_probe.bg`, tier-2): 2.44×** —
+   identical float arithmetic (bit-identical results) costs ~46 ns/iter through
+   boxed struct fields vs ~19 ns/iter through unboxed float locals, i.e. field
+   boxing is ~59% of that kernel. Real nbody recovers less (it also has sqrt /
+   array gets / loop control) — est. ~25% ceiling — but it is the largest
+   remaining tier-2 win and the opportunity is real (contrast field-CSE, probed
+   to 0). Design: in `analyze_float_types`/`unbox_floats` (`float_repr.rs` /
+   `ir.rs`), a `FloatBinOp` operand sourced from a field `HeapLoad` becomes a
+   *speculatively*-float value: emit `GuardFloat` on the boxed ptr, unbox to an
+   FP register, mark the operand definitely-float so the op and its downstream
+   chain unbox; the final field write boxes once. Bail = current guarded boxed
+   lowering. Gate behind a sub-flag; degrade to boxed on any unhandled shape.
+   Build in the smallest slices (single field-read → single op first), each
+   gated + harness-green + bit-identical, A/B on the probe.
 
 ---
 

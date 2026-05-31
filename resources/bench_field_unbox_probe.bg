@@ -1,0 +1,72 @@
+namespace bench_field_unbox_probe
+
+use beagle.core as core
+use beagle.runtime as runtime
+
+struct P {
+    mut x
+    mut vx
+    mass
+}
+
+// Boxed-field version: reads/writes float STRUCT FIELDS (nbody's pattern).
+// Field reads are HeapLoad (not float-proven) so the whole arithmetic chain
+// stays boxed under step-2 unboxing.
+fn step_fields(p, n) {
+    let dt = 0.01
+    let mut i = 0
+    while i < n {
+        let dx = p.x - 1.5
+        let mag = dt / (dx * dx + 0.001)
+        p.vx = p.vx - dx * p.mass * mag
+        p.x = p.x + dt * p.vx
+        i = i + 1
+    }
+    p.x
+}
+
+// Unboxed-local version: identical float arithmetic but on float LOCALS,
+// which step-2 keeps unboxed in FP registers (no box alloc per op).
+fn step_locals(n) {
+    let dt = 0.01
+    let mut x = 1.0
+    let mut vx = 0.0
+    let mass = 2.0
+    let mut i = 0
+    while i < n {
+        let dx = x - 1.5
+        let mag = dt / (dx * dx + 0.001)
+        vx = vx - dx * mass * mag
+        x = x + dt * vx
+        i = i + 1
+    }
+    x
+}
+
+fn measure_fields(iters) {
+    let p = P { x: 1.0, vx: 0.0, mass: 2.0 }
+    let start = core/time-now()
+    let r = step_fields(p, iters)
+    let elapsed = core/time-now() - start
+    println("fields (boxed): ${iters} iters  (${elapsed} ns)  r=${r}")
+    elapsed
+}
+
+fn measure_locals(iters) {
+    let start = core/time-now()
+    let r = step_locals(iters)
+    let elapsed = core/time-now() - start
+    println("locals (unboxed): ${iters} iters  (${elapsed} ns)  r=${r}")
+    elapsed
+}
+
+fn main() {
+    measure_fields(20000)
+    measure_locals(20000)
+    let n = runtime/specialize-all()
+    println("specialized ${n} functions")
+    measure_fields(5000000)
+    measure_fields(5000000)
+    measure_locals(5000000)
+    measure_locals(5000000)
+}
