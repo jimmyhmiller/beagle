@@ -328,6 +328,22 @@ boundary between representations is coerced (`coerce_to_fp` / `coerce_to_tagged`
    multi-op field-fed expression (e.g. the probe's `dx*dx + c`), not a single
    op. Build expression-tree versioning at emission, gated, A/B on the probe.
 
+   **REFINED (iter 11) — dumped the real tier-2 IR; the region routes through
+   LOCALS, so the sound build is full LOOP-BODY VERSIONING, not expression-
+   local.** The speculative float region is not a contiguous register chain:
+   intermediates round-trip through locals (`dx`→slot, `dx*dx`→slot,
+   `mag`→slot) and interleave with the field-read IC idioms (guard + heap loads
+   + slow-path property-access call). So the register-chain stat undercounts,
+   and the intermediate locals would need DUAL representation (FP in the fast
+   version, boxed in the slow). That means versioning the whole loop body:
+   guard the field leaves at loop entry, duplicate the body (fast =
+   float-locals-as-FP-slots + guarded field reads; slow = current boxed
+   lowering), merge. This is the large/high-risk build flagged for deliberate
+   scoping (not autonomous 60s grinding). Also: the 2.44× probe removed field
+   reads entirely (`step_locals` has none), so versioning that KEEPS the field
+   reads wins somewhat less — measure a tighter upper bound (boxing cost vs
+   field-read IC cost) before committing to the build.
+
 ---
 
 ## Anti-spill checklist (Phase 4)
