@@ -24,6 +24,7 @@ pub mod dump;
 pub mod emit_legacy;
 pub mod gc_safety;
 pub mod lift_vregs;
+pub mod loops;
 pub mod mem2reg;
 pub mod opt;
 pub mod regalloc;
