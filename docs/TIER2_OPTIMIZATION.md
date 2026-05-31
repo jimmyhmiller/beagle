@@ -109,12 +109,25 @@ deliberately did NOT grind these (the "must not break things" bar):
   invalidation needed). **Progress:** (1) `lower_field_read` extracted from
   `Ast::PropertyAccess` — the idiom is now a reusable AST-level method, since
   the slow-path `call_builtin` forces expansion to live at the AST level, not
-  in `Ir::compile` (commit 625aae2, behaviour-identical). Next steps:
-  (2) `Instruction::FieldRead{dst,object,property_addr,prior,property_name}` +
-  an AST-level `expand_field_reads` post-pass (rebuild calling
-  `lower_field_read`); emit FieldRead only under `in_tier_up_compile()`; verify
-  behaviour-neutral. (3) same for writes. (4) the (object_var, field) CSE with
-  label-count barrier + immutability + non-mut gate; measure nbody.
+  in `Ir::compile` (commit 625aae2, behaviour-identical).
+  (2) **DONE** (commit 352535a, behaviour-neutral): `Instruction::FieldRead`
+  deferral + AST-level `expand_field_reads` rebuild pass that re-lowers each
+  via `lower_field_read`. Emitted only under `in_tier_up_compile()`. KEY
+  GOTCHA fixed: `expand_field_reads` must run in BOTH places an Ir is lowered
+  — the end of `AstCompiler::compile` (synthetic top-level body) AND before
+  the inner-function `self.ir.compile` in the `Ast::Function` arm
+  (ast.rs:~1651). Top-level fns (weighted/step) compile through the
+  `Ast::Function` path, so the inner one is the primary site; missing it leaks
+  FieldRead to the backend (the `unreachable!` guards fire). 367/367 both ways.
+  Next steps: (3) the (object_var, field) CSE inside `expand_field_reads`:
+  track a map keyed on (object_register, field_name) → result register; reuse
+  only when (a) the field is immutable (struct_id>>24 → get_struct_by_id →
+  is_field_mutable) AND (b) no barrier since the cached read — bump a barrier
+  counter on every non-FieldRead Label/Jump/Call/StoreLocal-to-object in the
+  rebuild so reuse is dominance-safe by construction. (4) measure nbody A/B.
+  NOTE: object identity is by the FieldRead's `object` register; since reads
+  AND (eventually) writes are deferred, a write to the same field invalidates;
+  for now only immutable fields are reused so writes to OTHER fields are safe.
 - **guarded float speculation** (struct/array-fed loops, e.g. nbody's ~25%
   ceiling) — needs body-versioning (two copies of a region guarded at entry).
   Very large; the biggest remaining win but the riskiest build.
