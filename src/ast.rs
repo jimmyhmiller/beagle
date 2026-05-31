@@ -1502,8 +1502,16 @@ impl AstCompiler<'_> {
                     && let Some(ref full_name) = full_function_name_for_check
                     && !full_name.starts_with("beagle.bail/")
                 {
-                    let threshold =
-                        self.compiler.command_line_arguments.auto_specialize_threshold as i64;
+                    // Test/CI harness hook: `BEAGLE_SPECIALIZE_THRESHOLD`
+                    // overrides the counter so functions tier up far sooner,
+                    // letting the ordinary test suite exercise tier-2 code
+                    // (which it otherwise never reaches at the 1000 default).
+                    let threshold = std::env::var("BEAGLE_SPECIALIZE_THRESHOLD")
+                        .ok()
+                        .and_then(|v| v.parse::<i64>().ok())
+                        .unwrap_or(
+                            self.compiler.command_line_arguments.auto_specialize_threshold as i64,
+                        );
                     if let Ok((counter_addr, name_ptr)) =
                         self.compiler.add_function_counter(full_name, threshold)
                     {

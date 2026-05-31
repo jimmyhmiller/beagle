@@ -1,0 +1,86 @@
+# Tier-2 SSA optimization workflow
+
+Beagle's tier-2 (the feedback-specialized recompile, optionally through the
+SSA pipeline) is where we can be aggressive about codegen quality — the
+function is known-hot, the recompile is off the critical path, and we have
+type feedback. This document is the standing process for adding **sound,
+correct** tier-2 optimizations without regressing.
+
+We do **not** do OSR / deoptimization-to-baseline. Every optimization must
+be sound under Beagle's per-op-bail model: never assume a runtime type we
+haven't proven or guarded, and never produce a representation a bail path
+can't satisfy. "Optimal but sound" — when in doubt, stay correct.
+
+## The hard problem: standard tests never hit tier 2
+
+A function only reaches tier 2 after `specialize-all` or ~1000 calls, and the
+auto path is async — so the ordinary suite runs entirely on tier-1 code. A
+tier-2 miscompile is invisible to it. Two tools close that gap:
+
+### 1. Tier-2 differential test harness (`BEAGLE_TEST_TIER2=1`)
+
+`test "..." { }` blocks run **twice**: once on tier-1, then — after
+`specialize-all` — again on the specialized/SSA code. Both must pass.
+Implemented in `src/main.rs` (the test-block loop runs as `run_blocks`,
+called a second time when the env is set).
+
+```
+# Validate tier-2 SSA + float unboxing against the whole test-block corpus:
+BEAGLE_SSA_TIER2=1 BEAGLE_TEST_TIER2=1 cargo run --release -- test resources/
+```
+
+A tier-2-only failure prints `test FAIL [tier2]: ...`. **Caveat:** tests that
+call `specialize-all` themselves and assert on the count (`assert!(n > 0)`)
+false-positive on the second pass (count is 0 — already specialized); such
+meta-assertions were removed from the tier-up tests. Don't add new ones —
+assert on *behaviour*, not on the specialization count.
+
+### 2. Threshold override (`BEAGLE_SPECIALIZE_THRESHOLD=N`)
+
+Lowers the tier-up counter so long-running functions tier up during a normal
+run (`src/ast.rs`). Useful for benchmarks and long loops; less useful for
+short unit tests (the async recompile may not finish before they end —
+prefer the differential harness for those).
+
+**Growing coverage:** most of the suite is *snapshot* tests (`main()` +
+`println`), which the harness does not yet re-run (a differential `main()`
+re-run needs careful GC-thread handling — the next harness step). The
+highest-leverage way to expand tier-2 coverage today is to add `test "..."`
+blocks (they get the differential pass for free), and to keep a parity test
+per optimization (see `resources/ssa_tier2_parity_test.bg`).
+
+## Adding a tier-2 optimization — the checklist
+
+1. **Prove the prize first.** Measure the win on a focused benchmark before
+   building (e.g. `bench_phase0_*`, `bench_boxing_probe`). If it isn't there,
+   stop.
+2. **Establish soundness on paper.** What must be true at runtime? What
+   proves it (feedback + guard, or a static invariant)? What does the bail
+   path produce, and can the optimized representation hold it? Write it into
+   `docs/SSA_ARCHITECTURE.md` if it touches the SSA layer.
+3. **Gate it.** New optimizations ride `BEAGLE_SSA_TIER2` (tier-up only) or a
+   dedicated env flag, so cold first-compiles and the default path stay
+   untouched and the blast radius is bounded.
+4. **Implement conservatively.** Bail to the safe lowering whenever an
+   assumption isn't provable (see float unboxing's `unbox_safe` gate). A
+   missed case must degrade, never miscompile.
+5. **Test under the harness.** `BEAGLE_SSA_TIER2=1 BEAGLE_TEST_TIER2=1 test
+   resources/` must stay green. Add a `test`-block parity test exercising the
+   new shape. Run `/ssa-review`-style scrutiny against the spec.
+6. **Measure and commit.** Confirm the win holds and bit-exact outputs; note
+   bail rate (`BEAGLE_SSA_LOG_BAIL`).
+
+## Optimization pipeline (status)
+
+- **done** — Tier-2 SSA path (`BEAGLE_SSA_TIER2`): ~20-30% on hot loops via
+  better regalloc.
+- **done** — Float unboxing (sound): definitely-float locals → unscanned FP
+  slots, guard-free unboxed `FloatBinOp`s; ~70-75% on float-domain loops.
+- **next** — Snapshot differential in the harness (broad coverage).
+- **next** — Immutable-field-load CSE: non-`mut` fields are globally stable,
+  so reads are CSE-able. Sound design: AST-level cache keyed on
+  `(object_var, field)` with **written-label-count staleness** (reuse only if
+  no label/call/reassignment occurred between — handles branch dominance by
+  construction). Needs the harness to validate.
+- **later** — Non-pointer values → unscanned slots (smaller GC root set);
+  guarded float speculation for struct-fed loops (needs body-versioning).

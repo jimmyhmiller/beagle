@@ -2429,43 +2429,72 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     if args.test {
         let test_names = runtime.get_test_function_names();
         if !test_names.is_empty() {
-            let mut test_passed = 0;
-            let mut test_failed = 0;
-            for test_name in &test_names {
-                // Extract the human-readable test name from __test_name__
-                let short = test_name.rsplit('/').next().unwrap_or(test_name);
-                let display_name = short
-                    .strip_prefix("__test_")
-                    .and_then(|s| s.strip_suffix("__"))
-                    .unwrap_or(short)
-                    .replace('_', " ");
+            // Tier-2 harness: when BEAGLE_TEST_TIER2 is set, run every test
+            // block a second time after `specialize-all` so the tier-2
+            // (specialized / SSA) code path is validated against the same
+            // assertions. The standard suite otherwise never reaches tier 2.
+            let tier2_mode = std::env::var("BEAGLE_TEST_TIER2")
+                .map(|v| !v.is_empty() && v != "0")
+                .unwrap_or(false);
 
-                // Compile a wrapper that calls the test function with try/catch
-                // Use the short function name since compile_string runs in the test's namespace
-                let short_fn_name = test_name.rsplit('/').next().unwrap_or(test_name);
-                let wrapper = format!(
-                    "try {{ {}(); \"__PASS__\" }} catch (e) {{ to-string(e) }}",
-                    short_fn_name
-                );
-                match runtime.compile_string(&wrapper) {
-                    Ok(fn_ptr) => {
-                        let result = runtime.call_via_trampoline(fn_ptr);
-                        let result_str = runtime.get_string(0, result);
-                        if result_str == "__PASS__" {
-                            println!("  test pass: {}", display_name);
-                            test_passed += 1;
-                        } else {
-                            println!("  test FAIL: {}", display_name);
-                            println!("        {}", result_str);
-                            test_failed += 1;
+            // Run all blocks once, return (passed, failed). `pass_label` is
+            // appended to failure lines so tier-2 failures are identifiable.
+            let run_blocks = |runtime: &mut Runtime, pass_label: &str| -> (i32, i32) {
+                let mut passed = 0;
+                let mut failed = 0;
+                for test_name in &test_names {
+                    let short = test_name.rsplit('/').next().unwrap_or(test_name);
+                    let display_name = short
+                        .strip_prefix("__test_")
+                        .and_then(|s| s.strip_suffix("__"))
+                        .unwrap_or(short)
+                        .replace('_', " ");
+                    let short_fn_name = test_name.rsplit('/').next().unwrap_or(test_name);
+                    let wrapper = format!(
+                        "try {{ {}(); \"__PASS__\" }} catch (e) {{ to-string(e) }}",
+                        short_fn_name
+                    );
+                    match runtime.compile_string(&wrapper) {
+                        Ok(fn_ptr) => {
+                            let result = runtime.call_via_trampoline(fn_ptr);
+                            let result_str = runtime.get_string(0, result);
+                            if result_str == "__PASS__" {
+                                if pass_label.is_empty() {
+                                    println!("  test pass: {}", display_name);
+                                }
+                                passed += 1;
+                            } else {
+                                println!("  test FAIL{}: {}", pass_label, display_name);
+                                println!("        {}", result_str);
+                                failed += 1;
+                            }
+                        }
+                        Err(e) => {
+                            println!(
+                                "  test FAIL{}: {} (compile error: {})",
+                                pass_label, display_name, e
+                            );
+                            failed += 1;
                         }
                     }
-                    Err(e) => {
-                        println!("  test FAIL: {} (compile error: {})", display_name, e);
-                        test_failed += 1;
-                    }
                 }
+                (passed, failed)
+            };
+
+            let (test_passed, mut test_failed) = run_blocks(runtime, "");
+
+            // Second pass on tier-2 code (only if tier-1 was clean, so a
+            // tier-2-only failure is unambiguous).
+            if tier2_mode && test_failed == 0 {
+                let n = runtime.specialize_all();
+                eprintln!(
+                    "[tier2-test] specialized {} functions; re-running blocks",
+                    n
+                );
+                let (_p2, f2) = run_blocks(runtime, " [tier2]");
+                test_failed += f2;
             }
+
             if test_failed > 0 {
                 return Err(format!(
                     "Test blocks: {} passed, {} failed",
