@@ -3350,58 +3350,7 @@ impl AstCompiler<'_> {
                 let object = self.ir.assign_new(object);
 
                 let (property_addr, prior) = self.alloc_property_cache().unwrap();
-                let property_location = Value::RawValue(property_addr);
-                let property_location = self.ir.assign_new(property_location);
-                let result = self.ir.assign_new(0);
-
-                let exit_property_access = self.ir.label("exit_property_access");
-                let slow_property_path = self.ir.label("slow_property_path");
-
-                // Check for null before untagging - go to slow path for nice error
-                let object_value: Value = object.into();
-                self.ir.jump_if(
-                    slow_property_path,
-                    Condition::Equal,
-                    object_value,
-                    Value::Null,
-                );
-
-                let untagged_object = self.ir.untag(object.into());
-                let struct_id_versioned = self.ir.read_struct_id_versioned(untagged_object);
-
-                // Tier-2: if we have a warm cache value from the prior
-                // compile, bake it into the comparison and load offset
-                // — saving two memory loads through the cache slot per
-                // access. Otherwise emit the regular runtime IC.
-                if let Some((expected_id, offset_bytes, _is_mutable)) = prior {
-                    let baked_id =
-                        self.ir.assign_new(Value::RawValue(expected_id as usize));
-                    self.ir.jump_if(
-                        slow_property_path,
-                        Condition::NotEqual,
-                        struct_id_versioned,
-                        baked_id,
-                    );
-                    let baked_offset =
-                        self.ir.assign_new(Value::RawValue(offset_bytes as usize));
-                    let property_result = self.ir.read_field(untagged_object, baked_offset.into());
-                    self.ir.assign(result, property_result);
-                } else {
-                    let property_value = self.ir.load_from_heap(property_location.into(), 0);
-                    self.ir.jump_if(
-                        slow_property_path,
-                        Condition::NotEqual,
-                        struct_id_versioned,
-                        property_value,
-                    );
-                    let property_offset = self.ir.load_from_heap(property_location.into(), 1);
-                    let property_result = self.ir.read_field(untagged_object, property_offset);
-                    self.ir.assign(result, property_result);
-                }
-                self.ir.jump(exit_property_access);
-
-                self.ir.write_label(slow_property_path);
-                let property = if let Ast::Identifier(name, _) = property.as_ref() {
+                let property_name = if let Ast::Identifier(name, _) = property.as_ref() {
                     name.clone()
                 } else {
                     return Err(CompileError::ExpectedIdentifier {
@@ -3409,17 +3358,7 @@ impl AstCompiler<'_> {
                     });
                 };
 
-                let constant_ptr = self.string_constant(property.clone());
-                let constant_ptr = self.ir.assign_new(constant_ptr);
-                let call_result = self.call_builtin(
-                    "beagle.builtin/property-access",
-                    vec![object.into(), constant_ptr.into(), property_location.into()],
-                )?;
-
-                self.ir.assign(result, call_result);
-
-                self.ir.write_label(exit_property_access);
-
+                let result = self.lower_field_read(object, property_addr, prior, property_name)?;
                 Ok(result.into())
             }
             Ast::IndexOperator { array, index, .. } => {
@@ -6145,6 +6084,79 @@ impl AstCompiler<'_> {
 
     pub fn call_builtin(&mut self, name: &str, args: Vec<Value>) -> Result<Value, CompileError> {
         self.call(name, args)
+    }
+
+    /// Emit the inline property-cache field-read idiom: null check →
+    /// struct-id guard (baked tier-2 immediates or runtime IC) → `read_field`,
+    /// with a slow path through `beagle.builtin/property-access`. Returns the
+    /// register holding the field value. Extracted from `Ast::PropertyAccess`
+    /// so a deferred `FieldRead` can be expanded to the same code.
+    fn lower_field_read(
+        &mut self,
+        object: VirtualRegister,
+        property_addr: usize,
+        prior: PropertyFeedback,
+        property_name: String,
+    ) -> Result<VirtualRegister, CompileError> {
+        let property_location = Value::RawValue(property_addr);
+        let property_location = self.ir.assign_new(property_location);
+        let result = self.ir.assign_new(0);
+
+        let exit_property_access = self.ir.label("exit_property_access");
+        let slow_property_path = self.ir.label("slow_property_path");
+
+        // Check for null before untagging - go to slow path for nice error
+        let object_value: Value = object.into();
+        self.ir.jump_if(
+            slow_property_path,
+            Condition::Equal,
+            object_value,
+            Value::Null,
+        );
+
+        let untagged_object = self.ir.untag(object.into());
+        let struct_id_versioned = self.ir.read_struct_id_versioned(untagged_object);
+
+        // Tier-2: if we have a warm cache value from the prior compile, bake
+        // it into the comparison and load offset — saving two memory loads
+        // through the cache slot per access. Otherwise emit the regular IC.
+        if let Some((expected_id, offset_bytes, _is_mutable)) = prior {
+            let baked_id = self.ir.assign_new(Value::RawValue(expected_id as usize));
+            self.ir.jump_if(
+                slow_property_path,
+                Condition::NotEqual,
+                struct_id_versioned,
+                baked_id,
+            );
+            let baked_offset = self.ir.assign_new(Value::RawValue(offset_bytes as usize));
+            let property_result = self.ir.read_field(untagged_object, baked_offset.into());
+            self.ir.assign(result, property_result);
+        } else {
+            let property_value = self.ir.load_from_heap(property_location.into(), 0);
+            self.ir.jump_if(
+                slow_property_path,
+                Condition::NotEqual,
+                struct_id_versioned,
+                property_value,
+            );
+            let property_offset = self.ir.load_from_heap(property_location.into(), 1);
+            let property_result = self.ir.read_field(untagged_object, property_offset);
+            self.ir.assign(result, property_result);
+        }
+        self.ir.jump(exit_property_access);
+
+        self.ir.write_label(slow_property_path);
+        let constant_ptr = self.string_constant(property_name);
+        let constant_ptr = self.ir.assign_new(constant_ptr);
+        let call_result = self.call_builtin(
+            "beagle.builtin/property-access",
+            vec![object.into(), constant_ptr.into(), property_location.into()],
+        )?;
+        self.ir.assign(result, call_result);
+
+        self.ir.write_label(exit_property_access);
+
+        Ok(result)
     }
 
     fn first_pass(&mut self, ast: &Ast) -> Result<(), CompileError> {
