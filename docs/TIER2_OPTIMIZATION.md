@@ -290,3 +290,33 @@ hunt is exhaustive.
   default). Design fully written in docs/SSA_ARCHITECTURE.md stage 3.
 To resume the float win later: it's a planned build, not a hunt — start from the
 stage-3 design with a dedicated session.
+
+## Perf work COMPLETE (iter 22) — field-fed float win is architecturally unreachable
+
+Assessed the last remaining float path, UNBOXED FIELD STORAGE, and it is NOT
+soundly achievable in Beagle's architecture:
+- Struct fields are 8-byte slots the GC scans as TAGGED values (types.rs
+  write_field(_, value: usize); get_fields -> &[usize]). An inline f64 needs all
+  64 bits — it can't carry a tag or be told apart from a pointer by the GC.
+- Storing a field unboxed requires the struct LAYOUT to mark that field f64 (GC
+  skips it; accessors read raw). That must hold for ALL instances — but a
+  dynamic field can receive a non-float (`b.x = "hi"`), so it can't be
+  unconditionally unboxed.
+- Reverting a speculatively-unboxed layout on a non-float write needs DEOPT,
+  which Beagle does NOT do by design ("no OSR/deoptimization"). Whole-program
+  "this field is always float" is unsound (no-whole-program: new instances /
+  redefinition). NaN-boxing would be a total value-representation rewrite.
+
+CONCLUSION: the field-fed (nbody-shape) float win is architecturally unreachable
+soundly — both paths closed (loop-body versioning ruled out iter 21;
+unboxed-field storage ruled out here). The achievable float win — unboxing float
+LOCALS/intermediates — is already SHIPPED via SSA tier-2 default-on (3.46x).
+
+FINAL PERF STATE this session:
+- SHIPPED: SSA tier-2 default-on — 3.46x float, 20% int, 23% btrees, no
+  regressions, 367/367, opt-out BEAGLE_SSA_TIER2=0. (commits 214dab4/6a99385)
+- HUNT exhaustive: no other cheap/medium wins (alloc tight, dispatch
+  irreducible, GC young-gen large, strings cons/builder, SSA passes all on).
+- Reusable analysis added + tested: natural_loops, flat_ir_loops,
+  versionable_float_loop (for any future loop work).
+The autonomous perf loop has delivered its win and rigorously closed the rest.
