@@ -82,6 +82,34 @@ plus a parity test per optimization (`resources/ssa_tier2_parity_test.bg`).
 6. **Measure and commit.** Confirm the win holds and bit-exact outputs; note
    bail rate (`BEAGLE_SSA_LOG_BAIL`).
 
+## State assessment (after loop iters 1-3)
+
+The high-value, tractable tier-2 wins are **landed**: tier-2 SSA regalloc
+(~20-30% on hot loops) and float unboxing (~70-75% on float-domain loops).
+The benchmarks now go through SSA tier-2 with **zero bails** (nbody 16/16 OK,
+series 10/10, btrees 24/24), so the SSA path is already fully applied — there
+is no bail-reduction win to chase on them.
+
+What remains is **high-effort / diminishing-return**, and the autonomous loop
+deliberately did NOT grind these (the "must not break things" bar):
+- **field-CSE** — ~6% estimated on nbody (≈4 of ~30 field accesses redundant:
+  `bi.mass`/`bj.mass` read 3× each). Requires deferring field *reads and
+  writes* through core field-access codegen — a large build with real
+  miscompile risk for a modest win. Needs a deliberate, human-overseen effort
+  + a thorough field-CSE parity test, not an autonomous quick pass.
+- **guarded float speculation** (struct/array-fed loops, e.g. nbody's ~25%
+  ceiling) — needs body-versioning (two copies of a region guarded at entry).
+  Very large; the biggest remaining win but the riskiest build.
+- **non-pointer → unscanned slots** — sound but the GC already tag-checks
+  scanned slots, so the win (smaller scanned frame) is modest and hard to
+  measure cleanly.
+- **regalloc live-range splitting** (spec Phase 7) — general, but a complex,
+  high-risk regalloc change.
+
+Recommendation: these need explicit prioritization/oversight. Pick one
+deliberately rather than grinding autonomously; each is a multi-session build
+held to the hard gates below.
+
 ## Optimization pipeline (status)
 
 - **done** — Tier-2 SSA path (`BEAGLE_SSA_TIER2`): ~20-30% on hot loops via
