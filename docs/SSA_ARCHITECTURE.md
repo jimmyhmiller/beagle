@@ -565,3 +565,28 @@ unless every speculative-float-feeding read's (object,field) is never written
 in the body, OR the read provably precedes all writes to that location). This
 is the real remaining difficulty — an alias-aware hoist-safety check — not just
 loop detection. The probe is the tool to validate any candidate check on nbody.
+
+### Stage 3 — loop-body versioning RULED OUT for field-fed floats (iter 21, decisive)
+
+Built `ir_loops::versionable_float_loop` (conservative, tested) and ran it on
+real tier-2 IR: EVERY field-fed float loop in nbody (4) AND the probe (1) is
+`WriteBeforeRead` — NOT soundly versionable. Root cause is a genuine
+read-after-write FIELD dependency, not conservatism: `p.x = p.x + dt*p.vx`
+reads the just-written `p.vx`; nbody adds `bi`/`bj` aliasing. Sound versioning
+needs to hoist guarded field reads above all writes, but these reads MUST see
+post-write values, so hoisting is semantically wrong. Loop-body versioning
+therefore cannot deliver the field-fed float win.
+
+WHY the 2.44x probe still measured a win: it kept the values in unboxed LOCALS,
+where the read-after-write flows through registers (no field round-trip). Moving
+them to struct FIELDS introduces the dependency that blocks unboxing-via-
+versioning.
+
+CORRECT remaining path = UNBOXED FIELD STORAGE (struct-layout specialization):
+a provably-/guarded-float struct field stores raw f64 inline (not a boxed
+pointer), so reads/writes are direct f64 with no allocation and the read-after-
+write dependency is just a normal memory dep — no hoisting/versioning needed.
+This is a different, large build (struct layout + GC must not scan the f64 field
++ all access sites + guard/box on non-float write). Not started. Loop-body
+versioning (natural_loops 271ee86, flat_ir_loops 2d1deb5, versionable_float_loop)
+is sound reusable analysis but is NOT the path to the field-fed float win.

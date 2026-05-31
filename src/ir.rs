@@ -1537,44 +1537,23 @@ impl Ir {
             Value::Register(r) => float_regs.contains(&r.index),
             _ => crate::float_repr::is_float_const(v),
         };
-        // VALIDATION (BEAGLE_SSA_GUARDED_FLOAT): report flat-IR loops and the
-        // speculative float ops inside each, to confirm the versioning premise
-        // on real code (e.g. nbody's inner loop) before building the codegen.
+        // Guarded-float loop-body versioning was investigated and RULED OUT
+        // for field-fed float loops: `ir_loops::versionable_float_loop` rejects
+        // every nbody/probe loop (WriteBeforeRead — read-after-write field
+        // deps can't be hoisted). See docs/SSA_ARCHITECTURE.md stage 3. The
+        // gated diagnostic that proved this was removed; the tested check
+        // remains in `ir_loops` documenting the conclusion.
         if std::env::var("BEAGLE_SSA_GUARDED_FLOAT").is_ok() {
-            let loops = crate::ir_loops::flat_ir_loops(&self.instructions);
-            for lp in &loops {
-                let (mut total, mut spec) = (0usize, 0usize);
-                let (mut reads, mut writes, mut first_write, mut last_read) =
-                    (0usize, 0usize, usize::MAX, 0usize);
-                for (p, ins) in self.instructions[lp.body.0..=lp.body.1].iter().enumerate() {
-                    let p = p + lp.body.0;
-                    match ins {
-                        Instruction::FloatBinOp { a, b, .. } => {
-                            total += 1;
-                            if !(definitely_float(a) && definitely_float(b)) {
-                                spec += 1;
-                            }
-                        }
-                        Instruction::HeapLoad(..) | Instruction::HeapLoadReg(..) => {
-                            reads += 1;
-                            last_read = p;
-                        }
-                        Instruction::HeapStore(..)
-                        | Instruction::HeapStoreOffset(..)
-                        | Instruction::HeapStoreOffsetReg(..) => {
-                            writes += 1;
-                            first_write = first_write.min(p);
-                        }
-                        _ => {}
-                    }
-                }
-                if spec > 0 {
+            for lp in &crate::ir_loops::flat_ir_loops(&self.instructions) {
+                let verdict = crate::ir_loops::versionable_float_loop(
+                    &self.instructions,
+                    lp,
+                    &definitely_float,
+                );
+                if verdict != crate::ir_loops::Versionable::NoSpeculativeFloat {
                     eprintln!(
-                        "[guarded-float-loop] fn={:?} body={:?} float_binops={} speculative={} \
-                         heap_reads={} heap_writes={} first_write={} last_read={} writes_after_reads={}",
-                        self.debug_name, lp.body, total, spec, reads, writes,
-                        first_write, last_read,
-                        writes == 0 || first_write > last_read
+                        "[guarded-float-loop] fn={:?} body={:?} VERDICT={:?}",
+                        self.debug_name, lp.body, verdict
                     );
                 }
             }

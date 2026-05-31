@@ -58,6 +58,65 @@ fn jump_target(ins: &Instruction) -> Option<usize> {
     }
 }
 
+/// Why a loop is (not) soundly versionable for guarded float unboxing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Versionable {
+    /// Sound to version: has speculative field-fed float ops AND every heap
+    /// read precedes every heap write in the body (so guarded reads can be
+    /// hoisted above all writes — a guard-miss bail re-runs the slow body
+    /// with no doubled side effects, and no hoisted read crosses a write to
+    /// a possibly-aliasing location).
+    Yes,
+    /// No speculative (field-fed) float op — nothing to unbox.
+    NoSpeculativeFloat,
+    /// A heap WRITE precedes a heap READ in the body. Hoisting reads above
+    /// writes would be unsound (the read may alias the written location —
+    /// e.g. `p.x = p.x + dt*p.vx` reads `p.vx` after writing it). Sound
+    /// versioning of this shape needs alias analysis we don't have.
+    WriteBeforeRead { first_write: usize, last_read: usize },
+}
+
+/// Conservative hoist-safety / versionability check (SSA spec stage 3).
+/// `is_float` decides whether a `Value` is *definitely* float (so a
+/// `FloatBinOp` is speculative iff NOT both operands are definitely-float).
+/// Positions in the returned reason are absolute instruction indices.
+pub fn versionable_float_loop(
+    instructions: &[Instruction],
+    lp: &FlatLoop,
+    is_float: &dyn Fn(&crate::ir::Value) -> bool,
+) -> Versionable {
+    let mut has_spec = false;
+    let mut last_read: Option<usize> = None;
+    let mut first_write: Option<usize> = None;
+    for p in lp.body.0..=lp.body.1 {
+        match &instructions[p] {
+            Instruction::FloatBinOp { a, b, .. } => {
+                if !(is_float(a) && is_float(b)) {
+                    has_spec = true;
+                }
+            }
+            Instruction::HeapLoad(..) | Instruction::HeapLoadReg(..) => last_read = Some(p),
+            Instruction::HeapStore(..)
+            | Instruction::HeapStoreOffset(..)
+            | Instruction::HeapStoreOffsetReg(..) => {
+                first_write.get_or_insert(p);
+            }
+            _ => {}
+        }
+    }
+    if !has_spec {
+        return Versionable::NoSpeculativeFloat;
+    }
+    // Hoist-safe iff every read precedes every write (or there are no writes).
+    match (last_read, first_write) {
+        (Some(lr), Some(fw)) if fw <= lr => Versionable::WriteBeforeRead {
+            first_write: fw,
+            last_read: lr,
+        },
+        _ => Versionable::Yes,
+    }
+}
+
 /// Detect loops in the flat IR via backward jumps. One entry per loop
 /// header, merging multiple back-edges to the same header (the furthest
 /// latch becomes the body end). Sorted by header position. Inner loops of
@@ -103,6 +162,89 @@ mod tests {
     }
     fn jump_if(i: usize) -> Instruction {
         Instruction::JumpIf(lbl(i), Condition::Equal, Value::Null, Value::Null)
+    }
+    fn reg(index: usize) -> Value {
+        Value::Register(crate::ir::VirtualRegister {
+            argument: None,
+            index,
+            volatile: false,
+            is_physical: false,
+        })
+    }
+    fn spec_floatbinop() -> Instruction {
+        Instruction::FloatBinOp {
+            op: crate::ir::FloatOp::Add,
+            dst: reg(1),
+            a: reg(2),
+            b: reg(3),
+            feedback_slot: 0,
+            bail_table: 0,
+        }
+    }
+
+    #[test]
+    fn versionable_reads_before_writes() {
+        let prog = vec![
+            Instruction::Label(lbl(0)),
+            spec_floatbinop(),
+            Instruction::HeapLoad(reg(4), reg(5), 0),
+            Instruction::HeapStore(reg(6), reg(7)),
+            Instruction::Jump(lbl(0)),
+        ];
+        let lp = FlatLoop {
+            header_label: 0,
+            header_pos: 0,
+            latch_pos: 4,
+            body: (0, 4),
+        };
+        assert_eq!(
+            versionable_float_loop(&prog, &lp, &|_| false),
+            Versionable::Yes
+        );
+    }
+
+    #[test]
+    fn not_versionable_write_before_read() {
+        // The nbody/probe shape: a write precedes a later read (read-after-
+        // write through a field) — hoisting the read would be unsound.
+        let prog = vec![
+            Instruction::Label(lbl(0)),
+            spec_floatbinop(),
+            Instruction::HeapStore(reg(6), reg(7)), // write first
+            Instruction::HeapLoad(reg(4), reg(5), 0), // read after
+            Instruction::Jump(lbl(0)),
+        ];
+        let lp = FlatLoop {
+            header_label: 0,
+            header_pos: 0,
+            latch_pos: 4,
+            body: (0, 4),
+        };
+        assert!(matches!(
+            versionable_float_loop(&prog, &lp, &|_| false),
+            Versionable::WriteBeforeRead { .. }
+        ));
+    }
+
+    #[test]
+    fn no_speculative_float_op() {
+        // FloatBinOp whose operands are definitely-float (is_float == true) is
+        // NOT speculative → nothing to unbox.
+        let prog = vec![
+            Instruction::Label(lbl(0)),
+            spec_floatbinop(),
+            Instruction::Jump(lbl(0)),
+        ];
+        let lp = FlatLoop {
+            header_label: 0,
+            header_pos: 0,
+            latch_pos: 2,
+            body: (0, 2),
+        };
+        assert_eq!(
+            versionable_float_loop(&prog, &lp, &|_| true),
+            Versionable::NoSpeculativeFloat
+        );
     }
 
     #[test]
