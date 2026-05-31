@@ -174,6 +174,61 @@ pub fn analyze_float_types(instructions: &[Instruction]) -> FloatTypes {
     }
 }
 
+/// Opportunity stats for IR-level guarded-float *region versioning* (SSA
+/// spec stage 3). Counts deferred `FloatBinOp`s that are *speculative* (not
+/// provably float — operands come from field `HeapLoad`s etc.) and, among
+/// those, how many are *chained* (an operand is another speculative op's
+/// result). Chained speculative ops are exactly the box→unbox round-trips
+/// that region versioning eliminates: guard the region's leaves once, run
+/// it unboxed, box only the escapes. Returns
+/// `(total_float_binops, speculative, chained_speculative)`.
+///
+/// Behaviour-neutral analysis — used only to validate the opportunity and
+/// (later) to drive the versioning codegen. A high `chained` count on a
+/// benchmark means the prize is reachable at this layer.
+pub fn speculative_chain_stats(
+    instructions: &[Instruction],
+    types: &FloatTypes,
+) -> (usize, usize, usize) {
+    let def_float = |v: &Value| match v {
+        Value::Register(r) => types.regs.contains(&r.index),
+        _ => is_float_const(v),
+    };
+    let is_speculative = |a: &Value, b: &Value| !(def_float(a) && def_float(b));
+
+    // Registers defined by a speculative FloatBinOp.
+    let mut spec_dsts: HashSet<usize> = HashSet::new();
+    let mut total = 0usize;
+    let mut speculative = 0usize;
+    for ins in instructions {
+        if let Instruction::FloatBinOp { dst, a, b, .. } = ins {
+            total += 1;
+            if is_speculative(a, b) {
+                speculative += 1;
+                if let Value::Register(r) = dst {
+                    spec_dsts.insert(r.index);
+                }
+            }
+        }
+    }
+
+    // Chained: a speculative op fed by another speculative op's result.
+    let mut chained = 0usize;
+    for ins in instructions {
+        if let Instruction::FloatBinOp { a, b, .. } = ins {
+            if is_speculative(a, b) {
+                let fed_by_spec = [a, b]
+                    .iter()
+                    .any(|v| matches!(v, Value::Register(r) if spec_dsts.contains(&r.index)));
+                if fed_by_spec {
+                    chained += 1;
+                }
+            }
+        }
+    }
+    (total, speculative, chained)
+}
+
 /// Local-slot indices referenced anywhere in `inst`, recovered from its
 /// rendered form (`Value::Local(n)` always prints as `localN`). Used only
 /// by the conservative safety check below, so the string scan is fine.

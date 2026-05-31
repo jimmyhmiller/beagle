@@ -2519,6 +2519,23 @@ impl Ir {
             .any(|i| matches!(i, Instruction::FloatBinOp { .. }))
         {
             let types = crate::float_repr::analyze_float_types(&self.instructions);
+            // Guarded-float region-versioning opportunity (SSA spec stage 3).
+            // Gated, behaviour-neutral: just reports how many speculative
+            // (field-fed) FloatBinOps chain — the box/unbox round-trips that
+            // region versioning would eliminate. Foundation for the codegen.
+            if std::env::var("BEAGLE_SSA_GUARDED_FLOAT").is_ok() {
+                let (total, spec, chained) =
+                    crate::float_repr::speculative_chain_stats(&self.instructions, &types);
+                if spec > 0 {
+                    eprintln!(
+                        "[guarded-float] {} float_binops={} speculative={} chained={}",
+                        self.debug_name.as_deref().unwrap_or("<anon>"),
+                        total,
+                        spec,
+                        chained
+                    );
+                }
+            }
             self.float_locals = types.locals;
             self.float_regs = types.regs;
             // Safety gate: if any float local is touched by a form the
