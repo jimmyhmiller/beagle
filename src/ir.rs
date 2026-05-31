@@ -1537,6 +1537,48 @@ impl Ir {
             Value::Register(r) => float_regs.contains(&r.index),
             _ => crate::float_repr::is_float_const(v),
         };
+        // VALIDATION (BEAGLE_SSA_GUARDED_FLOAT): report flat-IR loops and the
+        // speculative float ops inside each, to confirm the versioning premise
+        // on real code (e.g. nbody's inner loop) before building the codegen.
+        if std::env::var("BEAGLE_SSA_GUARDED_FLOAT").is_ok() {
+            let loops = crate::ir_loops::flat_ir_loops(&self.instructions);
+            for lp in &loops {
+                let (mut total, mut spec) = (0usize, 0usize);
+                let (mut reads, mut writes, mut first_write, mut last_read) =
+                    (0usize, 0usize, usize::MAX, 0usize);
+                for (p, ins) in self.instructions[lp.body.0..=lp.body.1].iter().enumerate() {
+                    let p = p + lp.body.0;
+                    match ins {
+                        Instruction::FloatBinOp { a, b, .. } => {
+                            total += 1;
+                            if !(definitely_float(a) && definitely_float(b)) {
+                                spec += 1;
+                            }
+                        }
+                        Instruction::HeapLoad(..) | Instruction::HeapLoadReg(..) => {
+                            reads += 1;
+                            last_read = p;
+                        }
+                        Instruction::HeapStore(..)
+                        | Instruction::HeapStoreOffset(..)
+                        | Instruction::HeapStoreOffsetReg(..) => {
+                            writes += 1;
+                            first_write = first_write.min(p);
+                        }
+                        _ => {}
+                    }
+                }
+                if spec > 0 {
+                    eprintln!(
+                        "[guarded-float-loop] fn={:?} body={:?} float_binops={} speculative={} \
+                         heap_reads={} heap_writes={} first_write={} last_read={} writes_after_reads={}",
+                        self.debug_name, lp.body, total, spec, reads, writes,
+                        first_write, last_read,
+                        writes == 0 || first_write > last_read
+                    );
+                }
+            }
+        }
         let old = std::mem::take(&mut self.instructions);
         self.label_locations.clear();
         let mut fp: std::collections::HashSet<usize> = std::collections::HashSet::new();

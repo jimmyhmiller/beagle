@@ -539,3 +539,29 @@ FloatBinOps, all field writes after all field reads); (c) clone body → fast
 (current); entry branch selects; (d) verify bit-identical + measure.
 NOTE: the CFG `natural_loops` util (commit 271ee86) stays as reusable infra
 (LICM/unrolling), but this flat-IR path doesn't depend on it.
+
+### Stage 3 — premise VALIDATED on real nbody, soundness model revised (iter 20)
+
+Wired flat_ir_loops + a heap read/write probe into unbox_floats (gated
+BEAGLE_SSA_GUARDED_FLOAT, behaviour-neutral). Run on real tier-2 nbody/advance:
+- flat_ir_loops correctly finds the (nested) loops: outer body=(23,1595),
+  inners (47,1161)/(161,1139)/(1166,1573); the innermost has 6 speculative
+  FloatBinOps, the bigger ones 28-34. So flat-IR loop detection WORKS on real
+  code — premise confirmed.
+- BUT `writes_after_reads=false` on ALL of them: first_write(591) < last_read
+  (1133+). Field writes INTERLEAVE with reads (`bj.vx = bj.vx + ...` reads
+  bj.vx after bi.vx was already written). So the simple bail model — "guard all
+  field reads at body top, bail before any write" — is UNSOUND here: a late
+  guard-miss bail would double the earlier writes.
+
+REVISED soundness model for the versioning codegen: the FAST version must HOIST
+every guarded field read above every field WRITE in the body (read all inputs
+first, guard, then compute+write), AND this is only sound if no hoisted read
+reads a location written earlier in the same iteration — i.e. needs alias
+reasoning (two `object.field` accesses alias iff same object + same field). For
+nbody each velocity field is read-before-its-single-write per j-iteration, so
+hoisting is sound there, but the CHECK must prove it (conservatively: bail
+unless every speculative-float-feeding read's (object,field) is never written
+in the body, OR the read provably precedes all writes to that location). This
+is the real remaining difficulty — an alias-aware hoist-safety check — not just
+loop detection. The probe is the tool to validate any candidate check on nbody.
