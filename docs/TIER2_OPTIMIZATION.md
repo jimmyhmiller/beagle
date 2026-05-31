@@ -266,3 +266,27 @@ iter 16 — perf hunt is now COMPREHENSIVE; broad win landed, only big-build lev
   loop-body versioning — large, narrow, high-risk; no small sound slice exists
   (confirmed across iters 7-11). This needs a dedicated multi-session build, not
   autonomous 60s grinding (per the no-whole-program / oversight memory).
+
+## Perf session conclusion (iter 17) — substantially complete
+
+The autonomous perf loop is being wound down: the broad win is landed and the
+hunt is exhaustive.
+- LANDED: SSA tier-2 default-on (3.46x float / 20% int / 23% btrees, no
+  regressions, 367/367, opt-out BEAGLE_SSA_TIER2=0). This was the high-ROI move
+  — activating already-built+tested work.
+- HUNT COMPLETE (iters 12-16): no cheap or medium wins remain. Allocator fast
+  path tight; protocol dispatch IC irreducible for sound dynamic dispatch
+  (devirt/inline redefinition-gated); GC young gen ~160MB; all SSA opt passes
+  on; strings cons/builder-optimized; field-write float boxes must be heap
+  (escape into heap structs); in-place box mutation unsound (float boxes are
+  shared/immutable).
+- REMAINING LEVER (one, big): field-fed float unboxing (nbody-shape struct-
+  field float loops) needs loop-body VERSIONING — loop detection + body
+  duplication + dual-representation locals (FP-slot fast / boxed slow) + leaf
+  guards + merge. No sound incremental slice (confirmed iters 7-11). It is a
+  dedicated multi-session build needing explicit prioritization, NOT autonomous
+  60s grinding (per the no-whole-program / oversight memory). Also narrow
+  (only struct-fed float loops; pure-float code already wins ~3.5x via SSA
+  default). Design fully written in docs/SSA_ARCHITECTURE.md stage 3.
+To resume the float win later: it's a planned build, not a hunt — start from the
+stage-3 design with a dedicated session.
