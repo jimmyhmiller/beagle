@@ -1,0 +1,86 @@
+namespace bench_ops_probe
+
+use beagle.core as core
+use beagle.runtime as runtime
+
+struct Shape {
+    kind
+    size
+}
+
+protocol Area {
+    fn area(self)
+}
+
+extend Shape with Area {
+    fn area(self) {
+        self.size * self.size
+    }
+}
+
+// Protocol method dispatch in a loop.
+fn bench_protocol(n) {
+    let s = Shape { kind: 1, size: 3 }
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        acc = acc + area(s)
+        i = i + 1
+    }
+    acc
+}
+
+// Persistent vector index access in a loop.
+fn bench_vector_get(n) {
+    let v = [10, 20, 30, 40, 50]
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        acc = acc + v[2]
+        i = i + 1
+    }
+    acc
+}
+
+// Persistent map lookup in a loop.
+fn bench_map_get(n) {
+    let m = {:a 1 :b 2 :c 3}
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        acc = acc + m[:b]
+        i = i + 1
+    }
+    acc
+}
+
+// Baseline: plain integer arithmetic loop.
+fn bench_baseline(n) {
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        acc = acc + 5
+        i = i + 1
+    }
+    acc
+}
+
+fn measure(label, f, n) {
+    let start = core/time-now()
+    let r = f(n)
+    let elapsed = core/time-now() - start
+    println("${label}: (${elapsed} ns) r=${r}")
+    elapsed
+}
+
+fn main() {
+    runtime/specialize-all()
+    measure("baseline ", bench_baseline, 2000000)
+    measure("protocol ", bench_protocol, 2000000)
+    measure("vector   ", bench_vector_get, 2000000)
+    measure("map      ", bench_map_get, 2000000)
+    measure("baseline2", bench_baseline, 2000000)
+    measure("protocol2", bench_protocol, 2000000)
+    measure("vector2  ", bench_vector_get, 2000000)
+    measure("map2     ", bench_map_get, 2000000)
+}
