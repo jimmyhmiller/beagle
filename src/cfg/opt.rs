@@ -42,7 +42,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::cfg::{BlockId, CfgFunction, Op, SlotId, Terminator, VReg};
+use crate::cfg::{BlockId, CfgFunction, InlineBranchOp, Op, SlotId, Terminator, VReg};
 
 /// Run all Phase 3 passes to fixpoint. Wired into `build_cfg` after
 /// mem2reg.
@@ -53,9 +53,13 @@ pub fn optimize(f: &mut CfgFunction) {
     let no_dead_slot_stores = std::env::var("BEAGLE_SSA_NO_DEAD_SLOT_STORES").is_ok();
     let no_dce = std::env::var("BEAGLE_SSA_NO_DCE").is_ok();
     let no_licm = std::env::var("BEAGLE_SSA_NO_LICM").is_ok();
+    let no_guards = std::env::var("BEAGLE_SSA_NO_GUARD_ELIM").is_ok();
     let mut changed = true;
     while changed {
         changed = false;
+        if !no_guards {
+            changed |= eliminate_redundant_guards(f);
+        }
         if !no_trivial {
             changed |= eliminate_trivial_block_params(f);
         }
@@ -444,6 +448,234 @@ pub fn coalesce_copies(f: &mut CfgFunction) -> bool {
     removed_any
 }
 
+// =========================================================================
+// Redundant guard elimination (typed-SSA cleanup)
+// =========================================================================
+
+/// Remove `GuardInt`/`GuardFloat` checks whose input is *already* known to be
+/// an int / float, replacing the two-successor `InlineBranch` with a plain
+/// `Jump` to its fall-through.
+///
+/// Beagle speculates with guard-and-inline-bail (no deopt), so a monomorphic
+/// op like `a + b` emits `guard_int a; guard_int b; add` — and every later use
+/// of `a` re-guards it. Once a value has passed a guard (or is produced by an
+/// int/float-typed op or constant), all *dominated* re-guards are provably
+/// redundant: the guard can never bail, so it becomes an unconditional jump and
+/// its bail block goes dead (removed by later DCE / unreachable cleanup).
+///
+/// **Soundness.** A guard's `dst` equals its `src` on the (always-taken)
+/// fall-through, so we rename `dst → src` function-wide and drop the guard. The
+/// "known int/float" facts are def-based and therefore hold at every use by SSA
+/// dominance (a def dominates all its uses): constants, int/float arithmetic
+/// results, and the `dst` of any guard are typed; `Move` and block params
+/// propagate to a fixpoint. We never *introduce* a type assumption — we only
+/// drop a check that a dominating fact already established, so a value that
+/// could be non-int still hits its first guard.
+pub fn eliminate_redundant_guards(f: &mut CfgFunction) -> bool {
+    let (known_int, known_float) = compute_known_types(f);
+
+    let mut rename: HashMap<VReg, VReg> = HashMap::new();
+    let mut new_terms: Vec<(usize, Terminator)> = Vec::new();
+    for (i, block) in f.blocks.iter().enumerate() {
+        if let Terminator::InlineBranch {
+            op,
+            fall_through,
+            fall_args,
+            ..
+        } = &block.terminator
+        {
+            let redundant = match op {
+                InlineBranchOp::GuardInt { dst, src } if known_int.contains(src) => {
+                    Some((*dst, *src))
+                }
+                InlineBranchOp::GuardFloat { dst, src } if known_float.contains(src) => {
+                    Some((*dst, *src))
+                }
+                _ => None,
+            };
+            if let Some((dst, src)) = redundant {
+                rename.insert(dst, src);
+                new_terms.push((
+                    i,
+                    Terminator::Jump {
+                        target: *fall_through,
+                        args: fall_args.clone(),
+                    },
+                ));
+            }
+        }
+    }
+    if new_terms.is_empty() {
+        return false;
+    }
+    for (i, term) in new_terms {
+        f.blocks[i].terminator = term;
+    }
+    let resolved = resolve_transitive_rename(&rename);
+    let full: HashMap<VReg, VReg> = rename
+        .into_iter()
+        .map(|(k, v)| (k, *resolved.get(&k).unwrap_or(&v)))
+        .collect();
+    apply_rename_function_wide(f, &full);
+    crate::cfg::builder::rebuild_predecessors(f);
+    true
+}
+
+/// Def-based int/float typing of every VReg, to a fixpoint over `Move` and
+/// block-param propagation. A VReg is "int" if it can only ever hold a tagged
+/// int at runtime, "float" if it can only ever hold a tagged/boxed float.
+fn compute_known_types(f: &CfgFunction) -> (HashSet<VReg>, HashSet<VReg>) {
+    let mut known_int: HashSet<VReg> = HashSet::new();
+    let mut known_float: HashSet<VReg> = HashSet::new();
+
+    // Seed from type-determined definitions.
+    for block in &f.blocks {
+        for op in &block.body {
+            match op {
+                Op::ConstTaggedInt { dst, .. } | Op::AddInt { dst, .. } => {
+                    known_int.insert(*dst);
+                }
+                Op::Compare { dst, .. } | Op::CompareFloat { dst, .. } => {
+                    // A comparison yields a tagged boolean, which the int guard
+                    // accepts as a small tagged value; conservatively NOT marked
+                    // (bools are not ints for guard purposes) — left out.
+                    let _ = dst;
+                }
+                Op::AddFloat { dst, .. }
+                | Op::SubFloat { dst, .. }
+                | Op::MulFloat { dst, .. }
+                | Op::DivFloat { dst, .. }
+                | Op::IntToFloat { dst, .. }
+                | Op::FRoundToZero { dst, .. } => {
+                    known_float.insert(*dst);
+                }
+                _ => {}
+            }
+        }
+        // A guard's dst (and the checked-arithmetic dsts) are typed on the
+        // fall-through path, where they're defined.
+        if let Terminator::InlineBranch { op, .. } = &block.terminator {
+            match op {
+                InlineBranchOp::GuardInt { dst, .. }
+                | InlineBranchOp::SubChecked { dst, .. }
+                | InlineBranchOp::MulChecked { dst, .. }
+                | InlineBranchOp::DivChecked { dst, .. }
+                | InlineBranchOp::ModuloChecked { dst, .. }
+                | InlineBranchOp::ShiftLeftChecked { dst, .. }
+                | InlineBranchOp::ShiftRightChecked { dst, .. }
+                | InlineBranchOp::ShiftRightZeroChecked { dst, .. }
+                | InlineBranchOp::ShiftRightImmChecked { dst, .. } => {
+                    known_int.insert(*dst);
+                }
+                InlineBranchOp::GuardFloat { dst, .. } => {
+                    known_float.insert(*dst);
+                }
+                InlineBranchOp::InlineBumpAllocate { .. } => {}
+            }
+        }
+    }
+
+    // Propagate through Moves and block params to a fixpoint.
+    let preds = predecessor_map(f);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in &f.blocks {
+            for op in &block.body {
+                if let Op::Move { dst, src } = op {
+                    if known_int.contains(src) && known_int.insert(*dst) {
+                        changed = true;
+                    }
+                    if known_float.contains(src) && known_float.insert(*dst) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        // A block param is int/float iff every predecessor passes an int/float
+        // at that position.
+        for (bi, block) in f.blocks.iter().enumerate() {
+            let bid = BlockId(bi as u32);
+            if block.params.is_empty() {
+                continue;
+            }
+            let Some(pred_list) = preds.get(&bid) else {
+                continue;
+            };
+            if pred_list.is_empty() {
+                continue;
+            }
+            for (idx, &param) in block.params.iter().enumerate() {
+                let all_int = pred_list
+                    .iter()
+                    .all(|&p| incoming_arg(f, p, bid, idx).is_some_and(|v| known_int.contains(&v)));
+                if all_int && known_int.insert(param) {
+                    changed = true;
+                }
+                let all_float = pred_list.iter().all(|&p| {
+                    incoming_arg(f, p, bid, idx).is_some_and(|v| known_float.contains(&v))
+                });
+                if all_float && known_float.insert(param) {
+                    changed = true;
+                }
+            }
+        }
+    }
+    (known_int, known_float)
+}
+
+/// Predecessor map (block -> its predecessor blocks), from terminators.
+fn predecessor_map(f: &CfgFunction) -> HashMap<BlockId, Vec<BlockId>> {
+    let mut m: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+    for (i, block) in f.blocks.iter().enumerate() {
+        let from = BlockId(i as u32);
+        for succ in block.terminator.successors() {
+            m.entry(succ).or_default().push(from);
+        }
+    }
+    m
+}
+
+/// The arg `pred` passes to `succ`'s block param at position `idx`.
+fn incoming_arg(f: &CfgFunction, pred: BlockId, succ: BlockId, idx: usize) -> Option<VReg> {
+    match &f.blocks[pred.0 as usize].terminator {
+        Terminator::Jump { target, args } if *target == succ => args.get(idx).copied(),
+        Terminator::Branch {
+            t_target,
+            t_args,
+            f_target,
+            f_args,
+            ..
+        } => {
+            // A single edge to `succ`; if both go to succ they must agree by
+            // CFG construction, take the true side first.
+            if *t_target == succ {
+                t_args.get(idx).copied()
+            } else if *f_target == succ {
+                f_args.get(idx).copied()
+            } else {
+                None
+            }
+        }
+        Terminator::InlineBranch {
+            fall_through,
+            fall_args,
+            bail,
+            bail_args,
+            ..
+        } => {
+            if *fall_through == succ {
+                fall_args.get(idx).copied()
+            } else if *bail == succ {
+                bail_args.get(idx).copied()
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 fn resolve_transitive_rename(raw: &HashMap<VReg, VReg>) -> HashMap<VReg, VReg> {
     let mut resolved: HashMap<VReg, VReg> = HashMap::new();
     for (&start, _) in raw {
@@ -655,8 +887,94 @@ fn remove_terminator_arg(term: &mut Terminator, succ: BlockId, idx: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cfg::{CfgFunction, Op, RegClass, SlotId, Terminator};
+    use crate::cfg::{CfgFunction, InlineBranchOp, Op, RegClass, SlotId, Terminator};
     use crate::ir::Condition;
+
+    #[test]
+    fn redundant_guard_on_known_int_is_removed() {
+        // A: x=1; y=2; t = x + y;  guard_int(g, t) -> B else Cbail
+        // B: ret g
+        // t is an AddInt result => known int => the guard is redundant.
+        let mut f = CfgFunction::new(Some("guard".into()), 0);
+        let a = f.new_block();
+        let b = f.new_block();
+        let cbail = f.new_block();
+        f.entry = a;
+
+        let x = f.new_vreg(RegClass::Gp);
+        let y = f.new_vreg(RegClass::Gp);
+        let t = f.new_vreg(RegClass::Gp);
+        let g = f.new_vreg(RegClass::Gp);
+
+        f.block_mut(a)
+            .body
+            .push(Op::ConstTaggedInt { dst: x, value: 1 });
+        f.block_mut(a)
+            .body
+            .push(Op::ConstTaggedInt { dst: y, value: 2 });
+        f.block_mut(a).body.push(Op::AddInt {
+            dst: t,
+            lhs: x,
+            rhs: y,
+        });
+        f.block_mut(a).terminator = Terminator::InlineBranch {
+            op: InlineBranchOp::GuardInt { dst: g, src: t },
+            fall_through: b,
+            fall_args: vec![],
+            bail: cbail,
+            bail_args: vec![],
+        };
+        f.block_mut(b).terminator = Terminator::Ret { value: g };
+        f.block_mut(cbail).terminator = Terminator::Unreachable;
+        f.block_mut(b).predecessors = vec![a];
+        f.block_mut(cbail).predecessors = vec![a];
+
+        let changed = eliminate_redundant_guards(&mut f);
+        assert!(changed, "guard on a known int should be eliminated");
+        // The guard terminator becomes a plain Jump to the fall-through.
+        assert!(
+            matches!(&f.block(a).terminator, Terminator::Jump { target, .. } if *target == b),
+            "guard replaced by Jump to fall-through, got {:?}",
+            f.block(a).terminator
+        );
+        // g was renamed to t (the guard's input).
+        assert!(
+            matches!(&f.block(b).terminator, Terminator::Ret { value } if *value == t),
+            "use of guard dst renamed to its src"
+        );
+    }
+
+    #[test]
+    fn guard_on_unknown_value_is_kept() {
+        // Guard on a SlotLoad result (unknown type) must NOT be eliminated.
+        let mut f = CfgFunction::new(Some("guard_keep".into()), 1);
+        let a = f.new_block();
+        let b = f.new_block();
+        let cbail = f.new_block();
+        f.entry = a;
+        let v = f.new_vreg(RegClass::Gp);
+        let g = f.new_vreg(RegClass::Gp);
+        f.block_mut(a).body.push(Op::SlotLoad {
+            dst: v,
+            slot: SlotId(0),
+        });
+        f.block_mut(a).terminator = Terminator::InlineBranch {
+            op: InlineBranchOp::GuardInt { dst: g, src: v },
+            fall_through: b,
+            fall_args: vec![],
+            bail: cbail,
+            bail_args: vec![],
+        };
+        f.block_mut(b).terminator = Terminator::Ret { value: g };
+        f.block_mut(cbail).terminator = Terminator::Unreachable;
+        f.block_mut(b).predecessors = vec![a];
+        f.block_mut(cbail).predecessors = vec![a];
+
+        assert!(
+            !eliminate_redundant_guards(&mut f),
+            "guard on an untyped SlotLoad must be kept"
+        );
+    }
 
     /// `c = const; v = Move c; ret v`: coalesce removes the Move,
     /// folds v → c. Uses a non-entry-param Move src so the "preserve

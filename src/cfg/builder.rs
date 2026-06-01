@@ -1583,7 +1583,7 @@ fn extract_call_target(
 
 /// Recompute every block's `predecessors` list from the terminator graph.
 /// Called after fill_block has populated all terminators.
-fn rebuild_predecessors(f: &mut CfgFunction) {
+pub(crate) fn rebuild_predecessors(f: &mut CfgFunction) {
     let n = f.blocks.len();
     let mut new_preds: Vec<Vec<BlockId>> = vec![Vec::new(); n];
     for (idx, block) in f.blocks.iter().enumerate() {
