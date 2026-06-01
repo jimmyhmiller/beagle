@@ -2543,6 +2543,22 @@ impl Ir {
             .iter()
             .any(|i| matches!(i, Instruction::FloatBinOp { .. }))
         {
+            // Float-parameter-versioning planner (path (a), step 1: analysis
+            // only — behaviour-neutral). Gated; reports candidates so the
+            // codegen step can be validated against the analysis.
+            if std::env::var("BEAGLE_FLOAT_PARAM_VERSION").is_ok() {
+                if let Some(plan) = crate::float_repr::plan_float_param_version(&self.instructions)
+                {
+                    let mut fl: Vec<_> = plan.float_types.locals.iter().copied().collect();
+                    fl.sort();
+                    eprintln!(
+                        "[float-param-version] {} guard_params={:?} -> float_locals={:?}",
+                        self.debug_name.as_deref().unwrap_or("<anon>"),
+                        plan.guard_params,
+                        fl
+                    );
+                }
+            }
             let types = crate::float_repr::analyze_float_types(&self.instructions);
             // Guarded-float region-versioning opportunity (SSA spec stage 3).
             // Gated, behaviour-neutral: just reports how many speculative
