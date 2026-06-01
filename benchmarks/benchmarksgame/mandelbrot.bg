@@ -38,7 +38,7 @@ fn draw_row(n, inv_n, ci, x, byte_acc, bit_num) {
         }
     } else {
         let cr = to-float(x) * inv_n - 1.5
-        let escape = mandel(cr, ci, 0.0, 0.0, 0.0, 0.0, 0)
+        let escape = mandel(cr, ci)
 
         let new_byte_acc = (byte_acc << 1) | escape
         let new_bit_num = bit_num + 1
@@ -52,18 +52,30 @@ fn draw_row(n, inv_n, ci, x, byte_acc, bit_num) {
     }
 }
 
-fn mandel(cr, ci, zr, zi, tr, ti, iter) {
-    if tr + ti > LIMIT_SQ {
-        0
-    } else if iter >= MAX_ITER {
-        1
-    } else {
+fn mandel(cr, ci) {
+    let mut zr = 0.0
+    let mut zi = 0.0
+    let mut tr = 0.0
+    let mut ti = 0.0
+    let mut iter = 0
+    let mut result = 1
+    while true {
+        if tr + ti > LIMIT_SQ {
+            result = 0
+            break()
+        }
+        if iter >= MAX_ITER {
+            break()
+        }
         let new_zi = 2.0 * zr * zi + ci
         let new_zr = tr - ti + cr
-        let new_tr = new_zr * new_zr
-        let new_ti = new_zi * new_zi
-        mandel(cr, ci, new_zr, new_zi, new_tr, new_ti, iter + 1)
+        zr = new_zr
+        zi = new_zi
+        tr = new_zr * new_zr
+        ti = new_zi * new_zi
+        iter = iter + 1
     }
+    result
 }
 
 fn main(args) {
