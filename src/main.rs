@@ -78,6 +78,7 @@ mod code_memory;
 pub mod common;
 mod compiler;
 pub mod dump;
+pub mod escape;
 mod eternal;
 pub mod feedback;
 pub mod float_repr;

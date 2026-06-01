@@ -73,7 +73,10 @@ pub enum Versionable {
     /// writes would be unsound (the read may alias the written location —
     /// e.g. `p.x = p.x + dt*p.vx` reads `p.vx` after writing it). Sound
     /// versioning of this shape needs alias analysis we don't have.
-    WriteBeforeRead { first_write: usize, last_read: usize },
+    WriteBeforeRead {
+        first_write: usize,
+        last_read: usize,
+    },
 }
 
 /// Conservative hoist-safety / versionability check (SSA spec stage 3).
