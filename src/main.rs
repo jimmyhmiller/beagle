@@ -83,6 +83,7 @@ mod eternal;
 pub mod feedback;
 pub mod float_repr;
 mod gc;
+pub mod inline_closures;
 pub mod ir;
 pub mod ir_loops;
 pub mod lir;

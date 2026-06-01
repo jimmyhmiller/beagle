@@ -1206,6 +1206,14 @@ impl AstCompiler<'_> {
         // field locals, eliminating the heap allocation. Sound (no whole-
         // program assumption, no GC object). ON by default; BEAGLE_SCALAR_REPL=0
         // opts out. Runs before the other AST passes so they see the rewrite.
+        // Inline non-escaping single-expression local closures (removes the
+        // per-creation closure allocation + indirect call). Runs before
+        // scalar replacement so the rewritten code is seen by it. ON by
+        // default; BEAGLE_INLINE_CLOSURES=0 opts out.
+        if crate::inline_closures::inline_enabled() {
+            crate::inline_closures::inline_in_ast(&mut self.ast);
+        }
+
         if crate::escape::scalar_repl_enabled() {
             crate::escape::scalar_replace_in_ast(&mut self.ast);
         }

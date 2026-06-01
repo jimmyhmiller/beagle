@@ -1,0 +1,96 @@
+namespace inline_closure_test
+
+// Exercises the non-escaping closure inliner (src/inline_closures.rs). The
+// inlinable closures live in regular `fn`s (the path the inliner runs on);
+// the test blocks assert the results are correct. Results must be identical
+// whether or not inlining fires (BEAGLE_INLINE_CLOSURES=0 disables it).
+
+// Basic: non-escaping single-expr closure, literal arg — inlines.
+fn basic_literal() {
+    let f = fn(x) { x + 10 }
+    f(5)
+}
+
+// Captures a local by value; capture not mutated — inlines. Multiple calls.
+fn captured_local() {
+    let base = 100
+    let g = fn(x) { x + base }
+    g(1) + g(2)
+}
+
+// Multiple params, variable args — inlines.
+fn multi_param() {
+    let a = 3
+    let b = 4
+    let h = fn(x, y) { x * y + a - b }
+    h(a, b)
+}
+
+// Several call sites — each inlines correctly.
+fn many_call_sites() {
+    let k = fn(x) { x * x }
+    k(2) + k(3) + k(4)
+}
+
+// SOUNDNESS: capture mutated between creation and call. The closure captures
+// `c` BY VALUE at creation (= 1), so both calls must see 1 even though `c` is
+// later reassigned. The inliner must BAIL here, preserving correctness.
+fn capture_by_value() {
+    let mut c = 1
+    let snap = fn(x) { x + c }
+    let first = snap(0)
+    c = 99
+    let second = snap(0)
+    first + second
+}
+
+// Closure inside a loop with a fresh capture each iteration — inlines.
+fn loop_fresh_capture() {
+    let mut i = 0
+    let mut acc = 0
+    while i < 5 {
+        let base = i
+        let add_base = fn(x) { x + base }
+        acc = acc + add_base(1)
+        i = i + 1
+    }
+    acc
+}
+
+// Escaping closure passed to a higher-order function must still work (bails).
+fn apply_twice(f, v) {
+    f(f(v))
+}
+fn escaping_ok() {
+    let inc = fn(x) { x + 1 }
+    apply_twice(inc, 10)
+}
+
+test "inline basic literal arg" {
+    assert-eq!(basic_literal(), 15)
+}
+
+test "inline captured local multiple calls" {
+    assert-eq!(captured_local(), 203)
+}
+
+test "inline multi param" {
+    assert-eq!(multi_param(), 11)
+}
+
+test "inline many call sites" {
+    assert-eq!(many_call_sites(), 29)
+}
+
+test "capture by value preserved" {
+    assert-eq!(capture_by_value(), 2)
+}
+
+test "inline in loop with fresh capture" {
+    // sum over i in 0..4 of (1 + i) = 5 + (0+1+2+3+4) = 15
+    assert-eq!(loop_fresh_capture(), 15)
+}
+
+test "escaping closure still works" {
+    assert-eq!(escaping_ok(), 12)
+}
