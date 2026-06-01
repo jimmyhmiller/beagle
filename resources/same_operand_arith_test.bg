@@ -1,0 +1,34 @@
+namespace same_operand_arith_test
+
+// Regression: load-CSE collapses both reloads of `x` to one VReg, so the
+// checked-arithmetic lowerings see `lhs == rhs` (same physical register).
+// The tagged-int untag must only fire once per shared register, else `x * x`
+// (and friends) double-untag and return 0.
+
+fn sq(x) { x * x }
+fn diff(x) { x - x }
+fn quot(x) { x / x }
+fn rem(x) { x % x }
+fn shl(x) { x << x }
+fn shr(x) { x >> x }
+
+fn main() {
+    println(sq(5))
+    println(sq(7))
+    println(sq(12))
+    println(diff(99))
+    println(quot(42))
+    println(rem(42))
+    println(shl(3))
+    println(shr(2))
+}
+
+// @beagle.core.snapshot
+// 25
+// 49
+// 144
+// 0
+// 1
+// 0
+// 24
+// 0

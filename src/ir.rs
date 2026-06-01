@@ -2955,15 +2955,23 @@ impl Ir {
                     backend.guard_integer(guard_temp, b, error_label);
                     backend.free_temporary_register(guard_temp);
 
+                    // When `a` and `b` are the same physical register (e.g.
+                    // `x - x` after load-CSE collapses both reloads to one
+                    // VReg), untag and re-tag it exactly once — a second
+                    // shift would double-untag the shared register.
+                    let ab_same = a == b;
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
-                    backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    if !ab_same {
+                        backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    }
                     backend.sub(dest, a, b);
                     backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
-                    // Only re-tag operands if they're different from dest
+                    // Only re-tag operands if they're different from dest (and
+                    // re-tag a shared a/b register only once).
                     if a != dest {
                         backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
                     }
-                    if b != dest {
+                    if b != dest && !ab_same {
                         backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
                     }
                     self.store_spill(dest, dest_spill, backend);
@@ -2991,16 +2999,24 @@ impl Ir {
                     backend.guard_integer(guard_temp, b, error_label);
                     backend.free_temporary_register(guard_temp);
 
+                    // When `a` and `b` are the same physical register (e.g.
+                    // `x * x` after load-CSE collapses both reloads to one
+                    // VReg), untag and re-tag it exactly once — a second
+                    // shift would double-untag the shared register and yield 0.
+                    let ab_same = a == b;
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
-                    backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    if !ab_same {
+                        backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    }
                     backend.mul(dest, a, b);
                     backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
-                    // Only re-tag operands if they're different from dest to avoid
-                    // double-shifting the result
+                    // Only re-tag operands if they're different from dest (and
+                    // re-tag a shared a/b register only once) to avoid
+                    // double-shifting.
                     if a != dest {
                         backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
                     }
-                    if b != dest {
+                    if b != dest && !ab_same {
                         backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
                     }
                     self.store_spill(dest, dest_spill, backend);
@@ -3019,8 +3035,12 @@ impl Ir {
                     backend.guard_integer(guard_temp, b, error_label);
                     backend.free_temporary_register(guard_temp);
 
+                    // Untag/re-tag a shared a/b register exactly once (see Mul).
+                    let ab_same = a == b;
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
-                    backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    if !ab_same {
+                        backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    }
                     // Check for division by zero
                     let zero_reg = backend.temporary_register();
                     backend.mov_64(zero_reg, 0);
@@ -3029,11 +3049,12 @@ impl Ir {
                     backend.jump_equal(error_label);
                     backend.div(dest, a, b);
                     backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
-                    // Only re-tag operands if they're different from dest
+                    // Only re-tag operands if they're different from dest (and
+                    // re-tag a shared a/b register only once)
                     if a != dest {
                         backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
                     }
-                    if b != dest {
+                    if b != dest && !ab_same {
                         backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
                     }
                     self.store_spill(dest, dest_spill, backend);
@@ -3051,8 +3072,12 @@ impl Ir {
                     backend.guard_integer(guard_temp, b, error_label);
                     backend.free_temporary_register(guard_temp);
 
+                    // Untag/re-tag a shared a/b register exactly once (see Mul).
+                    let ab_same = a == b;
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
-                    backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    if !ab_same {
+                        backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    }
                     // Check for division by zero
                     let zero_reg = backend.temporary_register();
                     backend.mov_64(zero_reg, 0);
@@ -3062,11 +3087,12 @@ impl Ir {
                     // True modulo: result is always non-negative when divisor is positive
                     backend.modulo(dest, a, b);
                     backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
-                    // Only re-tag operands if they're different from dest
+                    // Only re-tag operands if they're different from dest (and
+                    // re-tag a shared a/b register only once)
                     if a != dest {
                         backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
                     }
-                    if b != dest {
+                    if b != dest && !ab_same {
                         backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
                     }
                     self.store_spill(dest, dest_spill, backend);
@@ -3114,14 +3140,18 @@ impl Ir {
                     backend.guard_integer(dest, a, error_label);
                     backend.guard_integer(dest, b, error_label);
 
+                    // Untag/re-tag a shared a/b register exactly once (see Mul).
+                    let ab_same = a == b;
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
-                    backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    if !ab_same {
+                        backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    }
                     backend.shift_left(dest, a, b);
                     backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
                     if !a_aliases_dest {
                         backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
                     }
-                    if !b_aliases_dest {
+                    if !b_aliases_dest && !ab_same {
                         backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
                     }
                     self.store_spill(dest, dest_spill, backend);
@@ -3138,14 +3168,18 @@ impl Ir {
                     backend.guard_integer(dest, a, error_label);
                     backend.guard_integer(dest, b, error_label);
 
+                    // Untag/re-tag a shared a/b register exactly once (see Mul).
+                    let ab_same = a == b;
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
-                    backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    if !ab_same {
+                        backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    }
                     backend.shift_right(dest, a, b);
                     backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
                     if !a_aliases_dest {
                         backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
                     }
-                    if !b_aliases_dest {
+                    if !b_aliases_dest && !ab_same {
                         backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
                     }
                     self.store_spill(dest, dest_spill, backend);
@@ -3162,15 +3196,19 @@ impl Ir {
                     backend.guard_integer(dest, a, error_label);
                     backend.guard_integer(dest, b, error_label);
 
+                    // Untag/re-tag a shared a/b register exactly once (see Mul).
+                    let ab_same = a == b;
                     backend.shift_right_imm(a, a, BuiltInTypes::tag_size());
-                    backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    if !ab_same {
+                        backend.shift_right_imm(b, b, BuiltInTypes::tag_size());
+                    }
                     backend.and_imm(a, a, 0xFFFFFFFF);
                     backend.shift_right_zero(dest, a, b);
                     backend.shift_left_imm(dest, dest, BuiltInTypes::tag_size());
                     if !a_aliases_dest {
                         backend.shift_left_imm(a, a, BuiltInTypes::tag_size());
                     }
-                    if !b_aliases_dest {
+                    if !b_aliases_dest && !ab_same {
                         backend.shift_left_imm(b, b, BuiltInTypes::tag_size());
                     }
                     self.store_spill(dest, dest_spill, backend);
