@@ -475,12 +475,94 @@ pub fn coalesce_copies(f: &mut CfgFunction) -> bool {
 /// propagate to a fixpoint. We never *introduce* a type assumption — we only
 /// drop a check that a dominating fact already established, so a value that
 /// could be non-int still hits its first guard.
+///
+/// **Dominated re-guards (the load-CSE follow-through).** The def-based facts
+/// key on a guard's typed *output* vreg. After global load-CSE collapses an
+/// operand's repeated reloads to a single loaded vreg, every re-guard checks the
+/// *loaded* vreg while the guards' own outputs go dead — so the def-based set
+/// never marks the loaded vreg typed and the re-guards survive. A second,
+/// dominance-based fact closes this: a guard of `src` whose fall-through edge is
+/// the only way to reach a later guard of the same `src`/kind makes the later
+/// guard redundant. Eliminating it kills the bail block, and with it the
+/// safepoint that was blocking LICM.
 pub fn eliminate_redundant_guards(f: &mut CfgFunction) -> bool {
     let (known_int, known_float) = compute_known_types(f);
+
+    // Dominance-based guard facts. A `GuardInt`/`GuardFloat` of `src` proves
+    // `src` is that type on its fall-through edge. A *later* guard of the same
+    // `src` and kind is redundant if it is reached only after that fall-through
+    // edge — even when the first guard's typed *output* vreg is dead. That
+    // dead-output case is exactly what global load-CSE produces: it collapses an
+    // operand's repeated reloads to one loaded vreg, so every use (including the
+    // re-guards) points at the *loaded* vreg while the guards' own outputs go
+    // unused. The `known_int`/`known_float` def-based facts can't see through
+    // that; this dominance check can.
+    //
+    // Soundness requires *edge* dominance, not just block dominance: `ft`
+    // dominating `b2` is reflexively true when `ft == b2`, which says nothing
+    // about other predecessors of `b2`. We instead require the fall-through
+    // target `ft` to be entered *only* via this guard's fall-through edge — i.e.
+    // `ft`'s sole predecessor is the guard block and the guard's bail target is
+    // not `ft`. Then "src is the guarded type" holds on entry to `ft` and (since
+    // `src` is a single SSA value) at every block `ft` dominates.
+    // (is_int, src, guard_block, fall_through, bail)
+    let guard_facts: Vec<(bool, VReg, BlockId, BlockId, BlockId)> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(i, block)| match &block.terminator {
+            Terminator::InlineBranch {
+                op: InlineBranchOp::GuardInt { src, .. },
+                fall_through,
+                bail,
+                ..
+            } => Some((true, *src, BlockId(i as u32), *fall_through, *bail)),
+            Terminator::InlineBranch {
+                op: InlineBranchOp::GuardFloat { src, .. },
+                fall_through,
+                bail,
+                ..
+            } => Some((false, *src, BlockId(i as u32), *fall_through, *bail)),
+            _ => None,
+        })
+        .collect();
+    // Dominance is only useful when two guards can dominate each other, and it
+    // needs valid predecessors. Skip the (non-trivial) computation otherwise.
+    // The dominance case can only fire when two guards check the *same* src
+    // vreg with the same kind. Detecting that is cheap; the dominator
+    // computation (and the `rebuild_predecessors` it needs) is not — so only pay
+    // for it when a repeated (kind, src) actually exists. Without load-CSE
+    // unifying an operand's reloads, repeated-src guards are rare, so most
+    // functions skip this entirely.
+    let dom_disabled = std::env::var("BEAGLE_SSA_NO_GUARD_DOM").is_ok();
+    let has_repeated_src = {
+        let mut seen: HashSet<(bool, VReg)> = HashSet::new();
+        guard_facts
+            .iter()
+            .any(|&(gi, src, ..)| !seen.insert((gi, src)))
+    };
+    let idom = if has_repeated_src && !dom_disabled {
+        crate::cfg::builder::rebuild_predecessors(f);
+        let rpo = crate::cfg::dom::reverse_postorder(f);
+        crate::cfg::dom::compute_idoms(f, &rpo)
+    } else {
+        HashMap::new()
+    };
+    let dominating_guard = |is_int: bool, src: VReg, b2: BlockId| -> bool {
+        guard_facts.iter().any(|&(gi, gsrc, gb, ft, bail)| {
+            gi == is_int
+                && gsrc == src
+                && gb != b2
+                && bail != ft
+                && f.block(ft).predecessors.as_slice() == [gb]
+                && crate::cfg::dom::dominates(&idom, ft, b2)
+        })
+    };
 
     let mut rename: HashMap<VReg, VReg> = HashMap::new();
     let mut new_terms: Vec<(usize, Terminator)> = Vec::new();
     for (i, block) in f.blocks.iter().enumerate() {
+        let b = BlockId(i as u32);
         if let Terminator::InlineBranch {
             op,
             fall_through,
@@ -489,10 +571,14 @@ pub fn eliminate_redundant_guards(f: &mut CfgFunction) -> bool {
         } = &block.terminator
         {
             let redundant = match op {
-                InlineBranchOp::GuardInt { dst, src } if known_int.contains(src) => {
+                InlineBranchOp::GuardInt { dst, src }
+                    if known_int.contains(src) || dominating_guard(true, *src, b) =>
+                {
                     Some((*dst, *src))
                 }
-                InlineBranchOp::GuardFloat { dst, src } if known_float.contains(src) => {
+                InlineBranchOp::GuardFloat { dst, src }
+                    if known_float.contains(src) || dominating_guard(false, *src, b) =>
+                {
                     Some((*dst, *src))
                 }
                 _ => None,
@@ -977,6 +1063,138 @@ mod tests {
         assert!(
             !eliminate_redundant_guards(&mut f),
             "guard on an untyped SlotLoad must be kept"
+        );
+    }
+
+    /// Two guards of the *same untyped* vreg in a straight chain: the first
+    /// guard's fall-through is the only way to the second guard's block, so the
+    /// second is redundant by edge dominance even though the first guard's
+    /// output is unused (the load-CSE shape). The first guard must stay.
+    #[test]
+    fn dominated_reguard_on_same_src_is_removed() {
+        // A: v = SlotLoad slot(0); guard_int(g1, v) -> B else bailA
+        // B: guard_int(g2, v) -> C else bailB     <- redundant (edge-dominated)
+        // C: ret v
+        let mut f = CfgFunction::new(Some("reguard".into()), 1);
+        let a = f.new_block();
+        let b = f.new_block();
+        let c = f.new_block();
+        let bail_a = f.new_block();
+        let bail_b = f.new_block();
+        f.entry = a;
+
+        let v = f.new_vreg(RegClass::Gp);
+        let g1 = f.new_vreg(RegClass::Gp);
+        let g2 = f.new_vreg(RegClass::Gp);
+
+        f.block_mut(a).body.push(Op::SlotLoad {
+            dst: v,
+            slot: SlotId(0),
+        });
+        f.block_mut(a).terminator = Terminator::InlineBranch {
+            op: InlineBranchOp::GuardInt { dst: g1, src: v },
+            fall_through: b,
+            fall_args: vec![],
+            bail: bail_a,
+            bail_args: vec![],
+        };
+        f.block_mut(b).terminator = Terminator::InlineBranch {
+            op: InlineBranchOp::GuardInt { dst: g2, src: v },
+            fall_through: c,
+            fall_args: vec![],
+            bail: bail_b,
+            bail_args: vec![],
+        };
+        f.block_mut(c).terminator = Terminator::Ret { value: v };
+        f.block_mut(bail_a).terminator = Terminator::Unreachable;
+        f.block_mut(bail_b).terminator = Terminator::Unreachable;
+        f.block_mut(b).predecessors = vec![a];
+        f.block_mut(c).predecessors = vec![b];
+        f.block_mut(bail_a).predecessors = vec![a];
+        f.block_mut(bail_b).predecessors = vec![b];
+
+        let changed = eliminate_redundant_guards(&mut f);
+        assert!(changed, "edge-dominated re-guard should be eliminated");
+        // First guard (A) stays — it's the one that establishes the fact.
+        assert!(
+            matches!(
+                &f.block(a).terminator,
+                Terminator::InlineBranch {
+                    op: InlineBranchOp::GuardInt { .. },
+                    ..
+                }
+            ),
+            "first guard must be kept"
+        );
+        // Second guard (B) becomes a plain Jump to its fall-through.
+        assert!(
+            matches!(&f.block(b).terminator, Terminator::Jump { target, .. } if *target == c),
+            "second (dominated) guard must become a Jump, got {:?}",
+            f.block(b).terminator
+        );
+    }
+
+    /// Two guards of the same vreg on *sibling* branches of a diamond: neither
+    /// is edge-dominated by the other, so both must be kept.
+    #[test]
+    fn sibling_guards_on_same_src_are_kept() {
+        // entry: v = load; branch ? then : else
+        // then:  guard_int(g1, v) -> join else bail1
+        // else:  guard_int(g2, v) -> join else bail2
+        // join:  ret v
+        let mut f = CfgFunction::new(Some("sibling".into()), 1);
+        let entry = f.new_block();
+        let then_b = f.new_block();
+        let else_b = f.new_block();
+        let join = f.new_block();
+        let bail1 = f.new_block();
+        let bail2 = f.new_block();
+        f.entry = entry;
+
+        let v = f.new_vreg(RegClass::Gp);
+        let cond = f.new_vreg(RegClass::Gp);
+        let g1 = f.new_vreg(RegClass::Gp);
+        let g2 = f.new_vreg(RegClass::Gp);
+
+        f.block_mut(entry).body.push(Op::SlotLoad {
+            dst: v,
+            slot: SlotId(0),
+        });
+        f.block_mut(entry).terminator = Terminator::Branch {
+            cond: Condition::Equal,
+            lhs: cond,
+            rhs: cond,
+            t_target: then_b,
+            t_args: vec![],
+            f_target: else_b,
+            f_args: vec![],
+        };
+        f.block_mut(then_b).terminator = Terminator::InlineBranch {
+            op: InlineBranchOp::GuardInt { dst: g1, src: v },
+            fall_through: join,
+            fall_args: vec![],
+            bail: bail1,
+            bail_args: vec![],
+        };
+        f.block_mut(else_b).terminator = Terminator::InlineBranch {
+            op: InlineBranchOp::GuardInt { dst: g2, src: v },
+            fall_through: join,
+            fall_args: vec![],
+            bail: bail2,
+            bail_args: vec![],
+        };
+        f.block_mut(join).terminator = Terminator::Ret { value: v };
+        f.block_mut(bail1).terminator = Terminator::Unreachable;
+        f.block_mut(bail2).terminator = Terminator::Unreachable;
+        f.block_mut(then_b).predecessors = vec![entry];
+        f.block_mut(else_b).predecessors = vec![entry];
+        f.block_mut(join).predecessors = vec![then_b, else_b];
+        f.block_mut(bail1).predecessors = vec![then_b];
+        f.block_mut(bail2).predecessors = vec![else_b];
+
+        assert!(
+            !eliminate_redundant_guards(&mut f),
+            "sibling guards on the same src must both be kept"
         );
     }
 
