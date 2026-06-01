@@ -1,0 +1,50 @@
+namespace bench_closure_probe
+
+use beagle.core as core
+use beagle.runtime as runtime
+
+// A closure created inside the loop, capturing a local, called once, never
+// stored/returned/passed. If closures heap-allocate their environment, this
+// allocates one closure object per iteration — a candidate for escape
+// analysis / scalar replacement (stack-allocate or inline).
+fn sum_closure(n) {
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        let base = i
+        let f = fn(x) { x + base }
+        acc = acc + f(1)
+        i = i + 1
+    }
+    acc
+}
+
+// Hand-inlined equivalent: no closure object.
+fn sum_inline(n) {
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        let base = i
+        acc = acc + (1 + base)
+        i = i + 1
+    }
+    acc
+}
+
+fn measure(label, f, n) {
+    let start = core/time-now()
+    let r = f(n)
+    let elapsed = core/time-now() - start
+    println("${label}: n=${n} (${elapsed} ns) r=${r}")
+    elapsed
+}
+
+fn main() {
+    measure("closure", sum_closure, 200000)
+    measure("inline ", sum_inline, 200000)
+    runtime/specialize-all()
+    measure("closure2", sum_closure, 5000000)
+    measure("inline2 ", sum_inline, 5000000)
+    measure("closure3", sum_closure, 5000000)
+    measure("inline3 ", sum_inline, 5000000)
+}

@@ -1,0 +1,59 @@
+namespace bench_closure_probe2
+
+use beagle.core as core
+use beagle.runtime as runtime
+
+// Closure created ONCE outside the loop; only CALLED inside. Isolates
+// indirect-call cost from per-iteration allocation cost.
+fn call_only(n) {
+    let mut i = 0
+    let mut acc = 0
+    let f = fn(x) { x + 7 }
+    while i < n {
+        acc = acc + f(i)
+        i = i + 1
+    }
+    acc
+}
+
+// Closure created AND called inside the loop: allocation + call each iter.
+fn alloc_and_call(n) {
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        let f = fn(x) { x + 7 }
+        acc = acc + f(i)
+        i = i + 1
+    }
+    acc
+}
+
+// Direct top-level function call (no closure object) for baseline call cost.
+fn add7(x) { x + 7 }
+fn direct_call(n) {
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        acc = acc + add7(i)
+        i = i + 1
+    }
+    acc
+}
+
+fn measure(label, f, n) {
+    let start = core/time-now()
+    let r = f(n)
+    let elapsed = core/time-now() - start
+    println("${label}: n=${n} (${elapsed} ns) r=${r}")
+    elapsed
+}
+
+fn main() {
+    measure("callonly", call_only, 200000)
+    measure("alloccall", alloc_and_call, 200000)
+    measure("direct  ", direct_call, 200000)
+    runtime/specialize-all()
+    measure("callonly2", call_only, 5000000)
+    measure("alloccall2", alloc_and_call, 5000000)
+    measure("direct2  ", direct_call, 5000000)
+}

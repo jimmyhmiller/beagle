@@ -3316,6 +3316,11 @@ impl MMapMutWithOffset {
 thread_local! {
     pub static NATIVE_ARGUMENTS : RefCell<MMapMutWithOffset> = RefCell::new(MMapMutWithOffset::new());
 
+    /// Per-thread self-validating cache for `Runtime::get_function_by_pointer`
+    /// (function code pointer -> index into `functions`). See that method for
+    /// the soundness argument. Thread-local => no lock, no cross-thread races.
+    static FN_PTR_CACHE: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
+
     /// Cached pointer to the current thread's ThreadGlobal.
     /// Avoids locking the thread_globals mutex on every add_handle_root/remove_handle_root.
     /// Safety: The ThreadGlobal is Box'd in the HashMap, so its address is stable.
@@ -8324,7 +8329,27 @@ impl Runtime {
     }
 
     pub fn get_function_by_pointer(&self, value: *const u8) -> Option<&Function> {
-        self.functions.iter().find(|f| f.pointer == value.into())
+        let target = value.into();
+        // Fast path: thread-local self-validating cache (pointer -> index).
+        // The cached index is only trusted after verifying it still points at
+        // the same function pointer, so the cache is correct across function
+        // redefinition and JIT code-address reuse — a stale entry simply fails
+        // verification and falls through to the scan, which refreshes it.
+        // `functions` only ever grows, so a cached index is always in bounds.
+        // Per-thread so it needs no lock and can't race across threads.
+        let key = value as usize;
+        let cached = FN_PTR_CACHE.with(|c| c.borrow().get(&key).copied());
+        if let Some(idx) = cached {
+            if let Some(f) = self.functions.get(idx) {
+                if f.pointer == target {
+                    return Some(f);
+                }
+            }
+        }
+        // Slow path: linear scan, then memoize the result for next time.
+        let idx = self.functions.iter().position(|f| f.pointer == target)?;
+        FN_PTR_CACHE.with(|c| c.borrow_mut().insert(key, idx));
+        Some(&self.functions[idx])
     }
 
     pub fn get_function_containing_pointer(&self, value: *const u8) -> Option<(&Function, usize)> {
