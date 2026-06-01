@@ -219,14 +219,42 @@ pub fn scalar_repl_enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// Entry point: scalar-replace non-escaping structs throughout `ast`
-/// (recursing into Program elements / function bodies).
+/// Entry point: scalar-replace non-escaping structs inside every FUNCTION
+/// body reachable from `ast`.
+///
+/// **Crucially, this only descends into function bodies — it never runs the
+/// replacement pass on Program / namespace top-level statements.** A function
+/// body is a closed scope where `var_escapes` sees every use of `v`. A
+/// top-level `let v = Struct{...}` is a PERSISTENT binding: in the REPL it is
+/// referenced by later input lines, and at namespace level it can be read from
+/// inside any function — neither of which is visible to the local analysis
+/// here. Scalar-replacing such a binding would delete a name later code still
+/// references ("Undefined variable: v"). So top level is descended for nested
+/// functions but its own lets are left untouched.
 pub fn scalar_replace_in_ast(ast: &mut Ast) {
-    let mut wrapper = std::mem::replace(ast, Ast::Null(0));
-    let mut buf = vec![wrapper];
-    scalar_replace_structs(&mut buf);
-    wrapper = buf.pop().unwrap();
-    *ast = wrapper;
+    replace_in_functions(ast);
+}
+
+/// Walk `node` looking for `Ast::Function` boundaries; scalar-replace within
+/// each function body (a closed scope) but do NOT replace lets at the
+/// non-function levels we pass through (Program elements, top-level let
+/// values, etc.).
+fn replace_in_functions(node: &mut Ast) {
+    match node {
+        Ast::Function { body, .. } => {
+            // Closed scope — safe. scalar_replace_structs recurses into this
+            // function's own nested blocks and inner closures.
+            scalar_replace_structs(body);
+        }
+        Ast::Program { elements, .. } => {
+            for el in elements.iter_mut() {
+                replace_in_functions(el);
+            }
+        }
+        // Any other top-level node (e.g. `let f = fn() {...}`) may still
+        // contain a function; descend without replacing its own lets.
+        _ => for_each_child_ast_mut(node, &mut replace_in_functions),
+    }
 }
 
 /// Scalar-replace non-escaping struct allocations in a statement list (and,
