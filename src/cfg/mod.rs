@@ -23,6 +23,7 @@ pub mod dom;
 pub mod dump;
 pub mod emit_legacy;
 pub mod gc_safety;
+pub mod licm;
 pub mod lift_vregs;
 pub mod loops;
 pub mod mem2reg;

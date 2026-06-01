@@ -52,6 +52,7 @@ pub fn optimize(f: &mut CfgFunction) {
     let no_coalesce = std::env::var("BEAGLE_SSA_NO_COALESCE").is_ok();
     let no_dead_slot_stores = std::env::var("BEAGLE_SSA_NO_DEAD_SLOT_STORES").is_ok();
     let no_dce = std::env::var("BEAGLE_SSA_NO_DCE").is_ok();
+    let no_licm = std::env::var("BEAGLE_SSA_NO_LICM").is_ok();
     let mut changed = true;
     while changed {
         changed = false;
@@ -69,6 +70,9 @@ pub fn optimize(f: &mut CfgFunction) {
         }
         if !no_dce {
             changed |= dead_code_elimination(f);
+        }
+        if !no_licm {
+            changed |= crate::cfg::licm::loop_invariant_code_motion(f);
         }
     }
 }
