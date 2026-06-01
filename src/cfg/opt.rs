@@ -54,6 +54,7 @@ pub fn optimize(f: &mut CfgFunction) {
     let no_dce = std::env::var("BEAGLE_SSA_NO_DCE").is_ok();
     let no_licm = std::env::var("BEAGLE_SSA_NO_LICM").is_ok();
     let no_guards = std::env::var("BEAGLE_SSA_NO_GUARD_ELIM").is_ok();
+    let no_load_cse = std::env::var("BEAGLE_SSA_NO_LOAD_CSE").is_ok();
     let mut changed = true;
     while changed {
         changed = false;
@@ -62,6 +63,9 @@ pub fn optimize(f: &mut CfgFunction) {
         }
         if !no_trivial {
             changed |= eliminate_trivial_block_params(f);
+        }
+        if !no_load_cse {
+            changed |= crate::cfg::load_cse::global_load_cse(f);
         }
         if !no_slot_forward {
             changed |= forward_slot_stores(f);
