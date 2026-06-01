@@ -85,17 +85,40 @@ fn escapes(node: &Ast, v: &str, fields: &[String]) -> bool {
             object, property, ..
         } => escapes(object, v, fields) || escapes(property, v, fields),
 
-        // ---- Assignment: writing through `v` (field write or rebind)
-        //      is an escape; otherwise recurse target + value. ----------
-        Ast::Assignment { name, value, .. } => {
-            let target_touches_v = match name.as_ref() {
-                // `v = e` — reassignment of v itself.
-                Ast::Identifier(n, _) if n == v => true,
-                // `v.f = e` — field write through v.
-                Ast::PropertyAccess { object, .. } if is_ident(object, v) => true,
-                _ => false,
-            };
-            target_touches_v || escapes(name, v, fields) || escapes(value, v, fields)
+        // ---- Assignment: a `v.f = e` field write (f in the literal's
+        //      fields) is NOT an escape — it becomes a write to the field-
+        //      local. Rebinding `v` itself, or writing a non-literal
+        //      (defaulted) field, escapes. The written value must still not
+        //      let `v` escape. ----------------------------------------------
+        Ast::Assignment { name, value, .. } => match name.as_ref() {
+            // `v = e` — reassignment of v itself.
+            Ast::Identifier(n, _) if n == v => true,
+            // `v.f = e` — field write through v.
+            Ast::PropertyAccess {
+                object, property, ..
+            } if is_ident(object, v) => {
+                let f_in_fields = matches!(property.as_ref(),
+                    Ast::Identifier(f, _) if fields.iter().any(|x| x == f));
+                // A write to a non-literal field has no field-local to
+                // target → escape. Otherwise only the RHS can escape v.
+                !f_in_fields || escapes(value, v, fields)
+            }
+            // Any other LHS (e.g. `arr[v] = e`): recurse both sides.
+            _ => escapes(name, v, fields) || escapes(value, v, fields),
+        },
+
+        // ---- A sibling `let`/`let mut` binding only escapes `v` if its
+        //      value references v, OR it shadows v (rebinds the same name —
+        //      then later `v.f` would refer to the new value and our rewrite
+        //      would be wrong, so bail). A non-identifier (destructuring)
+        //      pattern could bind v in a way we don't track → bail. -------
+        Ast::Let { pattern, value, .. } | Ast::LetMut { pattern, value, .. } => {
+            match pattern {
+                Pattern::Identifier { name, .. } if name == v => true,
+                Pattern::Identifier { .. } => escapes(value, v, fields),
+                // Destructuring could rebind v; be conservative.
+                _ => true,
+            }
         }
 
         // ---- A bare use of `v` anywhere else = escape. ----------------
@@ -227,20 +250,37 @@ pub fn scalar_replace_structs(body: &mut Vec<Ast>) {
     while i < body.len() {
         if let Some((v, fields)) = replaceable_struct_let(body, i) {
             let fnames: Vec<String> = fields.iter().map(|(f, _)| f.clone()).collect();
-            // Rewrite v.field -> v$field in the rest of the block.
+            // Fields that are written via `v.f = e` need mutable locals.
+            let written = written_fields(&body[i + 1..], &v, &fnames);
+            // Rewrite v.field reads AND `v.f = e` writes -> v$field in the
+            // rest of the block (for_each_child_ast_mut recurses into the
+            // Assignment LHS, so a `v.f = e` becomes `v$f = e` automatically).
             for stmt in body[i + 1..].iter_mut() {
                 rewrite_field_reads(stmt, &v, &fnames);
             }
-            // Replace the struct-let with one let per field.
+            // Replace the struct-let with one let per field — mutable if the
+            // field is ever written, immutable otherwise.
             let lets: Vec<Ast> = fields
                 .into_iter()
-                .map(|(f, e)| Ast::Let {
-                    pattern: Pattern::Identifier {
+                .map(|(f, e)| {
+                    let pattern = Pattern::Identifier {
                         name: field_local(&v, &f),
                         token_range: dummy_tr(),
-                    },
-                    value: Box::new(e),
-                    token_range: dummy_tr(),
+                    };
+                    let value = Box::new(e);
+                    if written.contains(&f) {
+                        Ast::LetMut {
+                            pattern,
+                            value,
+                            token_range: dummy_tr(),
+                        }
+                    } else {
+                        Ast::Let {
+                            pattern,
+                            value,
+                            token_range: dummy_tr(),
+                        }
+                    }
                 })
                 .collect();
             let n = lets.len();
@@ -276,6 +316,34 @@ fn replaceable_struct_let(body: &[Ast], i: usize) -> Option<(String, Vec<(String
         return None;
     }
     Some((v.clone(), fields.clone()))
+}
+
+/// Field names of `v` written via `v.f = e` (f in `fnames`) anywhere in
+/// `nodes`. Used to decide which field-locals must be `LetMut`.
+fn written_fields(nodes: &[Ast], v: &str, fnames: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for n in nodes {
+        collect_written_fields(n, v, fnames, &mut out);
+    }
+    out
+}
+
+fn collect_written_fields(node: &Ast, v: &str, fnames: &[String], out: &mut Vec<String>) {
+    if let Ast::Assignment { name, .. } = node {
+        if let Ast::PropertyAccess {
+            object, property, ..
+        } = name.as_ref()
+        {
+            if is_ident(object, v) {
+                if let Ast::Identifier(f, _) = property.as_ref() {
+                    if fnames.iter().any(|x| x == f) && !out.iter().any(|w| w == f) {
+                        out.push(f.clone());
+                    }
+                }
+            }
+        }
+    }
+    for_each_child_ast(node, &mut |c| collect_written_fields(c, v, fnames, out));
 }
 
 /// Call `f` on each nested statement-list (Vec<Ast> body) of `stmt`. Covers
@@ -349,6 +417,9 @@ fn for_each_child_ast_mut(node: &mut Ast, f: &mut dyn FnMut(&mut Ast)) {
             f(right);
         }
         Ast::Not { expr, .. } => f(expr),
+        // Let/LetMut values can hold `v.field` reads (e.g. `let dx = v.x`);
+        // recurse into the value (the pattern is a binder, never a read).
+        Ast::Let { value, .. } | Ast::LetMut { value, .. } => f(value),
         Ast::If {
             condition,
             then,
@@ -418,6 +489,7 @@ fn for_each_child_ast(node: &Ast, f: &mut dyn FnMut(&Ast)) {
             f(right);
         }
         Ast::Not { expr, .. } => f(expr),
+        Ast::Let { value, .. } | Ast::LetMut { value, .. } => f(value),
         Ast::If {
             condition,
             then,
@@ -532,11 +604,33 @@ mod tests {
     }
 
     #[test]
-    fn escapes_on_field_write() {
-        // v.x = 5
+    fn literal_field_write_does_not_escape() {
+        // v.x = 5   (x is a literal field) — writable scalar, not an escape.
         let body = vec![Ast::Assignment {
             name: Box::new(field("v", "x")),
             value: Box::new(int(5)),
+            token_range: tr(),
+        }];
+        assert!(!var_escapes(&body, "v", &fns()));
+    }
+
+    #[test]
+    fn non_literal_field_write_escapes() {
+        // v.z = 5   (z is NOT a literal field) — no field-local to target.
+        let body = vec![Ast::Assignment {
+            name: Box::new(field("v", "z")),
+            value: Box::new(int(5)),
+            token_range: tr(),
+        }];
+        assert!(var_escapes(&body, "v", &fns()));
+    }
+
+    #[test]
+    fn field_write_with_escaping_rhs_escapes() {
+        // v.x = v   (RHS leaks v) — escape.
+        let body = vec![Ast::Assignment {
+            name: Box::new(field("v", "x")),
+            value: Box::new(id("v")),
             token_range: tr(),
         }];
         assert!(var_escapes(&body, "v", &fns()));
@@ -629,6 +723,49 @@ mod tests {
                 }
                 _ => panic!("expected add of field locals"),
             },
+            _ => panic!("expected assignment"),
+        }
+    }
+
+    #[test]
+    fn rewrite_mutable_struct_emits_letmut_for_written_field() {
+        // let v = V2{x:1, y:2}; v.x = v.x + 1; acc = v.y
+        // x is written -> LetMut v$x; y is read-only -> Let v$y.
+        let mut body = vec![
+            let_("v", struct_lit(vec![("x", int(1)), ("y", int(2))])),
+            assign(field("v", "x"), add(field("v", "x"), int(1))),
+            assign(id("acc"), field("v", "y")),
+        ];
+        scalar_replace_structs(&mut body);
+        // 2 field bindings + 2 assignments = 4 statements.
+        assert_eq!(body.len(), 4);
+        // v$x written -> LetMut
+        match &body[0] {
+            Ast::LetMut {
+                pattern: crate::ast::Pattern::Identifier { name, .. },
+                ..
+            } => assert_eq!(name, "v$x"),
+            _ => panic!("expected LetMut v$x"),
+        }
+        // v$y read-only -> Let
+        match &body[1] {
+            Ast::Let {
+                pattern: crate::ast::Pattern::Identifier { name, .. },
+                ..
+            } => assert_eq!(name, "v$y"),
+            _ => panic!("expected Let v$y"),
+        }
+        // the write became `v$x = v$x + 1` (Identifier LHS, no PropertyAccess)
+        match &body[2] {
+            Ast::Assignment { name, value, .. } => {
+                assert!(matches!(name.as_ref(), Ast::Identifier(n, _) if n == "v$x"));
+                match value.as_ref() {
+                    Ast::Add { left, .. } => {
+                        assert!(matches!(left.as_ref(), Ast::Identifier(n, _) if n == "v$x"))
+                    }
+                    _ => panic!("expected add"),
+                }
+            }
             _ => panic!("expected assignment"),
         }
     }
