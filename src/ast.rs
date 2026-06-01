@@ -1201,6 +1201,15 @@ impl AstCompiler<'_> {
     }
 
     pub fn compile(&mut self) -> Result<Ir, CompileError> {
+        // Scalar-replace non-escaping struct allocations (escape analysis):
+        // `let v = Struct{...}` used only as `v.field` reads becomes plain
+        // field locals, eliminating the heap allocation. Sound (no whole-
+        // program assumption, no GC object). ON by default; BEAGLE_SCALAR_REPL=0
+        // opts out. Runs before the other AST passes so they see the rewrite.
+        if crate::escape::scalar_repl_enabled() {
+            crate::escape::scalar_replace_in_ast(&mut self.ast);
+        }
+
         // TODO: Get rid of clone
         self.find_mutable_vars_that_need_boxing(&self.ast.clone());
 
