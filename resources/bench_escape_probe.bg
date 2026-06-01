@@ -1,0 +1,52 @@
+namespace bench_escape_probe
+use beagle.core as core
+use beagle.runtime as runtime
+
+struct V2 {
+    x
+    y
+}
+
+// Non-escaping struct: v is created, read locally, never returned/stored/passed.
+// Escape analysis + scalar replacement should eliminate the allocation.
+fn sum_struct(n) {
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        let v = V2 { x: i, y: i + 1 }
+        acc = acc + v.x + v.y
+        i = i + 1
+    }
+    acc
+}
+
+// Hand-scalarized equivalent: no allocation.
+fn sum_scalar(n) {
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        let x = i
+        let y = i + 1
+        acc = acc + x + y
+        i = i + 1
+    }
+    acc
+}
+
+fn measure(label, f, n) {
+    let start = core/time-now()
+    let r = f(n)
+    let elapsed = core/time-now() - start
+    println("${label}: n=${n} (${elapsed} ns) r=${r}")
+    elapsed
+}
+
+fn main() {
+    measure("struct ", sum_struct, 200000)
+    measure("scalar ", sum_scalar, 200000)
+    runtime/specialize-all()
+    measure("struct2", sum_struct, 5000000)
+    measure("scalar2", sum_scalar, 5000000)
+    measure("struct3", sum_struct, 5000000)
+    measure("scalar3", sum_scalar, 5000000)
+}
