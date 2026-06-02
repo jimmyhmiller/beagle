@@ -1218,6 +1218,15 @@ impl AstCompiler<'_> {
             crate::escape::scalar_replace_in_ast(&mut self.ast);
         }
 
+        // Hoist loop-invariant pure-arithmetic out of `while` loops via guard-
+        // and-hoist (`while c {..E..}` => `if c { let t = E; while c {..t..} }`).
+        // Sound by construction: the `if c` guard means a trapping/allocating
+        // invariant runs only when the loop would execute >= 1 time. ON by
+        // default; BEAGLE_HOIST_LICM=0 opts out.
+        if crate::hoist_loop_invariant::hoist_enabled() {
+            crate::hoist_loop_invariant::hoist_in_ast(&mut self.ast);
+        }
+
         // TODO: Get rid of clone
         self.find_mutable_vars_that_need_boxing(&self.ast.clone());
 
