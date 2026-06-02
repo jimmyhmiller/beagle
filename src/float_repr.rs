@@ -109,19 +109,33 @@ pub fn analyze_float_types(instructions: &[Instruction]) -> FloatTypes {
 
 /// Options that relax the *sound-by-default* float analysis for the
 /// float-parameter-versioning planner (see `plan_float_param_version`). With
-/// both off, `analyze_core` is the sound analysis used by the normal unbox
-/// pass. With both on, it computes what *would* be provably float if the
-/// function's float arguments were guaranteed float at entry — the optimistic
-/// set a guarded fast version could rely on.
-#[derive(Clone, Copy, Default)]
+/// the defaults, `analyze_core` is the sound analysis used by the normal unbox
+/// pass. With `float_arg_indices` set, it computes what *would* be provably
+/// float if exactly those parameters were guaranteed float at entry — the
+/// optimistic set a guarded fast version could rely on.
+#[derive(Clone, Default)]
 struct AnalyzeOpts {
-    /// Treat an argument register as a float witness (only valid behind an
-    /// entry guard that proves the arg float).
-    assume_args_float: bool,
+    /// Treat an argument register as a float witness iff its argument index
+    /// is in this set. `None` = guard nothing via args (the sound default).
+    /// Used by the planner to model "what is provably float if exactly these
+    /// params are guarded float at entry".
+    float_arg_indices: Option<std::collections::HashSet<usize>>,
     /// Model the `TailRecurse` back-edge as float stores to the parameter
     /// slots `local0..localN` (sound dataflow — the values do flow there —
     /// but only useful in conjunction with knowing the entry is float).
     model_tailrecurse: bool,
+}
+
+impl AnalyzeOpts {
+    /// Whether argument register `v` is an assumed-float witness under these
+    /// options.
+    fn arg_is_float(&self, v: &Value) -> bool {
+        let Value::Register(r) = v else { return false };
+        let Some(arg) = r.argument else { return false };
+        self.float_arg_indices
+            .as_ref()
+            .is_some_and(|s| s.contains(&arg))
+    }
 }
 
 fn is_arg_reg(v: &Value) -> bool {
@@ -149,7 +163,7 @@ fn collect_stores(ins: &Instruction, model_tailrecurse: bool) -> Vec<(usize, Val
 
 fn analyze_core(instructions: &[Instruction], opts: AnalyzeOpts) -> FloatTypes {
     let wit = |v: &Value, fr: &HashSet<usize>, cand: &HashSet<usize>| {
-        is_float_value(v, fr, cand) || (opts.assume_args_float && is_arg_reg(v))
+        is_float_value(v, fr, cand) || opts.arg_is_float(v)
     };
 
     // Optimistic: every slot with a store starts as a float candidate.
@@ -250,48 +264,175 @@ fn param_slots(instructions: &[Instruction]) -> HashSet<usize> {
     out
 }
 
-/// Decide whether `instructions` is a float-parameter-versioning candidate:
-/// a function with a TCO'd / loop-carried float chain that is boxed today
-/// only because its float values originate in arguments. Returns the params
-/// to guard and the float sets a guarded fast version could unbox.
+/// The float types provable if exactly the parameters whose slot index is in
+/// `guarded` are known float at entry (the rest of the args stay untyped).
+/// Models the `TailRecurse` back-edge too (harmless when absent). Slot index ==
+/// argument index for parameters (the prologue stores `argK` into `localK`).
+fn analyze_with_guarded(instructions: &[Instruction], guarded: &HashSet<usize>) -> FloatTypes {
+    analyze_core(
+        instructions,
+        AnalyzeOpts {
+            float_arg_indices: Some(guarded.clone()),
+            model_tailrecurse: true,
+        },
+    )
+}
+
+/// True if some value in `types` is an operand of a `FloatBinOp` — i.e. the
+/// unboxed set actually feeds float *arithmetic*, so eliminating the box/unbox
+/// round-trips is a real win.
 ///
-/// Conservative: returns `None` unless guarding some float parameters
-/// *strictly* enlarges the provably-float local set (i.e. there is a real
-/// boxing win to capture) AND the function actually loops via `TailRecurse`
-/// (the carried-state case this targets).
+/// This is the gate that makes versioning pay off **and** keeps it sound. A
+/// guarded float param that never feeds a `FloatBinOp` (it is only copied and
+/// passed to a call — e.g. mandelbrot's `draw_row`, which guards `ci` only to
+/// hand it to `mandel(cr, ci)`) gains nothing from unboxing: the value is
+/// unboxed and immediately re-boxed at the call boundary. Such "unbox a value
+/// that only flows into calls" cases are exactly where an unboxed FP value
+/// crosses a call (which the regalloc doesn't yet preserve across), so they are
+/// both pointless and unsafe. mandelbrot's `mandel`, by contrast, feeds its
+/// guarded `cr`/`ci` into real `FloatBinOp` arithmetic — the prize.
+/// True if any `FloatBinOp` in the body combines a value the versioning can
+/// NOT prove unboxed — a register absent from `types.regs` that isn't a float
+/// constant (a heap/field load or global-cell read). Such ops stay boxed even
+/// in the fast version, so their presence means versioning would duplicate the
+/// body without removing the dominant box/unbox traffic (the `nbody/advance`
+/// shape). Used as a profitability gate, not a soundness gate.
+fn has_uncovered_float_arith(instructions: &[Instruction], types: &FloatTypes) -> bool {
+    let covered = |v: &Value| match v {
+        Value::Register(r) => types.regs.contains(&r.index),
+        _ => is_float_const(v),
+    };
+    instructions
+        .iter()
+        .any(|i| matches!(i, Instruction::FloatBinOp { a, b, .. } if !covered(a) || !covered(b)))
+}
+
+fn float_types_feed_arithmetic(
+    instructions: &[Instruction],
+    types: &FloatTypes,
+    baseline: &FloatTypes,
+) -> bool {
+    // A FloatBinOp operand must be a register that is float *because of the
+    // guards* — in `types.regs` but NOT already float in the sound baseline.
+    // This excludes float-*constant* registers (e.g. the `1.5` in `cr - 1.5`,
+    // which is float regardless of any guard) so draw_row — whose only float
+    // ops combine a const with a non-guarded value, never a guarded one — is
+    // correctly rejected, while `mandel`'s guarded `cr`/`ci` (which genuinely
+    // feed the arithmetic) is accepted.
+    let unlocked = |v: &Value| {
+        matches!(v, Value::Register(r)
+            if types.regs.contains(&r.index) && !baseline.regs.contains(&r.index))
+    };
+    instructions
+        .iter()
+        .any(|i| matches!(i, Instruction::FloatBinOp { a, b, .. } if unlocked(a) || unlocked(b)))
+}
+
+/// Decide whether `instructions` is a float-parameter-versioning candidate:
+/// a function with a loop-carried float chain that is boxed today only because
+/// its float values originate in arguments. Returns the params to guard and the
+/// float set a guarded fast version could unbox.
+///
+/// Handles both the TCO'd (`TailRecurse`) and the `while`/`loop` (carried via
+/// `StoreLocal` back-edge) shapes — the only requirement is a loop, so a
+/// straight-line function (no carried state) is never versioned.
+///
+/// Conservative on two axes:
+/// - **Necessity-minimised guards.** Starting from all parameters, a guard is
+///   dropped whenever assuming it float does not enlarge the *derived* (non-
+///   parameter) float set. This excludes integer params (e.g. a loop bound `n`)
+///   whose float assumption unlocks nothing — guarding them would only produce a
+///   dead fast path that always misses.
+/// - **Strict win.** Returns `None` unless the guarded set proves *strictly*
+///   more float locals than the sound baseline (there is a real boxing win).
+///
+/// **Soundness of the returned `float_types`:** it is computed assuming float
+/// for *exactly* the guarded params, so an unguarded param never enters the
+/// unbox set. The entry guards the codegen inserts establish that assumption at
+/// runtime; a guard miss takes the slow (re-invoke generic) path.
+///
+/// **Arithmetic-benefit restriction.** Only versions when some unboxed value
+/// actually feeds a `FloatBinOp` (see `float_types_feed_arithmetic`). A guarded
+/// param that is merely copied and passed to a call (e.g. mandelbrot's
+/// `draw_row`, which guards `ci` only to hand it to `mandel(cr, ci)`) gains
+/// nothing from unboxing and would push an unboxed FP value across a call — both
+/// pointless and unsafe (the regalloc doesn't preserve FP across calls yet). The
+/// prize, `mandel`, feeds its guarded params into real float arithmetic.
 pub fn plan_float_param_version(instructions: &[Instruction]) -> Option<FloatParamVersionPlan> {
-    // Only target TCO'd loops (carried float state through the back-edge).
-    if !instructions
+    // Require a loop carrying state (TCO back-edge or a flat back-edge jump).
+    let has_loop = instructions
         .iter()
         .any(|i| matches!(i, Instruction::TailRecurse(..)))
-    {
+        || !crate::ir_loops::flat_ir_loops(instructions).is_empty();
+    if !has_loop {
+        return None;
+    }
+
+    let params = param_slots(instructions);
+    if params.is_empty() {
         return None;
     }
     let baseline = analyze_core(instructions, AnalyzeOpts::default());
-    let optimistic = analyze_core(
-        instructions,
-        AnalyzeOpts {
-            assume_args_float: true,
-            model_tailrecurse: true,
-        },
-    );
+
+    // Derived (non-guarded-param) float locals unlocked by guarding `g`.
+    let derived = |g: &HashSet<usize>| -> HashSet<usize> {
+        analyze_with_guarded(instructions, g)
+            .locals
+            .difference(g)
+            .copied()
+            .collect()
+    };
+
+    // Minimise: drop any guard whose removal preserves the derived float set.
+    let mut guarded: HashSet<usize> = params;
+    loop {
+        let cur = derived(&guarded);
+        let mut order: Vec<usize> = guarded.iter().copied().collect();
+        order.sort_unstable();
+        let mut removed = false;
+        for p in order {
+            let mut without = guarded.clone();
+            without.remove(&p);
+            if derived(&without).is_superset(&cur) {
+                guarded = without;
+                removed = true;
+                break;
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
+    if guarded.is_empty() {
+        return None;
+    }
+
+    let float_types = analyze_with_guarded(instructions, &guarded);
     // The fast version must prove strictly more float locals than today.
-    if !optimistic.locals.is_superset(&baseline.locals) || optimistic.locals == baseline.locals {
+    if !float_types.locals.is_superset(&baseline.locals) || float_types.locals == baseline.locals {
         return None;
     }
-    // Guard exactly the float parameters whose floatness the optimistic
-    // analysis relies on (param slots that become float under the assumption).
-    let mut guard_params: Vec<usize> = param_slots(instructions)
-        .into_iter()
-        .filter(|p| optimistic.locals.contains(p))
-        .collect();
-    if guard_params.is_empty() {
+    // The unboxed set must feed real float arithmetic — otherwise versioning is
+    // pointless (unbox-then-rebox) and risks pushing an unboxed FP value across
+    // a call (see `float_types_feed_arithmetic`).
+    if !float_types_feed_arithmetic(instructions, &float_types, &baseline) {
         return None;
     }
-    guard_params.sort();
+    // ...and the unboxed set must cover essentially ALL the loop's float
+    // arithmetic. If the body also does float ops over values versioning can't
+    // prove unboxed (heap/field loads, global cells — `nbody/advance`'s body
+    // floats), those stay boxed regardless, so duplicating the whole body
+    // behind a param guard adds guard + icache cost without removing their
+    // box/unbox traffic — a measured net loss. Versioning only pays when the
+    // guarded-derived set is the loop's float work (mandel: all-local accums).
+    if has_uncovered_float_arith(instructions, &float_types) {
+        return None;
+    }
+    let mut guard_params: Vec<usize> = guarded.into_iter().collect();
+    guard_params.sort_unstable();
     Some(FloatParamVersionPlan {
         guard_params,
-        float_types: optimistic,
+        float_types,
     })
 }
 
@@ -495,43 +636,148 @@ mod tests {
         Instruction::TailRecurse(reg(99), args)
     }
 
-    /// A minimal `mandel`-shaped TCO'd float loop: one float param `p` (local0)
-    /// arrives as an arg, is combined with a float const each iteration, and
-    /// is carried back via `TailRecurse`. Boxed today (arg poisons the slot);
-    /// a candidate for guarded float-param versioning.
-    fn mandel_like() -> Vec<Instruction> {
+    fn label(index: usize) -> crate::common::Label {
+        crate::common::Label { index }
+    }
+
+    /// A minimal `mandel`-shaped TCO'd float loop: a float param `cr` (local0)
+    /// arrives as an arg and feeds a *derived* float `t` (local5) recomputed
+    /// each iteration; the param is carried back unchanged via `TailRecurse`.
+    /// Boxed today (the arg-store poisons local0, so `cr + 1.0` is speculative);
+    /// a guarded fast version proves both float.
+    fn mandel_like_tco() -> Vec<Instruction> {
         vec![
-            // prologue: local0 = arg0  (the float param, poisons today)
-            Instruction::StoreLocal(Value::Local(0), arg_reg(0, 0)),
-            // loop body: r10 = local0; r11 = r10 + 1.0
-            Instruction::Assign(reg(10), Value::Local(0)),
-            float_binop(11, reg(10), float_const()),
-            // back-edge: tail_recurse with the new float value for local0
-            tail_recurse(vec![reg(11)]),
+            Instruction::StoreLocal(Value::Local(0), arg_reg(0, 0)), // cr = arg0
+            Instruction::Assign(reg(9), Value::Local(0)),            // cr
+            float_binop(11, reg(9), float_const()),                  // t = cr + 1.0
+            Instruction::StoreLocal(Value::Local(5), reg(11)),       // local5 = t (derived)
+            tail_recurse(vec![reg(9)]),                              // carry cr unchanged
+        ]
+    }
+
+    /// The same shape as a `while`/`loop` (flat back-edge `Jump`, no
+    /// `TailRecurse`): `acc` (local1) is carried via `StoreLocal` across the
+    /// back-edge. This is the mandelbrot `mandel` shape.
+    fn mandel_like_while() -> Vec<Instruction> {
+        vec![
+            Instruction::StoreLocal(Value::Local(0), arg_reg(0, 0)), // cr = arg0
+            Instruction::StoreLocal(Value::Local(1), float_const()), // acc = 0.0
+            Instruction::Label(label(0)),                            // loop header
+            Instruction::Assign(reg(9), Value::Local(0)),            // cr
+            Instruction::Assign(reg(10), Value::Local(1)),           // acc
+            float_binop(12, reg(10), reg(9)),                        // acc + cr
+            Instruction::StoreLocal(Value::Local(1), reg(12)),       // acc = acc + cr
+            Instruction::Jump(label(0)),                             // back-edge
         ]
     }
 
     #[test]
     fn baseline_does_not_prove_float_param() {
-        // Without guarding, the arg-store poisons local0 → not float.
-        let floats = analyze_float_types(&mandel_like()).locals;
+        // Without guarding, the arg-store poisons local0 → not float, and the
+        // speculative `acc + cr` poisons the derived accumulator too.
+        let floats = analyze_float_types(&mandel_like_tco()).locals;
         assert!(!floats.contains(&0), "param must be boxed without a guard");
-    }
-
-    #[test]
-    fn planner_detects_float_param_candidate() {
-        let plan = plan_float_param_version(&mandel_like())
-            .expect("mandel-like TCO float loop should be a candidate");
-        assert_eq!(plan.guard_params, vec![0], "param local0 should be guarded");
         assert!(
-            plan.float_types.locals.contains(&0),
-            "guarded fast version proves the param float"
+            !floats.contains(&5),
+            "derived local must be boxed without a guard"
         );
     }
 
     #[test]
-    fn planner_rejects_non_tco_function() {
-        // No TailRecurse → not the carried-state case this targets.
+    fn planner_detects_tco_candidate() {
+        let plan = plan_float_param_version(&mandel_like_tco())
+            .expect("mandel-like TCO float loop should be a candidate");
+        assert_eq!(
+            plan.guard_params,
+            vec![0],
+            "only the float param is guarded"
+        );
+        assert!(
+            plan.float_types.locals.contains(&0) && plan.float_types.locals.contains(&5),
+            "guarded fast version proves param + derived local float"
+        );
+    }
+
+    #[test]
+    fn planner_detects_while_loop_candidate() {
+        let plan = plan_float_param_version(&mandel_like_while())
+            .expect("mandel-like while-loop float loop should be a candidate");
+        assert_eq!(
+            plan.guard_params,
+            vec![0],
+            "only the float param is guarded"
+        );
+        assert!(
+            plan.float_types.locals.contains(&1),
+            "guarded fast version proves the derived acc float"
+        );
+    }
+
+    #[test]
+    fn planner_does_not_guard_int_param() {
+        // Two params: an int `n` (local0, used only in an int add) and a float
+        // `c` (local1) that feeds a derived float acc (local2). Guarding `n`
+        // unlocks nothing float, so the planner must guard only `c`.
+        let prog = vec![
+            Instruction::StoreLocal(Value::Local(0), arg_reg(0, 0)), // n = arg0
+            Instruction::StoreLocal(Value::Local(1), arg_reg(1, 1)), // c = arg1
+            Instruction::StoreLocal(Value::Local(2), float_const()), // acc = 0.0
+            Instruction::Label(label(0)),
+            Instruction::Assign(reg(8), Value::Local(0)), // n
+            Instruction::AddInt(reg(9), reg(8), reg(8)),  // int use of n
+            Instruction::Assign(reg(10), Value::Local(1)), // c
+            Instruction::Assign(reg(11), Value::Local(2)), // acc
+            float_binop(12, reg(11), reg(10)),            // acc + c
+            Instruction::StoreLocal(Value::Local(2), reg(12)),
+            Instruction::Jump(label(0)),
+        ];
+        let plan =
+            plan_float_param_version(&prog).expect("float param c should make this a candidate");
+        assert_eq!(
+            plan.guard_params,
+            vec![1],
+            "guard only the float param c, not int n"
+        );
+        assert!(
+            !plan.float_types.locals.contains(&0),
+            "int param n must never enter the unbox set"
+        );
+        assert!(plan.float_types.locals.contains(&2), "derived acc is float");
+    }
+
+    #[test]
+    fn planner_rejects_field_fed_float_arith() {
+        // nbody/advance shape: a guarded float param `c` feeds a derived float
+        // acc (a real versioning opportunity in isolation), BUT the loop ALSO
+        // does a FloatBinOp combining a value versioning can't prove unboxed —
+        // here an int-add result standing in for a heap/field-loaded float.
+        // Those ops stay boxed regardless, so duplicating the body behind the
+        // `c` guard would add guard + icache cost for no net win → reject (the
+        // `has_uncovered_float_arith` profitability gate). Without the extra op
+        // this is exactly `planner_does_not_guard_int_param`, which IS accepted.
+        let prog = vec![
+            Instruction::StoreLocal(Value::Local(0), arg_reg(0, 0)), // n = arg0 (int)
+            Instruction::StoreLocal(Value::Local(1), arg_reg(1, 1)), // c = arg1 (float)
+            Instruction::StoreLocal(Value::Local(2), float_const()), // acc = 0.0
+            Instruction::Label(label(0)),
+            Instruction::Assign(reg(8), Value::Local(0)), // n
+            Instruction::AddInt(reg(9), reg(8), reg(8)),  // int value (uncovered operand)
+            Instruction::Assign(reg(10), Value::Local(1)), // c
+            Instruction::Assign(reg(11), Value::Local(2)), // acc
+            float_binop(12, reg(11), reg(10)),            // acc + c (both covered)
+            float_binop(13, reg(12), reg(9)),             // (acc+c) + <uncovered field-fed>
+            Instruction::StoreLocal(Value::Local(2), reg(13)),
+            Instruction::Jump(label(0)),
+        ];
+        assert!(
+            plan_float_param_version(&prog).is_none(),
+            "field-fed float arithmetic must suppress versioning"
+        );
+    }
+
+    #[test]
+    fn planner_rejects_non_loop_function() {
+        // No loop (no TailRecurse, no back-edge) → not the carried-state case.
         let prog = vec![
             Instruction::StoreLocal(Value::Local(0), arg_reg(0, 0)),
             Instruction::Assign(reg(10), Value::Local(0)),
@@ -542,8 +788,8 @@ mod tests {
 
     #[test]
     fn planner_rejects_when_no_extra_floats_unlocked() {
-        // A TCO loop whose carried state is plainly an int counter: guarding
-        // args float unlocks nothing → no plan.
+        // A loop whose carried state is plainly an int counter: guarding args
+        // float unlocks nothing → no plan.
         let prog = vec![
             Instruction::StoreLocal(Value::Local(0), arg_reg(0, 0)),
             Instruction::Assign(reg(10), Value::Local(0)),

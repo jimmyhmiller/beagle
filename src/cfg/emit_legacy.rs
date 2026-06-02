@@ -321,6 +321,13 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
 
         match op {
             // ---- Moves & constants ----
+            // An FP-class move must use an FP register move (`fmov Dd, Dn`);
+            // a plain `Assign` lowers to an integer `mov` of the wrong (GP)
+            // registers, silently corrupting the value. FP block-param
+            // transfers on edges flow through here (Op::Move).
+            Op::Move { dst, src } if dst.class == RegClass::Fp => self
+                .instructions
+                .push(I::MoveFloat(self.reg(*dst), self.reg(*src))),
             Op::Move { dst, src } => self
                 .instructions
                 .push(I::Assign(self.reg(*dst), self.reg(*src))),

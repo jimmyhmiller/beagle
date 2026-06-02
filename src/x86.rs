@@ -986,6 +986,13 @@ impl LowLevelX86 {
         self.instructions.push(X86Asm::MovqRX { dest, src });
     }
 
+    /// MOVSD xmm, xmm — copy one XMM (double) register to another.
+    pub fn mov_float_reg(&mut self, dest: X86Register, src: X86Register) {
+        if dest != src {
+            self.instructions.push(X86Asm::MovsdRR { dest, src });
+        }
+    }
+
     /// Convert signed 64-bit integer to double-precision floating-point.
     /// CVTSI2SD xmm, r64
     pub fn cvtsi2sd(&mut self, dest: X86Register, src: X86Register) {

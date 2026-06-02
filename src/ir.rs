@@ -189,6 +189,10 @@ pub enum Instruction {
     GuardFloat(Value, Value, Label),
     FmovGeneralToFloat(Value, Value),
     FmovFloatToGeneral(Value, Value),
+    /// FP register → FP register move (`fmov Dd, Dn`). Emitted by the SSA
+    /// edge resolver for FP block-param transfers; a plain `Assign` would
+    /// lower to an integer `mov` of the wrong (GP) registers.
+    MoveFloat(Value, Value),
     IntToFloat(Value, Value), // Convert tagged int to float register (SCVTF/CVTSI2SD)
     FRoundToZero(Value, Value), // Float round toward zero (FRINTZ/ROUNDSD)
     AddFloat(Value, Value, Value),
@@ -431,6 +435,9 @@ impl Instruction {
                 get_registers!(a, b)
             }
             Instruction::FmovGeneralToFloat(a, b) => {
+                get_registers!(a, b)
+            }
+            Instruction::MoveFloat(a, b) => {
                 get_registers!(a, b)
             }
             Instruction::FmovFloatToGeneral(a, b) => {
@@ -729,6 +736,7 @@ impl Instruction {
             | Instruction::LoadConstant(value, value1)
             | Instruction::FmovGeneralToFloat(value, value1)
             | Instruction::FmovFloatToGeneral(value, value1)
+            | Instruction::MoveFloat(value, value1)
             | Instruction::IntToFloat(value, value1)
             | Instruction::FRoundToZero(value, value1)
             | Instruction::ShiftRightImm(value, value1, _, _)
@@ -1557,6 +1565,113 @@ impl Ir {
         let qt = self.volatile_register().into();
         self.instructions.push(Instruction::FRoundToZero(qt, q));
         qt
+    }
+
+    /// Float-parameter versioning (path (a)): guard the plan's float params at
+    /// entry; on success fall through to the body (which the caller then
+    /// unboxes by setting `float_locals` to `plan.float_types`), on a guard
+    /// miss re-invoke the resident generic version `generic_addr` with the
+    /// original args and return its result.
+    ///
+    /// **Soundness.** The guards read the argument registers ONCE at entry,
+    /// *before* the prologue's arg→slot stores (which the unbox pass turns into
+    /// FP stores). A guard miss jumps to the slow block before any slot is
+    /// written, so the re-invoke sees the original (boxed) args. The body is
+    /// unboxed only on the fast path, where every guarded param is proven
+    /// float. Re-invoking the generic from entry re-runs the function with no
+    /// observed state change (the guard is the first thing that runs), so it is
+    /// sound regardless of the body's purity.
+    ///
+    /// Returns `false` (no change) when the argument registers can't be
+    /// reconstructed or the body doesn't end in a `Ret` (so the appended slow
+    /// block could be reached by fall-through).
+    fn apply_float_param_versioning(
+        &mut self,
+        plan: &crate::float_repr::FloatParamVersionPlan,
+        generic_addr: usize,
+    ) -> bool {
+        // The slow block is only reachable via a guard bail; require the body
+        // to end in a return so it can't be entered by fall-through.
+        if !matches!(self.instructions.last(), Some(Instruction::Ret(_))) {
+            return false;
+        }
+
+        // Reconstruct argument registers: arg_index → vreg (lowest vreg index
+        // per arg), mirroring the CFG builder's `collect_argument_vregs`.
+        let mut by_arg: std::collections::HashMap<usize, VirtualRegister> =
+            std::collections::HashMap::new();
+        for inst in &self.instructions {
+            for vr in inst.get_registers() {
+                if let Some(a) = vr.argument {
+                    by_arg
+                        .entry(a)
+                        .and_modify(|e| {
+                            if vr.index < e.index {
+                                *e = vr;
+                            }
+                        })
+                        .or_insert(vr);
+                }
+            }
+        }
+        let Some(&max_arg) = by_arg.keys().max() else {
+            return false;
+        };
+        // The re-invoke must pass the complete original-arg list, so require
+        // args 0..=max_arg to all be present (no unused-arg gaps).
+        let mut all_args: Vec<VirtualRegister> = Vec::with_capacity(max_arg + 1);
+        for a in 0..=max_arg {
+            match by_arg.get(&a) {
+                Some(vr) => all_args.push(*vr),
+                None => return false,
+            }
+        }
+        // Each guard param's slot index == its argument index (the prologue
+        // stores `argK` into `localK`); the guard reads that arg register.
+        let mut guard_regs: Vec<VirtualRegister> = Vec::with_capacity(plan.guard_params.len());
+        for &p in &plan.guard_params {
+            match by_arg.get(&p) {
+                Some(vr) => guard_regs.push(*vr),
+                None => return false,
+            }
+        }
+        if guard_regs.is_empty() {
+            return false;
+        }
+
+        let slow = self.label("fpv_slow");
+
+        // Prepend the entry guards (before the prologue arg→slot stores).
+        let mut guards: Vec<Instruction> = Vec::with_capacity(guard_regs.len());
+        for vr in &guard_regs {
+            let scratch = self.volatile_register();
+            guards.push(Instruction::GuardFloat(
+                scratch.into(),
+                Value::Register(*vr),
+                slow,
+            ));
+        }
+        let body = std::mem::take(&mut self.instructions);
+        self.instructions = guards;
+        self.instructions.extend(body);
+
+        // Append the slow block: re-invoke the resident generic with the
+        // original args, return its result. Tagged like `Value::Function` (the
+        // call lowering untags with `>> tag_size`), matching the deopt
+        // re-invoke in `cfg::builder::apply_deopt_rewrite`.
+        let tagged = crate::types::BuiltInTypes::Function.tag(generic_addr as isize) as usize;
+        self.instructions.push(Instruction::Label(slow));
+        let result = self.volatile_register();
+        let call_args: Vec<Value> = all_args.iter().map(|vr| Value::Register(*vr)).collect();
+        self.instructions.push(Instruction::Call(
+            Value::Register(result),
+            Value::RawValue(tagged),
+            call_args,
+            false,
+        ));
+        self.instructions
+            .push(Instruction::Ret(Value::Register(result)));
+        true
     }
 
     /// Rewrite deferred `FloatBinOp`s and float-local accesses to keep
@@ -2589,23 +2704,55 @@ impl Ir {
             .iter()
             .any(|i| matches!(i, Instruction::FloatBinOp { .. }))
         {
-            // Float-parameter-versioning planner (path (a), step 1: analysis
-            // only — behaviour-neutral). Gated; reports candidates so the
-            // codegen step can be validated against the analysis.
-            if std::env::var("BEAGLE_FLOAT_PARAM_VERSION").is_ok() {
-                if let Some(plan) = crate::float_repr::plan_float_param_version(&self.instructions)
+            // Float-parameter versioning (path (a)). Default ON (opt out with
+            // BEAGLE_SSA_FLOAT_PARAM_VERSION=0). When specializing an eligible
+            // loop whose float chain is boxed only because it originates in
+            // arguments, guard the float params at entry and unbox the fast
+            // body; a guard miss re-invokes the resident generic version (the
+            // slow path emitted by `apply_float_param_versioning`). The analysis
+            // sets `float_locals` to the guarded-optimistic set instead of the
+            // sound default. Fires only inside a tier-up recompile (the deopt
+            // context supplies `generic_addr`), so it's off the cold path.
+            //
+            // Validated bit-identical on all benchmarksgame ports (mandelbrot
+            // ~2× / 2.16→1.08s, nbody/spectral/fannkuch/fasta unchanged) and the
+            // suite (369/369 plain + versioning-on + tier-2 harness). Two bugs
+            // surfaced and were fixed while landing this: (1) the SSA edge
+            // resolver emitted an integer `mov` for FP block-param transfers —
+            // fixed with `Instruction::MoveFloat` (a shared-backend fix
+            // benefiting all SSA float code); (2) the planner versioned
+            // `draw_row`, whose guarded `ci` only flows into the `mandel` call
+            // (no float arithmetic) — now excluded by the arithmetic-benefit
+            // gate in `plan_float_param_version`.
+            let mut versioned_types: Option<crate::float_repr::FloatTypes> = None;
+            if std::env::var("BEAGLE_SSA_FLOAT_PARAM_VERSION")
+                .map(|v| v != "0")
+                .unwrap_or(true)
+            {
+                if let Some((generic_addr, _)) = self.debug_name.as_deref().and_then(deopt_info_for)
                 {
-                    let mut fl: Vec<_> = plan.float_types.locals.iter().copied().collect();
-                    fl.sort();
-                    eprintln!(
-                        "[float-param-version] {} guard_params={:?} -> float_locals={:?}",
-                        self.debug_name.as_deref().unwrap_or("<anon>"),
-                        plan.guard_params,
-                        fl
-                    );
+                    if let Some(plan) =
+                        crate::float_repr::plan_float_param_version(&self.instructions)
+                    {
+                        if self.apply_float_param_versioning(&plan, generic_addr) {
+                            if std::env::var("BEAGLE_FLOAT_PARAM_VERSION_LOG").is_ok() {
+                                let mut fl: Vec<_> =
+                                    plan.float_types.locals.iter().copied().collect();
+                                fl.sort();
+                                eprintln!(
+                                    "[float-param-version] {} guard_params={:?} -> float_locals={:?}",
+                                    self.debug_name.as_deref().unwrap_or("<anon>"),
+                                    plan.guard_params,
+                                    fl
+                                );
+                            }
+                            versioned_types = Some(plan.float_types);
+                        }
+                    }
                 }
             }
-            let types = crate::float_repr::analyze_float_types(&self.instructions);
+            let types = versioned_types
+                .unwrap_or_else(|| crate::float_repr::analyze_float_types(&self.instructions));
             // Guarded-float region-versioning opportunity (SSA spec stage 3).
             // Gated, behaviour-neutral: just reports how many speculative
             // (field-fed) FloatBinOps chain — the box/unbox round-trips that
@@ -3309,6 +3456,13 @@ impl Ir {
                     let dest_spill = self.dest_spill(dest);
                     let dest = self.value_to_register(dest, backend);
                     backend.fmov_from_float(dest, src);
+                    self.store_spill(dest, dest_spill, backend);
+                }
+                Instruction::MoveFloat(dest, src) => {
+                    let src = self.value_to_register(src, backend);
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, backend);
+                    backend.mov_float_reg(dest, src);
                     self.store_spill(dest, dest_spill, backend);
                 }
                 Instruction::IntToFloat(dest, src) => {

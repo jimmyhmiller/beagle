@@ -408,6 +408,13 @@ impl PrettyPrint for Instruction {
                     value1.pretty_print()
                 )
             }
+            Instruction::MoveFloat(value, value1) => {
+                format!(
+                    "move_float {}, {}",
+                    value.pretty_print(),
+                    value1.pretty_print()
+                )
+            }
             Instruction::IntToFloat(value, value1) => {
                 format!(
                     "int_to_float {}, {}",

@@ -35,6 +35,26 @@ history (`project_type_aware_gc_safety`, `project_float_unboxing`,
 
 - **Float *locals* unboxing** — shipped (SSA tier-2 default-on): series 3.46×,
   fib 20%, btrees 23%. Local/intermediate floats stay in FP registers.
+- **Float-parameter versioning** — **LANDED, default-on** (opt out with
+  `BEAGLE_SSA_FLOAT_PARAM_VERSION=0`). Guards float params at entry, unboxes the
+  fast body, re-invokes the resident generic on a guard miss. **mandelbrot ~2×
+  (2.16→1.08s @ n=2000), bit-identical**; all other benchmarksgame ports
+  bit-identical; suite 369/369 (plain + on + tier-2 harness). See Priority 1.
+- **`Instruction::MoveFloat`** — a shared SSA-backend fix landed alongside: the
+  edge resolver emitted an integer `mov` for FP block-param transfers (silently
+  corrupting loop-carried floats with non-coalesced FP phis). Now emits
+  `fmov`/`movsd`. Benefits **all** SSA float code, not just versioning.
+- **De-specialize on redefinition** — landed (`Compiler::revert_all_specializations`,
+  hooked into `compile_string*` + `add_struct`). When `eval`/REPL/reload redefines
+  a struct/let/function, all tier-2 specializations revert to their retained tier-1
+  code (jump-table swap-back) so no specialized code keeps a stale snapshot of the
+  redefined world. Fixes the silent-wrong-result staleness at the default threshold.
+- **Inlined array primitives** — `beagle.mutable-array/swap` and `/write-field`
+  are now inline primitives (`src/primitives.rs`), like `get` already was. Each
+  array op in a tight loop was a full wrapper-function call; inlining the
+  type-guard + bounds + store(+barrier) and delegating non-array/OOB to the real
+  wrapper on the slow path removes that overhead. **fannkuch_redux ~1.9× (4.9s →
+  2.63s @ n=10)**, bit-identical; suite 369/369 (plain + tier-2 + generational GC).
 - **Deopt (reinvoke-for-pure-functions)** — `BEAGLE_SSA_DEOPT`, **on by
   default**. Removes the bail-rejoin for eligible pure functions so loop-carried
   ints promote to registers. ~25–35% on pure-no-call int loops. Validated
@@ -64,42 +84,109 @@ huge (forward-resume OSR).
 
 ---
 
-## Priority 1 — Float-parameter versioning (the next prize)
+## Priority 1 — Float-parameter versioning — ✅ LANDED, default-on
 
-**Why:** the one clearly-tractable, sound, *measured* remaining win. mandelbrot
-~15% (probe in git history; `BEAGLE_FLOAT_ARG_PROBE` was the unsound proof). Hits
-TCO'd local-float loops (mandelbrot-shape) that box today only because their
-float values originate in *arguments*. **Sound** — the entry guard is read once
-before the loop, so the nbody read-after-write hoist hazard does NOT apply.
+**Status (2026-06-02):** shipped, default-on (opt out `BEAGLE_SSA_FLOAT_PARAM_VERSION=0`).
+**mandelbrot ~2× (2.16→1.08s @ n=2000), bit-identical.** All other benchmarksgame
+ports bit-identical; suite 369/369 (plain + on + tier-2 harness). The original
+~15%/~38% estimates were the *kernel* ceiling; the full benchmark (with IO and
+draw_rows) realizes ~2× because `draw_rows` (the outer float loop) versions too.
 
-**What exists:** `src/float_repr.rs::plan_float_param_version` (step 1, landed) —
-returns a `FloatParamVersionPlan { guard_params, float_types }` when guarding
-float params strictly enlarges the provably-float local set and the function
-loops via `TailRecurse`. The float dataflow (`analyze_core` + `AnalyzeOpts`)
-models the optimistic case (`assume_args_float`, `model_tailrecurse`). The
-unboxing engine (`unbox_floats`, `LoadLocalFloat`/`StoreLocalFloat`, unscanned FP
-slots) is shipped.
+**Design (Path B, no body duplication).** `mandel`/`draw_rows` are versioned:
+guard each float param at entry; pass → unboxed fast body; miss → re-invoke the
+resident generic (`generic_addr` from `deopt_info_for`) with the original args.
+Sound because the guard is the first thing that runs (re-invoke from entry is
+unobservable) and `float_types` is computed assuming float for *exactly* the
+guarded params (an unguarded param never enters the unbox set).
 
-**What to build (step 2 — the versioned codegen):**
-1. When a function has a `FloatParamVersionPlan`, emit at entry (after the
-   arg→slot prologue): `GuardFloat` each `guard_params` slot. All pass → jump to
-   the **fast** body; any fails → jump to the **slow** body.
-2. **Fast body** = the function body with `plan.float_types` driving
-   `unbox_floats` (float params unboxed, carried unboxed across the `TailRecurse`
-   back-edge in FP slots).
-3. **Slow body** = today's boxed lowering (unchanged).
-4. Both reach the same return.
+**Implementation:**
+- `src/float_repr.rs::plan_float_param_version` — handles `TailRecurse` and
+  `while`/`loop` (flat back-edge) shapes. Three gates: (1) **necessity-minimised
+  guards** (drop a guard whose float assumption doesn't enlarge the *derived*
+  float set — excludes int params like a loop bound `n`); (2) **strict win** (more
+  float locals than the sound baseline); (3) **arithmetic-benefit**
+  (`float_types_feed_arithmetic`) — some guard-*unlocked* register (in
+  `float_types.regs` but not `baseline.regs`, so not a mere float const) must feed
+  a `FloatBinOp`. Gate (3) is what excludes `draw_row`, whose guarded `ci` is only
+  copied and handed to `mandel(cr,ci)` (no arithmetic) — versioning it pushed an
+  unboxed FP value across the call and corrupted it.
+- `src/ir.rs::apply_float_param_versioning` — prepends `GuardFloat` per guard
+  param (before the arg→slot prologue), appends the re-invoke slow block, sets
+  `float_locals`/`float_regs` so `unbox_floats` unboxes the fast body.
 
-**Risks / where it bites:** this is IR-level body duplication (per iter-10's
-finding: AST-emission versioning double-consumes feedback slots — do it at the
-IR level in/after `unbox_floats`). Must handle label relabeling, the
-`TailRecurse` back-edge in both versions, and the feedback-slot cursor. **Float
-output must be bit-identical**; gc-stress must pass. Gate
-`BEAGLE_SSA_FLOAT_PARAM_VERSION`, A/B on a mandelbrot probe.
+**Two bugs found + fixed while landing (both in the shared SSA backend):**
+1. **`Instruction::MoveFloat`** — the edge resolver lowered FP block-param
+   transfers (`Op::Move` of FP class) to an integer `mov` of the wrong (GP)
+   registers, silently corrupting any loop-carried float with a non-coalesced FP
+   phi (minimal repro `/tmp/n6.bg`: `nzi = zr*zi + ci` carried). Added an FP
+   register move (`fmov Dd,Dn` / `movsd`) wired through the backend trait. **This
+   fixes all SSA float code**, not just versioning.
+2. **draw_row over-version** — fixed by the arithmetic-benefit gate (above).
 
-**Caution (from memory):** versioning is repeatedly flagged as "the very large,
-riskiest build that needs oversight." Build in the smallest gated, bit-identical
-slices.
+**Reusable diagnostics learned:** capture tier-2 asm with `--dump asm` and pick
+the record by size/structure (tier-1 polymorphic is larger + has `scvtf`; tier-2
+SSA is the lean one). `BEAGLE_SSA_DUMP_FN`/`BEAGLE_SSA_VERIFY_STAGES` dump/verify
+per SSA phase. `runtime/specialize-all()` + `--no-auto-specialize` gives
+deterministic tier-up for A/B (async trampoline tier-up is racy).
+
+**Remaining (future):** `draw_row`-shape loops (unboxed float passed across a
+fast-path call) stay boxed until the regalloc **preserves FP across calls** (the
+spiller handles only GP today — `cfg::regalloc::spill`). That's the next unlock
+for call-bearing float loops.
+
+---
+
+## Priority 1.5 — Hot-loop tier-up (OSR) — the biggest remaining systemic lever
+
+**Finding (2026-06-02, measured).** Tier-up is triggered by the **entry
+counter**. A function entered once but running a hot inner loop (fannkuch,
+spectral_norm, any `main`-with-a-big-loop) **never tiers up** — it runs the whole
+computation as unoptimized tier-1 (polymorphic ops, no int/float specialization,
+no SSA regalloc). Confirmed: lowering the threshold to 1 doesn't help fannkuch
+(specialization fires but applies to the *next* call, which never comes);
+`runtime/specialize-all()` + a second call shows tier-2 would give **~32%**
+(4.95s → ~3.35s on fannkuch n=10).
+
+**Fix = OSR (on-stack replacement):** count loop back-edges in tier-1 code; when a
+loop is hot, compile the tier-2 version and transfer the running frame into it at
+the loop header. **Tractable here because tier-1 and tier-2 share a byte-identical
+slot layout** (same AST, feedback-independent alloc — see the deopt notes): all
+live loop state is already in stack slots, so OSR is essentially "jump from the
+tier-1 loop header to the tier-2 loop header" with no register-state transfer (the
+GP values are in slots; FP would need care). Hard parts: back-edge instrumentation
+in tier-1, mapping tier-1→tier-2 loop-header addresses, the frame hand-off.
+
+**Tier-2 activation races execution at low thresholds (BLOCKER for lowering the
+threshold).** Tier-up runs on the compiler thread; the install (`flush_deferred_
+functions`: jump-table swap + function-table mutation) races with the mutator
+reading the function table (closure dispatch's ptr→index scan, etc.). At the
+default 1000 it's rare (functions tier up when warm); at low thresholds a function
+tiers up *during* its own first execution → crashes (uncaught exceptions via the
+async wrapper — `map_utils_advanced` at thr=10, `struct_redefine_*`/`redefine_let`
+at thr=1). **Tried TWICE & reverted both times: defer activation to a
+stop-the-world** (compiler stages a ready install; a mutator applies it at STW).
+The 2nd attempt fixed the thrash (relaxed-load gate before the atomic swap) so
+it's correct and no longer thrashes — but it is a **confirmed dead end** for two
+reasons measured on the real `beag` binary:
+1. **It never activates on alloc-fast-path-heavy hot loops.** mandelbrot boxes
+   its floats via the *inline* bump allocator in generated code, which never
+   enters Rust `allocate()` where the `installs_ready` STW trigger lives. So
+   tier-2 never installs and mandelbrot ran 2.89s (tier-1) instead of 1.04s — a
+   ~37% regression. (`BEAGLE_DBG_INSTALL` trace: 0 activations.)
+2. **Zero correctness benefit.** Full suite at `BEAGLE_SPECIALIZE_THRESHOLD=1`
+   is 363/369 with STW-staging == 363/369 with HEAD's immediate-flush. The 6
+   remaining thr=1 failures are pre-existing de-spec-at-thr1 bugs, not the
+   install race.
+Conclusion: keep immediate-flush. The right fix is **fine-grained
+synchronization of the function-table reads** (lock/seqlock around the ptr→index
+scan + the activation), NOT deferral — a separate careful project. Until then,
+keep the threshold at the default.
+
+**Current Beagle vs Node v24 (warmed, median of 3):** fannkuch_redux 21× (now
+~12× after array inlining), nbody 18×, spectral_norm 8×, binary_trees 2.6×,
+mandelbrot 1.7× (was ~3.5× pre-versioning). The big multipliers (fannkuch,
+spectral) are dominated by **never tiering up** + array/V8-codegen gaps. OSR is
+the lever that unlocks tier-2 for them.
 
 ---
 

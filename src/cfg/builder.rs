@@ -2116,6 +2116,7 @@ fn instruction_name(inst: &Instruction) -> &'static str {
         Instruction::FRoundToZero(..) => "FRoundToZero",
         Instruction::AddFloat(..) => "AddFloat",
         Instruction::FloatBinOp { .. } => "FloatBinOp",
+        Instruction::MoveFloat(..) => "MoveFloat",
         Instruction::LoadLocalFloat(..) => "LoadLocalFloat",
         Instruction::StoreLocalFloat(..) => "StoreLocalFloat",
         Instruction::FieldRead { .. } => "FieldRead",

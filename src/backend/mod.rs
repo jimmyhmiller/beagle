@@ -140,6 +140,11 @@ pub trait CodegenBackend: Sized {
     /// Move value from floating-point register to general-purpose register.
     fn fmov_from_float(&mut self, dest: Self::Register, src: Self::Register);
 
+    /// Move a value between two floating-point registers without conversion
+    /// (`fmov Dd, Dn` on ARM64, `movsd`/`movaps` on x86-64). Distinct from
+    /// `mov_reg`, which moves general-purpose registers.
+    fn mov_float_reg(&mut self, dest: Self::Register, src: Self::Register);
+
     /// Convert signed integer to floating-point (SCVTF on ARM64, CVTSI2SD on x86-64).
     fn int_to_float(&mut self, dest: Self::Register, src: Self::Register);
 

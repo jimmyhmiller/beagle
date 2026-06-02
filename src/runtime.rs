@@ -8191,6 +8191,19 @@ impl Runtime {
         Ok(function_pointer as usize)
     }
 
+    /// Point the named function's jump-table slot back at `pointer` (its
+    /// retained tier-1 code) with `size`. Used by the compiler to revert a
+    /// tier-2 specialization on a runtime redefinition. No-op if the function
+    /// is gone (returns false).
+    pub fn revert_function_pointer(&mut self, name: &str, pointer: usize, size: usize) -> bool {
+        if let Some(index) = self.functions.iter().position(|f| f.name == name) {
+            let _ = self.overwrite_function(index, pointer as *const u8, size);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn get_pointer(&self, function: &Function) -> Result<*const u8, Box<dyn Error>> {
         Ok(function.pointer.into())
     }

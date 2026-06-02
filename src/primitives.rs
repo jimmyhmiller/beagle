@@ -23,6 +23,8 @@ pub fn get_inline_primitive_arity(name: &str) -> usize {
         "beagle.primitive/string-builder-byte-at" | "beagle.string-builder/byte-at" => 2,
         "beagle.primitive/string-builder-set-byte-at!" | "beagle.string-builder/set-byte-at!" => 3,
         "beagle.mutable-array/get" => 2,
+        "beagle.mutable-array/write-field" => 3,
+        "beagle.mutable-array/swap" => 3,
         "beagle.mutable-array/read-field-unsafe" => 2,
         "beagle.primitive/breakpoint" => 0,
         "beagle.primitive/size" => 1,
@@ -92,6 +94,96 @@ impl AstCompiler<'_> {
         self.ir.write_label(done);
         self.ir
             .add_int(storage_ptr, Value::Register(payload_offset))
+    }
+
+    /// Type-guard that `array` is a `RAW_ARRAY` heap object. On a miss, jumps
+    /// to `slow` (the caller delegates to the real wrapper there, which throws
+    /// on a non-array). Returns `(array_ptr, header, large_flag)` for the fast
+    /// path. Shared by the inlined `swap`/`write-field` expansions; mirrors the
+    /// guard inside the inlined `get`.
+    fn array_type_guard(
+        &mut self,
+        array: Value,
+        slow: crate::common::Label,
+    ) -> (Value, Value, Value) {
+        let tag = self.ir.get_tag(array);
+        self.ir.jump_if(
+            slow,
+            Condition::NotEqual,
+            tag,
+            Value::RawValue(BuiltInTypes::HeapObject.get_tag() as usize),
+        );
+        let array_ptr = self.ir.untag(array);
+        let header = self.ir.load_from_heap(array_ptr, 0);
+        let type_id_offset = Header::type_id_offset();
+        let type_id = self
+            .ir
+            .shift_right_imm_raw(header, (type_id_offset * 8) as i32);
+        let type_id = self.ir.and_imm(type_id, 0x0000_0000_0000_FFFF);
+        self.ir.jump_if(
+            slow,
+            Condition::NotEqual,
+            type_id,
+            Value::RawValue(TYPE_ID_RAW_ARRAY as usize),
+        );
+        let large_flag = self
+            .ir
+            .and_imm(header, 1 << Header::LARGE_OBJECT_BIT_POSITION);
+        (array_ptr, header, large_flag)
+    }
+
+    /// Tagged-int element count of an array (large: extended-size word; small:
+    /// inline header field).
+    fn array_tagged_size(&mut self, array_ptr: Value, header: Value, large_flag: Value) -> Value {
+        let zero = self.ir.assign_new(Value::RawValue(0));
+        let not_large = self.ir.label("arr_size_not_large");
+        let done = self.ir.label("arr_size_done");
+        let size_reg = self.ir.volatile_register();
+        self.ir
+            .jump_if(not_large, Condition::Equal, large_flag, zero);
+        let extended = self.ir.load_from_heap(array_ptr, 1);
+        self.ir.assign(size_reg, extended);
+        self.ir.jump(done);
+        self.ir.write_label(not_large);
+        let size_offset = Header::size_offset();
+        let inline_size = self
+            .ir
+            .shift_right_imm_raw(header, (size_offset * 8) as i32);
+        let inline_size = self.ir.and_imm(inline_size, 0x0000_0000_0000_FFFF);
+        self.ir.assign(size_reg, inline_size);
+        self.ir.write_label(done);
+        self.ir
+            .tag(Value::Register(size_reg), BuiltInTypes::Int.get_tag())
+    }
+
+    /// Byte offset (from the array pointer) of element `index_value` (a tagged
+    /// int), accounting for the 1- vs 2-word header (`large_flag`).
+    fn array_byte_offset(&mut self, index_value: Value, large_flag: Value) -> Value {
+        let zero = self.ir.assign_new(Value::RawValue(0));
+        let not_large = self.ir.label("arr_off_not_large");
+        let done = self.ir.label("arr_off_done");
+        let offset_reg = self.ir.volatile_register();
+        self.ir
+            .jump_if(not_large, Condition::Equal, large_flag, zero);
+        let field_large = self.ir.add_int(index_value, Value::TaggedConstant(2));
+        let field_large = self.ir.mul(field_large, Value::RawValue(8));
+        self.ir.assign(offset_reg, field_large);
+        self.ir.jump(done);
+        self.ir.write_label(not_large);
+        let field_small = self.ir.add_int(index_value, Value::TaggedConstant(1));
+        let field_small = self.ir.mul(field_small, Value::RawValue(8));
+        self.ir.assign(offset_reg, field_small);
+        self.ir.write_label(done);
+        Value::Register(offset_reg)
+    }
+
+    /// Emit the generational-GC card-marking write barrier for a store of
+    /// `value` into the object at `array_ptr` (already untagged).
+    fn array_write_barrier(&mut self, array_ptr: Value, value: Value) {
+        let write_barrier_fn =
+            Value::RawValue((write_barrier as usize) << BuiltInTypes::tag_size());
+        self.ir
+            .call_builtin(write_barrier_fn, vec![array_ptr, value]);
     }
 
     pub fn compile_inline_primitive_function(&mut self, name: &str, args: Vec<Value>) -> Value {
@@ -357,6 +449,107 @@ impl AstCompiler<'_> {
 
                 self.ir.write_label(invalid);
                 self.ir.assign(result, Value::Null);
+                self.ir.write_label(done);
+                Value::Register(result)
+            }
+            "beagle.mutable-array/write-field" => {
+                // Fast path: array + in-bounds → inline store + write barrier.
+                // Any miss (non-array or out-of-bounds) → call the real wrapper,
+                // which throws on a non-array and returns null out-of-bounds —
+                // exact semantics with no duplication.
+                let array = args[0];
+                let index = args[1];
+                let value = args[2];
+
+                let slow = self.ir.label("awf_slow");
+                let done = self.ir.label("awf_done");
+                let result = self.ir.assign_new(Value::Null);
+
+                let (array_ptr, header, large_flag) = self.array_type_guard(array, slow);
+                let index_reg = self.ir.assign_new(index);
+                let index_value = Value::Register(index_reg);
+                self.ir.jump_if(
+                    slow,
+                    Condition::LessThan,
+                    index_value,
+                    Value::TaggedConstant(0),
+                );
+                let tagged_size = self.array_tagged_size(array_ptr, header, large_flag);
+                self.ir.jump_if(
+                    slow,
+                    Condition::GreaterThanOrEqual,
+                    index_value,
+                    tagged_size,
+                );
+                let offset = self.array_byte_offset(index_value, large_flag);
+                self.ir.heap_store_with_reg_offset(array_ptr, value, offset);
+                self.array_write_barrier(array_ptr, value);
+                self.ir.assign(result, Value::Null);
+                self.ir.jump(done);
+
+                self.ir.write_label(slow);
+                let slow_result = self
+                    .call_builtin(
+                        "beagle.mutable-array/write-field",
+                        vec![array, index, value],
+                    )
+                    .expect("beagle.mutable-array/write-field must resolve for inline slow path");
+                self.ir.assign(result, slow_result);
+                self.ir.write_label(done);
+                Value::Register(result)
+            }
+            "beagle.mutable-array/swap" => {
+                // Fast path: array + both indices in-bounds → two inline reads +
+                // two inline writes (+ barriers). Any miss → real wrapper (throws
+                // on non-array, null out-of-bounds). `tmp`/offsets stay live
+                // across the barrier calls; the GP allocator preserves them.
+                let array = args[0];
+                let i = args[1];
+                let j = args[2];
+
+                let slow = self.ir.label("asw_slow");
+                let done = self.ir.label("asw_done");
+                let result = self.ir.assign_new(Value::Null);
+
+                let (array_ptr, header, large_flag) = self.array_type_guard(array, slow);
+                let i_reg = self.ir.assign_new(i);
+                let i_value = Value::Register(i_reg);
+                let j_reg = self.ir.assign_new(j);
+                let j_value = Value::Register(j_reg);
+                let tagged_size = self.array_tagged_size(array_ptr, header, large_flag);
+                self.ir
+                    .jump_if(slow, Condition::LessThan, i_value, Value::TaggedConstant(0));
+                self.ir
+                    .jump_if(slow, Condition::GreaterThanOrEqual, i_value, tagged_size);
+                self.ir
+                    .jump_if(slow, Condition::LessThan, j_value, Value::TaggedConstant(0));
+                self.ir
+                    .jump_if(slow, Condition::GreaterThanOrEqual, j_value, tagged_size);
+
+                let off_i = self.array_byte_offset(i_value, large_flag);
+                let tmp = self.ir.heap_load_with_reg_offset(array_ptr, off_i);
+                let tmp = self.ir.assign_new(tmp);
+                let off_j = self.array_byte_offset(j_value, large_flag);
+                let vj = self.ir.heap_load_with_reg_offset(array_ptr, off_j);
+                let vj = self.ir.assign_new(vj);
+                // perm[i] = perm[j]
+                let off_i2 = self.array_byte_offset(i_value, large_flag);
+                self.ir
+                    .heap_store_with_reg_offset(array_ptr, Value::Register(vj), off_i2);
+                self.array_write_barrier(array_ptr, Value::Register(vj));
+                // perm[j] = tmp
+                let off_j2 = self.array_byte_offset(j_value, large_flag);
+                self.ir
+                    .heap_store_with_reg_offset(array_ptr, Value::Register(tmp), off_j2);
+                self.array_write_barrier(array_ptr, Value::Register(tmp));
+                self.ir.assign(result, Value::Null);
+                self.ir.jump(done);
+
+                self.ir.write_label(slow);
+                let slow_result = self
+                    .call_builtin("beagle.mutable-array/swap", vec![array, i, j])
+                    .expect("beagle.mutable-array/swap must resolve for inline slow path");
+                self.ir.assign(result, slow_result);
                 self.ir.write_label(done);
                 Value::Register(result)
             }

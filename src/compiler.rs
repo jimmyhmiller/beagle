@@ -408,6 +408,13 @@ pub struct Compiler {
     /// fire multiple times in races, and we don't want to recompile
     /// over and over.
     pub specialized_names: HashSet<String>,
+    /// For each specialized function, the (pointer, size) of its tier-1 code
+    /// *before* the tier-2 swap. On a runtime redefinition (eval/REPL/reload),
+    /// `revert_all_specializations` restores these into the jump table so no
+    /// specialized code keeps a stale snapshot of redefined state (struct
+    /// layouts, name resolution, etc.). The generic code is retained (deopt
+    /// relies on it), so the revert is just a jump-table-slot swap-back.
+    pub specialization_originals: HashMap<String, (usize, usize)>,
     /// Per-function entry counters. Each compiled (named, non-bail,
     /// first-time) function gets one 8-byte slot. The slot is
     /// initialized to the negative of the threshold and incremented on
@@ -518,6 +525,9 @@ impl Compiler {
         byte_offset: usize,
         line_offset: usize,
     ) -> Result<usize, Box<dyn Error>> {
+        // Runtime recompile may redefine functions/structs/lets — drop any
+        // tier-2 specializations so none keep a stale snapshot of the world.
+        self.revert_all_specializations();
         let saved_namespace_id = if let Some(ns_name) = namespace {
             let current_id = self.current_namespace_id();
             if let Some(ns_id) = self.get_namespace_id(ns_name) {
@@ -658,6 +668,9 @@ impl Compiler {
             .clone()
             .unwrap_or_else(|| "<specialized>".to_string());
         let current_address: usize = function.pointer.into();
+        // Tier-1 (pre-swap) code, retained so a later runtime redefinition can
+        // revert this function out of its specialized snapshot.
+        let tier1_size = function.size;
         // Use the transitive ranges so we also capture feedback for
         // sites inside nested fns (closures / lambdas). The cursor in
         // the recompile advances on every alloc, so the feedback array
@@ -753,8 +766,13 @@ impl Compiler {
             Ok(_) => {
                 self.defer_function_installs = false;
                 self.flush_deferred_functions();
-                self.code_allocator.make_executable();
                 self.specialized_names.insert(full_name.to_string());
+                // Remember the tier-1 code so a runtime redefinition can revert
+                // this function (only the first specialization records it — the
+                // `specialized_names` guard above prevents re-entry until revert).
+                self.specialization_originals
+                    .entry(full_name.to_string())
+                    .or_insert((current_address, tier1_size));
                 Ok(true)
             }
             Err(e) => {
@@ -772,6 +790,9 @@ impl Compiler {
         string: &str,
         namespace: Option<&str>,
     ) -> Result<usize, Box<dyn Error>> {
+        // Runtime recompile may redefine functions/structs/lets — drop any
+        // tier-2 specializations so none keep a stale snapshot of the world.
+        self.revert_all_specializations();
         // Switch to target namespace if specified, saving the current one
         let saved_namespace_id = if let Some(ns_name) = namespace {
             let current_id = self.current_namespace_id();
@@ -1539,11 +1560,32 @@ impl Compiler {
 
     // TODO: All of this seems bad
     pub fn add_struct(&mut self, s: Struct) {
-        let runtime = get_runtime().get_mut();
-        let is_redefinition = runtime.add_struct(s);
+        let is_redefinition = {
+            let runtime = get_runtime().get_mut();
+            runtime.add_struct(s)
+        };
         if is_redefinition {
             self.invalidate_all_property_caches();
+            self.revert_all_specializations();
         }
+    }
+
+    /// Revert every specialized function to its retained tier-1 code (swap the
+    /// jump-table slots back) and forget the specializations. Called on a
+    /// runtime redefinition (eval/REPL/reload) so no tier-2 code keeps a stale
+    /// snapshot of the world it was specialized against — struct layouts, name
+    /// resolution, baked feedback. Tier-1 is fully dynamic, so reverting is
+    /// always correct; hot functions re-tier-up afterward. No-op when nothing
+    /// is specialized (so it's free at startup / cold runs).
+    pub fn revert_all_specializations(&mut self) {
+        if self.specialization_originals.is_empty() {
+            return;
+        }
+        let runtime = get_runtime().get_mut();
+        for (name, (pointer, size)) in self.specialization_originals.drain() {
+            runtime.revert_function_pointer(&name, pointer, size);
+        }
+        self.specialized_names.clear();
     }
 
     /// Invalidate all property access inline caches by writing usize::MAX to the
@@ -1618,6 +1660,8 @@ impl Compiler {
                 "beagle.string-builder/byte-at"
                     | "beagle.string-builder/set-byte-at!"
                     | "beagle.mutable-array/get"
+                    | "beagle.mutable-array/write-field"
+                    | "beagle.mutable-array/swap"
                     | "beagle.mutable-array/read-field-unsafe"
             )
     }
@@ -2448,6 +2492,7 @@ impl CompilerThread {
                 arith_feedback_range_by_address: HashMap::new(),
                 arith_feedback_debug_names: Vec::new(),
                 specialized_names: HashSet::new(),
+                specialization_originals: HashMap::new(),
                 function_counter_cache: MmapOptions::new(MmapOptions::page_size() * 64) // 256KB ≈ 32k functions
                     .map_err(|e| {
                         CompileError::MemoryMapping(format!("Failed to create mmap: {}", e))

@@ -2242,6 +2242,16 @@ impl LowLevelArm {
         });
     }
 
+    /// `FMOV Dd, Dn` — copy one double-precision FP register to another
+    /// without conversion (ftype=01 = double).
+    pub fn fmov_reg(&mut self, dest: Register, src: Register) {
+        self.instructions.push(ArmAsm::FmovFloat {
+            ftype: 0b01,
+            rn: src,
+            rd: dest,
+        });
+    }
+
     /// Convert signed 64-bit integer to double-precision floating-point.
     /// SCVTF Dd, Xn
     pub fn scvtf(&mut self, dest: Register, src: Register) {
