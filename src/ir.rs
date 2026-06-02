@@ -1181,7 +1181,7 @@ impl Ir {
         // Fast path: both args must be tagged ints.
         self.guard_int(a.into(), miss);
         self.guard_int(b.into(), miss);
-        self.feedback_or(feedback_slot, crate::feedback::FB_INT_INT);
+        self.feedback_or_specialized(feedback_slot, crate::feedback::FB_INT_INT);
 
         let result = op_int(self, a.into(), b.into());
         self.assign(result_register, result);
@@ -1281,7 +1281,7 @@ impl Ir {
         // across the GC safepoint inside `allocate_static`.
         self.guard_float(a.into(), miss);
         self.guard_float(b.into(), miss);
-        self.feedback_or(feedback_slot, crate::feedback::FB_FLOAT_FLOAT);
+        self.feedback_or_specialized(feedback_slot, crate::feedback::FB_FLOAT_FLOAT);
 
         let float_pointer = self.allocate_static(1);
         let float_pointer_untagged = self.untag(float_pointer);
@@ -2249,7 +2249,7 @@ impl Ir {
 
         self.guard_float(a.into(), miss);
         self.guard_float(b.into(), miss);
-        self.feedback_or(feedback_slot, crate::feedback::FB_FLOAT_FLOAT);
+        self.feedback_or_specialized(feedback_slot, crate::feedback::FB_FLOAT_FLOAT);
         {
             let a_untagged = self.untag(a.into());
             let b_untagged = self.untag(b.into());
@@ -2304,7 +2304,7 @@ impl Ir {
         // Fast path: both args int, do tagged-int compare directly.
         self.guard_int(a.into(), miss);
         self.guard_int(b.into(), miss);
-        self.feedback_or(feedback_slot, crate::feedback::FB_INT_INT);
+        self.feedback_or_specialized(feedback_slot, crate::feedback::FB_INT_INT);
         {
             let tag = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
             let dest = self.volatile_register();
@@ -4228,6 +4228,18 @@ impl Ir {
     /// `slot_addr` must point to an 8-byte word (typically allocated via
     /// `Compiler::add_arith_feedback`). `bits` is one of the constants in
     /// `crate::feedback`.
+    /// Feedback recording on the fast path of a *specialized* (tier-2) op. The
+    /// specialized `*_with_bail` ops are only ever emitted in the feedback-
+    /// directed recompile, and specialized functions never re-tier (see the
+    /// tier-up-check guard in ast.rs), so this write is never read — it is dead.
+    /// Skipping it removes a per-iteration store from every hot tier-2 loop.
+    /// Gated for measurement; default skips.
+    pub fn feedback_or_specialized(&mut self, slot_addr: usize, bits: u64) {
+        if std::env::var("BEAGLE_KEEP_TIER2_FEEDBACK").is_ok() {
+            self.feedback_or(slot_addr, bits);
+        }
+    }
+
     pub fn feedback_or(&mut self, slot_addr: usize, bits: u64) {
         if slot_addr == 0 {
             // Defensive: a zero slot would clobber address 0; treat as a no-op
