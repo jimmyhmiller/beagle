@@ -146,6 +146,33 @@ logs and skips SSA codegen for that function (falls back to legacy IR).
   pointer is **not** rematerializable and must still go through a root
   slot. The rematerializable set lives in `regalloc/spill.rs::remat_op_for`.
 
+- **Type-aware GC-safety (in progress).** The remat exemption is one instance
+  of a more general truth: I9's root-slot requirement only applies to values
+  that *might be relocatable heap pointers*. A value provably a tagged
+  immediate (int / bool / null / raw scalar) is never a GC root, so it needs no
+  slot across a safepoint even if live there. This unlocks two wins: `mem2reg`
+  may promote a **non-pointer slot** across safepoints (loop-carried int
+  accumulators become register phis instead of round-tripping a slot every
+  iteration), and regalloc may keep such a value in a callee-saved register
+  across a call without rooting it. The phased plan:
+  - **Phase A (landed):** `src/cfg/pointer_class.rs` — a sound *non-pointer*
+    analysis (provably-non-pointer VRegs + slots). Must analysis,
+    maybe-pointer default, audited whitelist of producers; a false positive
+    would make the GC miss a real root, so unrecognized ⇒ pointer. Boxed
+    floats are pointers (to the heap box); only the `Fp` class is GC-exempt
+    (Phase D). Analysis only — not yet consumed.
+  - **Phase B:** split the cross-safepoint constraint — every value still keeps
+    the I7 *clobber* constraint (no caller-saved), but only maybe-pointers keep
+    the I9 *root* constraint; a non-pointer may sit in callee-saved / an
+    unscanned spill slot across a call.
+  - **Phase C:** extend `slot_is_gc_safe_to_promote` so a non-pointer slot is
+    promotable across safepoints. Depends on B (else the promoted phi is just
+    re-spilled to a root slot — measured backfire).
+  - **Phase D:** float unboxing — definitely-float locals stay unboxed in FP
+    registers, spill to unscanned FP slots, box only at escapes.
+  Validate every phase with `scripts/ssa_diff.sh` and the `gc-always`
+  gc-stress tests; a missed root surfaces immediately under stress GC.
+
 ### I10 — Slots read by soft-edge (handler) blocks stay materialized
 
 - Handler / resume / abort blocks are reached only through the runtime

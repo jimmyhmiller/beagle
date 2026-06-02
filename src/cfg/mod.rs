@@ -29,6 +29,7 @@ pub mod load_cse;
 pub mod loops;
 pub mod mem2reg;
 pub mod opt;
+pub mod pointer_class;
 pub mod regalloc;
 pub mod verify;
 
