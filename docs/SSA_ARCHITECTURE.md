@@ -193,6 +193,31 @@ logs and skips SSA codegen for that function (falls back to legacy IR).
   Phase A (`pointer_class.rs`) stays as the sound type oracle for when deopt (or
   another consumer) lands.
 
+  **DEOPT LANDED (sound, gated off, `BEAGLE_SSA_DEOPT`).** Reinvoke-for-pure-
+  functions deopt: when specializing an eligible *pure* function, each
+  type/overflow guard bail is redirected to a deopt block that re-invokes the
+  resident generic code (raw tagged pointer → bypasses the jump table, can't
+  re-enter the specialized version) with the original args (reloaded cold from
+  param slots, pinned out of mem2reg via `CfgFunction::deopt_pinned_slots`) and
+  returns its result — no inline rejoin. The loop is then safepoint-free so
+  mem2reg's existing I9 gate promotes loop-carried locals to registers (no Phase
+  C needed). Sound by idempotence (a pure function re-run from entry yields the
+  same result); misses ~never taken in monomorphic code. Eligibility
+  (`builder.rs::apply_deopt_rewrite`): no observable/unsafe-to-rerun op on any
+  fast-reachable block (entry `__pause` safepoint excepted), no param-slot
+  reassignment. Validated: 369/369 plain + `BEAGLE_TEST_TIER2`; gc-stress +
+  forced-specialize pass; forced-specialize suite identical deopt-on vs off.
+  Measured ~25-35% on a hot no-overflow int loop.
+  **Limitation: narrow.** The "no call on the fast path" rule excludes most real
+  hot code — `fib` (recursive calls) and `nbody` (array reads + floats) are
+  ineligible, so real benchmarks don't move; only pure-no-call int loops win.
+  Broadening needs one of: transitive-purity for recursive/known-pure calls
+  (helps little — those hot paths aren't loop-carried-int), **region/loop
+  versioning** (deopt to an inline slow loop, forward-resume, no purity
+  constraint — handles impure bodies; the general win), or **Phase D float
+  unboxing** (nbody). Region versioning + Phase D are the real-code payoff and
+  remain to build; the reinvoke deopt is the validated foundation/proof.
+
   **DEOPT FEASIBILITY — discovered, measured (2026-06).** Investigated whether
   full deopt is buildable given the current setup. Findings (all verified by
   dump/measurement):
