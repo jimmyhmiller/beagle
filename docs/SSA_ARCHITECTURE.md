@@ -193,6 +193,32 @@ logs and skips SSA codegen for that function (falls back to legacy IR).
   Phase A (`pointer_class.rs`) stays as the sound type oracle for when deopt (or
   another consumer) lands.
 
+  **DEOPT FEASIBILITY — discovered, measured (2026-06).** Investigated whether
+  full deopt is buildable given the current setup. Findings (all verified by
+  dump/measurement):
+  - **State map is the identity (the usually-hardest part is free).** Tier-1 and
+    tier-2 compile from the same AST with deterministic, feedback-independent
+    slot allocation; the *entire* SlotStore/SlotLoad sequence is byte-identical
+    across tiers (a 6-local fn → 18 slots, identical). Because push_to_stack
+    gives every value — locals *and* intermediates — a canonical slot, a deopt
+    only has to write each *promoted* register back to its own slot
+    (`memcpy` the slot region) — no per-value marshalling, no operand-stack
+    reconstruction (at any op boundary all live values are slot-resident).
+  - **The generic code stays resident.** Specialization swaps the jump-table
+    entry and writes new pages; the old (tier-1) code is never freed → a deopt
+    target exists at its old address.
+  - **Ceiling measured (`BEAGLE_SSA_DEOPT_CEILING`, unsound gate, reverted).**
+    Redirecting type/overflow bails to a deopt-exit (no rejoin) on a monomorphic
+    int loop dropped loop-carried slot traffic **7 → 0** (i/acc fully
+    register-promoted) and ran **~38% faster** (~49M → ~30.5M ns, interleaved).
+    So the win is large and the mechanism is proven.
+  The remaining real work is the *control/frame transfer* (resume stubs +
+  position ids + frame setup) — standard OSR, but with the state-reconstruction
+  half eliminated. Easiest sound first cut: **reinvoke-for-pure-functions** — if
+  a fn has no side effect before any guard, a guard miss can just re-call the
+  resident generic version with the original args and return its result (sound
+  by idempotence; covers pure numeric kernels — the hot case). No OSR needed.
+
 ### I10 — Slots read by soft-edge (handler) blocks stay materialized
 
 - Handler / resume / abort blocks are reached only through the runtime
