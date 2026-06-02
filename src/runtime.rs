@@ -4039,6 +4039,32 @@ impl PerThreadData {
 thread_local! {
     static THREAD_DATA_PTR: std::cell::Cell<*mut PerThreadData> =
         const { std::cell::Cell::new(std::ptr::null_mut()) };
+
+    /// True once this thread has been counted in `registered_thread_count` as a
+    /// GC mutator (main thread at startup, child threads in `run_thread`). A
+    /// stop-the-world coordinator uses this to decide whether to subtract 1
+    /// (itself) from the count of threads it must wait to see parked: a
+    /// registered coordinator is one of the counted threads, a non-registered
+    /// one (e.g. the async tier-up compile thread) is not.
+    static REGISTERED_MUTATOR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Mark the current thread as a registered GC mutator. Call right after the
+/// thread is counted in `registered_thread_count`.
+pub fn mark_thread_registered() {
+    REGISTERED_MUTATOR.with(|c| c.set(true));
+}
+
+/// Whether the current thread is a registered GC mutator (counted in
+/// `registered_thread_count`).
+pub fn current_thread_is_registered() -> bool {
+    REGISTERED_MUTATOR.with(|c| c.get())
+}
+
+/// Mark the current thread as no longer a registered GC mutator. Call right
+/// after the thread is removed from `registered_thread_count`.
+pub fn mark_thread_unregistered() {
+    REGISTERED_MUTATOR.with(|c| c.set(false));
 }
 
 /// Initialize per-thread data for the current thread.
@@ -5562,6 +5588,127 @@ impl Runtime {
             (*state).alloc_ptr = alloc_ptr;
             (*state).alloc_end = alloc_end;
         }
+    }
+
+    /// Stop-the-world primitive used to *validate the rendezvous independently
+    /// of GC*: park every other registered mutator at its entry safepoint,
+    /// observe that they are all stopped, then resume. Returns the number of
+    /// OTHER threads that were parked during the pause. The coordinator is the
+    /// calling (registered) mutator, so the wait count subtracts 1 for
+    /// ourselves — mirroring `gc_impl`. No heap walk, no collection.
+    ///
+    /// This is the scaffolding the tier-2 install application will hang on:
+    /// once we can drive a race-free STW from here, applying staged installs
+    /// is just doing the work at the marked point while everyone is parked.
+    pub fn stop_the_world_observe(&mut self, frame_pointer: usize) -> usize {
+        crate::builtins::save_frame_pointer(frame_pointer);
+        let log = std::env::var("BEAGLE_STW_LOG").is_ok();
+
+        if self.memory.threads.len() == 1 {
+            // We are the only thread; there is nobody to stop.
+            if log {
+                eprintln!("[stw-observe] single thread; no rendezvous needed");
+            }
+            return 0;
+        }
+
+        // Acquire the GC lock so we don't race a real GC's stop-the-world.
+        let locked = match self.gc_lock.try_lock() {
+            Ok(l) => l,
+            Err(_) => {
+                // Another STW (GC or observe) is in progress — park until it
+                // releases us, then bail (it already stopped the world).
+                unsafe { __pause(0, frame_pointer) };
+                return 0;
+            }
+        };
+
+        if self
+            .is_paused
+            .compare_exchange(
+                0,
+                1,
+                std::sync::atomic::Ordering::Release,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            drop(locked);
+            unsafe { __pause(0, frame_pointer) };
+            return 0;
+        }
+
+        if log {
+            eprintln!("[stw-observe] requested pause; waiting for mutators to park");
+        }
+
+        let (lock, cvar) = &*self.thread_state;
+        let mut thread_state = lock
+            .lock()
+            .expect("Failed to lock thread state - this is a fatal error");
+
+        // Subtract 1 for ourselves ONLY if we are a registered mutator — i.e.
+        // one of the threads counted in `registered_thread_count`. A
+        // non-registered coordinator (e.g. an async compile thread) is not in
+        // that count, so it must wait for ALL registered mutators to park.
+        // Getting this wrong returns early, before every reader is stopped.
+        let self_in_count = if current_thread_is_registered() { 1 } else { 0 };
+        let target = |rt: &Self| {
+            rt.registered_thread_count
+                .load(std::sync::atomic::Ordering::Acquire)
+                .saturating_sub(self_in_count)
+        };
+        let mut wait_for = target(self);
+        while thread_state.paused_threads() + thread_state.c_calling_stack_pointers.len() < wait_for
+        {
+            thread_state = cvar
+                .wait_timeout(thread_state, std::time::Duration::from_millis(10))
+                .expect("Failed waiting on condition variable - this is a fatal error")
+                .0;
+            wait_for = target(self);
+        }
+
+        let parked = thread_state.paused_threads() + thread_state.c_calling_stack_pointers.len();
+        drop(thread_state);
+
+        if log {
+            eprintln!(
+                "[stw-observe] WORLD STOPPED: {} other thread(s) parked",
+                parked
+            );
+        }
+
+        // === tier-2 install application will go here (everyone is parked) ===
+
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+
+        self.is_paused
+            .store(0, std::sync::atomic::Ordering::Release);
+        for thread in self.memory.threads.iter() {
+            thread.unpark();
+        }
+
+        let mut thread_state = lock
+            .lock()
+            .expect("Failed to lock thread state after STW - this is a fatal error");
+        while thread_state.paused_threads() > 0 {
+            let (state, timeout) = cvar
+                .wait_timeout(thread_state, std::time::Duration::from_millis(1))
+                .expect("Failed waiting on condition variable - this is a fatal error");
+            thread_state = state;
+            if timeout.timed_out() {
+                for thread in self.memory.threads.iter() {
+                    thread.unpark();
+                }
+            }
+        }
+        thread_state.clear();
+        drop(locked);
+
+        if log {
+            eprintln!("[stw-observe] resumed");
+        }
+        parked
     }
 
     pub fn register_temporary_root(&mut self, root: usize) -> usize {

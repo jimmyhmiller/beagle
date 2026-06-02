@@ -2384,6 +2384,14 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
+            "beagle.runtime/stop-the-world",
+            runtime_stop_the_world_observe as *const u8,
+            true,
+            &[],
+            "Drive a stop-the-world rendezvous from the calling thread: park every other mutator at its entry safepoint, observe the world is stopped, then resume. Returns the number of other threads that were parked. Diagnostic scaffolding for race-free tier-2 install application; set BEAGLE_STW_LOG=1 to trace it.",
+        )?;
+
+        self.add_builtin_with_doc(
             "beagle.reflect/apropos",
             reflect_apropos as *const u8,
             true,

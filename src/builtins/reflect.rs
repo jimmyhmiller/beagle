@@ -686,6 +686,20 @@ pub extern "C" fn runtime_specialize_all(stack_pointer: usize, frame_pointer: us
     BuiltInTypes::construct_int(count as isize) as usize
 }
 
+/// runtime/stop-the-world() - Drive a stop-the-world rendezvous from the
+/// calling mutator (parking every other thread at its entry safepoint), observe
+/// that the world is stopped, then resume. Returns the number of OTHER threads
+/// that were parked. Scaffolding for race-free tier-2 install application.
+pub extern "C" fn runtime_stop_the_world_observe(
+    stack_pointer: usize,
+    frame_pointer: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let parked = runtime.stop_the_world_observe(frame_pointer);
+    BuiltInTypes::construct_int(parked as isize) as usize
+}
+
 /// reflect/all-namespaces() - List all namespace names
 pub extern "C" fn reflect_all_namespaces(stack_pointer: usize, frame_pointer: usize) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);

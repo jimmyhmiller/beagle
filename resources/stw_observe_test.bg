@@ -1,0 +1,75 @@
+namespace stw_observe_test
+
+// Validates the stop-the-world rendezvous primitive (runtime/stop-the-world)
+// independently of GC: spawn worker threads that spin calling a Beagle
+// function (so they repeatedly hit the function-entry safepoint), then have
+// the main thread drive an STW. The rendezvous parks every worker before
+// returning.
+//
+// Invariant under test: a stop-the-world is ALL-OR-NOTHING. It either parks
+// every worker (returns 3 here) or, if a GC is concurrently stopping the world,
+// backs off and returns 0 — it must NEVER observe a *partial* stop (1 or 2),
+// which would mean mutating shared state while a thread is still running. (An
+// earlier version mis-subtracted for a non-registered coordinator and returned
+// 2; that is exactly the bug this guards against.)
+//
+// Two deliberate choices keep this non-flaky:
+//   * `busy` uses NON-tail recursion — a tail-recursive self call is TCO'd to a
+//     jump that skips the entry-safepoint poll, so a tail-recursive worker
+//     would never park and the rendezvous would hang. `r + 1` keeps the call
+//     in non-tail position, forcing a real entry (and safepoint) per call.
+//   * the worker spin loop allocates NOTHING (pure `busy` + `deref`), so it
+//     never itself triggers the GC that would make `stop-the-world` back off.
+
+use beagle.runtime as runtime
+
+fn busy(n) {
+    if n <= 0 {
+        0
+    } else {
+        let r = busy(n - 1)
+        r + 1
+    }
+}
+
+fn worker(stop) {
+    if deref(stop) {
+        0
+    } else {
+        busy(150)
+        worker(stop)
+    }
+}
+
+// Drive the STW up to `tries` times, returning the largest parked-count seen.
+// Retrying rides past any transient GC that makes a single call back off to 0,
+// so we reliably observe at least one real full stop.
+fn observe_max(tries, best) {
+    if tries <= 0 {
+        best
+    } else {
+        let parked = runtime/stop-the-world()
+        // All-or-nothing: never a partial stop.
+        assert!(parked == 0 || parked == 3)
+        let new-best = if parked > best { parked } else { best }
+        observe_max(tries - 1, new-best)
+    }
+}
+
+test "stop-the-world is all-or-nothing and parks every worker" {
+    let stop = atom(false)
+
+    let w = fn() { worker(stop) }
+    thread(w)
+    thread(w)
+    thread(w)
+
+    let best = observe_max(8, 0)
+
+    // Release the workers so they exit their spin loop.
+    reset!(stop, true)
+
+    // At least one of the attempts ran a real stop-the-world and parked all
+    // three workers (it is not always 0 / backed off).
+    assert-eq!(best, 3)
+}

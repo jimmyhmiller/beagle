@@ -178,6 +178,10 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
                 // Fire USDT probes for thread start and registration
                 crate::gc::usdt_probes::fire_thread_register(current_count);
                 crate::gc::usdt_probes::fire_thread_start();
+                // This thread is now a registered GC mutator (counted in
+                // registered_thread_count) — record it so a stop-the-world it
+                // initiates subtracts itself correctly.
+                crate::runtime::mark_thread_registered();
                 // gc_lock released here - but we immediately enter Beagle code
                 // where __pause is the first instruction
                 break;

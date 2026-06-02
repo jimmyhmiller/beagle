@@ -1997,6 +1997,7 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
             .fetch_add(1, std::sync::atomic::Ordering::Release)
             + 1;
         gc::usdt_probes::fire_thread_register(new_count);
+        crate::runtime::mark_thread_registered();
     }
 
     let async_main_wrapper = "beagle.async/__main__";
@@ -2196,6 +2197,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                 .fetch_add(1, std::sync::atomic::Ordering::Release)
                 + 1;
             gc::usdt_probes::fire_thread_register(new_count);
+            crate::runtime::mark_thread_registered();
         }
 
         // Check if beagle.async/__main__ exists (implicit async handler wrapper)
@@ -2277,6 +2279,7 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                         .fetch_sub(1, std::sync::atomic::Ordering::Release)
                         - 1;
                     gc::usdt_probes::fire_thread_unregister(new_count);
+                    crate::runtime::mark_thread_unregistered();
                     break;
                 }
                 Err(_) => {
