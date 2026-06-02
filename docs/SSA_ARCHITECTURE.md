@@ -173,6 +173,26 @@ logs and skips SSA codegen for that function (falls back to legacy IR).
   Validate every phase with `scripts/ssa_diff.sh` and the `gc-always`
   gc-stress tests; a missed root surfaces immediately under stress GC.
 
+  **BLOCKER FOUND (Phase C prototyped, reverted).** Phases B–D are gated by the
+  **no-deopt guard-and-inline-bail design**, not by the GC machinery. A
+  speculative `guard-int v -> fast | bail` computes the generic result inline on
+  the bail path and **rejoins the hot path** (`block_fast`/`block_bail` →
+  `merge(v_fast, v_bail)`). The bail's `beagle.bail/op` call returns an *unknown*
+  type (a non-int add yields a boxed float / bignum — a relocatable pointer), so
+  every speculatively-typed loop-carried value is `merge(non-pointer,
+  maybe-pointer) = maybe-pointer`. Phase A therefore correctly classifies *every*
+  loop-carried accumulator in a guard-and-bail loop as maybe-pointer, and Phase C
+  (prototyped behind `BEAGLE_SSA_NO_NONPTR_PROMOTE`) promoted ~401 *cold*
+  non-pointer slots across the stdlib but **zero hot loop-carried values — no
+  measurable win** — so it was reverted (GC risk without reward). The same
+  bail-rejoin defeats cross-safepoint load-CSE (measured separately). The real
+  prerequisite for B–D is **deoptimization**: on guard failure, exit the
+  specialized function to a generic version instead of computing-inline-and-
+  merging, so the hot path's values are provably typed. That reverses the
+  codebase's deliberate "no-deopt" choice and is a major project of its own.
+  Phase A (`pointer_class.rs`) stays as the sound type oracle for when deopt (or
+  another consumer) lands.
+
 ### I10 — Slots read by soft-edge (handler) blocks stay materialized
 
 - Handler / resume / abort blocks are reached only through the runtime
