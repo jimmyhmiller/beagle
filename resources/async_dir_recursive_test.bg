@@ -9,12 +9,15 @@ use beagle.effect as effect
 fn main() {
     println("=== Async Directory Recursive Test ===")
 
+    let unique-suffix = to-string(core/random-int(2000000000)) ++ "-" ++ to-string(core/time-now())
+    let base = "/tmp/beagle_test_nested_" ++ unique-suffix
+
     let handler = async/BlockingAsyncHandler {}
 
     let result = handle effect/Handler(async/Async) with handler {
         // Test create-dir-all with nested path
         println("Testing create-dir-all...")
-        let mkdir-result = async/create-dir-all("/tmp/beagle_test_nested/a/b/c")
+        let mkdir-result = async/create-dir-all(base ++ "/a/b/c")
         match mkdir-result {
             Result.Ok { value } => println("create-dir-all: OK"),
             Result.Err { error } => println("create-dir-all error:", error)
@@ -22,7 +25,7 @@ fn main() {
 
         // Verify the directories exist by writing a file in the deepest one
         println("Writing test file in nested dir...")
-        let write-result = async/write-file("/tmp/beagle_test_nested/a/b/c/test.txt", "Hello nested!\n")
+        let write-result = async/write-file(base ++ "/a/b/c/test.txt", "Hello nested!\n")
         match write-result {
             Result.Ok { value } => println("write-file: OK"),
             Result.Err { error } => println("write-file error:", error)
@@ -30,7 +33,7 @@ fn main() {
 
         // Also write a file at intermediate level
         println("Writing file at intermediate level...")
-        let write2-result = async/write-file("/tmp/beagle_test_nested/a/middle.txt", "Middle file\n")
+        let write2-result = async/write-file(base ++ "/a/middle.txt", "Middle file\n")
         match write2-result {
             Result.Ok { value } => println("write-file intermediate: OK"),
             Result.Err { error } => println("write-file intermediate error:", error)
@@ -38,7 +41,7 @@ fn main() {
 
         // Now test remove-dir-all - should remove everything
         println("Testing remove-dir-all...")
-        let rmdir-result = async/remove-dir-all("/tmp/beagle_test_nested")
+        let rmdir-result = async/remove-dir-all(base)
         match rmdir-result {
             Result.Ok { value } => println("remove-dir-all: OK"),
             Result.Err { error } => println("remove-dir-all error:", error)
@@ -46,7 +49,7 @@ fn main() {
 
         // Verify it's gone
         println("Verifying removal...")
-        let exists-result = async/file-exists?("/tmp/beagle_test_nested")
+        let exists-result = async/file-exists?(base)
         match exists-result {
             Result.Ok { value } => {
                 if value {
@@ -63,6 +66,10 @@ fn main() {
     }
 
     println("Result:", result)
+
+    let _ = handle effect/Handler(async/Async) with handler {
+        async/remove-dir-all(base)
+    }
 }
 
 // @beagle.core.snapshot

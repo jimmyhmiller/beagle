@@ -184,7 +184,7 @@ fn test-add(a, b) {
 }
 
 fn main() {
-    let port = 18902
+    let port = 20000 + core/random-int(40000)
     let server_ready = atom(false)
 
     // Start a single-client REPL server on a background thread

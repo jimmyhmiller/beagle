@@ -8,7 +8,7 @@ use beagle.core as core
 fn main() {
     println("=== Async Blocking Functions Test ===")
 
-    let unique-suffix = to-string(core/thread-id()) ++ "-" ++ to-string(core/time-now())
+    let unique-suffix = to-string(core/random-int(2000000000)) ++ "-" ++ to-string(core/thread-id()) ++ "-" ++ to-string(core/time-now())
     let test-file = "/tmp/beagle_blocking_test_" ++ unique-suffix ++ ".txt"
     let test-dir = "/tmp/beagle_blocking_test_dir_" ++ unique-suffix
 

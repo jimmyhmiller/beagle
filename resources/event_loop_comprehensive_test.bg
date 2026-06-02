@@ -13,6 +13,8 @@ fn has-event?(events, name) {
 }
 
 fn main() {
+    let unique-suffix = to-string(core/random-int(2000000000)) ++ "-" ++ to-string(core/time-now())
+    let test_path = "/tmp/beagle_event_loop_comprehensive_test_" ++ unique-suffix ++ ".txt"
     let events = atom([])
 
     // --- Timer / Sleep ---
@@ -25,7 +27,6 @@ fn main() {
     }
 
     // --- File Write ---
-    let test_path = "/tmp/beagle_event_loop_comprehensive_test.txt"
     let content = "hello from event loop test"
     let write_result = async/write-file(test_path, content)
     match write_result {
@@ -115,6 +116,7 @@ fn main() {
     println("delete:", has-event?(collected, "delete-ok"))
     println("gone:", has-event?(collected, "gone-ok"))
     println("multi-sleep:", has-event?(collected, "multi-sleep-ok"))
+    let _ = async/delete-file(test_path)
     println("done")
 }
 

@@ -8,7 +8,8 @@ use beagle.effect as effect
 // through ImplicitAsyncHandler (normal main, no explicit handler)
 
 fn main() {
-    let path = "/tmp/beagle_implicit_handle_test.txt"
+    let unique-suffix = to-string(core/random-int(2000000000)) ++ "-" ++ to-string(core/time-now())
+    let path = "/tmp/beagle_implicit_handle_test_" ++ unique-suffix ++ ".txt"
 
     // Open for writing
     println("open for write...")

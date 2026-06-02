@@ -1,12 +1,17 @@
 namespace io-test
 
 use beagle.io as io
+use beagle.core as core
+use beagle.async as async
 
 fn test_file_write_read() {
     println("Testing file write/read...")
 
+    let unique-suffix = to-string(core/random-int(2000000000)) ++ "-" ++ to-string(core/time-now())
+    let test_path = "/tmp/beagle_io_test_" ++ unique-suffix ++ ".txt"
+
     // Write to a temp file
-    let file_result = io/open("/tmp/beagle_io_test.txt", "w")
+    let file_result = io/open(test_path, "w")
     match file_result {
         Result.Ok { value } => {
             let file = value
@@ -21,7 +26,7 @@ fn test_file_write_read() {
     }
 
     // Read it back
-    let file_result = io/open("/tmp/beagle_io_test.txt", "r")
+    let file_result = io/open(test_path, "r")
     match file_result {
         Result.Ok { value } => {
             let file = value
@@ -42,6 +47,8 @@ fn test_file_write_read() {
             println("Failed to open file for reading: ", error)
         }
     }
+
+    let _ = async/delete-file(test_path)
 }
 
 fn test_stderr() {

@@ -9,7 +9,8 @@ use beagle.core as core
 // Uses the implicit async handler provided by __main__
 
 fn main() {
-    let test_path = "/tmp/beagle_fs_test.txt"
+    let unique-suffix = to-string(core/random-int(2000000000)) ++ "-" ++ to-string(core/time-now())
+    let test_path = "/tmp/beagle_fs_test_" ++ unique-suffix ++ ".txt"
     let content = "Hello from beagle.fs!"
 
     // Test write-file
@@ -84,6 +85,7 @@ fn main() {
         }
     }
 
+    let _ = async/delete-file(test_path)
     println("Done!")
 }
 

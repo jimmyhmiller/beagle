@@ -8,7 +8,8 @@ use beagle.effect as effect
 // (normal main() without explicit handler setup)
 
 fn main() {
-    let base = "/tmp/beagle_implicit_ops_test"
+    let unique-suffix = to-string(core/random-int(2000000000)) ++ "-" ++ to-string(core/time-now())
+    let base = "/tmp/beagle_implicit_ops_test_" ++ unique-suffix
     let file_path = base ++ "/test.txt"
     let copy_path = base ++ "/copy.txt"
     let renamed_path = base ++ "/renamed.txt"
@@ -142,6 +143,9 @@ fn main() {
     }
 
     println("Done")
+
+    // Best-effort silent cleanup (test already removes base, but ensure it on early exit)
+    let _ = async/remove-dir-all(base)
 }
 
 // @beagle.core.snapshot

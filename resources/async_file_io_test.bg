@@ -7,7 +7,8 @@ use beagle.core as core
 // Test async file I/O using the implicit async handler
 
 fn main() {
-    let test_path = "/tmp/beagle_async_test.txt"
+    let unique-suffix = to-string(core/random-int(2000000000)) ++ "-" ++ to-string(core/time-now())
+    let test_path = "/tmp/beagle_async_test_" ++ unique-suffix ++ ".txt"
     let content = "Hello from async file I/O!"
 
     // Write file

@@ -4,7 +4,7 @@ use beagle.async as async
 use beagle.core as core
 
 fn main() {
-    let unique-suffix = to-string(core/thread-id()) ++ "-" ++ to-string(core/time-now())
+    let unique-suffix = to-string(core/random-int(2000000000)) ++ "-" ++ to-string(core/thread-id()) ++ "-" ++ to-string(core/time-now())
     let path = "/tmp/beagle_ambient_thread_test_" ++ unique-suffix ++ ".txt"
     let write_status = atom("pending")
     let read_value = atom("pending")

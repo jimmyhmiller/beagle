@@ -9,12 +9,17 @@ use beagle.effect as effect
 fn main() {
     println("=== Async New Operations Test ===")
 
+    let unique-suffix = to-string(core/random-int(2000000000)) ++ "-" ++ to-string(core/time-now())
+    let test_path = "/tmp/beagle_new_ops_test_" ++ unique-suffix ++ ".txt"
+    let copy_path = "/tmp/beagle_new_ops_copy_" ++ unique-suffix ++ ".txt"
+    let renamed_path = "/tmp/beagle_new_ops_renamed_" ++ unique-suffix ++ ".txt"
+
     let handler = async/BlockingAsyncHandler {}
 
     let result = handle effect/Handler(async/Async) with handler {
         // Create test file
         println("Creating test file...")
-        let write-result = async/write-file("/tmp/beagle_new_ops_test.txt", "Test content\n")
+        let write-result = async/write-file(test_path, "Test content\n")
         match write-result {
             Result.Ok { value } => println("write-file: OK"),
             Result.Err { error } => println("write-file error:", error)
@@ -22,7 +27,7 @@ fn main() {
 
         // Test is-file?
         println("Testing is-file?...")
-        let is-file-result = async/is-file?("/tmp/beagle_new_ops_test.txt")
+        let is-file-result = async/is-file?(test_path)
         match is-file-result {
             Result.Ok { value } => {
                 if value {
@@ -36,7 +41,7 @@ fn main() {
 
         // Test is-directory? on file (should be false)
         println("Testing is-directory? on file...")
-        let is-dir-result = async/is-directory?("/tmp/beagle_new_ops_test.txt")
+        let is-dir-result = async/is-directory?(test_path)
         match is-dir-result {
             Result.Ok { value } => {
                 if value {
@@ -64,7 +69,7 @@ fn main() {
 
         // Test copy-file
         println("Testing copy-file...")
-        let copy-result = async/copy-file("/tmp/beagle_new_ops_test.txt", "/tmp/beagle_new_ops_copy.txt")
+        let copy-result = async/copy-file(test_path, copy_path)
         match copy-result {
             Result.Ok { value } => println("copy-file: OK"),
             Result.Err { error } => println("copy-file error:", error)
@@ -72,7 +77,7 @@ fn main() {
 
         // Verify copy exists
         println("Verifying copy exists...")
-        let exists-result = async/file-exists?("/tmp/beagle_new_ops_copy.txt")
+        let exists-result = async/file-exists?(copy_path)
         match exists-result {
             Result.Ok { value } => {
                 if value {
@@ -86,7 +91,7 @@ fn main() {
 
         // Test rename-file
         println("Testing rename-file...")
-        let rename-result = async/rename-file("/tmp/beagle_new_ops_copy.txt", "/tmp/beagle_new_ops_renamed.txt")
+        let rename-result = async/rename-file(copy_path, renamed_path)
         match rename-result {
             Result.Ok { value } => println("rename-file: OK"),
             Result.Err { error } => println("rename-file error:", error)
@@ -94,8 +99,8 @@ fn main() {
 
         // Verify rename worked
         println("Verifying rename worked...")
-        let old-exists = async/file-exists?("/tmp/beagle_new_ops_copy.txt")
-        let new-exists = async/file-exists?("/tmp/beagle_new_ops_renamed.txt")
+        let old-exists = async/file-exists?(copy_path)
+        let new-exists = async/file-exists?(renamed_path)
         match old-exists {
             Result.Ok { value } => {
                 if value {
@@ -119,8 +124,8 @@ fn main() {
 
         // Cleanup
         println("Cleaning up...")
-        async/delete-file("/tmp/beagle_new_ops_test.txt")
-        async/delete-file("/tmp/beagle_new_ops_renamed.txt")
+        async/delete-file(test_path)
+        async/delete-file(renamed_path)
 
         println("=== All tests completed ===")
         42

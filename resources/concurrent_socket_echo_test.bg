@@ -11,9 +11,12 @@ fn main() {
     let client_result = atom(null)
     let server_done = atom(false)
 
+    // Per-process-unique port so concurrent test runs don't collide on bind.
+    let port = 20000 + core/random-int(40000)
+
     // Start server in background thread
     thread(fn() {
-        let listener = socket/listen("127.0.0.1", 19876)
+        let listener = socket/listen("127.0.0.1", port)
 
         // Signal that server is ready
         reset!(server_ready, true)
@@ -41,7 +44,7 @@ fn main() {
     }
 
     // Client connects and exchanges data
-    let conn = socket/connect("127.0.0.1", 19876)
+    let conn = socket/connect("127.0.0.1", port)
 
     socket/write(conn, "Hello World")
 

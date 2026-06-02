@@ -9,6 +9,9 @@ use beagle.effect as effect
 fn main() {
     println("=== Async Effect Test ===")
 
+    let unique-suffix = to-string(core/random-int(2000000000)) ++ "-" ++ to-string(core/time-now())
+    let test_path = "/tmp/beagle_async_test_" ++ unique-suffix ++ ".txt"
+
     // Create the handler ourselves to have more control
     let handler = async/BlockingAsyncHandler {}
 
@@ -20,42 +23,42 @@ fn main() {
 
         // Test file write
         println("Testing file write...")
-        let write-result = async/write-file("/tmp/beagle_async_test.txt", "Hello from async!\n")
+        let write-result = async/write-file(test_path, "Hello from async!\n")
         println("Write result:", write-result)
 
         // Test file exists
         println("Testing file exists...")
-        let exists-result = async/file-exists?("/tmp/beagle_async_test.txt")
+        let exists-result = async/file-exists?(test_path)
         println("File exists result:", exists-result)
 
         // Test file read
         println("Testing file read...")
-        let read-result = async/read-file("/tmp/beagle_async_test.txt")
+        let read-result = async/read-file(test_path)
         println("Read result:", read-result)
 
         // Test file size
         println("Testing file size...")
-        let size-result = async/file-size("/tmp/beagle_async_test.txt")
+        let size-result = async/file-size(test_path)
         println("File size result:", size-result)
 
         // Test append
         println("Testing append...")
-        let append-result = async/append-file("/tmp/beagle_async_test.txt", "Appended line\n")
+        let append-result = async/append-file(test_path, "Appended line\n")
         println("Append result:", append-result)
 
         // Read again
         println("Reading after append...")
-        let read2-result = async/read-file("/tmp/beagle_async_test.txt")
+        let read2-result = async/read-file(test_path)
         println("Read after append:", read2-result)
 
         // Test delete
         println("Testing delete...")
-        let delete-result = async/delete-file("/tmp/beagle_async_test.txt")
+        let delete-result = async/delete-file(test_path)
         println("Delete result:", delete-result)
 
         // Test file exists after delete
         println("Testing file exists after delete...")
-        let exists-after-result = async/file-exists?("/tmp/beagle_async_test.txt")
+        let exists-after-result = async/file-exists?(test_path)
         println("File exists after delete:", exists-after-result)
 
         println("=== All tests completed ===")
