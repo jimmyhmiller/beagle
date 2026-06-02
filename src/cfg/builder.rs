@@ -314,13 +314,17 @@ pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
     crate::cfg::dump::maybe_dump_phase("02-after-dce", &f, false);
     crate::cfg::dump::maybe_verify_stage("02-after-dce", &f);
 
-    // Deopt rewrite (BEAGLE_SSA_DEOPT, off by default). For an eligible pure
-    // function being specialized, redirect type/overflow guard bails to a deopt
-    // edge that re-invokes the resident generic code with the original args and
-    // returns its result — instead of computing the generic result inline and
-    // rejoining. Removing the bail safepoints from the hot path makes the loop
-    // safepoint-free so mem2reg promotes loop-carried locals to registers.
-    if std::env::var("BEAGLE_SSA_DEOPT").is_ok() {
+    // Deopt rewrite (ON by default; opt out with BEAGLE_SSA_DEOPT=0). For an
+    // eligible pure function being specialized, redirect type/overflow guard
+    // bails to a deopt edge that re-invokes the resident generic code with the
+    // original args and returns its result — instead of computing the generic
+    // result inline and rejoining. Removing the bail safepoints from the hot
+    // path makes the loop safepoint-free so mem2reg promotes loop-carried
+    // locals to registers.
+    if std::env::var("BEAGLE_SSA_DEOPT")
+        .map(|v| v != "0")
+        .unwrap_or(true)
+    {
         let log = std::env::var("BEAGLE_SSA_DEOPT_LOG").is_ok();
         let name = f.debug_name.clone();
         let info = name.as_deref().and_then(crate::ir::deopt_info_for);
