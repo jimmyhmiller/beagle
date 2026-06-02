@@ -314,6 +314,27 @@ pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
     crate::cfg::dump::maybe_dump_phase("02-after-dce", &f, false);
     crate::cfg::dump::maybe_verify_stage("02-after-dce", &f);
 
+    // Deopt rewrite (BEAGLE_SSA_DEOPT, off by default). For an eligible pure
+    // function being specialized, redirect type/overflow guard bails to a deopt
+    // edge that re-invokes the resident generic code with the original args and
+    // returns its result — instead of computing the generic result inline and
+    // rejoining. Removing the bail safepoints from the hot path makes the loop
+    // safepoint-free so mem2reg promotes loop-carried locals to registers.
+    if std::env::var("BEAGLE_SSA_DEOPT").is_ok() {
+        let log = std::env::var("BEAGLE_SSA_DEOPT_LOG").is_ok();
+        let name = f.debug_name.clone();
+        let info = name.as_deref().and_then(crate::ir::deopt_info_for);
+        if let (Some(name), Some((generic_addr, pause_addr))) = (name, info) {
+            let applied = apply_deopt_rewrite(&mut f, generic_addr, pause_addr);
+            if log {
+                eprintln!(
+                    "[deopt] {} applied={} generic@{:#x} pause@{:#x}",
+                    name, applied, generic_addr, pause_addr
+                );
+            }
+        }
+    }
+
     // Phase 2a: lift cross-block legacy VRegs to slots. The legacy IR
     // emits VRegs whose def doesn't dominate every use (single-def, but
     // used across control-flow merges); SSA can't model this directly
@@ -1583,6 +1604,200 @@ fn extract_call_target(
 
 /// Recompute every block's `predecessors` list from the terminator graph.
 /// Called after fill_block has populated all terminators.
+/// Deopt rewrite: for an eligible pure function, redirect each type/overflow
+/// guard bail to a fresh deopt block that re-invokes the resident generic code
+/// (`generic_addr`, surviving the specialization jump-table swap) with the
+/// original args and returns its result. The bail value no longer rejoins the
+/// hot path, so the fast path is provably typed and safepoint-free → mem2reg
+/// promotes loop-carried locals to registers.
+///
+/// **Soundness:** re-invoking from entry re-runs the function generically, so it
+/// is sound only when re-execution is unobservable — the function must have no
+/// observable / unsafe-to-rerun op on any non-bail (fast-reachable) block. The
+/// original args are the entry-param VRegs (immutable SSA values that dominate
+/// every deopt block), so no slot-layout assumption or param-reassignment check
+/// is needed. Returns whether any bail was rewritten.
+fn apply_deopt_rewrite(f: &mut CfgFunction, generic_addr: usize, pause_addr: usize) -> bool {
+    use crate::cfg::{CallTarget, ClobberSet, Terminator};
+    use std::collections::{HashMap, HashSet};
+
+    let entry = f.entry;
+    let arg_vregs: Vec<crate::cfg::VReg> = f.block(entry).params.clone();
+
+    // Map const-defining VRegs to their value, to recognize the transparent
+    // entry `__pause` safepoint call (`CallBuiltin reg(const == pause_addr)`),
+    // which is benign to re-run and must not disqualify the function.
+    let mut const_of: HashMap<crate::cfg::VReg, i64> = HashMap::new();
+    for block in &f.blocks {
+        for op in &block.body {
+            match op {
+                Op::ConstTaggedInt { dst, value } => {
+                    const_of.insert(*dst, *value);
+                }
+                Op::ConstRawValue { dst, value } => {
+                    const_of.insert(*dst, *value as i64);
+                }
+                _ => {}
+            }
+        }
+    }
+    let is_pause_call = |op: &Op| -> bool {
+        if pause_addr == 0 {
+            return false;
+        }
+        if let Op::Call {
+            target: CallTarget::Register(v),
+            ..
+        } = op
+        {
+            return const_of.get(v).map(|&c| c as usize) == Some(pause_addr);
+        }
+        false
+    };
+
+    // Fast-reachable blocks: BFS from entry, following normal edges and the
+    // fall-through of each guard but NOT the bail edge (the cold path we
+    // replace).
+    let mut fast: HashSet<BlockId> = HashSet::new();
+    let mut stack = vec![entry];
+    fast.insert(entry);
+    while let Some(b) = stack.pop() {
+        let succs: Vec<BlockId> = match &f.blocks[b.0 as usize].terminator {
+            Terminator::InlineBranch { fall_through, .. } => vec![*fall_through],
+            other => other.successors(),
+        };
+        for s in succs {
+            if fast.insert(s) {
+                stack.push(s);
+            }
+        }
+    }
+
+    // Param slots: param k is stored to root slot k by the entry prologue. The
+    // deopt re-invoke reloads these to pass the *original* args, so they must
+    // not be reassigned after entry (else the reload sees a mutated value).
+    let nargs = arg_vregs.len();
+    let param_slots: HashSet<SlotId> = (0..nargs as u32).map(SlotId::root).collect();
+
+    // Eligibility: no observable / unsafe-to-rerun op in any fast-reachable
+    // block, no param-slot reassignment outside entry, and at least one
+    // rewritable bail.
+    let mut has_bail = false;
+    for &b in &fast {
+        let block = &f.blocks[b.0 as usize];
+        for op in &block.body {
+            if is_pause_call(op) {
+                continue;
+            }
+            if op_unsafe_to_rerun(op) {
+                return false;
+            }
+            if b != entry {
+                if let Op::SlotStore { slot, .. } = op {
+                    if param_slots.contains(slot) {
+                        return false;
+                    }
+                }
+            }
+        }
+        if let Terminator::InlineBranch { op, .. } = &block.terminator {
+            if !matches!(op, InlineBranchOp::InlineBumpAllocate { .. }) {
+                has_bail = true;
+            }
+        }
+    }
+    if !has_bail {
+        return false;
+    }
+
+    // Tagged function pointer for the resident generic code (the call lowering
+    // untags with `>> tag_size`, matching `Value::Function`).
+    let tagged = crate::types::BuiltInTypes::Function.tag(generic_addr as isize) as u64;
+
+    let sites: Vec<usize> = fast
+        .iter()
+        .filter(|&&b| {
+            matches!(
+                &f.blocks[b.0 as usize].terminator,
+                Terminator::InlineBranch { op, .. }
+                    if !matches!(op, InlineBranchOp::InlineBumpAllocate { .. })
+            )
+        })
+        .map(|&b| b.0 as usize)
+        .collect();
+
+    for site in sites {
+        let deopt = f.new_block();
+        // Reload the original args from their param slots *cold*, here in the
+        // deopt block — NOT by keeping the entry-param VRegs live, which would
+        // pin them in registers across the whole hot loop.
+        let mut args = Vec::with_capacity(nargs);
+        for k in 0..nargs as u32 {
+            let v = f.new_vreg(RegClass::Gp);
+            f.block_mut(deopt).body.push(Op::SlotLoad {
+                dst: v,
+                slot: SlotId::root(k),
+            });
+            args.push(v);
+        }
+        let result = f.new_vreg(RegClass::Gp);
+        f.block_mut(deopt).body.push(Op::Call {
+            dst: result,
+            target: CallTarget::Raw(tagged),
+            args,
+            is_builtin: false,
+            clobbers: ClobberSet::AllCallerSaved,
+        });
+        f.block_mut(deopt).terminator = Terminator::Ret { value: result };
+        if let Terminator::InlineBranch {
+            bail, bail_args, ..
+        } = &mut f.blocks[site].terminator
+        {
+            *bail = deopt;
+            bail_args.clear();
+        }
+    }
+
+    // Pin the param slots so mem2reg keeps them materialized (their cold deopt
+    // reloads must not pull the args into registers across the loop).
+    f.deopt_pinned_slots.extend(param_slots);
+
+    rebuild_predecessors(f);
+    dce_unreachable_blocks(f);
+    true
+}
+
+/// Ops whose re-execution (by a deopt re-invoke from entry) would be observable
+/// or unsafe. Conservative: anything not clearly local/idempotent is included,
+/// so an unrecognized effect keeps the function ineligible.
+fn op_unsafe_to_rerun(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::Call { .. }
+            | Op::Recurse { .. }
+            | Op::HeapStore { .. }
+            | Op::HeapStoreOffset { .. }
+            | Op::HeapStoreOffsetReg { .. }
+            | Op::HeapStoreByteOffsetReg { .. }
+            | Op::HeapStoreByteOffsetMasked { .. }
+            | Op::AtomicStore { .. }
+            | Op::CompareAndSwap { .. }
+            | Op::StoreFloatConstant { .. }
+            | Op::PushExceptionHandler { .. }
+            | Op::PushResumableExceptionHandler { .. }
+            | Op::PopExceptionHandler { .. }
+            | Op::PopExceptionHandlerById { .. }
+            | Op::PushPromptHandler { .. }
+            | Op::PopPromptHandler { .. }
+            | Op::PushPromptTag { .. }
+            | Op::CaptureContinuation { .. }
+            | Op::CaptureContinuationTagged { .. }
+            | Op::PerformEffect { .. }
+            | Op::ReturnFromShift { .. }
+            | Op::Breakpoint
+    )
+}
+
 pub(crate) fn rebuild_predecessors(f: &mut CfgFunction) {
     let n = f.blocks.len();
     let mut new_preds: Vec<Vec<BlockId>> = vec![Vec::new(); n];

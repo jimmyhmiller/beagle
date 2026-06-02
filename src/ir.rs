@@ -885,6 +885,52 @@ pub fn in_tier_up_compile() -> bool {
     TIER_UP_COMPILE.with(|c| c.get())
 }
 
+thread_local! {
+    /// Set while specializing a function, to `(full_name, generic_code_addr)`.
+    /// `build_cfg` reads it: when the function being built matches `full_name`
+    /// and it is deopt-eligible, type-guard bails are rewritten to **deopt**
+    /// edges that re-invoke the resident generic code at `generic_code_addr`
+    /// (which survives the specialization jump-table swap) with the original
+    /// args and return its result — instead of computing the generic result
+    /// inline and rejoining the hot path. Eliminating the rejoin makes the hot
+    /// path provably typed, so loop-carried ints promote to registers.
+    /// Scoped by `DeoptContextGuard`.
+    static DEOPT_CONTEXT: std::cell::RefCell<Option<(String, usize, usize)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// RAII guard installing the deopt context for the function being specialized:
+/// `(full_name, generic_code_addr, pause_builtin_addr)`. `pause_builtin_addr` is
+/// the address of `beagle.builtin/__pause` so the rewrite can recognize (and
+/// ignore) the transparent entry safepoint call.
+pub struct DeoptContextGuard(Option<(String, usize, usize)>);
+
+impl DeoptContextGuard {
+    pub fn enter(full_name: String, generic_addr: usize, pause_addr: usize) -> Self {
+        DeoptContextGuard(
+            DEOPT_CONTEXT.with(|c| c.replace(Some((full_name, generic_addr, pause_addr)))),
+        )
+    }
+}
+
+impl Drop for DeoptContextGuard {
+    fn drop(&mut self) {
+        DEOPT_CONTEXT.with(|c| *c.borrow_mut() = self.0.take());
+    }
+}
+
+/// `(generic_code_addr, pause_builtin_addr)` if a deopt context is active for
+/// exactly `name`. `None` for nested closures (different name) or when no
+/// specialization is in progress.
+pub fn deopt_info_for(name: &str) -> Option<(usize, usize)> {
+    DEOPT_CONTEXT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|(n, _, _)| n == name)
+            .map(|(_, g, p)| (*g, *p))
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct Ir {
     register_index: usize,

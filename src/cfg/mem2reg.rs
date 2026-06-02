@@ -110,6 +110,7 @@ pub fn promote_slots(f: &mut CfgFunction) {
     for s in &read_filtered {
         let class = slot_class.get(s).copied().unwrap_or(RegClass::Gp);
         let safe = !read_in_unreachable.contains(s)
+            && !f.deopt_pinned_slots.contains(s)
             && (class == RegClass::Fp || crate::cfg::gc_safety::slot_is_gc_safe_to_promote(f, *s));
         if safe {
             promotable.insert(*s);

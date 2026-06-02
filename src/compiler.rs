@@ -714,6 +714,24 @@ impl Compiler {
         // this guard, so they stay on legacy.
         let result = {
             let _tier_up = crate::ir::TierUpCompileGuard::enter();
+            // Deopt: record the resident generic code address so the
+            // specialized build can re-invoke it on a guard miss instead of
+            // rejoining the bail result. Also pass __pause's address so the
+            // rewrite can ignore the transparent entry safepoint call. Only
+            // active under BEAGLE_SSA_DEOPT.
+            let pause_addr = {
+                let rt = get_runtime().get_mut();
+                rt.get_function_by_name("beagle.builtin/__pause")
+                    .cloned()
+                    .and_then(|f| rt.get_pointer(&f).ok())
+                    .map(|p| p as usize)
+                    .unwrap_or(0)
+            };
+            let _deopt = crate::ir::DeoptContextGuard::enter(
+                full_name.to_string(),
+                current_address,
+                pause_addr,
+            );
             self.compile_ast_with_feedback(
                 ast,
                 None,

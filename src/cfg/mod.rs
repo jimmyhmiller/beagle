@@ -778,6 +778,11 @@ pub struct CfgFunction {
     /// heap pointer (Phase 1 of the runtime-parity plan). Allocated via
     /// [`CfgFunction::alloc_unscanned_slot`].
     pub num_unscanned_slots: u32,
+    /// Slots the deopt rewrite reads in (cold) re-invoke blocks and which must
+    /// therefore stay materialized — promoting them would extend the original
+    /// args' live range across the whole hot loop. mem2reg skips these. Empty
+    /// unless the deopt rewrite ran.
+    pub deopt_pinned_slots: std::collections::HashSet<SlotId>,
 }
 
 impl CfgFunction {
@@ -789,6 +794,7 @@ impl CfgFunction {
             vreg_classes: Vec::new(),
             num_slots,
             num_unscanned_slots: 0,
+            deopt_pinned_slots: std::collections::HashSet::new(),
         }
     }
 
