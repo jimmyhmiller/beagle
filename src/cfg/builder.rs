@@ -1714,7 +1714,7 @@ fn apply_deopt_rewrite(f: &mut CfgFunction, generic_addr: usize, pause_addr: usi
     // untags with `>> tag_size`, matching `Value::Function`).
     let tagged = crate::types::BuiltInTypes::Function.tag(generic_addr as isize) as u64;
 
-    let sites: Vec<usize> = fast
+    let mut sites: Vec<usize> = fast
         .iter()
         .filter(|&&b| {
             matches!(
@@ -1725,6 +1725,9 @@ fn apply_deopt_rewrite(f: &mut CfgFunction, generic_addr: usize, pause_addr: usi
         })
         .map(|&b| b.0 as usize)
         .collect();
+    // Deterministic order: `fast` is a HashSet, so iterate sites in block order
+    // to keep block/VReg numbering (and thus regalloc) reproducible.
+    sites.sort_unstable();
 
     for site in sites {
         let deopt = f.new_block();
