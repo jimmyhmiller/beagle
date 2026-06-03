@@ -4195,6 +4195,13 @@ pub struct Runtime {
     pub functions: Vec<Function>,
     jump_table_reserved: Reserved,
     jump_table_pages: Vec<Mmap>,
+    /// Serializes mutation of `jump_table_pages` + the W^X mprotect dance in
+    /// `add_jump_table_entry` / `modify_jump_table_entry`. Those run on the
+    /// compiler thread (a redefinition recompiling a function) AND on spawn
+    /// threads applying tier-2 installs at a stop-the-world; without this lock
+    /// the concurrent `Vec::remove`/`insert` data-races and a jump-table write
+    /// can be lost, leaving a stale function pointer in the slot.
+    jump_table_lock: Mutex<()>,
     jump_table_base_ptr: usize,
     pub jump_table_offset: usize,
     compiler_channel: Option<BlockingSender<CompilerMessage, CompilerResponse>>,
@@ -4311,6 +4318,7 @@ impl Runtime {
             keyword_cells: vec![],
             jump_table_reserved,
             jump_table_pages: vec![],
+            jump_table_lock: Mutex::new(()),
             jump_table_base_ptr,
             jump_table_offset: 0,
             functions: vec![],
@@ -8633,6 +8641,12 @@ impl Runtime {
         let page_index = byte_offset / page_size;
         let offset_in_page = byte_offset % page_size;
 
+        // Serialize all jump-table page mutation (see `jump_table_lock`).
+        let _jt_guard = self
+            .jump_table_lock
+            .lock()
+            .expect("jump_table_lock poisoned");
+
         // Ensure we have enough pages committed
         while self.jump_table_pages.len() <= page_index {
             // Split a new page from reserved space and commit it
@@ -8699,6 +8713,14 @@ impl Runtime {
         let byte_offset = jump_table_offset * 8;
         let page_index = byte_offset / page_size;
         let offset_in_page = byte_offset % page_size;
+
+        // Serialize all jump-table page mutation (see `jump_table_lock`): the
+        // redefinition recompile (compiler thread) and tier-2 installs (spawn
+        // threads) both reach here and would otherwise race `jump_table_pages`.
+        let _jt_guard = self
+            .jump_table_lock
+            .lock()
+            .expect("jump_table_lock poisoned");
 
         if page_index >= self.jump_table_pages.len() {
             return Err("Jump table entry does not exist".into());
