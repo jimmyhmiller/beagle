@@ -661,7 +661,13 @@ pub extern "C" fn tier_up_trampoline(name_ptr: *const std::ffi::c_char) {
         let owned = name_str.to_string();
         std::thread::spawn(move || {
             let runtime = get_runtime().get_mut();
+            // Compile + STAGE the tier-2 install on the compiler thread.
             runtime.specialize_function(&owned);
+            // Then apply it in a stop-the-world from THIS spawn thread (a
+            // non-registered coordinator). The triggering mutator parks at its
+            // next entry safepoint; the compiler thread stays free to service
+            // other mutators' messages so they can park too (no deadlock).
+            runtime.stop_world_and_apply_installs(0);
         });
     }
 }

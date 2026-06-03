@@ -765,7 +765,13 @@ impl Compiler {
         match result {
             Ok(_) => {
                 self.defer_function_installs = false;
-                self.flush_deferred_functions();
+                // Stage the install instead of swapping the jump table here:
+                // this runs on the compiler thread while mutators read the
+                // function table locklessly. A coordinator applies the staged
+                // install inside a stop-the-world (see
+                // `Runtime::stop_world_and_apply_installs`), driven right after
+                // this returns.
+                self.stage_specialization_installs();
                 self.specialized_names.insert(full_name.to_string());
                 // Remember the tier-1 code so a runtime redefinition can revert
                 // this function (only the first specialization records it — the
@@ -872,6 +878,12 @@ impl Compiler {
         self.defer_function_installs = false;
         self.flush_deferred_functions();
         self.code_allocator.make_executable();
+        // Reset protocol-dispatch inline caches AGAIN now that the new impls
+        // and their dispatch-table entries are installed. The reset inside
+        // `revert_all_specializations` ran before this compile, so a dispatch
+        // in the gap could have re-cached the OLD target; this final reset
+        // guarantees the next dispatch re-resolves through the updated table.
+        self.invalidate_all_protocol_dispatch_caches();
         if let Some(top_level) = top_level {
             let function = self.get_function_by_name(&top_level).ok_or_else(|| {
                 CompileError::FunctionNotFound {
@@ -1578,12 +1590,41 @@ impl Compiler {
     /// always correct; hot functions re-tier-up afterward. No-op when nothing
     /// is specialized (so it's free at startup / cold runs).
     pub fn revert_all_specializations(&mut self) {
+        // A redefinition may have changed protocol dispatch; stale inline-cache
+        // entries (`[type_id -> old_fn_ptr]`) would keep calling old code, so
+        // reset them regardless of whether any tier-2 code needs reverting.
+        self.invalidate_all_protocol_dispatch_caches();
         if self.specialization_originals.is_empty() {
             return;
         }
         let runtime = get_runtime().get_mut();
+        // Raw pointer so we can call `&mut self` reverts while holding the
+        // `install_apply_lock` guard (which borrows a field of runtime).
+        let rt_ptr: *mut crate::runtime::Runtime = runtime;
+        // Hold the apply lock for the whole revert so a concurrent
+        // `apply_pending_installs` (driven by an async tier-up) cannot interleave
+        // its upserts with our pointer-reverts. Bumping the generation first
+        // means any install staged against the old world is skipped when applied.
+        let _apply_guard = runtime
+            .install_apply_lock
+            .lock()
+            .expect("install_apply_lock poisoned");
+        let g = runtime
+            .install_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if std::env::var("BEAGLE_STW_LOG").is_ok() {
+            eprintln!("[revert] bumped generation {} -> {}", g, g + 1);
+        }
+        // Drop any tier-2 installs staged but not yet applied — they were
+        // compiled against the pre-redefinition world and must not activate.
+        runtime
+            .installs_ready
+            .store(false, std::sync::atomic::Ordering::Release);
+        if let Ok(mut pending) = runtime.pending_installs.lock() {
+            pending.clear();
+        }
         for (name, (pointer, size)) in self.specialization_originals.drain() {
-            runtime.revert_function_pointer(&name, pointer, size);
+            unsafe { (*rt_ptr).revert_function_pointer(&name, pointer, size) };
         }
         self.specialized_names.clear();
     }
@@ -1598,6 +1639,23 @@ impl Compiler {
         while offset + entry_size <= self.property_look_up_cache_offset {
             unsafe {
                 let cache_ptr = self.property_look_up_cache.as_mut_ptr().add(offset) as *mut usize;
+                *cache_ptr = usize::MAX;
+            }
+            offset += entry_size;
+        }
+    }
+
+    /// Reset every protocol-dispatch inline cache to its sentinel so the next
+    /// call re-resolves through the (updated) dispatch table. Each entry is
+    /// 16 bytes: [type_id, fn_ptr]; writing `usize::MAX` to the type_id slot
+    /// forces a slow-path miss. Needed after a protocol impl is redefined —
+    /// otherwise a cached `[type_id -> old_fn_ptr]` keeps calling stale code.
+    fn invalidate_all_protocol_dispatch_caches(&mut self) {
+        let entry_size = 2 * 8; // 16 bytes per entry: type_id + fn_ptr
+        let mut offset = 0;
+        while offset + entry_size <= self.protocol_dispatch_cache_offset {
+            unsafe {
+                let cache_ptr = self.protocol_dispatch_cache.as_mut_ptr().add(offset) as *mut usize;
                 *cache_ptr = usize::MAX;
             }
             offset += entry_size;
@@ -2045,6 +2103,53 @@ impl Compiler {
     /// This ensures that other threads see either all old functions or all new
     /// functions, never a mix that could lead to new functions being called
     /// with old-layout struct values.
+    /// Make the just-compiled tier-2 code executable and QUEUE its installs on
+    /// the runtime without touching the jump table or function metadata. A
+    /// coordinator activates them inside a stop-the-world
+    /// (`Runtime::apply_pending_installs`); `installs_ready` flags that work is
+    /// pending. Used by `specialize_function` so the compiler thread never
+    /// mutates the function table while mutators read it.
+    fn stage_specialization_installs(&mut self) {
+        if self.deferred_updates.is_empty() {
+            return;
+        }
+        self.code_allocator.make_executable();
+        let updates = std::mem::take(&mut self.deferred_updates);
+        let runtime = get_runtime().get_mut();
+        // Tag with the current world generation so a redefinition that bumps
+        // the generation before this is applied marks it stale.
+        let generation = runtime
+            .install_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        {
+            let mut pending = runtime
+                .pending_installs
+                .lock()
+                .expect("pending_installs poisoned");
+            for u in updates {
+                pending.push(crate::runtime::PendingInstall {
+                    generation,
+                    name: u.name,
+                    pointer: u.pointer as usize,
+                    code_size: u.code_size,
+                    max_locals: u.max_locals,
+                    number_of_args: u.number_of_args,
+                    is_variadic: u.is_variadic,
+                    min_args: u.min_args,
+                    docstring: u.docstring,
+                    arg_names: u.arg_names,
+                    source_file: u.source_file,
+                    source_line: u.source_line,
+                    source_text: u.source_text,
+                    disk_location: u.disk_location,
+                });
+            }
+        }
+        runtime
+            .installs_ready
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
     fn flush_deferred_functions(&mut self) {
         if self.deferred_updates.is_empty() {
             return;
@@ -2666,6 +2771,13 @@ impl CompilerThread {
                         work_done.mark_done(CompilerResponse::SpecializationReport(report));
                     }
                     CompilerMessage::SpecializeFunction(name) => {
+                        // Only STAGE the install here (no jump-table swap): the
+                        // caller (the async tier-up spawn thread) drives the
+                        // stop-the-world that applies it. We must NOT coordinate
+                        // the STW from the compiler thread — a mutator blocked
+                        // sending us another message could never park, hanging
+                        // the rendezvous. Keeping this thread free to service
+                        // messages lets such mutators unblock and park.
                         if let Err(e) = self.compiler.specialize_function(&name) {
                             eprintln!("specialize_function({}) failed: {}", name, e);
                         }

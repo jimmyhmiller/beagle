@@ -4105,6 +4105,31 @@ pub fn cleanup_per_thread_data() {
     });
 }
 
+/// A tier-2 specialization that has been compiled and made executable but not
+/// yet installed into the function table. `pointer` is stored as `usize` (not
+/// `*const u8`) so the struct is `Send` — it is staged on the compiler thread
+/// and applied by a coordinator on another thread inside a stop-the-world.
+/// Fields mirror `Runtime::upsert_function`'s parameters.
+pub struct PendingInstall {
+    /// World generation at staging time. If `Runtime::install_generation` has
+    /// advanced past this when the install would be applied, the install is
+    /// stale (a redefinition intervened) and is skipped.
+    pub generation: u64,
+    pub name: Option<String>,
+    pub pointer: usize,
+    pub code_size: usize,
+    pub max_locals: usize,
+    pub number_of_args: usize,
+    pub is_variadic: bool,
+    pub min_args: usize,
+    pub docstring: Option<String>,
+    pub arg_names: Vec<String>,
+    pub source_file: Option<String>,
+    pub source_line: Option<usize>,
+    pub source_text: Option<String>,
+    pub disk_location: Option<DiskLocation>,
+}
+
 pub struct Runtime {
     pub memory: Memory,
     pub libraries: Vec<Library>,
@@ -4121,6 +4146,25 @@ pub struct Runtime {
     pub registered_thread_count: AtomicUsize,
     pub thread_state: Arc<(Mutex<ThreadState>, Condvar)>,
     pub gc_lock: Mutex<()>,
+    /// Tier-2 specializations compiled but not yet installed into the function
+    /// table. Staged here by the compiler thread (which must NOT mutate the
+    /// table while mutators read it locklessly), then applied by a coordinator
+    /// inside a stop-the-world via `apply_pending_installs` — see
+    /// `stop_world_and_apply_installs`. `installs_ready` is a cheap flag so the
+    /// coordinator / GC can skip the mutex when nothing is staged.
+    pub pending_installs: Mutex<Vec<PendingInstall>>,
+    pub installs_ready: AtomicBool,
+    /// Monotonic "world generation". Bumped by `revert_all_specializations`
+    /// when a redefinition reverts tier-2 code, so a tier-2 install staged
+    /// against the OLD world (tagged with the generation at staging time) is
+    /// recognized as stale and skipped by `apply_pending_installs`.
+    pub install_generation: AtomicU64,
+    /// Serializes `apply_pending_installs` (which writes tier-2 code into the
+    /// function table) against `revert_all_specializations` (which reverts it),
+    /// so a stale async install can't land after a redefinition. The generation
+    /// check happens under this lock; whichever side wins the lock, the
+    /// function ends in the correct (reverted) state.
+    pub install_apply_lock: Mutex<()>,
     pub ffi_function_info: Vec<FFIInfo>,
     pub ffi_info_by_name: HashMap<String, usize>,
     namespaces: NamespaceManager,
@@ -4244,6 +4288,10 @@ impl Runtime {
             is_paused: AtomicUsize::new(0),
             registered_thread_count: AtomicUsize::new(0),
             gc_lock: Mutex::new(()),
+            pending_installs: Mutex::new(Vec::new()),
+            installs_ready: AtomicBool::new(false),
+            install_generation: AtomicU64::new(0),
+            install_apply_lock: Mutex::new(()),
             thread_state: Arc::new((
                 Mutex::new(ThreadState {
                     stack_pointers: HashMap::new(),
@@ -4484,16 +4532,23 @@ impl Runtime {
 
     /// Specialize every FullySpecializable function. Returns the count
     /// of functions actually recompiled and swapped.
-    pub fn specialize_all(&self) -> usize {
+    pub fn specialize_all(&mut self) -> usize {
         let response = self
             .compiler_channel
             .as_ref()
             .expect("Compiler channel not initialized - this is a fatal error")
             .send(CompilerMessage::SpecializeAll);
-        match response {
+        let count = match response {
             CompilerResponse::SpecializeCount(n) => n,
             _ => 0,
-        }
+        };
+        // The compiler thread only STAGED the installs; activate them now in a
+        // stop-the-world. We are the calling mutator — a registered coordinator
+        // — so we are not blocked waiting on anyone and other mutators park at
+        // their entry safepoints. frame_pointer 0: the install path never walks
+        // frames and never parks the coordinator.
+        self.stop_world_and_apply_installs(0);
+        count
     }
 
     /// Per-function specialization verdicts derived from the feedback
@@ -5432,8 +5487,17 @@ impl Runtime {
             self.memory.run_gc(&gc_frame_tops, &binding_cells);
             log_gc_probe("after", frame_pointer);
 
+            // Single mutator (us) — safe to install staged tier-2 code here too.
+            self.apply_pending_installs();
+
             return;
         }
+
+        // Raw self pointer captured before `gc_lock` is held, so we can drain
+        // staged tier-2 installs (a `&mut self` call) while the `lock`/`cvar`
+        // borrow of `self.thread_state` is live below. Sound: every other
+        // mutator is parked at a safepoint during the window.
+        let self_ptr: *mut Runtime = self;
 
         let locked = self.gc_lock.try_lock();
 
@@ -5541,6 +5605,11 @@ impl Runtime {
         let binding_cells = self.namespaces.collect_binding_cells();
 
         self.memory.run_gc(&gc_frame_tops, &binding_cells);
+
+        // World is stopped — also install any staged tier-2 specializations.
+        // This is the fallback for the case where an install STW lost the race
+        // to this GC for the gc_lock.
+        unsafe { (*self_ptr).apply_pending_installs() };
 
         // Memory barrier to ensure all GC writes are visible before continuing
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
@@ -5709,6 +5778,190 @@ impl Runtime {
             eprintln!("[stw-observe] resumed");
         }
         parked
+    }
+
+    /// Install every staged tier-2 specialization into the function table
+    /// (jump-table swap + metadata). MUST be called with the world stopped (all
+    /// mutators parked) so no thread reads `functions` mid-mutation — either by
+    /// a `stop_world_and_apply_installs` coordinator or from the GC rendezvous.
+    /// Clears `installs_ready` first so a racing trigger sees an empty queue.
+    pub fn apply_pending_installs(&mut self) {
+        // Raw self pointer so we can call `&mut self` upserts while holding the
+        // `install_apply_lock` guard (which borrows a field of self). Captured
+        // before the lock so the cast itself doesn't conflict with the guard.
+        let self_ptr: *mut Runtime = self;
+        self.installs_ready
+            .store(false, std::sync::atomic::Ordering::Release);
+        // Serialize the whole table-mutation against `revert_all_specializations`
+        // so a stale install can't interleave with (or land after) a redefine's
+        // revert. The generation read below is therefore consistent with the
+        // upserts that follow.
+        let _apply_guard = self
+            .install_apply_lock
+            .lock()
+            .expect("install_apply_lock poisoned");
+        let current_gen = self
+            .install_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        let pending: Vec<PendingInstall> = {
+            let mut guard = match self.pending_installs.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            if guard.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *guard)
+        };
+        let log = std::env::var("BEAGLE_STW_LOG").is_ok();
+        for p in pending {
+            // Skip installs staged before a redefinition reverted the function:
+            // they hold OLD tier-2 code that must not overwrite the new world.
+            if p.generation != current_gen {
+                if log {
+                    eprintln!(
+                        "[install] SKIP stale install {:?} (gen {} != {})",
+                        p.name, p.generation, current_gen
+                    );
+                }
+                continue;
+            }
+            if log {
+                eprintln!(
+                    "[install] applying tier-2 install {:?} (gen {})",
+                    p.name, p.generation
+                );
+            }
+            unsafe {
+                let _ = (*self_ptr).upsert_function(
+                    p.name.as_deref(),
+                    p.pointer as *const u8,
+                    p.code_size,
+                    p.max_locals,
+                    p.number_of_args,
+                    p.is_variadic,
+                    p.min_args,
+                    p.docstring,
+                    p.arg_names,
+                    p.source_file,
+                    p.source_line,
+                    p.source_text,
+                    p.disk_location,
+                );
+            }
+        }
+    }
+
+    /// Stop the world and install all staged tier-2 specializations while every
+    /// other mutator is parked at its entry safepoint — the race-free
+    /// counterpart to the old compiler-thread jump-table swap.
+    ///
+    /// The coordinator may be a registered mutator (the calling thread after
+    /// `specialize-all`) or NOT (the async tier-up compile thread). We subtract
+    /// ourselves from the wait count only when registered. A non-registered
+    /// coordinator must stop even the sole mutator, because *it* — not the
+    /// mutator — is the one mutating the table, so a `threads.len() == 1`
+    /// fast-path would be unsound there.
+    ///
+    /// On `gc_lock` contention we simply leave the installs staged: a GC is
+    /// stopping the world and drains pending installs at its own rendezvous, and
+    /// the next tier-up will retry regardless. We never `__pause` here — this
+    /// can run on the compiler thread, which the GC would not unpark.
+    pub fn stop_world_and_apply_installs(&mut self, frame_pointer: usize) {
+        if !self
+            .installs_ready
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        crate::builtins::save_frame_pointer(frame_pointer);
+
+        let self_in_count = if current_thread_is_registered() { 1 } else { 0 };
+
+        // Sole registered mutator and we ARE it → nobody else can read the
+        // table, and we are not reading it right now → apply directly.
+        if self_in_count == 1
+            && self
+                .registered_thread_count
+                .load(std::sync::atomic::Ordering::Acquire)
+                <= 1
+        {
+            self.apply_pending_installs();
+            return;
+        }
+
+        // Raw self pointer so we can call the `&mut self` apply while a
+        // `gc_lock` guard / `thread_state` borrow are live (the borrow checker
+        // sees them as borrowing all of `self`). Sound: every other mutator is
+        // parked at a safepoint and touches no runtime state during the window.
+        let self_ptr: *mut Runtime = self;
+
+        let locked = match self.gc_lock.try_lock() {
+            Ok(l) => l,
+            // A GC (or another install STW) holds the lock; it will drain the
+            // staged installs at its rendezvous. Leave them and return.
+            Err(_) => return,
+        };
+        if self
+            .is_paused
+            .compare_exchange(
+                0,
+                1,
+                std::sync::atomic::Ordering::Release,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            drop(locked);
+            return;
+        }
+
+        let thread_state_arc = self.thread_state.clone();
+        let (lock, cvar) = &*thread_state_arc;
+        let mut thread_state = lock
+            .lock()
+            .expect("Failed to lock thread state - this is a fatal error");
+        let target = |rt: &Runtime| {
+            rt.registered_thread_count
+                .load(std::sync::atomic::Ordering::Acquire)
+                .saturating_sub(self_in_count)
+        };
+        let mut wait_for = target(self);
+        while thread_state.paused_threads() + thread_state.c_calling_stack_pointers.len() < wait_for
+        {
+            thread_state = cvar
+                .wait_timeout(thread_state, std::time::Duration::from_millis(10))
+                .expect("Failed waiting on condition variable - this is a fatal error")
+                .0;
+            wait_for = target(self);
+        }
+        drop(thread_state);
+
+        // World stopped — safe to mutate the function table.
+        unsafe { (*self_ptr).apply_pending_installs() };
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+
+        self.is_paused
+            .store(0, std::sync::atomic::Ordering::Release);
+        for thread in self.memory.threads.iter() {
+            thread.unpark();
+        }
+        let mut thread_state = lock
+            .lock()
+            .expect("Failed to lock thread state after install STW - this is a fatal error");
+        while thread_state.paused_threads() > 0 {
+            let (state, timeout) = cvar
+                .wait_timeout(thread_state, std::time::Duration::from_millis(1))
+                .expect("Failed waiting on condition variable - this is a fatal error");
+            thread_state = state;
+            if timeout.timed_out() {
+                for thread in self.memory.threads.iter() {
+                    thread.unpark();
+                }
+            }
+        }
+        thread_state.clear();
+        drop(locked);
     }
 
     pub fn register_temporary_root(&mut self, root: usize) -> usize {
