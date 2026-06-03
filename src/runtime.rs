@@ -4195,6 +4195,13 @@ pub struct Runtime {
     pub functions: Vec<Function>,
     jump_table_reserved: Reserved,
     jump_table_pages: Vec<Mmap>,
+    /// Serializes structural access to the `dispatch_tables` HashMap: a
+    /// redefinition mutates it (`add_protocol_info`, &mut) on the calling
+    /// thread while the compiler thread reads it (`get_dispatch_table_ptr`, &)
+    /// to bake dispatch-table pointers into recompiled protocol call sites.
+    /// Concurrent &mut + & on a HashMap is a data race that can corrupt the
+    /// read (a wrong DispatchTable pointer) and mis-dispatch.
+    dispatch_tables_lock: Mutex<()>,
     /// Serializes mutation of `jump_table_pages` + the W^X mprotect dance in
     /// `add_jump_table_entry` / `modify_jump_table_entry`. Those run on the
     /// compiler thread (a redefinition recompiling a function) AND on spawn
@@ -4318,6 +4325,7 @@ impl Runtime {
             keyword_cells: vec![],
             jump_table_reserved,
             jump_table_pages: vec![],
+            dispatch_tables_lock: Mutex::new(()),
             jump_table_lock: Mutex::new(()),
             jump_table_base_ptr,
             jump_table_offset: 0,
@@ -9125,6 +9133,12 @@ impl Runtime {
             _ => None,
         };
 
+        // Serialize structural dispatch-table access against the compiler
+        // thread reading it to bake call-site pointers (see dispatch_tables_lock).
+        let _dt_guard = self
+            .dispatch_tables_lock
+            .lock()
+            .expect("dispatch_tables_lock poisoned");
         if let Some(primitive_id) = builtin_primitive_id {
             // Built-in type - register in primitive dispatch
             let dispatch_table = self
@@ -9152,6 +9166,14 @@ impl Runtime {
             protocol_name.split_once("/").unwrap_or(("", protocol_name));
         let dispatch_key = format!("{}/{}", protocol_namespace, method_name);
 
+        // Serialize against `add_protocol_info` mutating the HashMap (see
+        // dispatch_tables_lock). The returned pointer targets the Box's heap
+        // allocation, which is stable across HashMap rehash, so it stays valid
+        // after the lock is released.
+        let _dt_guard = self
+            .dispatch_tables_lock
+            .lock()
+            .expect("dispatch_tables_lock poisoned");
         self.dispatch_tables
             .get(&dispatch_key)
             .map(|table| &**table as *const DispatchTable as usize)
@@ -9191,6 +9213,10 @@ impl Runtime {
     /// specializing them races that recompile on the jump table — and the win
     /// is negligible (they're dispatch glue). Callers skip specializing them.
     pub fn is_protocol_dispatcher(&self, name: &str) -> bool {
+        let _dt_guard = self
+            .dispatch_tables_lock
+            .lock()
+            .expect("dispatch_tables_lock poisoned");
         self.dispatch_tables.contains_key(name)
     }
 
