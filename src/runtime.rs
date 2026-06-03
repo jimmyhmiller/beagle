@@ -9046,31 +9046,36 @@ impl Runtime {
             .send(CompilerMessage::SetPauseAtomPointer(pause_atom_ptr));
     }
 
+    /// Returns `true` if this updated an EXISTING `(type, method)` impl (a
+    /// hot-reload / redefinition), `false` for a first definition. Callers use
+    /// this to invalidate protocol-dispatch inline caches only when needed.
     pub fn add_protocol_info(
         &mut self,
         protocol_name: &str,
         struct_name: &str,
         method_name: &str,
         f: usize,
-    ) {
+    ) -> bool {
         // Update existing entry if this type+method combo already exists,
         // otherwise add a new one. This allows protocol impls to be hot-reloaded.
         let entries = self
             .protocol_info
             .entry(protocol_name.to_string())
             .or_default();
-        if let Some(existing) = entries
+        let was_redefinition = if let Some(existing) = entries
             .iter_mut()
             .find(|e| e._type == struct_name && e.method_name == method_name)
         {
             existing.fn_pointer = f;
+            true
         } else {
             entries.push(ProtocolMethodInfo {
                 _type: struct_name.to_string(),
                 method_name: method_name.to_string(),
                 fn_pointer: f,
             });
-        }
+            false
+        };
 
         // Also update the dispatch table for O(1) lookup
         // Key format: "protocol_namespace/method_name" (e.g., "myapp/dispatch")
@@ -9115,6 +9120,7 @@ impl Runtime {
             dispatch_table.register(struct_id as isize, f);
         }
         // Note: silently ignore unknown types for now (could be forward references)
+        was_redefinition
     }
 
     /// Get the dispatch table pointer for a protocol method
@@ -9154,6 +9160,24 @@ impl Runtime {
 
         if let Some(table) = self.dispatch_tables.get_mut(&dispatch_key) {
             table.set_default_method(default_fn_ptr);
+        }
+    }
+
+    /// True if `name` is a protocol-dispatch method (the generic dispatcher
+    /// function, keyed in `dispatch_tables`). These are recompiled in place by
+    /// `compile_protocol_method` whenever an impl is (re)defined, so tier-2
+    /// specializing them races that recompile on the jump table — and the win
+    /// is negligible (they're dispatch glue). Callers skip specializing them.
+    pub fn is_protocol_dispatcher(&self, name: &str) -> bool {
+        self.dispatch_tables.contains_key(name)
+    }
+
+    /// Tell the compiler thread to reset all protocol-dispatch inline caches.
+    /// Call AFTER the dispatch table has been updated by a redefinition, so the
+    /// next dispatch at every call site re-resolves through the new table.
+    pub fn invalidate_protocol_dispatch_caches(&self) {
+        if let Some(channel) = self.compiler_channel.as_ref() {
+            let _ = channel.send(CompilerMessage::InvalidateProtocolDispatchCaches);
         }
     }
 

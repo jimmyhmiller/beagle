@@ -655,6 +655,16 @@ impl Compiler {
 
         // Resolve current pointer + source text.
         let runtime = get_runtime().get_mut();
+        // Don't tier-2 specialize protocol dispatcher functions: they are
+        // recompiled in place by `compile_protocol_method` on every impl
+        // (re)definition, so an async tier-2 install of one races that recompile
+        // for the same jump-table slot — letting a stale dispatcher version win
+        // (observed as protocol-redefinition staleness under aggressive tier-up).
+        // The dispatch happens through the (always-current) dispatch table at
+        // runtime regardless, so specializing the glue gains nothing.
+        if runtime.is_protocol_dispatcher(full_name) {
+            return Ok(false);
+        }
         let function = match runtime.find_function(full_name) {
             Some(f) => f,
             None => return Ok(false),
@@ -1650,7 +1660,7 @@ impl Compiler {
     /// 16 bytes: [type_id, fn_ptr]; writing `usize::MAX` to the type_id slot
     /// forces a slow-path miss. Needed after a protocol impl is redefined —
     /// otherwise a cached `[type_id -> old_fn_ptr]` keeps calling stale code.
-    fn invalidate_all_protocol_dispatch_caches(&mut self) {
+    pub fn invalidate_all_protocol_dispatch_caches(&mut self) {
         let entry_size = 2 * 8; // 16 bytes per entry: type_id + fn_ptr
         let mut offset = 0;
         while offset + entry_size <= self.protocol_dispatch_cache_offset {
@@ -2525,6 +2535,10 @@ pub enum CompilerMessage {
     /// Specializes only the named function; idempotent (handler skips
     /// already-specialized).
     SpecializeFunction(String),
+    /// Reset all protocol-dispatch inline caches to their sentinel. Sent after
+    /// a protocol impl is REDEFINED (so the dispatch table changed) — clears
+    /// `[type_id -> old_fn_ptr]` entries so the next dispatch re-resolves.
+    InvalidateProtocolDispatchCaches,
 }
 
 pub enum CompilerResponse {
@@ -2769,6 +2783,10 @@ impl CompilerThread {
                     CompilerMessage::GetSpecializationReport => {
                         let report = self.compiler.specialization_report();
                         work_done.mark_done(CompilerResponse::SpecializationReport(report));
+                    }
+                    CompilerMessage::InvalidateProtocolDispatchCaches => {
+                        self.compiler.invalidate_all_protocol_dispatch_caches();
+                        work_done.mark_done(CompilerResponse::Done);
                     }
                     CompilerMessage::SpecializeFunction(name) => {
                         // Only STAGE the install here (no jump-table swap): the

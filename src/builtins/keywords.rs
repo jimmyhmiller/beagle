@@ -24,9 +24,19 @@ pub extern "C" fn register_extension(
         runtime.resolve(protocol_name)
     };
 
-    runtime.add_protocol_info(&protocol_name, &struct_name, &method_name, f);
+    let was_redefinition = runtime.add_protocol_info(&protocol_name, &struct_name, &method_name, f);
 
     runtime.compile_protocol_method(&protocol_name, &method_name);
+
+    // On a hot-reload (the dispatch table changed), reset the protocol-dispatch
+    // inline caches so no call site keeps calling the old impl from a cached
+    // `[type_id -> old_fn_ptr]`. Done HERE — after the dispatch table is
+    // updated — so the next dispatch re-resolves correctly (clearing during the
+    // earlier compile phase races the update). Skipped for first definitions
+    // (startup) to avoid clearing on every stdlib `extend`.
+    if was_redefinition {
+        runtime.invalidate_protocol_dispatch_caches();
+    }
 
     BuiltInTypes::null_value() as usize
 }
