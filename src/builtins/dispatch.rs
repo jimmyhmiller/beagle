@@ -94,10 +94,18 @@ pub extern "C" fn protocol_dispatch(
         }
     }
 
-    // Update cache
+    // Update cache. The fast path checks slot 0 (type_id) as the key, then
+    // loads slot 1 (fn_ptr) as the value. Write the value FIRST, then publish
+    // the key with a release fence between, so a concurrent reader that sees a
+    // freshly-written key also sees the matching value — never a torn pairing
+    // of a new key with a stale fn_ptr (which would dispatch to the wrong
+    // impl). Slot 0 is initialized to the `usize::MAX` sentinel, so a reader
+    // that races the value write simply misses and takes the (correct) slow
+    // path. This is a slow-path-only ordering fix; the fast path is unchanged.
     let buffer = unsafe { from_raw_parts_mut(cache_location as *mut usize, 2) };
-    buffer[0] = type_id;
     buffer[1] = fn_ptr;
+    std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+    buffer[0] = type_id;
 
     fn_ptr
 }
