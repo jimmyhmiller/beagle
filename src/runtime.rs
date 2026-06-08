@@ -1,5 +1,5 @@
 use libloading::Library;
-use mmap_rs::{Mmap, MmapMut, MmapOptions, Reserved};
+use mmap_rs::{MmapMut, MmapOptions, Reserved, ReservedMut};
 use nanoserde::SerJson;
 use regex::Regex;
 use std::{
@@ -4194,7 +4194,21 @@ pub struct Runtime {
     // and things be under that?
     pub functions: Vec<Function>,
     jump_table_reserved: Reserved,
-    jump_table_pages: Vec<Mmap>,
+    /// Committed jump-table pages, kept permanently writable and only ever
+    /// appended (never removed or reordered). The pages hold a dense array of
+    /// `Function`-tagged pointers indexed by `jump_table_offset`; generated
+    /// code reads a slot with a plain `ldr` and the runtime publishes a slot
+    /// with an atomic store (`store_jump_table_slot`). We keep the committed
+    /// `ReservedMut` pages alive here so the mappings aren't dropped — slot
+    /// writes go through the stable absolute address
+    /// `jump_table_base_ptr + offset*8`, never through this Vec, so reads of
+    /// the Vec don't race the hot redefine path.
+    jump_table_pages: Vec<ReservedMut>,
+    /// Number of pages in `jump_table_pages`, published atomically. The
+    /// lock-free `modify_jump_table_entry` reads this for its bounds check
+    /// instead of `jump_table_pages.len()`, so it can't race `Vec::push` in
+    /// `add_jump_table_entry`.
+    jump_table_committed_pages: AtomicUsize,
     /// Serializes structural access to the `dispatch_tables` HashMap: a
     /// redefinition mutates it (`add_protocol_info`, &mut) on the calling
     /// thread while the compiler thread reads it (`get_dispatch_table_ptr`, &)
@@ -4202,12 +4216,14 @@ pub struct Runtime {
     /// Concurrent &mut + & on a HashMap is a data race that can corrupt the
     /// read (a wrong DispatchTable pointer) and mis-dispatch.
     dispatch_tables_lock: Mutex<()>,
-    /// Serializes mutation of `jump_table_pages` + the W^X mprotect dance in
-    /// `add_jump_table_entry` / `modify_jump_table_entry`. Those run on the
-    /// compiler thread (a redefinition recompiling a function) AND on spawn
-    /// threads applying tier-2 installs at a stop-the-world; without this lock
-    /// the concurrent `Vec::remove`/`insert` data-races and a jump-table write
-    /// can be lost, leaving a stale function pointer in the slot.
+    /// Serializes jump-table *growth* only: committing a new page (splitting
+    /// the reserved region + pushing to `jump_table_pages`) and bumping
+    /// `jump_table_offset` to allocate a slot, both in `add_jump_table_entry`.
+    /// The hot path — `modify_jump_table_entry`, which repoints an existing
+    /// slot on redefinition / tier-2 install — takes NO lock: it does a single
+    /// atomic aligned store into the already-committed, permanently-writable
+    /// slot, so a redefine recompile and a tier-2 install race safely
+    /// (last-writer-wins; the install-generation check decides authority).
     jump_table_lock: Mutex<()>,
     jump_table_base_ptr: usize,
     pub jump_table_offset: usize,
@@ -4325,6 +4341,7 @@ impl Runtime {
             keyword_cells: vec![],
             jump_table_reserved,
             jump_table_pages: vec![],
+            jump_table_committed_pages: AtomicUsize::new(0),
             dispatch_tables_lock: Mutex::new(()),
             jump_table_lock: Mutex::new(()),
             jump_table_base_ptr,
@@ -8638,26 +8655,53 @@ impl Runtime {
         Ok(function.jump_table_offset * 8 + self.jump_table_base_ptr)
     }
 
+    /// Atomically publish `tagged_pointer` into jump-table slot `offset`.
+    ///
+    /// The slot lives at the fixed address `jump_table_base_ptr + offset*8` in
+    /// the permanently-writable, append-only jump table. An aligned 8-byte
+    /// store is atomic on AArch64/x86-64, so a reader's plain `ldr` observes
+    /// the old or the new pointer but never a torn value; `Release` ordering
+    /// publishes the (already-executable) pointee to any thread that observes
+    /// the new pointer. This is the single mutation primitive for both adding
+    /// and modifying entries — no mprotect, no `Vec` mutation, no lock.
+    ///
+    /// # Safety / preconditions
+    /// `offset` must have been allocated by `add_jump_table_entry` (so its page
+    /// is committed). `jump_table_base_ptr` is page-aligned, so the slot is
+    /// 8-byte aligned.
+    fn store_jump_table_slot(&self, offset: usize, tagged_pointer: usize) {
+        let addr = self.jump_table_base_ptr + offset * 8;
+        debug_assert_eq!(addr % 8, 0, "jump table slot must be 8-byte aligned");
+        // SAFETY: `addr` is inside a committed, permanently-writable page and is
+        // 8-byte aligned (see preconditions), so an AtomicUsize store is valid.
+        unsafe {
+            (*(addr as *const AtomicUsize)).store(tagged_pointer, Ordering::Release);
+        }
+    }
+
     pub fn add_jump_table_entry(
         &mut self,
         _index: usize,
         pointer: *const u8,
     ) -> Result<usize, Box<dyn Error>> {
-        let jump_table_offset = self.jump_table_offset;
         let page_size = MmapOptions::page_size();
-        let byte_offset = jump_table_offset * 8;
-        let page_index = byte_offset / page_size;
-        let offset_in_page = byte_offset % page_size;
 
-        // Serialize all jump-table page mutation (see `jump_table_lock`).
+        // Serialize jump-table *growth* only (see `jump_table_lock`): committing
+        // pages and bumping `jump_table_offset`. The actual slot publish below is
+        // an atomic store, the same primitive the lock-free `modify` path uses.
         let _jt_guard = self
             .jump_table_lock
             .lock()
             .expect("jump_table_lock poisoned");
 
-        // Ensure we have enough pages committed
+        let jump_table_offset = self.jump_table_offset;
+        let byte_offset = jump_table_offset * 8;
+        let page_index = byte_offset / page_size;
+
+        // Ensure enough pages are committed. Pages are appended and kept
+        // permanently writable — never removed, reordered, or re-protected.
         while self.jump_table_pages.len() <= page_index {
-            // Split a new page from reserved space and commit it
+            // Split a new page from reserved space and commit it writable.
             let reserved = self
                 .jump_table_reserved
                 .split_to(page_size)
@@ -8667,97 +8711,47 @@ impl Runtime {
                 format!("Failed to make jump table page mutable: {:?}", e)
             })?;
 
-            // Zero out the new page
+            // Zero out the new page so unallocated slots read as a tagged null.
             unsafe {
                 std::ptr::write_bytes(new_page.as_mut_ptr(), 0, page_size);
             }
 
-            let page_reserved = new_page.make_read_only().map_err(|(_page, e)| {
-                format!("Failed to make jump table page read-only: {:?}", e)
-            })?;
-
-            let page: Mmap = page_reserved
-                .try_into()
-                .map_err(|e| format!("Failed to convert Reserved to Mmap: {:?}", e))?;
-
-            self.jump_table_pages.push(page);
+            self.jump_table_pages.push(new_page);
+            // Publish the new page count for the lock-free `modify` bounds check.
+            self.jump_table_committed_pages
+                .store(self.jump_table_pages.len(), Ordering::Release);
         }
 
-        // Get the page, make it mutable, write to it, make it read-only again
-        let page = self.jump_table_pages.remove(page_index);
-        let mut page_mut = page.make_mut().map_err(|(_, e)| {
-            format!(
-                "Failed to make jump table page mutable for writing: {:?}",
-                e
-            )
-        })?;
-
         let tagged_pointer = BuiltInTypes::Function.tag(pointer as isize) as usize;
-        let bytes = tagged_pointer.to_le_bytes();
-
-        page_mut[offset_in_page..offset_in_page + 8].copy_from_slice(&bytes);
-
-        let page_reserved = page_mut.make_read_only().map_err(|(_, e)| {
-            format!(
-                "Failed to make jump table page read-only after writing: {:?}",
-                e
-            )
-        })?;
-
-        let page: Mmap = page_reserved;
-
-        self.jump_table_pages.insert(page_index, page);
+        self.store_jump_table_slot(jump_table_offset, tagged_pointer);
 
         self.jump_table_offset += 1;
         Ok(jump_table_offset)
     }
 
     pub fn modify_jump_table_entry(
-        &mut self,
+        &self,
         jump_table_offset: usize,
         function_pointer: usize,
     ) -> Result<usize, Box<dyn Error>> {
         let page_size = MmapOptions::page_size();
         let byte_offset = jump_table_offset * 8;
         let page_index = byte_offset / page_size;
-        let offset_in_page = byte_offset % page_size;
 
-        // Serialize all jump-table page mutation (see `jump_table_lock`): the
-        // redefinition recompile (compiler thread) and tier-2 installs (spawn
-        // threads) both reach here and would otherwise race `jump_table_pages`.
-        let _jt_guard = self
-            .jump_table_lock
-            .lock()
-            .expect("jump_table_lock poisoned");
-
-        if page_index >= self.jump_table_pages.len() {
+        // Lock-free: the slot was allocated by a prior `add_jump_table_entry`, so
+        // its page is committed and permanently writable. Repointing it is a
+        // single atomic store, so a redefinition recompile (compiler thread) and
+        // a tier-2 install (spawn thread) can run here concurrently without a
+        // lock — they either target different slots or last-writer-wins on the
+        // same slot, and the install-generation check decides which is current.
+        // Read the committed-page count atomically (not `jump_table_pages.len()`)
+        // so this can't race `add`'s `Vec::push`.
+        if page_index >= self.jump_table_committed_pages.load(Ordering::Acquire) {
             return Err("Jump table entry does not exist".into());
         }
 
-        // Get the page, make it mutable, write to it, make it read-only again
-        let page = self.jump_table_pages.remove(page_index);
-        let mut page_mut = page.make_mut().map_err(|(_, e)| {
-            format!(
-                "Failed to make jump table page mutable for modification: {}",
-                e
-            )
-        })?;
-
         let tagged_pointer = BuiltInTypes::Function.tag(function_pointer as isize) as usize;
-        let bytes = tagged_pointer.to_le_bytes();
-
-        page_mut[offset_in_page..offset_in_page + 8].copy_from_slice(&bytes);
-
-        let page_reserved = page_mut.make_read_only().map_err(|(_, e)| {
-            format!(
-                "Failed to make jump table page read-only after modification: {:?}",
-                e
-            )
-        })?;
-
-        let page: Mmap = page_reserved;
-
-        self.jump_table_pages.insert(page_index, page);
+        self.store_jump_table_slot(jump_table_offset, tagged_pointer);
 
         Ok(jump_table_offset)
     }
