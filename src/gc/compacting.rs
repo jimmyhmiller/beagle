@@ -418,7 +418,7 @@ impl CompactingHeap {
                         .structs
                         .migration_plan_for(struct_id, layout_version)
                 {
-                    let new_pointer = self.copy_with_migration(&heap_object, plan);
+                    let new_pointer = self.copy_with_migration(&heap_object, &plan);
                     debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
                     let tagged_new = object_type.unwrap().tag(new_pointer) as usize;
                     unsafe { *pointer = Header::set_forwarding_bit(tagged_new) };
@@ -573,7 +573,10 @@ impl Allocator for CompactingHeap {
         if !self.options.gc {
             return;
         }
-        let had_pending_migrations = crate::get_runtime().get().structs.has_pending_migrations();
+        let migration_revision = crate::get_runtime()
+            .get()
+            .structs
+            .pending_migration_revision();
 
         for &gc_frame_top in gc_frame_tops.iter() {
             let roots = StackWalker::collect_stack_roots(gc_frame_top);
@@ -605,11 +608,11 @@ impl Allocator for CompactingHeap {
 
         unsafe { self.copy_remaining(start_offset) };
 
-        if had_pending_migrations {
+        if let Some(revision) = migration_revision {
             crate::get_runtime()
                 .get_mut()
                 .structs
-                .complete_pending_migrations();
+                .complete_pending_migrations(revision);
         }
 
         // Walk from_space one last time to find dead finalizable objects.

@@ -23,6 +23,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
         mpsc::{self, Receiver, SyncSender},
     },
 };
@@ -341,6 +342,13 @@ struct DeferredFunctionUpdate {
     disk_location: Option<crate::runtime::DiskLocation>,
 }
 
+/// Transient capture state for `build_osr_variant`. The per-function compile
+/// fills `captured` with the target's specialized IR + loop info.
+pub struct OsrCapture {
+    pub target: String,
+    pub captured: Option<(crate::ir::Ir, Vec<crate::osr::OsrLoopInfo>)>,
+}
+
 pub struct Compiler {
     pub code_allocator: CodeAllocator,
     pub property_look_up_cache: MmapMut,
@@ -408,6 +416,10 @@ pub struct Compiler {
     /// fire multiple times in races, and we don't want to recompile
     /// over and over.
     pub specialized_names: HashSet<String>,
+    /// Set transiently by `build_osr_variant` so the per-function compile can
+    /// snapshot the target function's specialized IR + loop info for OSR
+    /// continuation construction. `None` outside an OSR build.
+    pub osr_capture: Option<OsrCapture>,
     /// For each specialized function, the (pointer, size) of its tier-1 code
     /// *before* the tier-2 swap. On a runtime redefinition (eval/REPL/reload),
     /// `revert_all_specializations` restores these into the jump table so no
@@ -842,6 +854,275 @@ impl Compiler {
                 Err(e)
             }
         }
+    }
+
+    /// Build the optimized OSR continuation `F_osr` for the `loop_idx`-th loop
+    /// of `full_name` and publish its callable address in the OSR registry.
+    /// Runs on the compiler thread (driven by a `BuildOsrVariant` message).
+    ///
+    /// Strategy: feedback-recompile `full_name` (so its IR is *specialized*),
+    /// snapshotting that IR + loop info via `osr_capture`; deconstruct it into
+    /// `F_osr` (`crate::osr::build_osr_variant_ir`); compile `F_osr` through the
+    /// SSA tier-2 path; register its raw code address. F's own tier-2 install is
+    /// discarded — we only want the continuation. On any failure the loop is
+    /// marked `Failed` so the back-edge never retries.
+    pub fn build_osr_variant(&mut self, full_name: &str, loop_idx: usize) {
+        let key = format!("{}#L{}", full_name, loop_idx);
+        let dbg = std::env::var("BEAGLE_OSR_DEBUG").is_ok();
+        if dbg {
+            eprintln!("[OSR-build] start {}", key);
+        }
+        if self
+            .build_osr_variant_inner(full_name, loop_idx, &key)
+            .is_none()
+        {
+            if dbg {
+                eprintln!("[OSR-build] FAILED {}", key);
+            }
+            crate::osr::osr_set_failed(&key);
+        } else if dbg {
+            eprintln!("[OSR-build] ready {}", key);
+        }
+    }
+
+    fn build_osr_variant_inner(
+        &mut self,
+        full_name: &str,
+        loop_idx: usize,
+        key: &str,
+    ) -> Option<()> {
+        // --- Resolve source + feedback (mirrors `specialize_function`). ---
+        let (source_text, source_file, current_address, f_arity, feedback_bits, property_feedback) = {
+            let runtime = get_runtime().get_mut();
+            let function = runtime.find_function(full_name)?;
+            let source_text = match function.source_text.as_ref() {
+                Some(s) if !s.is_empty() => s.clone(),
+                _ => return None,
+            };
+            let source_file = function
+                .source_file
+                .clone()
+                .unwrap_or_else(|| "<osr>".to_string());
+            let current_address: usize = function.pointer.into();
+            // F's real arity — the deopt re-invoke (built into F_osr below)
+            // must call generic F with this many args, reloaded from slots
+            // `0..f_arity`. F_osr's own entry param is the live-in buffer.
+            let f_arity = function.number_of_args;
+            let mut feedback_bits = self.arith_feedback_range_for_address(current_address);
+            if feedback_bits.is_empty() {
+                feedback_bits = self.arith_feedback_for_address(current_address);
+            }
+            let mut property_feedback = self.property_cache_range_for_address(current_address);
+            if property_feedback.is_empty() {
+                property_feedback = self.property_cache_for_address(current_address);
+            }
+            (
+                source_text,
+                source_file,
+                current_address,
+                f_arity,
+                feedback_bits,
+                property_feedback,
+            )
+        };
+
+        // --- Switch to the function's namespace for name resolution. ---
+        let (namespace, _) = full_name.rsplit_once('/')?;
+        let saved_namespace_id = {
+            let current_id = self.current_namespace_id();
+            let ns_id = self.get_namespace_id(namespace)?;
+            self.set_current_namespace(ns_id);
+            current_id
+        };
+
+        // --- Feedback-compile F, capturing its specialized IR + loop info. ---
+        self.osr_capture = Some(OsrCapture {
+            target: full_name.to_string(),
+            captured: None,
+        });
+        self.defer_function_installs = true;
+
+        let mut parser = match Parser::new(source_file.clone(), source_text.clone()) {
+            Ok(p) => p,
+            Err(_) => {
+                self.cleanup_after_osr_compile(saved_namespace_id, None);
+                return None;
+            }
+        };
+        let ast = match parser.parse() {
+            Ok(a) => a,
+            Err(_) => {
+                self.cleanup_after_osr_compile(saved_namespace_id, None);
+                return None;
+            }
+        };
+        let token_line_column_map = parser.get_token_line_column_map();
+        let token_byte_spans = parser.get_token_byte_spans();
+        let definition_byte_ranges = parser.get_definition_byte_ranges();
+
+        let result = {
+            let _tier_up = crate::ir::TierUpCompileGuard::enter();
+            let pause_addr = {
+                let rt = get_runtime().get_mut();
+                rt.get_function_by_name("beagle.builtin/__pause")
+                    .cloned()
+                    .and_then(|f| rt.get_pointer(&f).ok())
+                    .map(|p| p as usize)
+                    .unwrap_or(0)
+            };
+            let _deopt = crate::ir::DeoptContextGuard::enter(
+                full_name.to_string(),
+                current_address,
+                pause_addr,
+            );
+            self.compile_ast_with_feedback(
+                ast,
+                None,
+                &source_file,
+                token_line_column_map,
+                source_text,
+                token_byte_spans,
+                definition_byte_ranges,
+                feedback_bits,
+                property_feedback,
+            )
+        };
+
+        // Discard F's tier-2 install entirely — we only want the continuation.
+        let capture = self.osr_capture.take();
+        self.cleanup_after_osr_compile(saved_namespace_id, Some(full_name));
+        result.ok()?;
+
+        let (base_ir, loops) = capture?.captured?;
+        let info = loops.get(loop_idx)?.clone();
+        if std::env::var("BEAGLE_OSR_DEBUG").is_ok() {
+            eprintln!(
+                "[OSR-build] captured ir ({} insns), {} loops; loop {} header={:?} live_ins={:?}",
+                base_ir.instructions.len(),
+                loops.len(),
+                loop_idx,
+                info.header_label,
+                info.live_in_slots
+            );
+        }
+
+        // --- Deconstruct + compile F_osr. ---
+        let osr_deopt = std::env::var("BEAGLE_OSR_DEOPT")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        let pause_addr = {
+            let rt = get_runtime().get_mut();
+            rt.get_function_by_name("beagle.builtin/__pause")
+                .cloned()
+                .and_then(|f| rt.get_pointer(&f).ok())
+                .map(|p| p as usize)
+                .unwrap_or(0)
+        };
+        // Classify which non-param live-in slots F treats as ints. Analyzing a
+        // *deopt-applied* CFG of F (merge-back removed) makes `pointer_class`
+        // report the loop-carried int accumulators as non-pointer. We guard
+        // exactly those at the OSR entry so the loop-header φ is known-int and
+        // guard-elim drops the loop's redundant int guards. Param slots
+        // (`0..f_arity`) are excluded: their stores must stay in the entry block
+        // for deopt eligibility, and warm leaves params slot-resident anyway.
+        let int_slots: std::collections::HashSet<usize> = if osr_deopt {
+            crate::cfg::builder::build_cfg_for_int_analysis(
+                &base_ir,
+                current_address,
+                pause_addr,
+                f_arity,
+            )
+            .filter(|(_, deopt_applied)| *deopt_applied)
+            .map(|(cfg, _)| {
+                let pc = crate::cfg::pointer_class::analyze(&cfg);
+                info.live_in_slots
+                    .iter()
+                    .copied()
+                    .filter(|s| {
+                        *s >= f_arity
+                            && pc
+                                .non_pointer_slots
+                                .contains(&crate::cfg::SlotId(*s as u32))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+        } else {
+            std::collections::HashSet::new()
+        };
+        if std::env::var("BEAGLE_OSR_DEBUG").is_ok() {
+            eprintln!("[OSR-build] int live-in slots to guard: {:?}", int_slots);
+        }
+        let mut f_osr_ir = crate::osr::build_osr_variant_ir(&base_ir, &info, &int_slots);
+        let f_osr_name = format!("{}$osr{}", full_name, loop_idx);
+        f_osr_ir.debug_name = Some(f_osr_name.clone());
+        let error_fn_pointer = f_osr_ir.error_fn_pointer;
+        let dump = self.dump.clone();
+        // Compile F_osr under a deopt context keyed on *its* name, re-invoking
+        // generic F (`current_address`, the resident tier-1 code) with F's real
+        // arity (see the int-slot analysis above for the rationale).
+        let mut backend = {
+            let _tier_up = crate::ir::TierUpCompileGuard::enter();
+            let _deopt = osr_deopt.then(|| {
+                crate::ir::DeoptContextGuard::enter_with_nargs(
+                    f_osr_name.clone(),
+                    current_address,
+                    pause_addr,
+                    Some(f_arity),
+                )
+            });
+            let backend = Backend::new();
+            f_osr_ir.compile(backend, error_fn_pointer, &dump)
+        };
+        let code = backend.compile_to_bytes();
+        let addr = self.add_code(&code).ok()?;
+        self.code_allocator.make_executable();
+
+        crate::osr::osr_set_ready(key, addr as usize, info.live_in_slots);
+        Some(())
+    }
+
+    /// Tear down the transient state of an OSR capture-compile.
+    ///
+    /// `target` = `Some(full_name)` on the success path, `None` on an
+    /// error/abort path.
+    ///
+    /// The capture-compile runs with `defer_function_installs = true`, so it
+    /// never pushes to `runtime.functions` directly — every compiled function
+    /// (the OSR target F's recompile *and* any inner closures / nested
+    /// functions in F's body) lands in `deferred_updates` instead. F's body
+    /// closures are compiled to FRESH code addresses and those addresses are
+    /// baked into the captured IR (hence into F_osr's `make_closure` ops). So
+    /// on success we MUST register those inner functions — otherwise F_osr
+    /// calls `make_closure(<unregistered address>)` and throws "Function not
+    /// found when creating closure" (the bug that hung beagle-zelda: any OSR'd
+    /// loop that creates a closure). We discard only F's own recompile (we
+    /// publish F_osr, not F's tier-2). Registration goes through the staged +
+    /// stop-the-world install path so it can't race mutator table reads, and
+    /// happens before F_osr is built/published.
+    fn cleanup_after_osr_compile(&mut self, saved_namespace_id: usize, target: Option<&str>) {
+        self.defer_function_installs = false;
+        match target {
+            Some(full_name) => {
+                self.deferred_updates
+                    .retain(|u| u.name.as_deref() != Some(full_name));
+                // Register the retained inner functions directly (append-only,
+                // preserving the "functions only ever grows" invariant
+                // `get_function_by_pointer` relies on). NOT via the
+                // stop-the-world install path: this runs on the compiler
+                // thread, and a STW there deadlocks (the compiler thread must
+                // stay free to service the park messages of the mutators it is
+                // stopping — which is why `tier_up_trampoline` runs its STW on a
+                // spawn thread). `flush_deferred_functions` runs *before* F_osr
+                // is built/published below, so F_osr's `make_closure` ops always
+                // resolve to a registered function.
+                self.flush_deferred_functions();
+            }
+            None => {
+                self.deferred_updates.clear();
+            }
+        }
+        self.set_current_namespace(saved_namespace_id);
     }
 
     pub fn compile_string_in_namespace(
@@ -1300,8 +1581,7 @@ impl Compiler {
         // This ensures the first access always goes to the slow path.
         // (mmap is zero-initialized, so struct_id=0 would falsely match the first registered struct.)
         unsafe {
-            let cache_ptr = location as *mut usize;
-            *cache_ptr = usize::MAX;
+            (*(location as *const AtomicUsize)).store(usize::MAX, Ordering::Release);
         }
         self.property_look_up_cache_offset += 3 * 8;
         // Owner address is unknown at allocation time; tier-up binds it
@@ -1522,8 +1802,16 @@ impl Compiler {
                 slots
                     .iter()
                     .map(|&addr| unsafe {
-                        let p = addr as *const u64;
-                        (*p, *p.add(1), *p.add(2))
+                        let p = addr as *const AtomicUsize;
+                        let key_before = (*p).load(Ordering::Acquire);
+                        let offset = (*p.add(1)).load(Ordering::Relaxed) as u64;
+                        let is_mutable = (*p.add(2)).load(Ordering::Relaxed) as u64;
+                        let key_after = (*p).load(Ordering::Acquire);
+                        if key_before == key_after {
+                            (key_after as u64, offset, is_mutable)
+                        } else {
+                            (usize::MAX as u64, 0, 0)
+                        }
                     })
                     .collect()
             })
@@ -1553,8 +1841,16 @@ impl Compiler {
         let count = (end - start) / stride;
         (0..count)
             .map(|i| unsafe {
-                let p = (base + start + i * stride) as *const u64;
-                (*p, *p.add(1), *p.add(2))
+                let p = (base + start + i * stride) as *const AtomicUsize;
+                let key_before = (*p).load(Ordering::Acquire);
+                let offset = (*p.add(1)).load(Ordering::Relaxed) as u64;
+                let is_mutable = (*p.add(2)).load(Ordering::Relaxed) as u64;
+                let key_after = (*p).load(Ordering::Acquire);
+                if key_before == key_after {
+                    (key_after as u64, offset, is_mutable)
+                } else {
+                    (usize::MAX as u64, 0, 0)
+                }
             })
             .collect()
     }
@@ -1691,8 +1987,9 @@ impl Compiler {
         let mut offset = 0;
         while offset + entry_size <= self.property_look_up_cache_offset {
             unsafe {
-                let cache_ptr = self.property_look_up_cache.as_mut_ptr().add(offset) as *mut usize;
-                *cache_ptr = usize::MAX;
+                let cache_ptr =
+                    self.property_look_up_cache.as_mut_ptr().add(offset) as *const AtomicUsize;
+                (*cache_ptr).store(usize::MAX, Ordering::Release);
             }
             offset += entry_size;
         }
@@ -1740,7 +2037,7 @@ impl Compiler {
         runtime.get_enum(name)
     }
 
-    pub fn get_struct(&self, name: &str) -> Option<(usize, &Struct)> {
+    pub fn get_struct(&self, name: &str) -> Option<(usize, Struct)> {
         let runtime = get_runtime().get_mut();
         runtime.get_struct(name)
     }
@@ -1979,7 +2276,7 @@ impl Compiler {
         None
     }
 
-    pub fn get_struct_by_id(&self, struct_id: usize) -> Option<&Struct> {
+    pub fn get_struct_by_id(&self, struct_id: usize) -> Option<Struct> {
         let runtime = get_runtime().get_mut();
         runtime.get_struct_by_id(struct_id)
     }
@@ -2578,6 +2875,10 @@ pub enum CompilerMessage {
     /// Specializes only the named function; idempotent (handler skips
     /// already-specialized).
     SpecializeFunction(String),
+    /// OSR: build the optimized continuation for `(function, loop_index)`.
+    /// Sent by the back-edge trampoline when a loop gets hot; the result is
+    /// published in the OSR registry (`crate::osr`).
+    BuildOsrVariant(String, usize),
     /// Reset all protocol-dispatch inline caches to their sentinel. Sent after
     /// a protocol impl is REDEFINED (so the dispatch table changed) — clears
     /// `[type_id -> old_fn_ptr]` entries so the next dispatch re-resolves.
@@ -2654,6 +2955,7 @@ impl CompilerThread {
                 arith_feedback_range_by_address: HashMap::new(),
                 arith_feedback_debug_names: Vec::new(),
                 specialized_names: HashSet::new(),
+                osr_capture: None,
                 specialization_originals: HashMap::new(),
                 function_counter_cache: MmapOptions::new(MmapOptions::page_size() * 64) // 256KB ≈ 32k functions
                     .map_err(|e| {
@@ -2842,6 +3144,10 @@ impl CompilerThread {
                         if let Err(e) = self.compiler.specialize_function(&name) {
                             eprintln!("specialize_function({}) failed: {}", name, e);
                         }
+                        work_done.mark_done(CompilerResponse::Done);
+                    }
+                    CompilerMessage::BuildOsrVariant(name, loop_idx) => {
+                        self.compiler.build_osr_variant(&name, loop_idx);
                         work_done.mark_done(CompilerResponse::Done);
                     }
                     CompilerMessage::SpecializeAll => {

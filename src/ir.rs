@@ -252,6 +252,17 @@ pub enum Instruction {
     /// bounded by the threshold.
     /// Fields: (counter_addr, name_c_str_ptr, trampoline_fn_ptr).
     TierUpCheck(usize, usize, usize),
+    /// Per-loop OSR back-edge check (legacy codegen only). Like
+    /// `TierUpCheck` but emitted at a hot loop latch: decrements the
+    /// per-loop counter and, on reaching zero, calls
+    /// `osr_trampoline(key_ptr, sp, fp)`. The trampoline either transfers
+    /// the running loop into an optimized continuation `F_osr` and returns
+    /// its result, or returns the `OSR_NO_OSR` sentinel. On a real result
+    /// the check returns it from the enclosing function (jumps to the
+    /// shared `exit`); on the sentinel it falls through to the back-edge.
+    /// Stripped from `F_osr`'s cloned IR. Fields:
+    /// (counter_addr, key_c_str_ptr, trampoline_fn_ptr).
+    OsrCheck(usize, usize, usize),
     /// Deferred boxed float binary op (tagged operands in, tagged result
     /// out). Carries everything the boxed lowering needs so the lowering
     /// decision can be made per-path: the legacy path expands it to the
@@ -663,6 +674,7 @@ impl Instruction {
             }
             Instruction::FeedbackOr(_, _) => vec![],
             Instruction::TierUpCheck(_, _, _) => vec![],
+            Instruction::OsrCheck(_, _, _) => vec![],
         }
     }
 
@@ -789,7 +801,8 @@ impl Instruction {
             | Instruction::Breakpoint
             | Instruction::RecordGcSafepoint
             | Instruction::FeedbackOr(_, _)
-            | Instruction::TierUpCheck(_, _, _) => {}
+            | Instruction::TierUpCheck(_, _, _)
+            | Instruction::OsrCheck(_, _, _) => {}
             Instruction::PushExceptionHandler(_, value, _) => {
                 replace_register!(value, old_register, new_register);
             }
@@ -903,21 +916,51 @@ thread_local! {
     /// inline and rejoining the hot path. Eliminating the rejoin makes the hot
     /// path provably typed, so loop-carried ints promote to registers.
     /// Scoped by `DeoptContextGuard`.
-    static DEOPT_CONTEXT: std::cell::RefCell<Option<(String, usize, usize)>> =
+    static DEOPT_CONTEXT: std::cell::RefCell<Option<DeoptContext>> =
         const { std::cell::RefCell::new(None) };
 }
 
-/// RAII guard installing the deopt context for the function being specialized:
-/// `(full_name, generic_code_addr, pause_builtin_addr)`. `pause_builtin_addr` is
-/// the address of `beagle.builtin/__pause` so the rewrite can recognize (and
-/// ignore) the transparent entry safepoint call.
-pub struct DeoptContextGuard(Option<(String, usize, usize)>);
+/// Active deopt context for the function being specialized.
+#[derive(Debug, Clone)]
+pub struct DeoptContext {
+    pub full_name: String,
+    pub generic_addr: usize,
+    pub pause_addr: usize,
+    /// Number of args to reload from param slots and pass to the generic
+    /// re-invoke. `None` => derive from the function's own entry params (the
+    /// normal warm-specialization case). `Some(k)` => an OSR continuation,
+    /// whose own entry param is the live-in *buffer* (1 arg) but whose deopt
+    /// must re-invoke generic F with F's real `k` args — and those `k` args sit
+    /// in slots `0..k`, repopulated from the buffer by the OSR entry.
+    pub reinvoke_nargs: Option<usize>,
+}
+
+/// RAII guard installing the deopt context for the function being specialized.
+/// `pause_addr` is the address of `beagle.builtin/__pause` so the rewrite can
+/// recognize (and ignore) the transparent entry safepoint call.
+pub struct DeoptContextGuard(Option<DeoptContext>);
 
 impl DeoptContextGuard {
     pub fn enter(full_name: String, generic_addr: usize, pause_addr: usize) -> Self {
-        DeoptContextGuard(
-            DEOPT_CONTEXT.with(|c| c.replace(Some((full_name, generic_addr, pause_addr)))),
-        )
+        Self::enter_with_nargs(full_name, generic_addr, pause_addr, None)
+    }
+
+    /// Like `enter`, but overrides the re-invoke arity — used by OSR variants
+    /// whose entry param is a buffer, not F's real args.
+    pub fn enter_with_nargs(
+        full_name: String,
+        generic_addr: usize,
+        pause_addr: usize,
+        reinvoke_nargs: Option<usize>,
+    ) -> Self {
+        DeoptContextGuard(DEOPT_CONTEXT.with(|c| {
+            c.replace(Some(DeoptContext {
+                full_name,
+                generic_addr,
+                pause_addr,
+                reinvoke_nargs,
+            }))
+        }))
     }
 }
 
@@ -934,8 +977,18 @@ pub fn deopt_info_for(name: &str) -> Option<(usize, usize)> {
     DEOPT_CONTEXT.with(|c| {
         c.borrow()
             .as_ref()
-            .filter(|(n, _, _)| n == name)
-            .map(|(_, g, p)| (*g, *p))
+            .filter(|ctx| ctx.full_name == name)
+            .map(|ctx| (ctx.generic_addr, ctx.pause_addr))
+    })
+}
+
+/// The re-invoke arity override for a deopt context active for exactly `name`.
+pub fn deopt_reinvoke_nargs_for(name: &str) -> Option<usize> {
+    DEOPT_CONTEXT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|ctx| ctx.full_name == name)
+            .and_then(|ctx| ctx.reinvoke_nargs)
     })
 }
 
@@ -1016,6 +1069,12 @@ impl Ir {
         };
         self.register_index += 1;
         register
+    }
+
+    /// Number of architecture argument registers (args beyond this are
+    /// passed on the stack as `Value::Stack`).
+    pub fn num_arg_registers(&self) -> usize {
+        self.num_arg_registers
     }
 
     pub fn arg(&mut self, n: usize) -> Value {
@@ -1401,6 +1460,24 @@ impl Ir {
     pub fn take_for_rebuild(&mut self) -> Vec<Instruction> {
         self.label_locations.clear();
         std::mem::take(&mut self.instructions)
+    }
+
+    /// Rebuild `label_locations` from the current instruction stream. Call
+    /// after mutating `instructions` in a way that shifts label positions
+    /// (e.g. prepending an OSR entry in `crate::osr::build_osr_variant_ir`);
+    /// otherwise the cached label positions go stale and jumps resolve to
+    /// the wrong addresses.
+    pub fn rebuild_label_locations(&mut self) {
+        let old = std::mem::take(&mut self.instructions);
+        self.label_locations.clear();
+        for instr in old {
+            if let Instruction::Label(label) = instr {
+                // Re-records the label at its new position.
+                self.write_label(label);
+            } else {
+                self.instructions.push(instr);
+            }
+        }
     }
 
     /// Whether the stream still contains any deferred `FieldRead` — used to
@@ -4393,6 +4470,63 @@ impl Ir {
                     backend.free_temporary_register(addr_reg);
                     backend.free_temporary_register(cnt_reg);
                 }
+                Instruction::OsrCheck(counter_addr, key_ptr, trampoline_ptr) => {
+                    // Hot path: decrement the per-loop counter, branch on
+                    // non-zero around the transfer. On zero (loop is hot):
+                    // call osr_trampoline(key, sp, fp). It returns either
+                    // F_osr's result (transfer happened) or the OSR_NO_OSR
+                    // sentinel (declined). On a real result, return it from
+                    // this function (jump to the shared `exit` — the value is
+                    // already in ret_reg); on the sentinel, fall through to
+                    // the back-edge. Safe to clobber caller-saved regs here:
+                    // the loop's live values live in callee-saved X19-X27
+                    // (the allocator pool), preserved across the extern-"C"
+                    // trampoline call.
+                    let addr_reg = backend.temporary_register();
+                    let cnt_reg = backend.temporary_register();
+                    let zero_reg = backend.temporary_register();
+                    backend.mov_64(addr_reg, *counter_addr as isize);
+                    backend.load_from_heap(cnt_reg, addr_reg, 0);
+                    backend.sub_imm(cnt_reg, cnt_reg, 1);
+                    backend.store_on_heap(addr_reg, cnt_reg, 0);
+                    backend.mov_64(zero_reg, 0);
+                    backend.compare(cnt_reg, zero_reg);
+                    backend.free_temporary_register(zero_reg);
+
+                    let after = backend.new_label("osr_after");
+                    backend.jump_not_equal(after);
+
+                    // Threshold reached: osr_trampoline(key, counter_addr, sp, fp).
+                    // counter_addr lets the trampoline re-arm the counter (so a
+                    // later trip can transfer once F_osr finishes building).
+                    let arg0 = backend.arg(0);
+                    let arg1 = backend.arg(1);
+                    let arg2 = backend.arg(2);
+                    let arg3 = backend.arg(3);
+                    let sp = backend.stack_pointer_reg();
+                    let fp = backend.frame_pointer();
+                    backend.mov_64(arg0, *key_ptr as isize);
+                    backend.mov_64(arg1, *counter_addr as isize);
+                    backend.mov_reg(arg2, sp);
+                    backend.mov_reg(arg3, fp);
+                    backend.mov_64(addr_reg, *trampoline_ptr as isize);
+                    backend.call_builtin(addr_reg);
+
+                    // Compare the result to the sentinel. Equal => declined,
+                    // continue the loop; not-equal => transfer happened,
+                    // return the result (already in ret_reg) from F.
+                    let ret = backend.ret_reg();
+                    let sentinel_reg = backend.temporary_register();
+                    backend.mov_64(sentinel_reg, crate::builtins::OSR_NO_OSR as isize);
+                    backend.compare(ret, sentinel_reg);
+                    backend.free_temporary_register(sentinel_reg);
+                    backend.jump_equal(after);
+                    backend.jump(exit);
+
+                    backend.write_label(after);
+                    backend.free_temporary_register(addr_reg);
+                    backend.free_temporary_register(cnt_reg);
+                }
                 Instruction::FeedbackOr(slot_addr, bits) => {
                     // load slot, or in bits, store back. Slot address is a
                     // compile-time constant — load via mov_64. Two scratch
@@ -4464,6 +4598,15 @@ impl Ir {
             name_ptr,
             trampoline_ptr,
         ));
+    }
+
+    /// Emit a per-loop OSR back-edge check (see `Instruction::OsrCheck`).
+    pub fn osr_check(&mut self, counter_addr: usize, key_ptr: usize, trampoline_ptr: usize) {
+        if counter_addr == 0 || key_ptr == 0 || trampoline_ptr == 0 {
+            return;
+        }
+        self.instructions
+            .push(Instruction::OsrCheck(counter_addr, key_ptr, trampoline_ptr));
     }
 
     pub fn jump(&mut self, label: Label) {

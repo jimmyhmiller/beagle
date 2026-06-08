@@ -349,6 +349,11 @@ pub struct GenerationalGC {
     /// constructs Buffer/Cell/TypedArray instances. Walked at minor GC instead
     /// of sweeping the entire young space.
     young_finalizable: Vec<usize>,
+    /// When set (BEAGLE_GC_VERIFY_ROOTS), run the end-of-collection root
+    /// verification pass that asserts no root still points into young space
+    /// after a minor GC. Converts the intermittent stale-forwarding crash into
+    /// a deterministic, early failure pointing at the unupdated root.
+    verify_roots: bool,
 }
 
 impl GenerationalGC {
@@ -520,6 +525,7 @@ impl Allocator for GenerationalGC {
             remembered_set: Vec::with_capacity(64),
             card_table,
             young_finalizable: Vec::new(),
+            verify_roots: std::env::var("BEAGLE_GC_VERIFY_ROOTS").is_ok(),
         }
     }
 
@@ -765,6 +771,60 @@ impl GenerationalGC {
         (slots, old_gen_values)
     }
 
+    /// End-of-minor-GC verification (gated on BEAGLE_GC_VERIFY_ROOTS).
+    ///
+    /// After a minor collection has updated every root it enumerated, no live
+    /// root may still point into young space: every reachable young object was
+    /// either promoted (its slot rewritten to the old-gen copy) or is dead. A
+    /// slot still holding a young pointer here is a root the collector failed
+    /// to update — the precise defect that lets a forwarding pointer leak to
+    /// mutator code and crash `property_access`
+    /// (see docs/GC_STALE_ROOT_REDEFINE_BUG.md).
+    ///
+    /// Must be called after `copy_remaining()` and BEFORE `young.clear()`, so
+    /// the offending object's forwarding header is still intact for the report.
+    fn verify_no_young_roots(&self, gc_frame_tops: &[usize], extra_roots: &[(*mut usize, usize)]) {
+        let check = |slot_addr: usize, slot_value: usize, origin: &str| {
+            let untagged = BuiltInTypes::untag(slot_value);
+            if untagged == 0 {
+                return;
+            }
+            if self.young.contains(untagged as *const u8) {
+                let header_data = unsafe { *(untagged as *const usize) };
+                let forwarded = Header::is_forwarding_bit_set(header_data);
+                panic!(
+                    "BUG: stale young-gen root survived minor GC ({origin}): slot {:#x} = {:#x} \
+                     still points into young space (offset={}, forwarding_bit={}, header={:#x}). \
+                     The collector updated this slot's siblings but not this one — \
+                     a forwarding pointer would leak to mutator code. \
+                     See docs/GC_STALE_ROOT_REDEFINE_BUG.md.",
+                    slot_addr,
+                    slot_value,
+                    untagged.wrapping_sub(self.young.base_address()),
+                    forwarded,
+                    header_data,
+                );
+            }
+        };
+
+        for &gc_frame_top in gc_frame_tops {
+            StackWalker::walk_stack_roots(gc_frame_top, |slot_addr, slot_value| {
+                check(slot_addr, slot_value, "stack frame slot");
+            });
+        }
+        for &(slot_addr, _value) in extra_roots {
+            // Re-read the slot: the collector updated it in place, so the
+            // original captured value is stale by design. We want the CURRENT
+            // contents.
+            let current = unsafe { *slot_addr };
+            check(
+                slot_addr as usize,
+                current,
+                "extra root (handle/binding cell)",
+            );
+        }
+    }
+
     /// Inner function to gather roots from a single thread's GC frame chain.
     /// Uses StackWalker and classifies roots into young gen (to copy) and old gen (to scan fields).
     fn gather_stack_roots_inner(&self, gc_frame_top: usize) -> (Vec<(usize, usize)>, Vec<usize>) {
@@ -882,6 +942,17 @@ impl GenerationalGC {
         // Return any unused tail of the promotion bump region to the free list
         // before mutator allocation resumes.
         self.old.end_promotion_bump();
+
+        // Decisive diagnostic (gated on BEAGLE_GC_VERIFY_ROOTS): after the
+        // collection has updated every root it knows about, re-walk those same
+        // roots and assert none still points into young space. Any survivor is
+        // a root the GC failed to update — exactly the defect behind the
+        // stale-forwarding crash (see docs/GC_STALE_ROOT_REDEFINE_BUG.md §4).
+        // We verify BEFORE young.clear() so the offending object's forwarding
+        // header is still intact and reportable.
+        if self.verify_roots {
+            self.verify_no_young_roots(gc_frame_tops, extra_roots);
+        }
 
         self.young.clear();
 
@@ -1158,7 +1229,7 @@ impl GenerationalGC {
                         .structs
                         .migration_plan_for(struct_id, layout_version)
                     {
-                        self.copy_with_migration(&heap_object, plan)
+                        self.copy_with_migration(&heap_object, &plan)
                     } else {
                         // Normal copy
                         let data = heap_object.get_full_object_data();
@@ -1249,9 +1320,8 @@ impl GenerationalGC {
             let runtime = crate::get_runtime().get();
             let struct_name = runtime
                 .get_struct_by_id(struct_id)
-                .map(|s| s.name.as_str())
-                .unwrap_or("<unknown>")
-                .to_string();
+                .map(|s| s.name)
+                .unwrap_or_else(|| "<unknown>".to_string());
             format!(" struct_id={} struct_name={}", struct_id, struct_name)
         } else {
             String::new()

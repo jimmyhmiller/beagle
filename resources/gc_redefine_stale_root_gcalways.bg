@@ -1,0 +1,63 @@
+namespace gc_redefine_stale_root_gcalways
+
+use beagle.core as core
+
+// Regression test for stale roots during live struct redefinition. This used
+// to abort in property_access with is_forwarding=true (SIGABRT).
+// See docs/GC_STALE_ROOT_REDEFINE_BUG.md.
+//
+// Regression shape: one thread repeatedly redefines a struct that is in active
+// use, another thread holds an instance in a Henderson-frame slot, and
+// gc-always drives old-layout migration. MarkAndSweep used to move the object
+// but omit stack roots from its post-sweep forwarding rewrite.
+
+// gc-always
+
+struct Point { x, y }
+
+fn read_x(p) { p.x }
+fn read_y(p) { p.y }
+
+fn churn(p, n) {
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        let scratch = Point { x: i, y: i }
+        acc = acc + read_x(p) + read_y(p) + read_x(scratch)
+        i = i + 1
+    }
+    acc
+}
+
+fn redefiner(running, rounds) {
+    let mut r = 0
+    while r < rounds {
+        eval("struct Point { x, y }")
+        r = r + 1
+    }
+    reset!(running, false)
+}
+
+fn main() {
+    let running = atom(true)
+    let t = thread(fn() {
+        redefiner(running, 6)
+    })
+
+    let anchor = Point { x: 111, y: 222 }
+    let mut total = 0
+    let mut guard = 0
+    while deref(running) == true && guard < 400 {
+        total = total + churn(anchor, 25)
+        guard = guard + 1
+    }
+
+    println(anchor.x)
+    println(anchor.y)
+    println(total > 0)
+}
+
+// @beagle.core.snapshot
+// 111
+// 222
+// true

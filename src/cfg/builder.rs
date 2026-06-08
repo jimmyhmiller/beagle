@@ -236,7 +236,12 @@ pub enum BuildError {
 /// Phase 1b-1 handles: `RegisterArgument`, `LoadLocal`, `StoreLocal`,
 /// `AddInt`, `Ret`, `Jump`, `JumpIf`, `Label` (filtered). Every other
 /// `Instruction` variant returns `Err(UnsupportedInstruction)`.
-pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
+/// Phase 1a only: translate the linear IR into an unoptimized CFG (block
+/// leaders, `SlotLoad`/`SlotStore` for every local per I6). No critical-edge
+/// split, deopt, lift, mem2reg, or opt. Used by `build_cfg` and by callers that
+/// need a slot-faithful CFG to analyze (e.g. OSR's Phase-C non-pointer
+/// classification, which must see the slots *before* mem2reg promotes them).
+fn cfg_ize(ir: &Ir) -> Result<CfgFunction, BuildError> {
     let mut f = CfgFunction::new(ir.debug_name.clone(), ir.num_locals as u32);
 
     // A function is variadic iff it reads its incoming arg count (only
@@ -293,6 +298,42 @@ pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
     }
 
     rebuild_predecessors(&mut f);
+    Ok(f)
+}
+
+/// Build F's CFG through Phase 1a–2a **plus the deopt rewrite**, stopping
+/// before mem2reg, for OSR's int-live-in classification. The deopt rewrite
+/// removes the polymorphic-arith merge-back (whose `Call` results otherwise
+/// taint the loop-carried accumulator slots as maybe-pointer), so the sound
+/// `pointer_class` analysis on the result reports exactly the slots F treats as
+/// ints. Returns the CFG and **whether the deopt rewrite applied** — the OSR
+/// entry must only guard live-ins when deopt applied, since without it the loop
+/// isn't promoted and the entry guards are pure overhead. `None` on build
+/// error. `nargs` is F's real arity.
+pub fn build_cfg_for_int_analysis(
+    ir: &Ir,
+    generic_addr: usize,
+    pause_addr: usize,
+    nargs: usize,
+) -> Option<(CfgFunction, bool)> {
+    let mut f = cfg_ize(ir).ok()?;
+    if f.blocks.is_empty() {
+        return Some((f, false));
+    }
+    split_critical_edges(&mut f);
+    dce_unreachable_blocks(&mut f);
+    let deopt_applied = apply_deopt_rewrite(&mut f, generic_addr, pause_addr, Some(nargs));
+    if std::env::var("BEAGLE_SSA_NO_LIFT").is_err() {
+        crate::cfg::lift_vregs::lift_cross_block_vregs(&mut f);
+    }
+    Some((f, deopt_applied))
+}
+
+pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
+    let mut f = cfg_ize(ir)?;
+    if f.blocks.is_empty() {
+        return Ok(f);
+    }
     crate::cfg::dump::maybe_dump_phase("00-after-cfg-ize", &f, false);
     crate::cfg::dump::maybe_verify_stage("00-after-cfg-ize", &f);
 
@@ -328,8 +369,11 @@ pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
         let log = std::env::var("BEAGLE_SSA_DEOPT_LOG").is_ok();
         let name = f.debug_name.clone();
         let info = name.as_deref().and_then(crate::ir::deopt_info_for);
+        let nargs_override = name
+            .as_deref()
+            .and_then(crate::ir::deopt_reinvoke_nargs_for);
         if let (Some(name), Some((generic_addr, pause_addr))) = (name, info) {
-            let applied = apply_deopt_rewrite(&mut f, generic_addr, pause_addr);
+            let applied = apply_deopt_rewrite(&mut f, generic_addr, pause_addr, nargs_override);
             if log {
                 eprintln!(
                     "[deopt] {} applied={} generic@{:#x} pause@{:#x}",
@@ -1621,7 +1665,12 @@ fn extract_call_target(
 /// original args are the entry-param VRegs (immutable SSA values that dominate
 /// every deopt block), so no slot-layout assumption or param-reassignment check
 /// is needed. Returns whether any bail was rewritten.
-fn apply_deopt_rewrite(f: &mut CfgFunction, generic_addr: usize, pause_addr: usize) -> bool {
+fn apply_deopt_rewrite(
+    f: &mut CfgFunction,
+    generic_addr: usize,
+    pause_addr: usize,
+    nargs_override: Option<usize>,
+) -> bool {
     use crate::cfg::{CallTarget, ClobberSet, Terminator};
     use std::collections::{HashMap, HashSet};
 
@@ -1680,7 +1729,10 @@ fn apply_deopt_rewrite(f: &mut CfgFunction, generic_addr: usize, pause_addr: usi
     // Param slots: param k is stored to root slot k by the entry prologue. The
     // deopt re-invoke reloads these to pass the *original* args, so they must
     // not be reassigned after entry (else the reload sees a mutated value).
-    let nargs = arg_vregs.len();
+    // For an OSR variant `nargs_override` is F's real arity (its entry param is
+    // the live-in buffer, but slots `0..nargs` hold F's original args, written
+    // by the OSR entry from the buffer).
+    let nargs = nargs_override.unwrap_or(arg_vregs.len());
     let param_slots: HashSet<SlotId> = (0..nargs as u32).map(SlotId::root).collect();
 
     // Eligibility: no observable / unsafe-to-rerun op in any fast-reachable
@@ -2152,6 +2204,7 @@ fn instruction_name(inst: &Instruction) -> &'static str {
         Instruction::RecordGcSafepoint => "RecordGcSafepoint",
         Instruction::FeedbackOr(..) => "FeedbackOr",
         Instruction::TierUpCheck(..) => "TierUpCheck",
+        Instruction::OsrCheck(..) => "OsrCheck",
     }
 }
 

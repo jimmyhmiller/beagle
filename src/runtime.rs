@@ -8,7 +8,7 @@ use std::{
     ffi::{CString, c_void},
     io::Write,
     sync::{
-        Arc, Condvar, Mutex, TryLockError,
+        Arc, Condvar, Mutex, RwLock, TryLockError,
         atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle, Thread, ThreadId},
@@ -514,6 +514,7 @@ pub struct MigrationPlan {
 pub struct StructManager {
     name_to_id: HashMap<String, usize>,
     structs: Vec<Struct>,
+    revision: u64,
     /// Current layout version per struct_id (incremented on redefinition, wraps at 16)
     layout_versions: Vec<u8>,
     /// Old definitions per struct_id, keyed by layout version (for slow-path field resolution)
@@ -535,6 +536,7 @@ impl StructManager {
         Self {
             name_to_id: HashMap::new(),
             structs: Vec::new(),
+            revision: 0,
             layout_versions: Vec::new(),
             previous_definitions: Vec::new(),
             migration_plans: Vec::new(),
@@ -545,6 +547,7 @@ impl StructManager {
     /// Insert a struct definition. Returns (struct_id, is_redefinition).
     /// On redefinition, the struct_id stays the same (stable ID).
     pub fn insert(&mut self, name: String, s: Struct) -> (usize, bool) {
+        self.revision = self.revision.wrapping_add(1);
         if let Some(&existing_id) = self.name_to_id.get(&name) {
             // Redefinition: keep the same struct_id, bump layout version
             let old_version = self.layout_versions[existing_id];
@@ -620,6 +623,10 @@ impl StructManager {
         !self.pending_migration_ids.is_empty()
     }
 
+    pub fn pending_migration_revision(&self) -> Option<u64> {
+        self.has_pending_migrations().then_some(self.revision)
+    }
+
     /// Called after a full-heap/full-live-set migration pass has rewritten all reachable
     /// outdated objects to their latest layouts.
     pub fn complete_pending_migrations(&mut self) {
@@ -630,6 +637,12 @@ impl StructManager {
         for struct_id in pending {
             self.migration_plans[struct_id].clear();
             self.previous_definitions[struct_id].clear();
+        }
+    }
+
+    pub fn complete_pending_migrations_at_revision(&mut self, revision: u64) {
+        if self.revision == revision {
+            self.complete_pending_migrations();
         }
     }
 
@@ -669,9 +682,137 @@ impl StructManager {
     }
 }
 
+pub struct StructRegistry {
+    inner: RwLock<StructManager>,
+}
+
+impl Default for StructRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StructRegistry {
+    pub fn new() -> Self {
+        Self {
+            inner: RwLock::new(StructManager::new()),
+        }
+    }
+
+    pub fn insert(&self, name: String, s: Struct) -> (usize, bool) {
+        self.inner
+            .write()
+            .expect("struct registry poisoned")
+            .insert(name, s)
+    }
+
+    pub fn get(&self, name: &str) -> Option<(usize, Struct)> {
+        self.inner
+            .read()
+            .expect("struct registry poisoned")
+            .get(name)
+            .map(|(id, s)| (id, s.clone()))
+    }
+
+    pub fn get_by_id(&self, type_id: usize) -> Option<Struct> {
+        self.inner
+            .read()
+            .expect("struct registry poisoned")
+            .get_by_id(type_id)
+            .cloned()
+    }
+
+    pub fn get_current_layout_version(&self, struct_id: usize) -> u8 {
+        self.inner
+            .read()
+            .expect("struct registry poisoned")
+            .get_current_layout_version(struct_id)
+    }
+
+    pub fn get_old_definition(&self, struct_id: usize, layout_version: u8) -> Option<Struct> {
+        self.inner
+            .read()
+            .expect("struct registry poisoned")
+            .get_old_definition(struct_id, layout_version)
+            .cloned()
+    }
+
+    pub fn layout_snapshot(
+        &self,
+        struct_id: usize,
+        layout_version: u8,
+    ) -> Option<(Struct, u8, Option<Struct>)> {
+        let structs = self.inner.read().expect("struct registry poisoned");
+        let current = structs.get_by_id(struct_id)?.clone();
+        let current_version = structs.get_current_layout_version(struct_id);
+        let old = structs
+            .get_old_definition(struct_id, layout_version)
+            .cloned();
+        Some((current, current_version, old))
+    }
+
+    pub fn has_pending_migrations(&self) -> bool {
+        self.inner
+            .read()
+            .expect("struct registry poisoned")
+            .has_pending_migrations()
+    }
+
+    pub fn pending_migration_revision(&self) -> Option<u64> {
+        self.inner
+            .read()
+            .expect("struct registry poisoned")
+            .pending_migration_revision()
+    }
+
+    pub fn complete_pending_migrations(&self, revision: u64) {
+        self.inner
+            .write()
+            .expect("struct registry poisoned")
+            .complete_pending_migrations_at_revision(revision);
+    }
+
+    pub fn migration_plan_for(
+        &self,
+        struct_id: usize,
+        layout_version: u8,
+    ) -> Option<MigrationPlan> {
+        self.inner
+            .read()
+            .expect("struct registry poisoned")
+            .migration_plan_for(struct_id, layout_version)
+            .cloned()
+    }
+
+    pub fn iter(&self) -> std::vec::IntoIter<Struct> {
+        self.inner
+            .read()
+            .expect("struct registry poisoned")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    pub fn for_each_mut(&self, f: impl FnMut(&mut Struct)) {
+        self.inner
+            .write()
+            .expect("struct registry poisoned")
+            .for_each_mut(f);
+    }
+
+    pub fn patch_disk_location(&self, full_name: &str, loc: DiskLocation) -> bool {
+        self.inner
+            .write()
+            .expect("struct registry poisoned")
+            .patch_disk_location(full_name, loc)
+    }
+}
+
 #[cfg(test)]
 mod struct_manager_tests {
-    use super::{Struct, StructManager};
+    use super::{Struct, StructManager, StructRegistry};
+    use std::sync::Arc;
 
     fn make_struct(name: &str, fields: &[&str]) -> Struct {
         Struct {
@@ -747,6 +888,56 @@ mod struct_manager_tests {
         assert!(structs.migration_plan_for(foo_id, 0).is_some());
         // bar has no migrations
         assert!(structs.migration_plan_for(bar_id, 0).is_none());
+    }
+
+    #[test]
+    fn stale_migration_completion_does_not_clear_newer_redefinition() {
+        let mut structs = StructManager::new();
+        let (foo_id, _) = structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a"]));
+        structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a", "b"]));
+        let stale_revision = structs.pending_migration_revision().unwrap();
+
+        structs.insert(
+            "user/Foo".to_string(),
+            make_struct("user/Foo", &["b", "a", "c"]),
+        );
+        structs.complete_pending_migrations_at_revision(stale_revision);
+
+        assert!(structs.has_pending_migrations());
+        assert!(structs.migration_plan_for(foo_id, 0).is_some());
+        let current_revision = structs.pending_migration_revision().unwrap();
+        structs.complete_pending_migrations_at_revision(current_revision);
+        assert!(!structs.has_pending_migrations());
+    }
+
+    #[test]
+    fn registry_lookups_remain_owned_during_redefinition() {
+        let structs = Arc::new(StructRegistry::new());
+        structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a"]));
+
+        let writer_structs = Arc::clone(&structs);
+        let writer = std::thread::spawn(move || {
+            for i in 0..2_000 {
+                let fields = if i % 2 == 0 {
+                    &["a", "b"][..]
+                } else {
+                    &["b", "a", "c"][..]
+                };
+                writer_structs.insert("user/Foo".to_string(), make_struct("user/Foo", fields));
+            }
+        });
+
+        for _ in 0..10_000 {
+            let (_, snapshot) = structs.get("user/Foo").unwrap();
+            assert_eq!(snapshot.fields.len(), snapshot.mutable_fields.len());
+            assert!(
+                snapshot
+                    .fields
+                    .iter()
+                    .all(|field| matches!(field.as_str(), "a" | "b" | "c"))
+            );
+        }
+        writer.join().unwrap();
     }
 }
 
@@ -4225,7 +4416,7 @@ pub struct Runtime {
     pub ffi_function_info: Vec<FFIInfo>,
     pub ffi_info_by_name: HashMap<String, usize>,
     namespaces: NamespaceManager,
-    pub structs: StructManager,
+    pub structs: StructRegistry,
     pub enums: EnumManager,
     /// Metadata for top-level `let`-bindings: source text + disk origin.
     /// Populated when an `Ast::Let` at the top level compiles; used by
@@ -4394,7 +4585,7 @@ impl Runtime {
             ffi_function_info: vec![],
             ffi_info_by_name: HashMap::new(),
             namespaces: NamespaceManager::new(),
-            structs: StructManager::new(),
+            structs: StructRegistry::new(),
             enums: EnumManager::new(),
             bindings: BindingManager::new(),
             string_constants: vec![],
@@ -4583,6 +4774,14 @@ impl Runtime {
     pub fn specialize_function(&self, name: &str) {
         if let Some(sender) = self.compiler_channel.as_ref() {
             let _ = sender.send(CompilerMessage::SpecializeFunction(name.to_string()));
+        }
+    }
+
+    /// OSR: request the compiler thread to build the continuation for
+    /// `(name, loop_idx)`. Non-blocking; the result lands in the OSR registry.
+    pub fn build_osr_variant(&self, name: &str, loop_idx: usize) {
+        if let Some(sender) = self.compiler_channel.as_ref() {
+            let _ = sender.send(CompilerMessage::BuildOsrVariant(name.to_string(), loop_idx));
         }
     }
 
@@ -7316,7 +7515,7 @@ impl Runtime {
                         }
                         let struct_value = self.get_struct_by_id(struct_id);
                         Some(self.get_struct_repr_inner(
-                            struct_value?,
+                            &struct_value?,
                             object.get_fields(),
                             depth + 1,
                             escape,
@@ -7490,7 +7689,7 @@ impl Runtime {
         self.collect_map_entries(map)
     }
 
-    pub fn get_struct_by_id(&self, struct_id: usize) -> Option<&Struct> {
+    pub fn get_struct_by_id(&self, struct_id: usize) -> Option<Struct> {
         self.structs.get_by_id(struct_id)
     }
 
@@ -7518,8 +7717,9 @@ impl Runtime {
         }
 
         let struct_type_id = heap_object.get_struct_id();
-        let current_def = self.get_struct_by_id(struct_type_id);
-        if current_def.is_none() {
+        let layout_version = heap_object.get_layout_version();
+        let layout = self.structs.layout_snapshot(struct_type_id, layout_version);
+        if layout.is_none() {
             let untagged = heap_object.untagged();
             let raw_header = unsafe { *(untagged as *const usize) };
             let is_forwarding = Header::is_forwarding_bit_set(raw_header);
@@ -7540,10 +7740,7 @@ impl Runtime {
                 struct_type_id
             );
         }
-        let current_def = current_def.unwrap();
-
-        let layout_version = heap_object.get_layout_version();
-        let current_version = self.structs.get_current_layout_version(struct_type_id);
+        let (current_def, current_version, old_def) = layout.unwrap();
 
         if layout_version == current_version {
             // Object has current layout — use current definition
@@ -7569,10 +7766,7 @@ impl Runtime {
             }
 
             // Look up old definition to find field in old layout
-            if let Some(old_def) = self
-                .structs
-                .get_old_definition(struct_type_id, layout_version)
-            {
+            if let Some(old_def) = old_def {
                 if let Some(field_index) = old_def.fields.iter().position(|f| f == string) {
                     Ok((heap_object.get_field(field_index), field_index))
                 } else {
@@ -9063,7 +9257,7 @@ impl Runtime {
         self.enums.get(name)
     }
 
-    pub fn get_struct(&self, name: &str) -> Option<(usize, &Struct)> {
+    pub fn get_struct(&self, name: &str) -> Option<(usize, Struct)> {
         self.structs.get(name)
     }
 

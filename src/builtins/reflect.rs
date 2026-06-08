@@ -672,6 +672,142 @@ pub extern "C" fn tier_up_trampoline(name_ptr: *const std::ffi::c_char) {
     }
 }
 
+/// Sentinel returned by `osr_trampoline` to mean "did NOT transfer — keep
+/// running tier-1." The OsrCheck codegen compares the trampoline's return
+/// against this; on a match it falls through to the back-edge, otherwise it
+/// returns the value (the OSR continuation's result) from the function.
+/// `usize::MAX` is never a value the runtime produces as a Beagle return
+/// (it decodes to a Null-tagged value with an all-ones payload, which the
+/// canonical Null — `0b111` — never equals).
+pub const OSR_NO_OSR: usize = usize::MAX;
+
+/// Debug-only: time of the first OSR back-edge trip, for measuring
+/// build-to-transfer latency under `BEAGLE_OSR_DEBUG`.
+static OSR_FIRST_TRIP: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// OSR back-edge trampoline (Phase 1: logging only).
+///
+/// Emitted at hot loop latches in tier-1 code via the generic
+/// `Instruction::TierUpCheck` primitive (decrement a per-loop counter;
+/// when it reaches zero, call this with the loop's key string). Reuses
+/// the same calling convention as `tier_up_trampoline`: the key C-string
+/// pointer is in the first arg register, and Beagle's arg registers are
+/// caller-saved across this call (the loop's live values live in
+/// callee-saved registers `X19-X27`, preserved by this `extern "C"`
+/// frame), so no preservation is needed here.
+///
+/// Fires at most once per loop instance (the counter never returns to
+/// zero after the first trip). Later phases will, instead of logging,
+/// compile a tier-2 OSR-entry variant and transfer the running frame
+/// into it. For now this only confirms the instrumentation points fire
+/// and lets us measure the per-iteration counter overhead.
+pub extern "C" fn osr_trampoline(
+    key_ptr: *const std::ffi::c_char,
+    counter_addr: usize,
+    sp: usize,
+    fp: usize,
+) -> usize {
+    use crate::osr::OsrState;
+
+    // How long to wait (loop iterations) before re-checking while the
+    // continuation is still being built on the compiler thread.
+    let recheck: i64 = std::env::var("BEAGLE_OSR_RECHECK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50_000);
+
+    if std::env::var("BEAGLE_OSR_DEBUG").is_ok() {
+        OSR_FIRST_TRIP.get_or_init(std::time::Instant::now);
+    }
+    if key_ptr.is_null() {
+        return OSR_NO_OSR;
+    }
+    let key = match unsafe { std::ffi::CStr::from_ptr(key_ptr) }.to_str() {
+        Ok(k) => k,
+        Err(_) => return OSR_NO_OSR,
+    };
+    // Re-arm the back-edge counter so the check fires again later (the trip
+    // that finds the continuation Ready will transfer instead).
+    let rearm = |val: i64| unsafe { *(counter_addr as *mut i64) = val };
+
+    match crate::osr::osr_lookup(key) {
+        Some(OsrState::Ready {
+            code_addr,
+            live_in_slots,
+        }) => {
+            // Re-entrancy guard: if F_osr is already executing for this key on
+            // this thread, we're inside a deopt re-invoke of generic F (which
+            // re-runs the same loop). Decline so generic F completes in tier-1
+            // instead of nesting another transfer (which could recurse without
+            // bound if the guard keeps failing).
+            if !crate::osr::osr_transfer_begin(key) {
+                rearm(recheck);
+                return OSR_NO_OSR;
+            }
+            // Transfer. The loop's live state is in F's frame at fixed
+            // FP-relative slots; read it (in argument order), call the
+            // optimized continuation, and return its result — which the
+            // OsrCheck codegen returns from F. GC may run inside the call,
+            // so publish F's frame first.
+            save_gc_context!(sp, fp);
+            // Pack the live-ins (read from F's frame, in slot order) into a
+            // buffer and pass its pointer as F_osr's single argument. F_osr
+            // unpacks it into slots before any safepoint, so the not-yet-rooted
+            // buffer values can't be moved by GC mid-unpack.
+            let buf: Vec<usize> = live_in_slots
+                .iter()
+                .map(|&k| unsafe { *((fp - (k + 3) * 8) as *const usize) })
+                .collect();
+            if std::env::var("BEAGLE_OSR_DEBUG").is_ok() {
+                let elapsed = OSR_FIRST_TRIP.get().map(|t| t.elapsed());
+                eprintln!(
+                    "[OSR-xfer] {} addr={:#x} t_since_first_trip={:?} slots={:?}",
+                    key, code_addr, elapsed, live_in_slots
+                );
+            }
+            let buf_ptr = buf.as_ptr() as usize;
+            let result = unsafe {
+                crate::builtins::apply::call_with_args(
+                    code_addr as *const u8,
+                    &[buf_ptr],
+                    1,
+                    false,
+                    0,
+                )
+            };
+            drop(buf); // keep the buffer alive across the call
+            crate::osr::osr_transfer_end(key);
+            result
+        }
+        Some(OsrState::Failed) => {
+            // Permanently ineligible — back off so the check effectively
+            // never fires again for this loop.
+            rearm(i64::MAX);
+            OSR_NO_OSR
+        }
+        Some(OsrState::Requested) => {
+            // Build in flight; check again soon.
+            rearm(recheck);
+            OSR_NO_OSR
+        }
+        None => {
+            // First trip for this loop: request the build (exactly once),
+            // then keep running tier-1 until it's ready.
+            if crate::osr::osr_try_reserve(key) {
+                if let Some((full, idx)) = key.rsplit_once("#L") {
+                    if let Ok(idx) = idx.parse::<usize>() {
+                        get_runtime()
+                            .get()
+                            .build_osr_variant(&full.to_string(), idx);
+                    }
+                }
+            }
+            rearm(recheck);
+            OSR_NO_OSR
+        }
+    }
+}
+
 /// runtime/specialize-all() - Walk the arithmetic-feedback cache and
 /// recompile every fully-monomorphic function with `*_with_bail`
 /// specialization, atomically swapping each function's jump-table slot

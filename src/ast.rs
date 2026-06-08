@@ -852,6 +852,7 @@ impl Ast {
             feedback_bits_cursor: 0,
             property_feedback_input: property_feedback,
             property_feedback_cursor: 0,
+            osr_loops: Vec::new(),
         };
 
         let ir = ast_compiler.compile()?;
@@ -1063,6 +1064,12 @@ pub struct AstCompiler<'a> {
     /// Empty for first-time compiles.
     pub property_feedback_input: Vec<(u64, u64, u64)>,
     pub property_feedback_cursor: usize,
+    /// OSR loop info for the function currently being compiled, in source
+    /// order (the loop index). Populated at each loop latch when
+    /// `BEAGLE_OSR` is set; consumed by `Compiler::build_osr_variant` to
+    /// construct the optimized continuation. Saved/restored around nested
+    /// function compiles.
+    pub osr_loops: Vec<crate::osr::OsrLoopInfo>,
 }
 
 impl AstCompiler<'_> {
@@ -1200,6 +1207,94 @@ impl AstCompiler<'_> {
         result
     }
 
+    /// Phase 1 OSR instrumentation: at a hot loop latch (just before the
+    /// back-edge jump), emit a per-loop counter check that calls
+    /// `osr_trampoline` when the loop has iterated `BEAGLE_OSR_THRESHOLD`
+    /// times. Reuses the generic `TierUpCheck` primitive (decrement +
+    /// conditional trampoline call).
+    ///
+    /// **Opt-in via `BEAGLE_OSR=1` (default OFF).** A hot once-entered loop in a
+    /// function that never trips the entry tier-up counter would otherwise run
+    /// the whole computation unoptimized; OSR transfers it mid-flight into a
+    /// warm-quality continuation (see `docs/OSR_PERF_HANDOFF.md`).
+    ///
+    /// NOTE: default OFF on purpose. OSR's continuation `F_osr` is compiled
+    /// through the SSA backend, which still has latent control-flow bugs for
+    /// some real-world loops (e.g. `beagle.core/tim-binary-insertion-sort`,
+    /// whose F_osr hangs the beagle-zelda game on a room-2 sort). Turning OSR on
+    /// by default turned those latent bugs into hangs in previously-working
+    /// code. Keep it opt-in until F_osr SSA correctness is hardened.
+    ///
+    /// Only emitted in TIER-1 (first-compile) code — that's the code OSR
+    /// transfers *from*; tier-2 recompiles (non-empty feedback bits) skip it,
+    /// exactly like the entry tier-up check. Safe to call at the latch because
+    /// the linear-scan allocator only uses callee-saved registers (X19-X27),
+    /// so the trampoline call clobbers nothing the loop needs.
+    fn maybe_emit_osr_backedge_check(&mut self, header_label: crate::common::Label) {
+        if std::env::var("BEAGLE_OSR")
+            .map(|v| v != "1")
+            .unwrap_or(true)
+        {
+            return;
+        }
+        // `OsrCheck` has legacy codegen only (it does a mid-block conditional
+        // return, which isn't a straight-line CFG op). Tier-1 is legacy by
+        // default; under BEAGLE_USE_SSA first-compiles route through SSA, so
+        // skip OSR instrumentation there to keep SSA testing clean.
+        if std::env::var("BEAGLE_USE_SSA").is_ok() {
+            return;
+        }
+        // OSR transfers only NAMED-LOCAL live state (verified: the eval stack
+        // is empty at every current loop back-edge). If a future lowering ever
+        // leaves an intermediate live on the eval stack across the back-edge,
+        // we can't reconstruct it at an OSR entry — so don't instrument that
+        // loop. Self-protecting guard for Foundation 2.
+        if !self.ir.local_stack_indices().is_empty() {
+            return;
+        }
+        let Some(name) = self.name.clone() else {
+            return;
+        };
+        let full_name = format!("{}/{}", self.compiler.current_namespace_name(), name);
+        if full_name.starts_with("beagle.bail/") {
+            return;
+        }
+        // Live-ins = every named local in scope at the latch (the eval stack
+        // is empty, so this is the complete live state). The OSR continuation
+        // receives them as arguments in this order; the trampoline reads the
+        // same slots out of F's running frame in this order.
+        let live_in_slots: Vec<usize> = self
+            .environment_stack
+            .last()
+            .map(|e| e.local_variables.iter().map(|(_, i)| *i).collect())
+            .unwrap_or_default();
+
+        // Per-function loop index (source order) — stable across compiles of
+        // the same function, so the key the back-edge check bakes matches the
+        // index `build_osr_variant` will look up.
+        let loop_idx = self.osr_loops.len();
+        self.osr_loops.push(crate::osr::OsrLoopInfo {
+            header_label,
+            live_in_slots,
+        });
+
+        // Emit the back-edge check only in TIER-1 (the OSR *source* tier).
+        // tier-2 recompiles (non-empty feedback) record the loop info above
+        // — which `build_osr_variant` consumes — but carry no check.
+        if !self.feedback_bits_input.is_empty() {
+            return;
+        }
+        let key = format!("{}#L{}", full_name, loop_idx);
+        let threshold = std::env::var("BEAGLE_OSR_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(100_000);
+        if let Ok((counter_addr, key_ptr)) = self.compiler.add_function_counter(&key, threshold) {
+            let trampoline_ptr = crate::builtins::osr_trampoline as *const u8 as usize;
+            self.ir.osr_check(counter_addr, key_ptr, trampoline_ptr);
+        }
+    }
+
     pub fn compile(&mut self) -> Result<Ir, CompileError> {
         // Scalar-replace non-escaping struct allocations (escape analysis):
         // `let v = Struct{...}` used only as `v.field` reads becomes plain
@@ -1300,6 +1395,9 @@ impl AstCompiler<'_> {
                     }
                 }
                 let old_ir = std::mem::replace(&mut self.ir, new_ir);
+                // Fresh OSR-loop accumulator for this function's body; the
+                // outer function's loops are restored after its compile.
+                let old_osr_loops = std::mem::take(&mut self.osr_loops);
                 let old_name = self.name.clone();
                 let old_arity = self.current_function_arity;
                 let old_is_variadic = self.current_function_is_variadic;
@@ -1678,6 +1776,26 @@ impl AstCompiler<'_> {
                 // call. Gated on BEAGLE_SSA_VERIFY=1; legacy lowering is
                 // unaffected.
                 let _ = crate::cfg::builder::try_build_and_verify(&self.ir);
+
+                // OSR capture: if this compile was driven by `build_osr_variant`
+                // for this exact function, snapshot the specialized IR (before
+                // `compile` consumes/mutates it) plus the loop info, so the
+                // continuation `F_osr` can be deconstructed from it.
+                if let Some(ref full_name) = full_function_name {
+                    if self
+                        .compiler
+                        .osr_capture
+                        .as_ref()
+                        .is_some_and(|c| &c.target == full_name)
+                    {
+                        let snapshot = self.ir.clone();
+                        let loops = self.osr_loops.clone();
+                        if let Some(cap) = self.compiler.osr_capture.as_mut() {
+                            cap.captured = Some((snapshot, loops));
+                        }
+                    }
+                }
+
                 let dump = self.compiler.dump.clone();
                 let mut backend = self.ir.compile(backend, error_fn_pointer, &dump);
                 let token_map = self.ir.ir_range_to_token_range.clone();
@@ -1807,6 +1925,7 @@ impl AstCompiler<'_> {
                 }
 
                 self.ir = old_ir;
+                self.osr_loops = old_osr_loops;
 
                 if is_not_top_level {
                     let function = self.compile_closure(
@@ -1865,6 +1984,7 @@ impl AstCompiler<'_> {
                 for ast in body.iter() {
                     self.call_compile(ast)?;
                 }
+                self.maybe_emit_osr_backedge_check(loop_start);
                 self.ir.jump(loop_start);
 
                 // Pop loop context
@@ -1906,6 +2026,7 @@ impl AstCompiler<'_> {
                 self.ir.assign(result_reg, last_value);
 
                 // Jump back to check condition
+                self.maybe_emit_osr_backedge_check(loop_start);
                 self.ir.jump(loop_start);
 
                 // Pop loop context
@@ -2873,14 +2994,15 @@ impl AstCompiler<'_> {
                             (name.clone(), format!("{}_{}", target_type, name))
                         };
 
-                        let compiled_fn_value = self.call_compile(&Ast::Function {
+                        let impl_function = Ast::Function {
                             name: Some(new_name.clone()),
                             args: args.clone(),
                             rest_param: rest_param.clone(),
                             body: body.clone(),
                             token_range: ast.token_range(),
                             docstring: None,
-                        })?;
+                        };
+                        let compiled_fn_value = self.call_compile(&impl_function)?;
                         // Use the compiled function value directly instead of
                         // looking it up by name, which fails during deferred
                         // function installation (eval/REPL).
@@ -2913,14 +3035,15 @@ impl AstCompiler<'_> {
                             let arity = case.args.len();
                             let method_name_with_arity = format!("{}${}", method_name, arity);
                             let new_name = format!("{}_{}${}", target_type, method_name, arity);
-                            let compiled_fn_value = self.call_compile(&Ast::Function {
+                            let impl_function = Ast::Function {
                                 name: Some(new_name.clone()),
                                 args: case.args.clone(),
                                 rest_param: case.rest_param.clone(),
                                 body: case.body.clone(),
                                 token_range: case.token_range,
                                 docstring: None,
-                            })?;
+                            };
+                            let compiled_fn_value = self.call_compile(&impl_function)?;
                             // Use the compiled function value directly instead of
                             // looking it up by name, which fails during deferred
                             // function installation (eval/REPL).

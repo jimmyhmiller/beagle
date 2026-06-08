@@ -1226,10 +1226,8 @@ impl LowLevelArm {
         // and under SSA register allocation dest and the guarded value
         // get coloured to the same physical register. Clobbering `dest`
         // there would destroy the value before the op that follows the
-        // guard reads it (e.g. `x & 0b111 == 0` then `x >> 24` yielded
-        // `0 >> 24 == 0`, breaking struct-id reads / match type checks).
-        // X16 is AAPCS IP0 scratch and is in neither allocator pool, so
-        // it can never alias `a`.
+        // guard reads it. X16 is AAPCS IP0 scratch and is in neither
+        // allocator pool, so it can never alias `a`.
         let scratch = X16;
         self.and_imm(scratch, a, 0b111);
         self.compare(scratch, ZERO_REGISTER);

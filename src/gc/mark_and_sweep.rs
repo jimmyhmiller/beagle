@@ -329,6 +329,47 @@ impl MarkAndSweep {
         cont.make_fp_links_relative_again();
     }
 
+    fn forwarded_value(&self, value: usize) -> Option<usize> {
+        if !BuiltInTypes::is_heap_pointer(value) {
+            return None;
+        }
+        let untagged = BuiltInTypes::untag(value);
+        if untagged == 0 || !self.space.contains(untagged as *const u8) {
+            return None;
+        }
+        let header = unsafe { *(untagged as *const usize) };
+        if !Header::is_forwarding_bit_set(header) {
+            return None;
+        }
+        let forwarded = Header::clear_forwarding_bit(header);
+        Some((forwarded & !7) | (value & 7))
+    }
+
+    fn update_continuation_segment_roots(&self, object: &HeapObject) {
+        let object = HeapObject::from_untagged(object.untagged() as *const u8);
+        let Some(cont) = ContinuationObject::from_heap_object(object) else {
+            return;
+        };
+        let Some((segment_base, segment_top, gc_frame_top)) = cont.segment_gc_frame_info() else {
+            return;
+        };
+        if gc_frame_top >= segment_base && gc_frame_top < segment_top {
+            StackWalker::walk_segment_gc_roots(
+                gc_frame_top,
+                segment_base,
+                segment_top,
+                |slot_addr, value| {
+                    if let Some(forwarded) = self.forwarded_value(value) {
+                        unsafe {
+                            *(slot_addr as *mut usize) = forwarded;
+                        }
+                    }
+                },
+            );
+        }
+        cont.make_fp_links_relative_again();
+    }
+
     /// Check if a pointer is within this allocator's space
     pub fn contains(&self, pointer: *const u8) -> bool {
         self.space.contains(pointer)
@@ -712,12 +753,16 @@ impl MarkAndSweep {
     }
 
     /// Post-sweep migration: migrate live objects with outdated struct shapes to the latest layout.
-    /// Also updates extra_roots (namespace bindings, handle stack) to point to new locations.
-    fn migrate_outdated_structs(&mut self, extra_roots: &[(*mut usize, usize)]) {
+    /// Also updates every non-heap root to point to the migrated copies.
+    fn migrate_outdated_structs(
+        &mut self,
+        gc_frame_tops: &[usize],
+        extra_roots: &[(*mut usize, usize)],
+    ) {
         let runtime = crate::get_runtime().get_mut();
-        if !runtime.structs.has_pending_migrations() {
+        let Some(migration_revision) = runtime.structs.pending_migration_revision() else {
             return;
-        }
+        };
 
         // Phase 1: Find all objects that need migration, allocate new copies
         let mut forwarding_map: Vec<(usize, usize, usize)> = Vec::new();
@@ -788,7 +833,9 @@ impl MarkAndSweep {
         }
 
         if forwarding_map.is_empty() {
-            runtime.structs.complete_pending_migrations();
+            runtime
+                .structs
+                .complete_pending_migrations(migration_revision);
             return;
         }
 
@@ -824,39 +871,37 @@ impl MarkAndSweep {
 
             if !heap_object.is_opaque_object() {
                 for field in heap_object.get_fields_mut().iter_mut() {
-                    if let Some(field_obj) = HeapObject::try_from_tagged(*field) {
-                        let field_untagged = field_obj.untagged();
-                        let field_tag = *field & 7;
-                        if self.space.contains(field_untagged as *const u8) {
-                            let field_header = unsafe { *(field_untagged as *const usize) };
-                            if Header::is_forwarding_bit_set(field_header) {
-                                let new_tagged = Header::clear_forwarding_bit(field_header);
-                                *field = (new_tagged & !7) | field_tag;
-                            }
-                        }
+                    if let Some(forwarded) = self.forwarded_value(*field) {
+                        *field = forwarded;
                     }
                 }
             }
+            self.update_continuation_segment_roots(&heap_object);
 
             offset += full_size;
             offset = (offset + 7) & !7;
         }
 
-        // Phase 2b: Update extra roots (namespace bindings, handle stack entries)
-        // These are stored in Rust-side Vecs, not on the heap, so Phase 2's heap walk misses them.
+        // Phase 2b: Update active Henderson-frame roots. Marking walked these
+        // slots but migration previously did not rewrite them, leaving direct
+        // stack references pointing at the forwarded old-layout copies.
+        for &gc_frame_top in gc_frame_tops {
+            StackWalker::walk_stack_roots(gc_frame_top, |slot_addr, value| {
+                if let Some(forwarded) = self.forwarded_value(value) {
+                    unsafe {
+                        *(slot_addr as *mut usize) = forwarded;
+                    }
+                }
+            });
+        }
+
+        // Phase 2c: Update extra roots (namespace bindings, handle stack entries).
+        // These are stored outside the heap, so Phase 2's heap walk misses them.
         for &(slot_addr, _) in extra_roots {
             let value = unsafe { *slot_addr };
-            if BuiltInTypes::is_heap_pointer(value) {
-                let untagged = BuiltInTypes::untag(value);
-                let tag = value & 7;
-                if self.space.contains(untagged as *const u8) {
-                    let header_at_old = unsafe { *(untagged as *const usize) };
-                    if Header::is_forwarding_bit_set(header_at_old) {
-                        let new_tagged = Header::clear_forwarding_bit(header_at_old);
-                        unsafe {
-                            *slot_addr = (new_tagged & !7) | tag;
-                        }
-                    }
+            if let Some(forwarded) = self.forwarded_value(value) {
+                unsafe {
+                    *slot_addr = forwarded;
                 }
             }
         }
@@ -871,7 +916,9 @@ impl MarkAndSweep {
         }
 
         self.shrink_highmark_if_tail_is_free();
-        runtime.structs.complete_pending_migrations();
+        runtime
+            .structs
+            .complete_pending_migrations(migration_revision);
     }
 }
 
@@ -923,7 +970,7 @@ impl Allocator for MarkAndSweep {
 
         self.sweep();
 
-        self.migrate_outdated_structs(extra_roots);
+        self.migrate_outdated_structs(gc_frame_tops, extra_roots);
         if self.options.print_stats {
             println!("Mark and sweep took {:?}", start.elapsed());
         }

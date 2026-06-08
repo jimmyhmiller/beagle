@@ -658,6 +658,12 @@ impl PrettyPrint for Instruction {
                     counter_addr, name_ptr, trampoline_ptr
                 )
             }
+            Instruction::OsrCheck(counter_addr, key_ptr, trampoline_ptr) => {
+                format!(
+                    "osr_check counter={:#x} key={:#x} trampoline={:#x}",
+                    counter_addr, key_ptr, trampoline_ptr
+                )
+            }
             Instruction::FieldRead {
                 dst,
                 object,

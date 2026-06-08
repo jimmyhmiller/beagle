@@ -1,0 +1,27 @@
+namespace osr_inner_closure_test
+
+// Regression: OSR'ing a loop that creates an inner closure must register that
+// inner closure. The OSR capture-compile compiles the closure to a fresh
+// address baked into F_osr's make_closure; if its registration is discarded,
+// F_osr throws "Function not found when creating closure". (Hung beagle-zelda
+// on a room-2 render Y-sort whose comparator is an inner closure.)
+// Run this file with BEAGLE_OSR=1 to exercise the path; correctness holds
+// either way.
+
+fn apply2(f, a, b) { f(a, b) }
+
+fn hot(n) {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        let cmp = fn(a, b) { a + b + i }
+        acc = acc + apply2(cmp, i, 1)
+        i = i + 1
+    }
+    acc
+}
+
+test "osr inner closure registers" {
+    // Large enough to trip the OSR back-edge counter under low thresholds.
+    assert-eq!(hot(200000), 40000000000)
+}

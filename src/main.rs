@@ -91,6 +91,7 @@ pub mod lir;
 pub mod machine_code;
 pub mod mmap_utils;
 pub mod native_memory;
+pub mod osr;
 pub mod parser;
 mod pretty_print;
 mod primitives;
