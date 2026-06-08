@@ -6,6 +6,9 @@ namespace fannkuch_redux
 // Beagle implementation matching Node.js node-8 structure exactly
 
 use beagle.mutable-array as arr
+use beagle.core as core
+use beagle.runtime as runtime
+use beagle.io as io
 
 fn fannkuch(n) {
     let perm1 = arr/new-array(n)
@@ -104,9 +107,26 @@ fn run(n) {
     flips
 }
 
+// Warm path: run once to populate type feedback, force tier-2 on every
+// monomorphic function, then time the real run so we always measure
+// optimized code. Timing goes to stderr; gated on a 2nd CLI arg so the
+// snapshot test (no args) is unaffected.
+fn bench_warm(n) {
+    run(7)
+    let c = runtime/specialize-all()
+    let start = core/time-now()
+    run(n)
+    let elapsed = core/time-now() - start
+    io/write-stderr("WARMBENCH ns=${elapsed} specialized=${c}\n")
+}
+
 fn main(args) {
     let n = if length(args) > 0 { to-number(get(args, 0)) } else { 7 }
-    run(n)
+    if length(args) > 1 {
+        bench_warm(n)
+    } else {
+        run(n)
+    }
 }
 
 // @beagle.core.snapshot

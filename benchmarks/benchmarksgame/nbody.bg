@@ -7,6 +7,9 @@ namespace nbody
 // Uses mutable structs and arrays to avoid allocation in the hot loop
 
 use beagle.mutable-array as arr
+use beagle.core as core
+use beagle.runtime as runtime
+use beagle.io as io
 
 let PI = 3.141592653589793
 let SOLAR_MASS = 39.47841760435743
@@ -212,7 +215,20 @@ fn run(n) {
     print-fixed9(energy(bodies, 5))
 }
 
+fn bench_warm(n) {
+    run(1000)
+    let c = runtime/specialize-all()
+    let start = core/time-now()
+    run(n)
+    let elapsed = core/time-now() - start
+    io/write-stderr("WARMBENCH ns=${elapsed} specialized=${c}\n")
+}
+
 fn main(args) {
     let n = if length(args) > 0 { to-number(get(args, 0)) } else { 1000 }
-    run(n)
+    if length(args) > 1 {
+        bench_warm(n)
+    } else {
+        run(n)
+    }
 }

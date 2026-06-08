@@ -12,6 +12,9 @@ namespace fasta
 use beagle.string-builder as sb
 use beagle.mutable-array as arr
 use beagle.builtin as builtin
+use beagle.core as core
+use beagle.runtime as runtime
+use beagle.io as io
 
 let LINE_WIDTH = 60
 let IM = 139968
@@ -169,9 +172,22 @@ fn run(n) {
     ""
 }
 
+fn bench_warm(n) {
+    run(1000)
+    let c = runtime/specialize-all()
+    let start = core/time-now()
+    run(n)
+    let elapsed = core/time-now() - start
+    io/write-stderr("WARMBENCH ns=${elapsed} specialized=${c}\n")
+}
+
 fn main(args) {
     let n = if length(args) > 0 { to-number(get(args, 0)) } else { 10 }
-    run(n)
+    if length(args) > 1 {
+        bench_warm(n)
+    } else {
+        run(n)
+    }
     ""
 }
 

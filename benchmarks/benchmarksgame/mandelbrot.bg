@@ -6,6 +6,9 @@ namespace mandelbrot
 // Beagle implementation
 
 use beagle.builtin as builtin
+use beagle.core as core
+use beagle.runtime as runtime
+use beagle.io as io
 
 let MAX_ITER = 50
 let LIMIT_SQ = 4.0
@@ -78,8 +81,21 @@ fn mandel(cr, ci) {
     result
 }
 
+fn bench_warm(n) {
+    run(64)
+    let c = runtime/specialize-all()
+    let start = core/time-now()
+    run(n)
+    let elapsed = core/time-now() - start
+    io/write-stderr("WARMBENCH ns=${elapsed} specialized=${c}\n")
+}
+
 fn main(args) {
     let n = if length(args) > 0 { to-number(get(args, 0)) } else { 8 }
-    run(n)
+    if length(args) > 1 {
+        bench_warm(n)
+    } else {
+        run(n)
+    }
     ""
 }

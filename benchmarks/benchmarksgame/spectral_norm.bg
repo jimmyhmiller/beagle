@@ -6,6 +6,9 @@ namespace spectral_norm
 // Beagle implementation
 
 use beagle.mutable-array as arr
+use beagle.core as core
+use beagle.runtime as runtime
+use beagle.io as io
 
 fn A(i, j) {
     let ij = i + j
@@ -118,9 +121,22 @@ fn run(n) {
     print-fixed9(result)
 }
 
+fn bench_warm(n) {
+    run(100)
+    let c = runtime/specialize-all()
+    let start = core/time-now()
+    run(n)
+    let elapsed = core/time-now() - start
+    io/write-stderr("WARMBENCH ns=${elapsed} specialized=${c}\n")
+}
+
 fn main(args) {
     let n = if length(args) > 0 { to-number(get(args, 0)) } else { 100 }
-    run(n)
+    if length(args) > 1 {
+        bench_warm(n)
+    } else {
+        run(n)
+    }
 }
 
 // @beagle.core.snapshot

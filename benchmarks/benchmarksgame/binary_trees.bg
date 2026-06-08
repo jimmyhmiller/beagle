@@ -1,5 +1,8 @@
 namespace binary_tree
 
+use beagle.core as core
+use beagle.runtime as runtime
+use beagle.io as io
 
 fn math_max(a, b) {
     if a > b {
@@ -37,9 +40,22 @@ fn parameterizedTree(depth) {
     loopThroughDepths(4, maxDepth, longLivedTree)
 }
 
+fn bench_warm(n) {
+    parameterizedTree(6)
+    let c = runtime/specialize-all()
+    let start = core/time-now()
+    parameterizedTree(n)
+    let elapsed = core/time-now() - start
+    io/write-stderr("WARMBENCH ns=${elapsed} specialized=${c}\n")
+}
+
 fn main(args) {
     let n = if length(args) > 0 { to-number(get(args, 0)) } else { 10 }
-    parameterizedTree(n)
+    if length(args) > 1 {
+        bench_warm(n)
+    } else {
+        parameterizedTree(n)
+    }
 }
 
 fn loopThroughDepths(depth, maxDepth, longLivedTree) {
