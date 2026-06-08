@@ -92,13 +92,25 @@ pub extern "C" fn unregister_c_call() -> usize {
     let runtime = get_runtime().get_mut();
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
+    // A stop-the-world counts this thread as safe while it is in a C call (its
+    // frame is registered in `c_calling_stack_pointers` and scanned there). If a
+    // STW is in progress as we return from the C call we must NOT:
+    //   (a) hold the `thread_state` lock while parked — the coordinator blocks
+    //       acquiring it; or
+    //   (b) unregister the c-call before parking — that drops the coordinator's
+    //       `paused + c_calling` count below its target, so it waits forever.
+    // The old code did both (`lock(); unregister(); park()` with the guard still
+    // held), deadlocking the game under OSR-frequent tier-up STWs during raylib
+    // rendering (a thread returning from `EndDrawing` vs. a tier-up installer).
+    // Instead: stay registered and parked with the lock released until the world
+    // is running again — our frame is unchanged while parked, so scanning it via
+    // the c-call entry stays valid — then unregister.
+    while runtime.is_paused() {
+        thread::park();
+    }
     let mut state = lock.lock().unwrap();
     state.unregister_c_call();
     condvar.notify_one();
-    while runtime.is_paused() {
-        // Park can unpark itself even if I haven't called unpark
-        thread::park();
-    }
     BuiltInTypes::null_value() as usize
 }
 
