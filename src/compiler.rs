@@ -441,6 +441,36 @@ pub struct Compiler {
     pub dump: std::sync::Arc<crate::dump::DumpConfig>,
 }
 
+/// Force the single top-level `fn` definition in a freshly-parsed `program`
+/// to be named `target`. Used by tier-up: a function's stored source slice may
+/// parse to a different name than the (possibly compiler-generated) name it is
+/// installed under — e.g. a protocol impl method stored as `Dog_speak` whose
+/// source reads `fn speak(...)` — and the install keys on the parsed name. No-op
+/// unless the program contains exactly one top-level `Ast::Function` (the common
+/// single-arity case; multi-arity definitions are left untouched).
+fn rename_sole_top_level_function(program: &mut crate::ast::Ast, target: &str) {
+    use crate::ast::Ast;
+    let Ast::Program { elements, .. } = program else {
+        return;
+    };
+    // Exactly one top-level function, or we can't tell which one is `target`.
+    let fn_count = elements
+        .iter()
+        .filter(|e| matches!(e, Ast::Function { .. }))
+        .count();
+    if fn_count != 1 {
+        return;
+    }
+    if let Some(Ast::Function { name, .. }) = elements
+        .iter_mut()
+        .find(|e| matches!(e, Ast::Function { .. }))
+    {
+        if name.as_deref() != Some(target) {
+            *name = Some(target.to_string());
+        }
+    }
+}
+
 impl Compiler {
     pub fn get_pause_atom(&self) -> usize {
         self.pause_atom_ptr.unwrap_or(0)
@@ -720,7 +750,20 @@ impl Compiler {
 
         // Parse + compile, threading the feedback bits.
         let mut parser = Parser::new(source_file.clone(), source_text.clone())?;
-        let ast = parser.parse()?;
+        let mut ast = parser.parse()?;
+        // The recompile MUST reinstall under `full_name`, but the install keys
+        // on the name the source's `fn` header parses to — and for
+        // compiler-generated functions those differ. A protocol impl method is
+        // stored as `Dog_speak`, yet its source slice still reads
+        // `fn speak(...)`, which reparses as the public dispatcher `speak`; a
+        // tier-2 install of it would clobber the dispatcher's jump-table slot
+        // with one type's impl body (observed as protocol-redefinition
+        // mis-dispatch). Force the sole top-level `fn` to the name we're
+        // specializing so the install lands on the right slot — and so impl
+        // bodies still tier up (suppressing their source would skip tier-2).
+        if let Some((_, unqualified)) = full_name.rsplit_once('/') {
+            rename_sole_top_level_function(&mut ast, unqualified);
+        }
         let token_line_column_map = parser.get_token_line_column_map();
         let token_byte_spans = parser.get_token_byte_spans();
         let definition_byte_ranges = parser.get_definition_byte_ranges();

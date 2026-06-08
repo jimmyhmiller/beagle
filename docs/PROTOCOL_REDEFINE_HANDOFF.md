@@ -1,13 +1,62 @@
 # Handoff: protocol-impl redefinition mis-dispatch under aggressive tier-up
 
-**Status:** primary bugs FIXED and committed; one residual ~2% crash remains,
-localized but not root-caused.
+**Status:** RESOLVED. Root-caused and fixed in `src/compiler.rs`.
 **Branch:** `ssa-foundation`
 **Test:** `resources/redefine_protocol_impl_test.bg`
 **Repro knob:** `BEAGLE_SPECIALIZE_THRESHOLD=1` (env, read in `src/ast.rs` ~line 1540).
-**Shipping config (default threshold 1000): fully clean — 370/370, this test passes.**
-The residual only manifests at pathologically low tier-up thresholds (the regime
-we'd need for future OSR / threshold-lowering work).
+**Shipping config (default threshold 1000): fully clean — 372/372, this test passes.**
+
+## 0. Resolution
+
+The async/delimited-continuation hypothesis in §4–§5 below was a red herring
+(the crash reproduced at the same rate when bypassing `beagle.async/__main__`).
+**Those sections are stale — do not chase them.**
+
+Actual root cause: protocol impl methods are compiled under generated internal
+names like `Cat_speak` / `Dog_speak`, but their stored `source_text` is the
+original source slice, e.g. `fn speak(self) { ... }`. Threshold-1 auto-tier-up of
+`Cat_speak` reparsed that source; the parser produced a function named `speak`,
+and the install keys on the *parsed* name — so the tier-2 install was staged for
+plain `redefine_protocol_impl_test/speak`, the protocol dispatcher. If that stale
+install landed after a later `eval`, the dispatcher jump-table slot was
+overwritten with Cat's impl body, so the final `speak(dog)` ran Cat's
+`self.lives` code on a Dog.
+
+Fix (`rename_sole_top_level_function` in `src/compiler.rs`, called from
+`specialize_function`): a tier-2 recompile must reinstall under the name it is
+specializing (`full_name`), regardless of what the source's `fn` header parses
+to. After reparsing the source, force the sole top-level `fn` to the unqualified
+`full_name` (`Cat_speak`), so the install lands on the correct jump-table slot
+and never touches the dispatcher. Protocol dispatchers themselves remain skipped
+by `Runtime::is_protocol_dispatcher`.
+
+This is preferred over the earlier source-suppression approach (suppress the
+stored source so `specialize_function` bails): that would have **disabled tier-2
+for every protocol impl method body**. The rename keeps impl bodies optimizable —
+verified `Cat_speak`/`Dog_speak` tier-2 install correctly under threshold-1
+churn.
+
+Validation after the fix:
+
+```bash
+cargo build --release --bin beag
+for i in $(seq 1 300); do
+  BEAGLE_SPECIALIZE_THRESHOLD=1 ./target/release/beag resources/redefine_protocol_impl_test.bg 2>&1 | tail -1
+done | sort | uniq -c
+# 300 Rex knows 5 tricks!
+
+for i in $(seq 1 150); do
+  BEAGLE_SPECIALIZE_THRESHOLD=1 ./target/release/beag run --no-gc resources/redefine_protocol_impl_test.bg 2>&1 | tail -1
+done | sort | uniq -c
+# 150 Rex knows 5 tricks!
+
+BEAGLE_SPECIALIZE_THRESHOLD=1 ./target/release/beag test resources/redefine_protocol_impl_test.bg
+# 1 passed, 0 failed, 0 skipped
+# also: redefine_protocol_add_test, struct_redefine_protocol_test pass @ thr1; full suite 372/372
+```
+
+The remaining sections are preserved as historical investigation notes — note
+§4–§5's async-continuation theory is WRONG (see above).
 
 ---
 
