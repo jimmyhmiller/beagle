@@ -9,7 +9,7 @@ use std::{
     io::Write,
     sync::{
         Arc, Condvar, Mutex, TryLockError,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering},
     },
     thread::{self, JoinHandle, Thread, ThreadId},
     time::Duration,
@@ -3875,75 +3875,132 @@ pub struct ProtocolMethodInfo {
     pub fn_pointer: usize,
 }
 
-/// Dispatch table for O(1) protocol method lookup
-/// Maps type_id -> function pointer for fast protocol dispatch
-#[derive(Debug, Clone)]
+/// One immutable generation of a dispatch array. Elements are mutated in place
+/// atomically (an aligned `usize` store); *growth* publishes a whole new
+/// `DispatchCells` via the owning `AtomicPtr` and leaks the old block (a
+/// lock-free reader may still be reading it). Never freed.
+#[derive(Debug)]
+struct DispatchCells {
+    data: Box<[AtomicUsize]>,
+}
+
+/// One published generation of the protocol-method dispatch map: name ->
+/// stable (leaked) `DispatchTable`. Immutable once published; a writer COWs a
+/// new map to add a method and atomic-swaps it into `Runtime::dispatch_tables`.
+type DispatchMap = HashMap<String, &'static DispatchTable>;
+
+/// Dispatch table for O(1) protocol method lookup, type_id -> tagged fn pointer.
+///
+/// Interior-mutable and lock-free for READERS: the slow-path dispatch
+/// (`lookup_*`, via a baked raw pointer), the compiler baking call-site
+/// pointers, and dispatcher gating all read with plain atomic loads of a
+/// consistent snapshot — never a lock. WRITERS (`register` / `set_default_method`,
+/// only on protocol (re)definition) must hold `Runtime::dispatch_write_lock`,
+/// which serializes them so the load-then-grow below is race-free. In-place
+/// update of an existing slot is a single atomic store (no allocation — this is
+/// the common redefinition case); growth swaps in a larger block and leaks the
+/// old one. The table's address is stable (tables are leaked, never freed), so
+/// a baked `dispatch_table_ptr` stays valid forever.
+#[derive(Debug)]
 pub struct DispatchTable {
-    /// Dense array for struct IDs (positive IDs, index = struct_id)
-    /// Value = function pointer (0 if not implemented for this type)
-    pub struct_dispatch: Vec<usize>,
-    /// Sparse array for primitive types (negative IDs mapped to indices)
-    /// Index mapping: -1 -> 0, -2 -> 1, etc.
-    pub primitive_dispatch: Vec<usize>,
-    /// Default method pointer (if protocol has default implementation)
-    pub default_method: Option<usize>,
+    /// Dense array indexed by struct_id; value = tagged fn pointer (0 = none).
+    struct_dispatch: AtomicPtr<DispatchCells>,
+    /// Sparse array for primitives (index = -type_id - 1); value (0 = none).
+    primitive_dispatch: AtomicPtr<DispatchCells>,
+    /// Default method pointer (0 = none).
+    default_method: AtomicUsize,
 }
 
 impl DispatchTable {
     pub fn new(default_method: Option<usize>) -> Self {
         Self {
-            struct_dispatch: Vec::new(),
-            primitive_dispatch: Vec::new(),
-            default_method,
+            struct_dispatch: AtomicPtr::new(std::ptr::null_mut()),
+            primitive_dispatch: AtomicPtr::new(std::ptr::null_mut()),
+            default_method: AtomicUsize::new(default_method.unwrap_or(0)),
         }
     }
 
-    /// Register an implementation for a type
-    /// type_id: positive for structs, negative for primitives
-    pub fn register(&mut self, type_id: isize, fn_pointer: usize) {
+    /// `(field, index)` for a `type_id`: negative = primitive, else struct.
+    fn field_for(&self, type_id: isize) -> (&AtomicPtr<DispatchCells>, usize) {
         if type_id < 0 {
-            // Primitive type - map negative ID to index
-            let index = (-type_id - 1) as usize;
-            if index >= self.primitive_dispatch.len() {
-                self.primitive_dispatch.resize(index + 1, 0);
-            }
-            self.primitive_dispatch[index] = fn_pointer;
+            (&self.primitive_dispatch, (-type_id - 1) as usize)
         } else {
-            // Struct type - use ID as index
-            let index = type_id as usize;
-            if index >= self.struct_dispatch.len() {
-                self.struct_dispatch.resize(index + 1, 0);
-            }
-            self.struct_dispatch[index] = fn_pointer;
+            (&self.struct_dispatch, type_id as usize)
         }
     }
 
-    /// Lookup function pointer for a struct type ID
-    pub fn lookup_struct(&self, struct_id: usize) -> usize {
-        if struct_id < self.struct_dispatch.len() {
-            let ptr = self.struct_dispatch[struct_id];
-            if ptr != 0 {
-                return ptr;
+    /// Register an implementation for a type.
+    ///
+    /// MUST be called while holding `Runtime::dispatch_write_lock` (serializes
+    /// writers); readers stay lock-free. In-place update of an existing index is
+    /// a plain atomic store; growth publishes a new, larger cells block and
+    /// leaks the old one.
+    pub fn register(&self, type_id: isize, fn_pointer: usize) {
+        let (field, index) = self.field_for(type_id);
+        let cur = field.load(Ordering::Acquire);
+        // SAFETY: `cur` is null or a leaked, never-freed `DispatchCells` published
+        // by a prior writer. Writers hold `dispatch_write_lock`, so it can't be
+        // swapped under us here.
+        let cur_cells: Option<&DispatchCells> = if cur.is_null() {
+            None
+        } else {
+            Some(unsafe { &*cur })
+        };
+        let cur_len = cur_cells.map_or(0, |c| c.data.len());
+        if index < cur_len {
+            // In-place atomic update — immediately visible to lock-free readers.
+            cur_cells.unwrap().data[index].store(fn_pointer, Ordering::Release);
+        } else {
+            // Grow: copy existing values into a larger block, set the new slot,
+            // publish atomically, and leak the old block (a reader may hold it).
+            let mut data: Vec<AtomicUsize> = Vec::with_capacity(index + 1);
+            for i in 0..=index {
+                let v = match cur_cells {
+                    Some(c) if i < cur_len => c.data[i].load(Ordering::Relaxed),
+                    _ => 0,
+                };
+                data.push(AtomicUsize::new(if i == index { fn_pointer } else { v }));
+            }
+            let new_cells = Box::into_raw(Box::new(DispatchCells {
+                data: data.into_boxed_slice(),
+            }));
+            field.store(new_cells, Ordering::Release);
+            // `cur` intentionally leaked: lock-free readers may still read it.
+        }
+    }
+
+    fn lookup(field: &AtomicPtr<DispatchCells>, index: usize, default: &AtomicUsize) -> usize {
+        let cells = field.load(Ordering::Acquire);
+        if !cells.is_null() {
+            let cells = unsafe { &*cells };
+            if index < cells.data.len() {
+                let ptr = cells.data[index].load(Ordering::Acquire);
+                if ptr != 0 {
+                    return ptr;
+                }
             }
         }
-        self.default_method.unwrap_or(0)
+        default.load(Ordering::Acquire)
+    }
+
+    /// Lookup function pointer for a struct type ID.
+    pub fn lookup_struct(&self, struct_id: usize) -> usize {
+        Self::lookup(&self.struct_dispatch, struct_id, &self.default_method)
     }
 
     /// Lookup function pointer for a primitive type
     /// primitive_index: 0 for Int (-1), 1 for Float (-2), etc.
     pub fn lookup_primitive(&self, primitive_index: usize) -> usize {
-        if primitive_index < self.primitive_dispatch.len() {
-            let ptr = self.primitive_dispatch[primitive_index];
-            if ptr != 0 {
-                return ptr;
-            }
-        }
-        self.default_method.unwrap_or(0)
+        Self::lookup(
+            &self.primitive_dispatch,
+            primitive_index,
+            &self.default_method,
+        )
     }
 
-    /// Set the default method pointer for this dispatch table
-    pub fn set_default_method(&mut self, fn_ptr: usize) {
-        self.default_method = Some(fn_ptr);
+    /// Set the default method pointer. MUST hold `Runtime::dispatch_write_lock`.
+    pub fn set_default_method(&self, fn_ptr: usize) {
+        self.default_method.store(fn_ptr, Ordering::Release);
     }
 }
 
@@ -4209,13 +4266,14 @@ pub struct Runtime {
     /// instead of `jump_table_pages.len()`, so it can't race `Vec::push` in
     /// `add_jump_table_entry`.
     jump_table_committed_pages: AtomicUsize,
-    /// Serializes structural access to the `dispatch_tables` HashMap: a
-    /// redefinition mutates it (`add_protocol_info`, &mut) on the calling
-    /// thread while the compiler thread reads it (`get_dispatch_table_ptr`, &)
-    /// to bake dispatch-table pointers into recompiled protocol call sites.
-    /// Concurrent &mut + & on a HashMap is a data race that can corrupt the
-    /// read (a wrong DispatchTable pointer) and mis-dispatch.
-    dispatch_tables_lock: Mutex<()>,
+    /// Serializes dispatch-table WRITERS among themselves: registering an impl,
+    /// inserting a new method's table, or setting a default (all only on
+    /// protocol (re)definition, which is rare). READERS — the slow-path
+    /// dispatch, the compiler baking call-site pointers, dispatcher gating —
+    /// never take this; they do lock-free atomic loads of the `dispatch_tables`
+    /// snapshot. This replaces the old reader+writer lock whose &mut/& aliasing
+    /// on a plain HashMap was the data race.
+    dispatch_write_lock: Mutex<()>,
     /// Serializes jump-table *growth* only: committing a new page (splitting
     /// the reserved region + pushing to `jump_table_pages`) and bumping
     /// `jump_table_offset` to allocate a slot, both in `add_jump_table_entry`.
@@ -4230,10 +4288,14 @@ pub struct Runtime {
     compiler_channel: Option<BlockingSender<CompilerMessage, CompilerResponse>>,
     compiler_thread: Option<JoinHandle<()>>,
     protocol_info: HashMap<String, Vec<ProtocolMethodInfo>>,
-    /// Dispatch tables for O(1) protocol method lookup
-    /// Key = "protocol_name/method_name"
-    /// Boxed to keep pointers stable when HashMap reallocates
-    dispatch_tables: HashMap<String, Box<DispatchTable>>,
+    /// Dispatch tables for O(1) protocol method lookup, key
+    /// "protocol_namespace/method_name". Published as an immutable snapshot
+    /// behind an `AtomicPtr`: readers load it lock-free; writers (under
+    /// `dispatch_write_lock`) COW-insert a new method and publish by atomic
+    /// store, leaking the old map. The leaked `&'static DispatchTable` values
+    /// are shared across map generations and never freed, so a baked
+    /// `dispatch_table_ptr` stays valid forever and survives the COW.
+    dispatch_tables: AtomicPtr<DispatchMap>,
     // Counter for generating unique prompt IDs to distinguish sequential handlers
     pub prompt_id_counter: AtomicUsize,
     // Global default uncaught exception handler (Beagle function pointer)
@@ -4342,7 +4404,7 @@ impl Runtime {
             jump_table_reserved,
             jump_table_pages: vec![],
             jump_table_committed_pages: AtomicUsize::new(0),
-            dispatch_tables_lock: Mutex::new(()),
+            dispatch_write_lock: Mutex::new(()),
             jump_table_lock: Mutex::new(()),
             jump_table_base_ptr,
             jump_table_offset: 0,
@@ -4350,7 +4412,7 @@ impl Runtime {
             compiler_channel: None,
             compiler_thread: None,
             protocol_info: HashMap::new(),
-            dispatch_tables: HashMap::new(),
+            dispatch_tables: AtomicPtr::new(Box::into_raw(Box::new(DispatchMap::new()))),
             diagnostic_store: Arc::new(Mutex::new(crate::compiler::DiagnosticStore::new())),
             prompt_id_counter: AtomicUsize::new(1),
             default_exception_handler_fn: None,
@@ -9127,68 +9189,65 @@ impl Runtime {
             _ => None,
         };
 
-        // Serialize structural dispatch-table access against the compiler
-        // thread reading it to bake call-site pointers (see dispatch_tables_lock).
-        let _dt_guard = self
-            .dispatch_tables_lock
-            .lock()
-            .expect("dispatch_tables_lock poisoned");
-        if let Some(primitive_id) = builtin_primitive_id {
-            // Built-in type - register in primitive dispatch
-            let dispatch_table = self
-                .dispatch_tables
-                .entry(dispatch_key)
-                .or_insert_with(|| Box::new(DispatchTable::new(None)));
-            // Use negative ID for primitive types (DispatchTable converts to index)
-            dispatch_table.register(-(primitive_id as isize + 1), f);
+        let type_id: Option<isize> = if let Some(primitive_id) = builtin_primitive_id {
+            // Built-in type — primitive dispatch uses a negative id.
+            Some(-(primitive_id as isize + 1))
         } else if let Some((struct_id, _)) = self.structs.get(struct_name) {
-            // Custom struct - register with struct_id
-            let dispatch_table = self
-                .dispatch_tables
-                .entry(dispatch_key)
-                .or_insert_with(|| Box::new(DispatchTable::new(None)));
-            dispatch_table.register(struct_id as isize, f);
+            // Custom struct — dispatch by struct_id.
+            Some(struct_id as isize)
+        } else {
+            // Unknown type (possibly a forward reference) — silently ignore.
+            None
+        };
+        if let Some(type_id) = type_id {
+            // Writers serialize via dispatch_write_lock; readers are lock-free.
+            let _w = self
+                .dispatch_write_lock
+                .lock()
+                .expect("dispatch_write_lock poisoned");
+            self.dispatch_table_for_write(&dispatch_key)
+                .register(type_id, f);
         }
-        // Note: silently ignore unknown types for now (could be forward references)
         was_redefinition
     }
 
-    /// Get the dispatch table pointer for a protocol method
-    /// Returns the raw pointer to the DispatchTable struct for use in generated code
+    /// Look up (or create) the dispatch table for `key`, returning its stable
+    /// leaked address. Creating a new method's table COWs the map snapshot and
+    /// publishes it by atomic store. MUST hold `dispatch_write_lock`.
+    fn dispatch_table_for_write(&self, key: &str) -> &'static DispatchTable {
+        // SAFETY: `dispatch_tables` always holds a valid, non-null leaked map.
+        let cur = unsafe { &*self.dispatch_tables.load(Ordering::Acquire) };
+        if let Some(&table) = cur.get(key) {
+            return table;
+        }
+        let table: &'static DispatchTable = Box::leak(Box::new(DispatchTable::new(None)));
+        let mut new_map = cur.clone();
+        new_map.insert(key.to_string(), table);
+        let new_ptr = Box::into_raw(Box::new(new_map));
+        self.dispatch_tables.store(new_ptr, Ordering::Release);
+        // Old map intentionally leaked: lock-free readers may still hold it.
+        table
+    }
+
+    /// Get the dispatch table pointer for a protocol method — the raw address of
+    /// the (leaked, stable) DispatchTable, baked into generated code.
     pub fn get_dispatch_table_ptr(&self, protocol_name: &str, method_name: &str) -> Option<usize> {
         let (protocol_namespace, _protocol_name) =
             protocol_name.split_once("/").unwrap_or(("", protocol_name));
         let dispatch_key = format!("{}/{}", protocol_namespace, method_name);
 
-        // Serialize against `add_protocol_info` mutating the HashMap (see
-        // dispatch_tables_lock). The returned pointer targets the Box's heap
-        // allocation, which is stable across HashMap rehash, so it stays valid
-        // after the lock is released.
-        let _dt_guard = self
-            .dispatch_tables_lock
-            .lock()
-            .expect("dispatch_tables_lock poisoned");
-        self.dispatch_tables
-            .get(&dispatch_key)
-            .map(|table| &**table as *const DispatchTable as usize)
+        // Lock-free: load the current immutable map snapshot. The returned
+        // address is a leaked DispatchTable — valid forever, stable across COW.
+        // SAFETY: `dispatch_tables` always holds a valid, non-null leaked map.
+        let map = unsafe { &*self.dispatch_tables.load(Ordering::Acquire) };
+        map.get(&dispatch_key)
+            .map(|&table| table as *const DispatchTable as usize)
     }
 
-    /// Get a reference to a dispatch table
-    pub fn get_dispatch_table(
-        &self,
-        protocol_name: &str,
-        method_name: &str,
-    ) -> Option<&DispatchTable> {
-        let (protocol_namespace, _protocol_name) =
-            protocol_name.split_once("/").unwrap_or(("", protocol_name));
-        let dispatch_key = format!("{}/{}", protocol_namespace, method_name);
-
-        self.dispatch_tables.get(&dispatch_key).map(|b| &**b)
-    }
-
-    /// Set the default method for a dispatch table
+    /// Set the default method for a dispatch table. Writer: serializes against
+    /// other writers; readers are lock-free.
     pub fn set_dispatch_table_default(
-        &mut self,
+        &self,
         protocol_name: &str,
         method_name: &str,
         default_fn_ptr: usize,
@@ -9196,7 +9255,13 @@ impl Runtime {
         let (protocol_namespace, _) = protocol_name.split_once("/").unwrap_or(("", protocol_name));
         let dispatch_key = format!("{}/{}", protocol_namespace, method_name);
 
-        if let Some(table) = self.dispatch_tables.get_mut(&dispatch_key) {
+        let _w = self
+            .dispatch_write_lock
+            .lock()
+            .expect("dispatch_write_lock poisoned");
+        // SAFETY: `dispatch_tables` always holds a valid, non-null leaked map.
+        let map = unsafe { &*self.dispatch_tables.load(Ordering::Acquire) };
+        if let Some(&table) = map.get(&dispatch_key) {
             table.set_default_method(default_fn_ptr);
         }
     }
@@ -9207,11 +9272,10 @@ impl Runtime {
     /// specializing them races that recompile on the jump table — and the win
     /// is negligible (they're dispatch glue). Callers skip specializing them.
     pub fn is_protocol_dispatcher(&self, name: &str) -> bool {
-        let _dt_guard = self
-            .dispatch_tables_lock
-            .lock()
-            .expect("dispatch_tables_lock poisoned");
-        self.dispatch_tables.contains_key(name)
+        // Lock-free: load the current immutable map snapshot.
+        // SAFETY: `dispatch_tables` always holds a valid, non-null leaked map.
+        let map = unsafe { &*self.dispatch_tables.load(Ordering::Acquire) };
+        map.contains_key(name)
     }
 
     /// Tell the compiler thread to reset all protocol-dispatch inline caches.
