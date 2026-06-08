@@ -266,9 +266,13 @@ pub extern "C" fn property_access(
             // old-layout objects (which have the same struct_id but different version).
             let raw_header = unsafe { *(heap_obj.untagged() as *const usize) };
             let combined = raw_header & 0x00FFFFFFFF0000F0;
-            let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 2) };
-            buffer[0] = combined;
-            buffer[1] = index * 8;
+            let cache = property_cache_location as *const AtomicUsize;
+            unsafe {
+                // Publish the key last. A concurrent invalidation or feedback
+                // snapshot can never pair a new key with the previous offset.
+                (*cache.add(1)).store(index * 8, Ordering::Relaxed);
+                (*cache).store(combined, Ordering::Release);
+            }
         }
     }
     result
@@ -349,10 +353,12 @@ pub extern "C" fn write_field(
     if layout_version == current_version {
         let raw_header = unsafe { *(heap_obj.untagged() as *const usize) };
         let combined = raw_header & 0x00FFFFFFFF0000F0;
-        let buffer = unsafe { from_raw_parts_mut(property_cache_location as *mut usize, 3) };
-        buffer[0] = combined;
-        buffer[1] = index * 8;
-        buffer[2] = 1; // is_mutable = true
+        let cache = property_cache_location as *const AtomicUsize;
+        unsafe {
+            (*cache.add(1)).store(index * 8, Ordering::Relaxed);
+            (*cache.add(2)).store(1, Ordering::Relaxed);
+            (*cache).store(combined, Ordering::Release);
+        }
     }
     BuiltInTypes::null_value() as usize
 }
