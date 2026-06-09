@@ -3527,50 +3527,42 @@ pub(crate) fn cached_thread_global_ptr() -> *mut ThreadGlobal {
 
 thread_local! {
     /// Set while this thread is applying staged tier-2 installs
-    /// (`apply_pending_installs`). That drain runs *inside* a stop-the-world —
-    /// every other mutator is parked and the heap has just been collected — and
-    /// it allocates (`upsert_function` -> `create_function_value` builds the
-    /// first-class function value, the representation every redefinition uses).
+    /// (`apply_pending_installs`), which runs inside a stop-the-world.
     ///
-    /// While this flag is set, allocation must *grow* rather than *collect*: a
-    /// re-entrant collection here is both unsafe and pointless.
-    ///   - Unsafe: the drain holds `install_apply_lock` (and, on the multi-
-    ///     thread path, `gc_lock` + `is_paused`). A nested `gc_impl` would
-    ///     re-lock `install_apply_lock` (self-deadlock), or `try_lock(gc_lock)`
-    ///     -> `__pause` and park the very coordinator the world is waiting on
-    ///     (a second self-deadlock).
-    ///   - Pointless: the enclosing collection already ran, so the heap is
-    ///     fresh; the drain's small allocations fit, and if they don't the
-    ///     allocator grows. We can't safely defer them out of the STW either —
-    ///     a running mutator doing `create_function_value` concurrently would
-    ///     race the table/string-pool mutations the drain performs.
+    /// A tier-2 install recompiles a function to *semantically identical*,
+    /// faster code. So `upsert_function` rebinds the function value **in place**
+    /// in this case (`rebind_installed_function`): update the existing
+    /// first-class function value's code pointer instead of allocating a fresh
+    /// struct. That keeps the install path free of Beagle-heap allocation — so
+    /// it cannot re-enter the collector and self-deadlock on `install_apply_lock`
+    /// / `gc_lock` — and it also means values already captured from the binding
+    /// pick up the optimized code.
     ///
-    /// Enforced at the universal collection choke point: `Runtime::gc_impl`
-    /// returns immediately when this is set, so every allocation path is
-    /// covered uniformly.
-    static IN_INSTALL_DRAIN: Cell<bool> = const { Cell::new(false) };
+    /// A *normal* redefinition (this flag clear) keeps allocating a fresh struct,
+    /// preserving capture-by-value semantics: a value captured before the
+    /// redefinition must keep seeing the old definition.
+    static APPLYING_TIER2_INSTALL: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Whether this thread is inside the STW install drain (see `IN_INSTALL_DRAIN`).
-/// When true, `gc_impl` is a no-op and allocation grows instead of collecting.
-fn in_install_drain() -> bool {
-    IN_INSTALL_DRAIN.with(|c| c.get())
+/// Whether this thread is applying a tier-2 install (see `APPLYING_TIER2_INSTALL`).
+fn applying_tier2_install() -> bool {
+    APPLYING_TIER2_INSTALL.with(|c| c.get())
 }
 
-/// RAII guard marking the STW install drain on the current thread, restoring
+/// RAII guard marking the tier-2 install drain on the current thread, restoring
 /// the previous state on drop (so it nests correctly).
-struct InstallDrainGuard(bool);
+struct Tier2InstallGuard(bool);
 
-impl InstallDrainGuard {
+impl Tier2InstallGuard {
     fn new() -> Self {
-        InstallDrainGuard(IN_INSTALL_DRAIN.with(|c| c.replace(true)))
+        Tier2InstallGuard(APPLYING_TIER2_INSTALL.with(|c| c.replace(true)))
     }
 }
 
-impl Drop for InstallDrainGuard {
+impl Drop for Tier2InstallGuard {
     fn drop(&mut self) {
         let prev = self.0;
-        IN_INSTALL_DRAIN.with(|c| c.set(prev));
+        APPLYING_TIER2_INSTALL.with(|c| c.set(prev));
     }
 }
 
@@ -4063,6 +4055,19 @@ impl NamespaceManager {
         namespace.cell_addrs.push(cell);
         debug_assert_eq!(namespace.ids.len(), namespace.cell_addrs.len());
         namespace.ids.len() - 1
+    }
+
+    /// Read the value currently bound to `name` in the current namespace, or
+    /// `None` if it isn't bound. Mirrors `add_binding`'s slot resolution, so a
+    /// caller sees exactly the cell `add_binding` would write.
+    fn read_current_binding(&self, name: &str) -> Option<usize> {
+        let namespace = self
+            .get_current_namespace()
+            .lock()
+            .expect("Failed to lock namespace in read_current_binding - this is a fatal error");
+        let slot = namespace.ids.iter().position(|n| n == name)?;
+        let cell = namespace.cell_addrs[slot];
+        Some(unsafe { *(cell as *const usize) })
     }
 
     /// Absolute address of the storage cell for `(namespace_id, slot)`, or
@@ -5744,16 +5749,16 @@ impl Runtime {
     }
 
     pub fn gc_impl(&mut self, frame_pointer: usize) {
-        // Collection choke point. If this thread is inside the STW install
-        // drain, allocation must grow rather than collect — a re-entrant
-        // collection here self-deadlocks (on `install_apply_lock`, and on the
-        // multi-thread path on `gc_lock` via `__pause`) and is pointless
-        // anyway, since the enclosing collection already ran. See
-        // `IN_INSTALL_DRAIN`. Returning here turns the forced/needed collection
-        // on the drain's allocation path into a grow-or-bump.
-        if in_install_drain() {
-            return;
-        }
+        // The tier-2 install drain must never allocate Beagle heap: it runs
+        // inside this collector holding `install_apply_lock` (and, on the
+        // multi-thread path, `gc_lock` + `is_paused`), so a re-entrant
+        // collection here would self-deadlock. `rebind_installed_function`
+        // keeps the drain allocation-free; this catches any regression loudly
+        // instead of as a hang.
+        debug_assert!(
+            !applying_tier2_install(),
+            "tier-2 install drain must not allocate Beagle heap (would re-enter the collector)"
+        );
 
         // Save the frame pointer so that any nested __pause calls use the correct address.
         crate::builtins::save_frame_pointer(frame_pointer);
@@ -6140,12 +6145,12 @@ impl Runtime {
     /// a `stop_world_and_apply_installs` coordinator or from the GC rendezvous.
     /// Clears `installs_ready` first so a racing trigger sees an empty queue.
     pub fn apply_pending_installs(&mut self) {
-        // Mark the STW install drain for this thread: `upsert_function` ->
-        // `create_function_value` allocates, and that allocation must grow
-        // rather than collect — a re-entrant collection here self-deadlocks on
-        // `install_apply_lock` (and on `gc_lock` on the multi-thread path).
-        // See `IN_INSTALL_DRAIN` for the full invariant.
-        let _install_drain = InstallDrainGuard::new();
+        // Mark this thread as applying tier-2 installs so `upsert_function`
+        // rebinds the function value in place (non-allocating) instead of
+        // allocating a fresh struct. This keeps the drain free of Beagle-heap
+        // allocation, so it cannot re-enter the collector and self-deadlock.
+        // See `APPLYING_TIER2_INSTALL`.
+        let _tier2_install = Tier2InstallGuard::new();
 
         // Raw self pointer so we can call `&mut self` upserts while holding the
         // `install_apply_lock` guard (which borrows a field of self). Captured
@@ -6680,6 +6685,39 @@ impl Runtime {
         heap_object.write_field(0, function);
 
         Ok(heap_pointer)
+    }
+
+    /// Rebind `name` to tier-2-recompiled code **without allocating**.
+    ///
+    /// Tier-2 installs produce semantically-identical, faster code, so we update
+    /// the *existing* first-class function value in place — its code pointer
+    /// (field 0) — rather than allocating a new struct. Two consequences:
+    ///   - values already captured from this binding now run the optimized code
+    ///     (the call/apply/reflect paths all read field 0 fresh on every use);
+    ///   - the install path performs no Beagle-heap allocation, so it cannot
+    ///     re-enter the collector and self-deadlock (the reason this is safe to
+    ///     call inside the stop-the-world install drain).
+    ///
+    /// If the binding isn't a function-value struct yet (a freshly-defined
+    /// function is bound as a raw `Function`-tagged pointer until its first
+    /// redefinition), bind the `Function`-tagged pointer — also non-allocating.
+    fn rebind_installed_function(&mut self, name: &str, function_pointer: usize) {
+        if let Some(current) = self.namespaces.read_current_binding(name) {
+            if BuiltInTypes::get_kind(current) == BuiltInTypes::HeapObject {
+                let obj = HeapObject::from_tagged(current);
+                if obj.get_type_id() == 0 && obj.get_struct_id() == self.function_struct_id {
+                    // Field 0 is an Int-tagged (non-pointer) code pointer, so no
+                    // write barrier is needed. Reusing the same object leaves the
+                    // binding cell unchanged.
+                    let int_tagged_fn_ptr =
+                        BuiltInTypes::Int.tag(function_pointer as isize) as usize;
+                    obj.write_field(0, int_tagged_fn_ptr);
+                    return;
+                }
+            }
+        }
+        let tagged_fn = BuiltInTypes::Function.tag(function_pointer as isize) as usize;
+        self.add_binding(name, tagged_fn);
     }
 
     /// Create a proper function object (HeapObject struct) from a raw function pointer.
@@ -8773,9 +8811,15 @@ impl Runtime {
                     if disk_location.is_some() {
                         self.functions[index].disk_location = disk_location.clone();
                     }
-                    // Create a function object if we have a stack (main thread).
-                    // On the compiler thread, fall back to Function-tagged pointer.
-                    if let Some(stack_pointer) = self.try_get_stack_base() {
+                    if applying_tier2_install() {
+                        // Tier-2 install: recompiled, semantically-identical
+                        // code. Rebind in place (non-allocating) so the drain
+                        // can't re-enter the collector, and so values already
+                        // captured from the binding pick up the faster code.
+                        self.rebind_installed_function(n, function_pointer);
+                    } else if let Some(stack_pointer) = self.try_get_stack_base() {
+                        // Normal redefinition on a stack-bearing thread: a fresh
+                        // struct, preserving capture-by-value semantics.
                         let fn_obj = self
                             .create_function_value(
                                 stack_pointer,
@@ -8786,6 +8830,7 @@ impl Runtime {
                             .expect("Failed to create function value");
                         self.add_binding(n, fn_obj);
                     } else {
+                        // Compiler thread (no stack): Function-tagged pointer.
                         let tagged_fn =
                             BuiltInTypes::Function.tag(function_pointer as isize) as usize;
                         self.add_binding(n, tagged_fn);
