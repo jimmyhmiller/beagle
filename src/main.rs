@@ -1643,11 +1643,51 @@ fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
             cmd.arg("--update-snapshots");
         }
 
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
         let test_start = std::time::Instant::now();
-        let output = cmd.output()?;
+        let mut child = cmd.spawn()?;
+        let stdout_handle = child.stdout.take().map(spawn_pipe_reader);
+        let stderr_handle = child.stderr.take().map(spawn_pipe_reader);
+        let maybe_status = wait_with_optional_timeout(&mut child, test_process_timeout())?;
+        let stdout = stdout_handle
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default();
+        let stderr = stderr_handle
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default();
         let duration_ms = test_start.elapsed().as_millis() as u64;
 
-        if output.status.success() {
+        let status = match maybe_status {
+            Some(status) => status,
+            None => {
+                // Deadlocked example (e.g. socket/STW race): killed so it can't
+                // pin CI at the job ceiling. Report as a failure naming the file.
+                println!("  FAIL  {} (timed out)", file_str);
+                let message = format!(
+                    "Test timed out after {}ms and was killed: {}\n\nstdout:\n{}\n\nstderr:\n{}",
+                    duration_ms,
+                    file_str,
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr),
+                );
+                for line in message.lines() {
+                    println!("        {}", line);
+                }
+                failed += 1;
+                ctrf_tests.push(CtrfTest {
+                    name: file_str.to_string(),
+                    status: "failed",
+                    duration_ms,
+                    file_path: file_str.to_string(),
+                    message: Some(message),
+                });
+                continue;
+            }
+        };
+
+        if status.success() {
             println!("  pass  {}", file_str);
             passed += 1;
             ctrf_tests.push(CtrfTest {
@@ -1659,12 +1699,7 @@ fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
             });
         } else {
             println!("  FAIL  {}", file_str);
-            let failure = format_test_process_failure(
-                file_str,
-                output.status,
-                &output.stdout,
-                &output.stderr,
-            );
+            let failure = format_test_process_failure(file_str, status, &stdout, &stderr);
             for line in failure.lines() {
                 println!("        {}", line);
             }
@@ -1818,6 +1853,54 @@ fn format_test_process_failure(
     message
 }
 
+/// Per-test-process timeout. A single example that deadlocks (e.g. a socket/STW
+/// race) must never pin CI at the multi-hour job ceiling: kill it and surface a
+/// hang naming the file. Override with `BEAGLE_TEST_TIMEOUT_SECS` (0 disables).
+fn test_process_timeout() -> Option<std::time::Duration> {
+    let secs = std::env::var("BEAGLE_TEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(300);
+    (secs != 0).then(|| std::time::Duration::from_secs(secs))
+}
+
+/// Wait for `child`, killing and reaping it if `timeout` elapses. Returns
+/// `Ok(None)` on timeout (the child has been killed), `Ok(Some(status))`
+/// otherwise. With `timeout == None`, waits indefinitely.
+fn wait_with_optional_timeout(
+    child: &mut std::process::Child,
+    timeout: Option<std::time::Duration>,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let timeout = match timeout {
+        Some(t) => t,
+        None => return child.wait().map(Some),
+    };
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Drain a child pipe to EOF on a background thread so a full pipe buffer can't
+/// deadlock the parent's wait.
+fn spawn_pipe_reader<R: std::io::Read + Send + 'static>(
+    mut reader: R,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    })
+}
+
 #[cfg(test)]
 fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     let mut test_files = discover_test_files(std::path::Path::new("resources"))?;
@@ -1904,7 +1987,7 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                 buf
             })
         });
-        let output_status = child.wait()?;
+        let maybe_status = wait_with_optional_timeout(&mut child, test_process_timeout())?;
         let stdout = stdout_handle
             .map(|h| h.join().unwrap_or_default())
             .unwrap_or_default();
@@ -1914,6 +1997,26 @@ fn run_all_tests(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
         let _ = monitor.join();
         let elapsed = start.elapsed();
         let rss = peak_rss_kb.load(std::sync::atomic::Ordering::Relaxed);
+
+        let output_status = match maybe_status {
+            Some(status) => status,
+            None => {
+                eprintln!(
+                    "[test] HANG {} (killed after {:.2}s, peak_rss={}KB)",
+                    path,
+                    elapsed.as_secs_f64(),
+                    rss
+                );
+                return Err(format!(
+                    "Test timed out after {:.0}s and was killed: {}\n\nstdout:\n{}\n\nstderr:\n{}",
+                    elapsed.as_secs_f64(),
+                    path,
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr),
+                )
+                .into());
+            }
+        };
 
         if !output_status.success() {
             eprintln!(
