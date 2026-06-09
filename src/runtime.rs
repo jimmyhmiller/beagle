@@ -3526,34 +3526,51 @@ pub(crate) fn cached_thread_global_ptr() -> *mut ThreadGlobal {
 }
 
 thread_local! {
-    /// Set while this thread is draining staged tier-2 installs
-    /// (`apply_pending_installs`). Allocations performed during the drain
-    /// (e.g. `create_function_value`) must not trigger a nested collection:
-    /// see `gc_suppressed` / `GcSuppressGuard` and the early return in
-    /// `Runtime::gc_impl`.
-    static GC_SUPPRESSED: Cell<bool> = const { Cell::new(false) };
+    /// Set while this thread is applying staged tier-2 installs
+    /// (`apply_pending_installs`). That drain runs *inside* a stop-the-world —
+    /// every other mutator is parked and the heap has just been collected — and
+    /// it allocates (`upsert_function` -> `create_function_value` builds the
+    /// first-class function value, the representation every redefinition uses).
+    ///
+    /// While this flag is set, allocation must *grow* rather than *collect*: a
+    /// re-entrant collection here is both unsafe and pointless.
+    ///   - Unsafe: the drain holds `install_apply_lock` (and, on the multi-
+    ///     thread path, `gc_lock` + `is_paused`). A nested `gc_impl` would
+    ///     re-lock `install_apply_lock` (self-deadlock), or `try_lock(gc_lock)`
+    ///     -> `__pause` and park the very coordinator the world is waiting on
+    ///     (a second self-deadlock).
+    ///   - Pointless: the enclosing collection already ran, so the heap is
+    ///     fresh; the drain's small allocations fit, and if they don't the
+    ///     allocator grows. We can't safely defer them out of the STW either —
+    ///     a running mutator doing `create_function_value` concurrently would
+    ///     race the table/string-pool mutations the drain performs.
+    ///
+    /// Enforced at the universal collection choke point: `Runtime::gc_impl`
+    /// returns immediately when this is set, so every allocation path is
+    /// covered uniformly.
+    static IN_INSTALL_DRAIN: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Whether collection is suppressed on the current thread (we are inside an
-/// install drain). When true, `gc_impl` is a no-op.
-fn gc_suppressed() -> bool {
-    GC_SUPPRESSED.with(|c| c.get())
+/// Whether this thread is inside the STW install drain (see `IN_INSTALL_DRAIN`).
+/// When true, `gc_impl` is a no-op and allocation grows instead of collecting.
+fn in_install_drain() -> bool {
+    IN_INSTALL_DRAIN.with(|c| c.get())
 }
 
-/// RAII guard that suppresses collection on the current thread for its
-/// lifetime, restoring the previous state on drop (so it nests correctly).
-struct GcSuppressGuard(bool);
+/// RAII guard marking the STW install drain on the current thread, restoring
+/// the previous state on drop (so it nests correctly).
+struct InstallDrainGuard(bool);
 
-impl GcSuppressGuard {
+impl InstallDrainGuard {
     fn new() -> Self {
-        GcSuppressGuard(GC_SUPPRESSED.with(|c| c.replace(true)))
+        InstallDrainGuard(IN_INSTALL_DRAIN.with(|c| c.replace(true)))
     }
 }
 
-impl Drop for GcSuppressGuard {
+impl Drop for InstallDrainGuard {
     fn drop(&mut self) {
         let prev = self.0;
-        GC_SUPPRESSED.with(|c| c.set(prev));
+        IN_INSTALL_DRAIN.with(|c| c.set(prev));
     }
 }
 
@@ -5727,15 +5744,14 @@ impl Runtime {
     }
 
     pub fn gc_impl(&mut self, frame_pointer: usize) {
-        // Re-entrancy guard. An allocation performed while draining staged
-        // tier-2 installs (`apply_pending_installs`) must not trigger a nested
-        // collection: under `gc-always` that nested GC re-enters
-        // `apply_pending_installs` and deadlocks on `install_apply_lock`, and it
-        // could also reclaim the function value that is mid-construction and not
-        // yet rooted. The outer collection has already completed before the
-        // drain begins, so skipping here is safe — the drain's small internal
-        // allocations just bump the frontier (growing the heap if needed).
-        if gc_suppressed() {
+        // Collection choke point. If this thread is inside the STW install
+        // drain, allocation must grow rather than collect — a re-entrant
+        // collection here self-deadlocks (on `install_apply_lock`, and on the
+        // multi-thread path on `gc_lock` via `__pause`) and is pointless
+        // anyway, since the enclosing collection already ran. See
+        // `IN_INSTALL_DRAIN`. Returning here turns the forced/needed collection
+        // on the drain's allocation path into a grow-or-bump.
+        if in_install_drain() {
             return;
         }
 
@@ -6124,11 +6140,12 @@ impl Runtime {
     /// a `stop_world_and_apply_installs` coordinator or from the GC rendezvous.
     /// Clears `installs_ready` first so a racing trigger sees an empty queue.
     pub fn apply_pending_installs(&mut self) {
-        // Suppress collection for the whole drain: `upsert_function` ->
-        // `create_function_value` allocates, and under `gc-always` that
-        // allocation would otherwise force a nested GC that re-enters this
-        // function and deadlocks on `install_apply_lock`. See `gc_impl`.
-        let _gc_suppress = GcSuppressGuard::new();
+        // Mark the STW install drain for this thread: `upsert_function` ->
+        // `create_function_value` allocates, and that allocation must grow
+        // rather than collect — a re-entrant collection here self-deadlocks on
+        // `install_apply_lock` (and on `gc_lock` on the multi-thread path).
+        // See `IN_INSTALL_DRAIN` for the full invariant.
+        let _install_drain = InstallDrainGuard::new();
 
         // Raw self pointer so we can call `&mut self` upserts while holding the
         // `install_apply_lock` guard (which borrows a field of self). Captured
