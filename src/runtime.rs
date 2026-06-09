@@ -3525,6 +3525,38 @@ pub(crate) fn cached_thread_global_ptr() -> *mut ThreadGlobal {
     CACHED_THREAD_GLOBAL.with(|c| c.get())
 }
 
+thread_local! {
+    /// Set while this thread is draining staged tier-2 installs
+    /// (`apply_pending_installs`). Allocations performed during the drain
+    /// (e.g. `create_function_value`) must not trigger a nested collection:
+    /// see `gc_suppressed` / `GcSuppressGuard` and the early return in
+    /// `Runtime::gc_impl`.
+    static GC_SUPPRESSED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether collection is suppressed on the current thread (we are inside an
+/// install drain). When true, `gc_impl` is a no-op.
+fn gc_suppressed() -> bool {
+    GC_SUPPRESSED.with(|c| c.get())
+}
+
+/// RAII guard that suppresses collection on the current thread for its
+/// lifetime, restoring the previous state on drop (so it nests correctly).
+struct GcSuppressGuard(bool);
+
+impl GcSuppressGuard {
+    fn new() -> Self {
+        GcSuppressGuard(GC_SUPPRESSED.with(|c| c.replace(true)))
+    }
+}
+
+impl Drop for GcSuppressGuard {
+    fn drop(&mut self) {
+        let prev = self.0;
+        GC_SUPPRESSED.with(|c| c.set(prev));
+    }
+}
+
 /// Non-inline wrapper exposed as a stable function pointer for JIT trampolines.
 /// Emitters embed the address of this symbol as an immediate and call it with
 /// `blr` to set x28 = MutatorState pointer on Rust → Beagle boundaries.
@@ -5695,6 +5727,18 @@ impl Runtime {
     }
 
     pub fn gc_impl(&mut self, frame_pointer: usize) {
+        // Re-entrancy guard. An allocation performed while draining staged
+        // tier-2 installs (`apply_pending_installs`) must not trigger a nested
+        // collection: under `gc-always` that nested GC re-enters
+        // `apply_pending_installs` and deadlocks on `install_apply_lock`, and it
+        // could also reclaim the function value that is mid-construction and not
+        // yet rooted. The outer collection has already completed before the
+        // drain begins, so skipping here is safe — the drain's small internal
+        // allocations just bump the frontier (growing the heap if needed).
+        if gc_suppressed() {
+            return;
+        }
+
         // Save the frame pointer so that any nested __pause calls use the correct address.
         crate::builtins::save_frame_pointer(frame_pointer);
 
@@ -6080,6 +6124,12 @@ impl Runtime {
     /// a `stop_world_and_apply_installs` coordinator or from the GC rendezvous.
     /// Clears `installs_ready` first so a racing trigger sees an empty queue.
     pub fn apply_pending_installs(&mut self) {
+        // Suppress collection for the whole drain: `upsert_function` ->
+        // `create_function_value` allocates, and under `gc-always` that
+        // allocation would otherwise force a nested GC that re-enters this
+        // function and deadlocks on `install_apply_lock`. See `gc_impl`.
+        let _gc_suppress = GcSuppressGuard::new();
+
         // Raw self pointer so we can call `&mut self` upserts while holding the
         // `install_apply_lock` guard (which borrows a field of self). Captured
         // before the lock so the cast itself doesn't conflict with the guard.
