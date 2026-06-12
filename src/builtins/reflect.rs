@@ -1886,7 +1886,7 @@ fn perform_append(
 /// function — the trampoline reloads it before branching into JIT code.
 fn recompile_fragment_and_run(
     runtime: &mut Runtime,
-    stack_pointer: usize,
+    _stack_pointer: usize,
     fragment: &str,
     namespace: &str,
     file: &str,
@@ -1910,7 +1910,17 @@ fn recompile_fragment_and_run(
             .expect("save_volatile_registers0 pointer not available");
         let save_vr0: extern "C" fn(usize) -> usize =
             unsafe { std::mem::transmute::<_, _>(save_vr0_ptr) };
+        // The nested top-level run overwrites the per-thread GC context
+        // with its own (soon-dead) frames. Restore the enclosing
+        // builtin's context afterward so a later throw from this same
+        // builtin invocation (e.g. a failed splice for the NEXT def in
+        // a multi-def `reflect/persist`) walks live stack, not the
+        // recompile's reused frames. Without this, a failing persist
+        // aborted the whole process with "shift without an enclosing
+        // reset" instead of raising a catchable error.
+        let saved_ctx = crate::builtins::save_current_gc_context();
         save_vr0(top_level_ptr);
+        crate::builtins::restore_gc_context(saved_ctx);
     }
     Ok(())
 }

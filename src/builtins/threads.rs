@@ -454,7 +454,14 @@ pub extern "C" fn eval(stack_pointer: usize, frame_pointer: usize, code: usize) 
         .get_pointer(shim_entry)
         .expect("apply_call_0 has no code pointer") as usize;
     let shim: extern "C" fn(usize) -> usize = unsafe { transmute(shim_ptr) };
-    shim(result as usize)
+    // Restore this builtin's GC context after the nested Beagle run —
+    // the eval'd code's builtins overwrite it with frames that are dead
+    // once the shim returns, and a subsequent throw/GC in our Beagle
+    // caller's builtin frame would walk reused stack memory.
+    let saved_ctx = crate::builtins::save_current_gc_context();
+    let eval_result = shim(result as usize);
+    crate::builtins::restore_gc_context(saved_ctx);
+    eval_result
 }
 
 pub extern "C" fn eval_in_ns(
@@ -530,8 +537,23 @@ pub extern "C" fn eval_in_ns(
     if result == 0 {
         return BuiltInTypes::null_value() as usize;
     }
-    let f: fn() -> usize = unsafe { transmute(result) };
-    f()
+    // Route through apply_call_0 so X28 (MutatorState) is valid on
+    // Beagle-side entry — same fix as `eval` above; a direct
+    // `transmute + call` faults if Rust used X28 as scratch.
+    let runtime = get_runtime().get();
+    let shim_entry = runtime
+        .get_function_by_name("beagle.builtin/apply_call_0")
+        .expect("apply_call_0 trampoline not compiled");
+    let shim_ptr = runtime
+        .get_pointer(shim_entry)
+        .expect("apply_call_0 has no code pointer") as usize;
+    let shim: extern "C" fn(usize) -> usize = unsafe { transmute(shim_ptr) };
+    // Restore this builtin's GC context after the nested Beagle run
+    // (same staleness hazard as `eval` above).
+    let saved_ctx = crate::builtins::save_current_gc_context();
+    let eval_result = shim(result as usize);
+    crate::builtins::restore_gc_context(saved_ctx);
+    eval_result
 }
 
 pub extern "C" fn sleep(_stack_pointer: usize, frame_pointer: usize, time: usize) -> usize {

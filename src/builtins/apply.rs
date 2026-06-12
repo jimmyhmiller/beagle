@@ -43,10 +43,21 @@ unsafe fn call_shim_padded(shim_ptr: usize, params: [usize; SHIM_MAX_PARAMS]) ->
         usize,
     ) -> usize;
     let f: ShimFn = unsafe { std::mem::transmute(shim_ptr) };
-    f(
+    // Every shim-routed call re-enters Beagle, whose builtins overwrite
+    // the per-thread GC context (saved FP/SP/return-addr) with frames
+    // that are dead once the shim returns. Restore the enclosing
+    // context so a later throw or GC from the same Rust frame walks
+    // live stack — the same staleness that `call_fn_0/1/2` and
+    // `call_beagle_fn_ptr` already guard against explicitly. If the
+    // shim never returns (continuation jump), the skip is harmless:
+    // that stack is abandoned wholesale.
+    let saved_ctx = crate::builtins::save_current_gc_context();
+    let result = f(
         params[0], params[1], params[2], params[3], params[4], params[5], params[6], params[7],
         params[8], params[9], params[10], params[11],
-    )
+    );
+    crate::builtins::restore_gc_context(saved_ctx);
+    result
 }
 
 /// Call a JIT-compiled Beagle function from Rust, routing through the
