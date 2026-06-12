@@ -1,0 +1,50 @@
+namespace contextual_handle_test
+
+use beagle.effect as effect
+
+// 1. Top-level fn named handle — previously a parse error.
+fn handle(x) {
+    x * 2
+}
+
+// 2. The block form still works.
+enum Ping {
+    Ask {}
+}
+
+struct H {}
+
+extend H with effect/Handler(Ping) {
+    fn handle(self, op, resume) {
+        match op {
+            Ping.Ask {} => resume("from-handler")
+        }
+    }
+}
+
+fn main() {
+    // Call the top-level fn — previously misparsed.
+    println(handle(21))
+
+    // Bare reference as a value.
+    let f = handle
+    println(f(5))
+
+    // Local binding named handle.
+    let handle = fn(x) { x + 100 }
+    println(handle(1))
+
+    // Keyword form, full shape — still the effect block.
+    let h = H {}
+    let r = handle effect/Handler(Ping) with h {
+        perform Ping.Ask {}
+    }
+    println(r)
+    "done"
+}
+
+// @beagle.core.snapshot
+// 42
+// 10
+// 101
+// from-handler

@@ -136,10 +136,12 @@ impl From<std::io::Error> for ParseError {
 pub type ParseResult<T> = Result<T, ParseError>;
 
 /// Build a `ParseError` describing an attempt to use a reserved keyword as a
-/// function name (e.g. `fn handle(...)` at the top level). Reserved keywords
+/// function name (e.g. `fn perform(...)` at the top level). Reserved keywords
 /// have special parse behavior at call sites, so allowing them as function
 /// names silently misparses calls — this error tells the user exactly what
-/// happened and how to fix it.
+/// happened and how to fix it. (`handle` is no longer in this set: it is a
+/// contextual keyword — the block form requires the full
+/// `handle <Protocol> [(...)] with` shape, so the name is unambiguous.)
 fn reserved_keyword_fn_name_error(
     keyword: &str,
     used_for: &str,
@@ -1625,18 +1627,60 @@ impl Parser {
                 }
             }
             Token::Handle => {
-                // Check if this looks like a handle statement: `handle Protocol(...) with ...`
-                // Handle statements always start with `handle <Atom>`
-                // We need to peek ahead: consume handle, skip whitespace, check next token, restore
+                // `handle` is a CONTEXTUAL keyword: it begins the
+                // effect-handler block form only when the full shape
+                // `handle <Protocol> [( ...type args... )] with` follows.
+                // Anywhere else — `handle(x)` calls, `fn handle` defs,
+                // bare references — it is an ordinary identifier. The
+                // `with` requirement makes false positives impossible:
+                // `handle Foo` is not legal call/identifier syntax, so
+                // only the block form ever matches.
                 let saved_position = self.position;
                 self.consume(); // consume 'handle'
-                let next = self.peek_next_non_whitespace();
+                self.skip_whitespace();
+                let mut is_handle_block = false;
+                if matches!(self.current_token(), Token::Atom(_)) {
+                    self.consume(); // protocol name
+                    self.skip_whitespace();
+                    if matches!(self.current_token(), Token::OpenParen) {
+                        // Skip balanced type-arg parens.
+                        let mut depth = 0usize;
+                        while !self.at_end() {
+                            match self.current_token() {
+                                Token::OpenParen => {
+                                    depth += 1;
+                                    self.consume();
+                                }
+                                Token::CloseParen => {
+                                    depth = depth.saturating_sub(1);
+                                    self.consume();
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                _ => {
+                                    self.consume();
+                                }
+                            }
+                        }
+                        self.skip_whitespace();
+                    }
+                    is_handle_block = matches!(self.current_token(), Token::With);
+                }
                 self.position = saved_position; // restore
-                if matches!(next, Token::Atom(_)) && struct_creation_allowed {
+                if is_handle_block && struct_creation_allowed {
                     Ok(Some(self.parse_handle()?))
                 } else {
+                    // Ordinary identifier — mirror the Token::Atom path
+                    // so `handle(x)` parses as a function call.
+                    let start_position = self.position;
                     self.consume();
-                    Ok(Some(Ast::Identifier("handle".to_string(), self.position)))
+                    self.skip_spaces();
+                    if self.is_open_paren() {
+                        Ok(Some(self.parse_call("handle".to_string(), start_position)?))
+                    } else {
+                        Ok(Some(Ast::Identifier("handle".to_string(), self.position)))
+                    }
                 }
             }
             Token::Future => {
@@ -2084,13 +2128,10 @@ impl Parser {
                 )
             }
             Token::Handle => {
-                if !allow_reserved_keyword_names {
-                    return Err(reserved_keyword_fn_name_error(
-                        "handle",
-                        "effect handler blocks (`handle Protocol(...) with ... { ... }`)",
-                        self.current_source_location(),
-                    ));
-                }
+                // `handle` is contextual: the block form requires the
+                // full `handle <Protocol> [(...)] with` shape, so a
+                // function named `handle` is unambiguous both here and
+                // at call sites (`handle(x)` parses as a call).
                 self.move_to_next_non_whitespace();
                 Some("handle".to_string())
             }
