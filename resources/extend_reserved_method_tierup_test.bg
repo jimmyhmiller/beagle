@@ -1,0 +1,48 @@
+namespace extend_reserved_method_tierup_test
+
+// Regression: `perform` is a reserved keyword at the top level but a
+// valid method name inside protocol/extend blocks. The stored source
+// fragment for `Runner_perform` reads `fn perform(...)`, which a plain
+// top-level re-parse rejects — so tier-up could never specialize it
+// (and, historically, the parse failure leaked the compiler's current
+// namespace). Fragments now re-parse under their original syntactic
+// context (FragmentContext::ExtendMethod). The body has property +
+// arithmetic feedback sites so tier-up actually attempts the recompile;
+// @tier2-rerun makes the tier-2 harness verify the specialized method.
+
+struct Runner {
+    base
+}
+
+protocol Task {
+    fn perform(self, n)
+}
+
+extend Runner with Task {
+    fn perform(self, n) {
+        self.base + n * 2
+    }
+}
+
+// `perform(r, 3)` at a call site would parse as the effect form, so the
+// dispatcher is passed as a VALUE (in argument position `perform` is an
+// ordinary identifier) and invoked through a parameter.
+fn call2(f, a, b) {
+    f(a, b)
+}
+
+// @tier2-rerun
+fn main() {
+    let r = Runner { base: 10 }
+    let mut total = 0
+    let mut i = 0
+    while i < 2000 {
+        total = total + call2(perform, r, 3)
+        i = i + 1
+    }
+    println(total)
+    "done"
+}
+
+// @beagle.core.snapshot
+// 32000

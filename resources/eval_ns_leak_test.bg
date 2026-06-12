@@ -1,0 +1,32 @@
+namespace eval_ns_leak_test
+
+// Regression: a PARSE error inside eval-in-ns (or any fragment compile
+// that switches namespace before parsing) used to leave the compiler's
+// current namespace permanently switched — every later eval then
+// compiled in the wrong namespace ("Namespace alias not found",
+// unresolvable locals). Surfaced by the live-coding fuzz harness: a
+// failed tier-up of beagle.async/ImplicitAsyncHandler_handle left the
+// compiler in beagle.async and broke all subsequent REPL evals.
+
+fn main() {
+    eval("fn probe() { 42 }")
+    println(eval("probe()"))
+
+    // Parse error AFTER eval-in-ns switched to beagle.core.
+    let r = try {
+        eval-in-ns("this is ((( not valid", "beagle.core")
+    } catch (e, resume) {
+        "caught"
+    }
+    println(r)
+
+    // Plain eval must still compile in THIS namespace, where probe lives.
+    let b = try { eval("probe()") } catch (e, resume) { "LEAKED" }
+    println(b)
+    "done"
+}
+
+// @beagle.core.snapshot
+// 42
+// caught
+// 42

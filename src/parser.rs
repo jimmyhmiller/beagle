@@ -1204,6 +1204,26 @@ fn test_tokenizer1() {
     assert_eq!(result.0[2], Token::Atom((6, 11)));
 }
 
+/// The syntactic context a source fragment originally appeared in.
+///
+/// Beagle's grammar is mildly context-sensitive: inside an
+/// `extend ... with ...` block, reserved words like `perform` are valid
+/// method names, while at the top level they are not. The runtime stores
+/// each definition's source as a standalone slice, so when the compiler
+/// re-parses one later (tier-up, OSR), it must parse it under the SAME
+/// rules as the place it came from. This enum is recorded per definition
+/// at first compile and handed back to the parser at re-parse time — it
+/// is NOT a general permissiveness knob; never set `ExtendMethod` for
+/// user-facing input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FragmentContext {
+    #[default]
+    TopLevel,
+    /// The fragment is a method body from an `extend ... with ...` block;
+    /// reserved words are valid as its `fn` name.
+    ExtendMethod,
+}
+
 pub struct Parser {
     file_name: String,
     source: String,
@@ -1221,6 +1241,9 @@ pub struct Parser {
     /// the start is extended backward to include any preceding `///` doc
     /// comment block. Populated by parse_function/parse_struct/parse_enum.
     definition_byte_ranges: std::collections::HashMap<(usize, usize), (usize, usize)>,
+    /// See [`FragmentContext`]. Set by the tier-up/OSR re-parse paths so a
+    /// stored fragment parses under the rules of its original location.
+    fragment_context: FragmentContext,
 }
 
 impl Parser {
@@ -1254,7 +1277,15 @@ impl Parser {
             token_byte_spans,
             pending_docstring: None,
             definition_byte_ranges: std::collections::HashMap::new(),
+            fragment_context: FragmentContext::TopLevel,
         })
+    }
+
+    /// Declare the syntactic context this parser's input came from. See
+    /// [`FragmentContext`] — only the compiler's fragment re-parse paths
+    /// (tier-up, OSR) should ever set this.
+    pub fn set_fragment_context(&mut self, context: FragmentContext) {
+        self.fragment_context = context;
     }
 
     pub fn get_token_byte_spans(&self) -> Vec<(usize, usize)> {
@@ -1530,7 +1561,13 @@ impl Parser {
 
     fn parse_atom(&mut self, struct_creation_allowed: bool) -> ParseResult<Option<Ast>> {
         match self.current_token() {
-            Token::Fn => Ok(Some(self.parse_function(false)?)),
+            Token::Fn => {
+                // Fragments re-parsed from an extend-block method body get
+                // extend-method name rules (reserved words like `perform`
+                // are valid method names there).
+                let allow_reserved = matches!(self.fragment_context, FragmentContext::ExtendMethod);
+                Ok(Some(self.parse_function(allow_reserved)?))
+            }
             Token::Loop => Ok(Some(self.parse_loop()?)),
             Token::While => Ok(Some(self.parse_while()?)),
             Token::Break => Ok(Some(self.parse_break()?)),

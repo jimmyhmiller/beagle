@@ -3020,6 +3020,14 @@ impl AstCompiler<'_> {
                             token_range: ast.token_range(),
                             docstring: None,
                         };
+                        // The stored source for this function is an
+                        // extend-method fragment; tier-up/OSR must
+                        // re-parse it under extend-block rules.
+                        self.compiler.mark_extend_method_fragment(format!(
+                            "{}/{}",
+                            self.compiler.current_namespace_name(),
+                            new_name
+                        ));
                         let compiled_fn_value = self.call_compile(&impl_function)?;
                         // Use the compiled function value directly instead of
                         // looking it up by name, which fails during deferred
@@ -3061,6 +3069,13 @@ impl AstCompiler<'_> {
                                 token_range: case.token_range,
                                 docstring: None,
                             };
+                            // Extend-method fragment — see the
+                            // single-arity branch above.
+                            self.compiler.mark_extend_method_fragment(format!(
+                                "{}/{}",
+                                self.compiler.current_namespace_name(),
+                                new_name
+                            ));
                             let compiled_fn_value = self.call_compile(&impl_function)?;
                             // Use the compiled function value directly instead of
                             // looking it up by name, which fails during deferred

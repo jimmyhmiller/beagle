@@ -1,0 +1,51 @@
+namespace effect_handle_tierup_test
+
+use beagle.effect as effect
+
+// Regression: extend-block methods are registered under mangled names
+// (`H_handle`) but their stored source still reads `fn handle(...)` —
+// and `handle` is a reserved keyword, so tier-up's standalone re-parse
+// of the fragment failed and the method could never specialize (and,
+// worse, the parse-error early-return leaked the namespace switch).
+// The body has property + arithmetic feedback sites so tier-up actually
+// attempts the recompile. The @tier2-rerun marker makes the tier-2
+// harness (BEAGLE_TEST_TIER2) verify the specialized handler produces
+// identical output.
+
+enum Ping {
+    Ask {}
+}
+
+struct H {
+    bias
+}
+
+extend H with effect/Handler(Ping) {
+    fn handle(self, op, resume) {
+        match op {
+            Ping.Ask {} => resume(self.bias + 3)
+        }
+    }
+}
+
+fn roundtrip(h) {
+    handle effect/Handler(Ping) with h {
+        perform Ping.Ask {}
+    }
+}
+
+// @tier2-rerun
+fn main() {
+    let h = H { bias: 4 }
+    let mut total = 0
+    let mut i = 0
+    while i < 2000 {
+        total = total + roundtrip(h)
+        i = i + 1
+    }
+    println(total)
+    "done"
+}
+
+// @beagle.core.snapshot
+// 14000

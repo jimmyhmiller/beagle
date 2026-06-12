@@ -416,6 +416,15 @@ pub struct Compiler {
     /// fire multiple times in races, and we don't want to recompile
     /// over and over.
     pub specialized_names: HashSet<String>,
+    /// Fully-qualified names of functions whose stored source fragment
+    /// came from an `extend ... with ...` method body. Beagle's grammar
+    /// is context-sensitive there (reserved words like `perform` are
+    /// valid method names inside extend blocks), so tier-up/OSR must
+    /// re-parse these fragments with `FragmentContext::ExtendMethod` —
+    /// a top-level re-parse would reject the name. Grows only; a stale
+    /// entry merely re-parses a fragment permissively, which cannot
+    /// change the meaning of valid code.
+    pub extend_method_fragments: HashSet<String>,
     /// Set transiently by `build_osr_variant` so the per-function compile can
     /// snapshot the target function's specialized IR + loop info for OSR
     /// continuation construction. `None` outside an OSR build.
@@ -483,6 +492,21 @@ fn rename_sole_top_level_function(program: &mut crate::ast::Ast, target: &str) {
     }
 }
 
+/// Parse a stored source fragment under the syntactic context it was
+/// originally defined in (see [`crate::parser::FragmentContext`]),
+/// returning the parser (for its token maps) alongside the AST. Shared
+/// by the tier-up and OSR recompile paths.
+fn parse_fragment(
+    source_file: &str,
+    source_text: &str,
+    context: crate::parser::FragmentContext,
+) -> Result<(Parser, crate::ast::Ast), Box<dyn Error>> {
+    let mut parser = Parser::new(source_file.to_string(), source_text.to_string())?;
+    parser.set_fragment_context(context);
+    let ast = parser.parse()?;
+    Ok((parser, ast))
+}
+
 impl Compiler {
     pub fn get_pause_atom(&self) -> usize {
         self.pause_atom_ptr.unwrap_or(0)
@@ -490,6 +514,46 @@ impl Compiler {
 
     pub fn set_pause_atom_ptr(&mut self, pointer: usize) {
         self.pause_atom_ptr = Some(pointer);
+    }
+
+    /// Run `f` with the current namespace switched to `ns_id`, restoring
+    /// the previous namespace on EVERY exit — including `?` early returns
+    /// inside `f`, which historically leaked the switch and poisoned all
+    /// later evals on the (shared) compiler thread. Any code that needs a
+    /// temporary namespace MUST go through this; never pair a bare
+    /// `set_current_namespace` with a manual restore.
+    fn with_namespace<R>(&mut self, ns_id: usize, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.current_namespace_id();
+        self.set_current_namespace(ns_id);
+        let result = f(self);
+        self.set_current_namespace(saved);
+        result
+    }
+
+    /// `with_namespace`, but `None` runs `f` in the current namespace.
+    fn with_namespace_opt<R>(&mut self, ns_id: Option<usize>, f: impl FnOnce(&mut Self) -> R) -> R {
+        match ns_id {
+            Some(id) => self.with_namespace(id, f),
+            None => f(self),
+        }
+    }
+
+    /// Record that `full_name`'s stored source fragment is an
+    /// extend-block method body, so later re-parses (tier-up, OSR) use
+    /// `FragmentContext::ExtendMethod`. Called during `Ast::Extend`
+    /// compilation for every method it registers.
+    pub fn mark_extend_method_fragment(&mut self, full_name: String) {
+        self.extend_method_fragments.insert(full_name);
+    }
+
+    /// The syntactic context `full_name`'s stored source fragment was
+    /// originally defined in.
+    fn fragment_context_for(&self, full_name: &str) -> crate::parser::FragmentContext {
+        if self.extend_method_fragments.contains(full_name) {
+            crate::parser::FragmentContext::ExtendMethod
+        } else {
+            crate::parser::FragmentContext::TopLevel
+        }
     }
 
     pub fn register_dynamic_var(&mut self, name: String, namespace_id: usize, slot: usize) {
@@ -570,20 +634,22 @@ impl Compiler {
         // Runtime recompile may redefine functions/structs/lets — drop any
         // tier-2 specializations so none keep a stale snapshot of the world.
         self.revert_all_specializations();
-        let saved_namespace_id = if let Some(ns_name) = namespace {
-            let current_id = self.current_namespace_id();
-            if let Some(ns_id) = self.get_namespace_id(ns_name) {
-                self.set_current_namespace(ns_id);
-                Some(current_id)
-            } else {
-                return Err(format!("Namespace '{}' not found", ns_name).into());
-            }
-        } else {
-            None
-        };
 
+        // Parse BEFORE switching namespaces. Parsing is namespace-independent,
+        // and a parse error propagating with `?` after the switch would leave
+        // the compiler's current namespace permanently switched — poisoning
+        // every later eval on the (shared) compiler thread.
         let mut parser = Parser::new(file_name.to_string(), string.to_string())?;
         let ast = parser.parse()?;
+
+        let ns_id = match namespace {
+            Some(ns_name) => match self.get_namespace_id(ns_name) {
+                Some(id) => Some(id),
+                None => return Err(format!("Namespace '{}' not found", ns_name).into()),
+            },
+            None => None,
+        };
+
         let token_line_column_map: Vec<(usize, usize)> = parser
             .get_token_line_column_map()
             .into_iter()
@@ -614,22 +680,21 @@ impl Compiler {
         };
         self.defer_function_installs = true;
 
-        let compile_result = self.compile_ast(
-            ast,
-            None,
-            file_name,
-            token_line_column_map,
-            padded_source,
-            token_byte_spans,
-            definition_byte_ranges,
-        );
+        let compile_result = self.with_namespace_opt(ns_id, |c| {
+            c.compile_ast(
+                ast,
+                None,
+                file_name,
+                token_line_column_map,
+                padded_source,
+                token_byte_spans,
+                definition_byte_ranges,
+            )
+        });
 
         let (top_level, diagnostics) = match compile_result {
             Ok(result) => result,
             Err(e) => {
-                if let Some(saved_id) = saved_namespace_id {
-                    self.set_current_namespace(saved_id);
-                }
                 self.deferred_updates.clear();
                 self.defer_function_installs = false;
                 let runtime = get_runtime().get_mut();
@@ -637,10 +702,6 @@ impl Compiler {
                 return Err(e);
             }
         };
-
-        if let Some(saved_id) = saved_namespace_id {
-            self.set_current_namespace(saved_id);
-        }
 
         if let Ok(mut store) = self.diagnostic_store.lock() {
             store.set_file_diagnostics(file_name.to_string(), diagnostics);
@@ -743,26 +804,22 @@ impl Compiler {
             return Ok(false);
         }
 
-        // Switch to the function's namespace so qualified-name resolution
-        // works during the recompile.
         let (namespace, _) = match full_name.rsplit_once('/') {
             Some(parts) => parts,
             None => return Ok(false),
         };
-        let saved_namespace_id = {
-            let current_id = self.current_namespace_id();
-            match self.get_namespace_id(namespace) {
-                Some(ns_id) => {
-                    self.set_current_namespace(ns_id);
-                    Some(current_id)
-                }
-                None => return Ok(false),
-            }
-        };
 
-        // Parse + compile, threading the feedback bits.
-        let mut parser = Parser::new(source_file.clone(), source_text.clone())?;
-        let mut ast = parser.parse()?;
+        // Parse BEFORE switching namespaces — a parse error propagating with
+        // `?` after the switch would leave the compiler's current namespace
+        // permanently switched, poisoning every later eval on the (shared)
+        // compiler thread.
+        //
+        // The fragment is re-parsed under the syntactic context it was
+        // originally defined in: extend-block method bodies allow reserved
+        // words (e.g. `perform`) as method names, which a top-level parse
+        // would reject.
+        let context = self.fragment_context_for(full_name);
+        let (parser, mut ast) = parse_fragment(&source_file, &source_text, context)?;
         // The recompile MUST reinstall under `full_name`, but the install keys
         // on the name the source's `fn` header parses to — and for
         // compiler-generated functions those differ. A protocol impl method is
@@ -780,6 +837,14 @@ impl Compiler {
         let token_byte_spans = parser.get_token_byte_spans();
         let definition_byte_ranges = parser.get_definition_byte_ranges();
 
+        // Resolve the function's namespace so qualified-name resolution
+        // works during the recompile; the switch goes through
+        // `with_namespace` so the restore is unskippable.
+        let ns_id = match self.get_namespace_id(namespace) {
+            Some(id) => id,
+            None => return Ok(false),
+        };
+
         let functions_before = {
             let runtime = get_runtime().get_mut();
             runtime.functions.len()
@@ -790,7 +855,7 @@ impl Compiler {
         // drives) as a tier-up compile, so `Ir::compile` routes it through
         // SSA when `BEAGLE_SSA_TIER2` is set. First-compiles never enter
         // this guard, so they stay on legacy.
-        let result = {
+        let result = self.with_namespace(ns_id, |this| {
             let _tier_up = crate::ir::TierUpCompileGuard::enter();
             // Deopt: record the resident generic code address so the
             // specialized build can re-invoke it on a guard miss instead of
@@ -810,7 +875,7 @@ impl Compiler {
                 current_address,
                 pause_addr,
             );
-            self.compile_ast_with_feedback(
+            this.compile_ast_with_feedback(
                 ast,
                 None,
                 &source_file,
@@ -821,11 +886,7 @@ impl Compiler {
                 feedback_bits,
                 property_feedback,
             )
-        };
-
-        if let Some(saved_id) = saved_namespace_id {
-            self.set_current_namespace(saved_id);
-        }
+        });
 
         match result {
             Ok(_) => {
@@ -926,74 +987,75 @@ impl Compiler {
             )
         };
 
-        // --- Switch to the function's namespace for name resolution. ---
+        // --- Resolve the function's namespace for name resolution. The
+        // switch goes through `with_namespace` so the restore is
+        // unskippable on every exit path. ---
         let (namespace, _) = full_name.rsplit_once('/')?;
-        let saved_namespace_id = {
-            let current_id = self.current_namespace_id();
-            let ns_id = self.get_namespace_id(namespace)?;
-            self.set_current_namespace(ns_id);
-            current_id
-        };
+        let ns_id = self.get_namespace_id(namespace)?;
 
         // --- Feedback-compile F, capturing its specialized IR + loop info. ---
-        self.osr_capture = Some(OsrCapture {
-            target: full_name.to_string(),
-            captured: None,
-        });
-        self.defer_function_installs = true;
+        let source_file_for_compile = source_file.clone();
+        let fragment_context = self.fragment_context_for(full_name);
+        let capture = self.with_namespace(ns_id, |this| {
+            this.osr_capture = Some(OsrCapture {
+                target: full_name.to_string(),
+                captured: None,
+            });
+            this.defer_function_installs = true;
 
-        let mut parser = match Parser::new(source_file.clone(), source_text.clone()) {
-            Ok(p) => p,
-            Err(_) => {
-                self.cleanup_after_osr_compile(saved_namespace_id, None);
-                return None;
-            }
-        };
-        let ast = match parser.parse() {
-            Ok(a) => a,
-            Err(_) => {
-                self.cleanup_after_osr_compile(saved_namespace_id, None);
-                return None;
-            }
-        };
-        let token_line_column_map = parser.get_token_line_column_map();
-        let token_byte_spans = parser.get_token_byte_spans();
-        let definition_byte_ranges = parser.get_definition_byte_ranges();
+            // Re-parse the fragment under its original syntactic context
+            // (extend-block methods allow reserved words as names).
+            let (parser, ast) =
+                match parse_fragment(&source_file_for_compile, &source_text, fragment_context) {
+                    Ok(pair) => pair,
+                    Err(_) => {
+                        this.osr_capture = None;
+                        this.cleanup_after_osr_compile(None);
+                        return None;
+                    }
+                };
+            let token_line_column_map = parser.get_token_line_column_map();
+            let token_byte_spans = parser.get_token_byte_spans();
+            let definition_byte_ranges = parser.get_definition_byte_ranges();
 
-        let result = {
-            let _tier_up = crate::ir::TierUpCompileGuard::enter();
-            let pause_addr = {
-                let rt = get_runtime().get_mut();
-                rt.get_function_by_name("beagle.builtin/__pause")
-                    .cloned()
-                    .and_then(|f| rt.get_pointer(&f).ok())
-                    .map(|p| p as usize)
-                    .unwrap_or(0)
+            let result = {
+                let _tier_up = crate::ir::TierUpCompileGuard::enter();
+                let pause_addr = {
+                    let rt = get_runtime().get_mut();
+                    rt.get_function_by_name("beagle.builtin/__pause")
+                        .cloned()
+                        .and_then(|f| rt.get_pointer(&f).ok())
+                        .map(|p| p as usize)
+                        .unwrap_or(0)
+                };
+                let _deopt = crate::ir::DeoptContextGuard::enter(
+                    full_name.to_string(),
+                    current_address,
+                    pause_addr,
+                );
+                this.compile_ast_with_feedback(
+                    ast,
+                    None,
+                    &source_file_for_compile,
+                    token_line_column_map,
+                    source_text,
+                    token_byte_spans,
+                    definition_byte_ranges,
+                    feedback_bits,
+                    property_feedback,
+                )
             };
-            let _deopt = crate::ir::DeoptContextGuard::enter(
-                full_name.to_string(),
-                current_address,
-                pause_addr,
-            );
-            self.compile_ast_with_feedback(
-                ast,
-                None,
-                &source_file,
-                token_line_column_map,
-                source_text,
-                token_byte_spans,
-                definition_byte_ranges,
-                feedback_bits,
-                property_feedback,
-            )
-        };
 
-        // Discard F's tier-2 install entirely — we only want the continuation.
-        let capture = self.osr_capture.take();
-        self.cleanup_after_osr_compile(saved_namespace_id, Some(full_name));
-        result.ok()?;
+            // Discard F's tier-2 install entirely — we only want the continuation.
+            let capture = this.osr_capture.take();
+            this.cleanup_after_osr_compile(Some(full_name));
+            if result.is_err() {
+                return None;
+            }
+            capture
+        })?;
 
-        let (base_ir, loops) = capture?.captured?;
+        let (base_ir, loops) = capture.captured?;
         let info = loops.get(loop_idx)?.clone();
         if std::env::var("BEAGLE_OSR_DEBUG").is_ok() {
             eprintln!(
@@ -1100,7 +1162,7 @@ impl Compiler {
     /// publish F_osr, not F's tier-2). Registration goes through the staged +
     /// stop-the-world install path so it can't race mutator table reads, and
     /// happens before F_osr is built/published.
-    fn cleanup_after_osr_compile(&mut self, saved_namespace_id: usize, target: Option<&str>) {
+    fn cleanup_after_osr_compile(&mut self, target: Option<&str>) {
         self.defer_function_installs = false;
         match target {
             Some(full_name) => {
@@ -1122,7 +1184,6 @@ impl Compiler {
                 self.deferred_updates.clear();
             }
         }
-        self.set_current_namespace(saved_namespace_id);
     }
 
     pub fn compile_string_in_namespace(
@@ -1133,23 +1194,26 @@ impl Compiler {
         // Runtime recompile may redefine functions/structs/lets — drop any
         // tier-2 specializations so none keep a stale snapshot of the world.
         self.revert_all_specializations();
-        // Switch to target namespace if specified, saving the current one
-        let saved_namespace_id = if let Some(ns_name) = namespace {
-            let current_id = self.current_namespace_id();
-            if let Some(ns_id) = self.get_namespace_id(ns_name) {
-                self.set_current_namespace(ns_id);
-                Some(current_id)
-            } else {
-                return Err(format!("Namespace '{}' not found", ns_name).into());
-            }
-        } else {
-            None
-        };
 
+        // Parse BEFORE switching namespaces. Parsing is namespace-independent,
+        // and a parse error propagating with `?` after the switch would leave
+        // the compiler's current namespace permanently switched — poisoning
+        // every later eval on the (shared) compiler thread.
+        //
         // For REPL/eval, we use "repl" as the file name for diagnostics.
         // Each eval replaces the previous "repl" diagnostics.
         let mut parser = Parser::new("".to_string(), string.to_string())?;
         let ast = parser.parse()?;
+
+        // Resolve the target namespace; the switch itself happens through
+        // `with_namespace_opt` below so the restore is unskippable.
+        let ns_id = match namespace {
+            Some(ns_name) => match self.get_namespace_id(ns_name) {
+                Some(id) => Some(id),
+                None => return Err(format!("Namespace '{}' not found", ns_name).into()),
+            },
+            None => None,
+        };
         let token_line_column_map = parser.get_token_line_column_map();
         let token_byte_spans = parser.get_token_byte_spans();
         let source_text = parser.source().to_string();
@@ -1170,23 +1234,21 @@ impl Compiler {
         // new struct layout) while others are still old (producing old-layout objects).
         self.defer_function_installs = true;
 
-        let compile_result = self.compile_ast(
-            ast,
-            Some("REPL_FUNCTION".to_string()),
-            "repl",
-            token_line_column_map,
-            source_text,
-            token_byte_spans,
-            definition_byte_ranges,
-        );
+        let compile_result = self.with_namespace_opt(ns_id, |c| {
+            c.compile_ast(
+                ast,
+                Some("REPL_FUNCTION".to_string()),
+                "repl",
+                token_line_column_map,
+                source_text,
+                token_byte_spans,
+                definition_byte_ranges,
+            )
+        });
 
         let (top_level, diagnostics) = match compile_result {
             Ok(result) => result,
             Err(e) => {
-                // Restore namespace before returning error
-                if let Some(saved_id) = saved_namespace_id {
-                    self.set_current_namespace(saved_id);
-                }
                 // Discard any deferred updates from the failed compilation
                 self.deferred_updates.clear();
                 self.defer_function_installs = false;
@@ -1196,11 +1258,6 @@ impl Compiler {
                 return Err(e);
             }
         };
-
-        // Restore namespace
-        if let Some(saved_id) = saved_namespace_id {
-            self.set_current_namespace(saved_id);
-        }
 
         // Store diagnostics for "repl" (replaces previous REPL diagnostics)
         if let Ok(mut store) = self.diagnostic_store.lock() {
@@ -2792,52 +2849,55 @@ impl Compiler {
             .map(|x| format!("arg{}", x))
             .collect();
 
-        let current_namespace_id = self.current_namespace_id();
         let protocol_namespace_id = runtime
             .get_namespace_id(protocol_namespace)
             .ok_or_else(|| format!("Protocol namespace not found: {}", protocol_namespace))?;
-        self.set_current_namespace(protocol_namespace_id);
 
-        // Try optimized dispatch first
-        let body = if let Some(optimized) = self.build_optimized_dispatch(
-            &protocol_name,
-            &method_name,
-            default_method.as_ref(),
-            args_as_strings.clone(),
-        ) {
-            vec![optimized]
-        } else {
-            // Fall back to if-chain
-            vec![self.build_method_if_chain(
+        // The whole build + compile runs inside the protocol's namespace;
+        // `with_namespace` makes the restore unskippable (a leaked switch
+        // would poison every later compile on this thread).
+        let compile_result = self.with_namespace(protocol_namespace_id, |this| {
+            // Try optimized dispatch first
+            let body = if let Some(optimized) = this.build_optimized_dispatch(
+                &protocol_name,
+                &method_name,
                 default_method.as_ref(),
-                protocol_methods,
                 args_as_strings.clone(),
-            )]
-        };
+            ) {
+                vec![optimized]
+            } else {
+                // Fall back to if-chain
+                vec![this.build_method_if_chain(
+                    default_method.as_ref(),
+                    protocol_methods,
+                    args_as_strings.clone(),
+                )]
+            };
 
-        let ast = Ast::Program {
-            elements: vec![Ast::Function {
-                name: Some(method_name.clone()),
-                args: args.clone(),
-                rest_param: None,
-                body,
+            let ast = Ast::Program {
+                elements: vec![Ast::Function {
+                    name: Some(method_name.clone()),
+                    args: args.clone(),
+                    rest_param: None,
+                    body,
+                    token_range: TokenRange::new(0, 0),
+                    docstring: None,
+                }],
                 token_range: TokenRange::new(0, 0),
-                docstring: None,
-            }],
-            token_range: TokenRange::new(0, 0),
-        };
-        // Ignore diagnostics from reify method compilation - these are internal
-        let _ = self.compile_ast(
-            ast,
-            None,
-            "test",
-            vec![],
-            String::new(),
-            vec![],
-            HashMap::new(),
-        )?;
+            };
+            // Ignore diagnostics from reify method compilation - these are internal
+            this.compile_ast(
+                ast,
+                None,
+                "test",
+                vec![],
+                String::new(),
+                vec![],
+                HashMap::new(),
+            )
+        });
+        let _ = compile_result?;
         self.code_allocator.make_executable();
-        self.set_current_namespace(current_namespace_id);
         Ok(())
     }
 }
@@ -2955,6 +3015,7 @@ impl CompilerThread {
                 arith_feedback_range_by_address: HashMap::new(),
                 arith_feedback_debug_names: Vec::new(),
                 specialized_names: HashSet::new(),
+                extend_method_fragments: HashSet::new(),
                 osr_capture: None,
                 specialization_originals: HashMap::new(),
                 function_counter_cache: MmapOptions::new(MmapOptions::page_size() * 64) // 256KB ≈ 32k functions
@@ -3237,5 +3298,40 @@ impl<R> WorkDone<R> {
         self.done_tx
             .send(result)
             .expect("Failed to send result back to main thread - this is a fatal error");
+    }
+}
+
+#[cfg(test)]
+mod fragment_context_tests {
+    use super::parse_fragment;
+    use crate::parser::FragmentContext;
+
+    #[test]
+    fn extend_method_context_allows_reserved_names() {
+        // `perform` is a reserved keyword at the top level but a valid
+        // method name inside extend blocks; an extend-method fragment
+        // must re-parse under those rules.
+        let src = "fn perform(self, op) {\n    1\n}";
+        assert!(parse_fragment("test", src, FragmentContext::TopLevel).is_err());
+        assert!(parse_fragment("test", src, FragmentContext::ExtendMethod).is_ok());
+    }
+
+    #[test]
+    fn top_level_context_stays_strict() {
+        // Ordinary fragments are unaffected by the context machinery.
+        let src = "fn add(a, b) {\n    a + b\n}";
+        assert!(parse_fragment("test", src, FragmentContext::TopLevel).is_ok());
+        // And reserved names stay rejected for genuinely top-level code.
+        let bad = "fn future(x) { x }";
+        assert!(parse_fragment("test", bad, FragmentContext::TopLevel).is_err());
+    }
+
+    #[test]
+    fn handle_is_contextual_everywhere() {
+        // `handle` is no longer reserved as a fn name in ANY context —
+        // the block form requires the full `handle <T> ... with` shape.
+        let src = "fn handle(self, op, resume) {\n    resume(1)\n}";
+        assert!(parse_fragment("test", src, FragmentContext::TopLevel).is_ok());
+        assert!(parse_fragment("test", src, FragmentContext::ExtendMethod).is_ok());
     }
 }
