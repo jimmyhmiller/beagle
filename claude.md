@@ -72,6 +72,11 @@ cargo run --features generation-v2 -- test resources/
 # For non-Rust files (*.bg, *.md, *.toml, etc.), remove trailing whitespace:
 sed -i '' 's/[[:space:]]*$//' path/to/file
 # Note: cargo fmt handles this automatically for Rust files
+
+# Live-coding smoke test (NOT part of the suite — run once after runtime
+# changes to exception delivery, continuations, GC context, effects,
+# persist/eval, or threads; fails on ANY server panic). See smoke/README.md.
+python3 smoke/live_coding_smoke.py
 ```
 
 ## Project Structure
