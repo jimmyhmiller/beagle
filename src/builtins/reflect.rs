@@ -1806,6 +1806,10 @@ fn perform_splice(
         line_end: new_line_end,
     };
     patch_disk_location(runtime, &info.full_name, patched_loc);
+    // Keep the stored source text in sync with the bytes just written,
+    // even if the recompile below fails — a corrective re-persist must
+    // pass the drift check against what's really on disk.
+    patch_source_text(runtime, &info.full_name, new_text);
 
     let namespace = namespace_of(&info.full_name).unwrap_or("").to_string();
     recompile_fragment_and_run(
@@ -2176,7 +2180,17 @@ pub extern "C" fn reflect_persist(
                 info,
                 fragment,
             } => {
-                if let Err(e) = perform_splice(runtime, stack_pointer, &info, &fragment) {
+                // Re-resolve at process time: an earlier splice in this
+                // same persist may have shifted this definition's byte
+                // range on disk. The `info` snapshot from classification
+                // predates those shifts, so splicing with it would fail
+                // the drift check ("file has changed") on every
+                // multi-def persist whose earlier def changed length.
+                let fresh_info = match resolve_by_name(runtime, &full_name) {
+                    Some(fresh) if fresh.disk_location.is_some() => fresh,
+                    _ => info,
+                };
+                if let Err(e) = perform_splice(runtime, stack_pointer, &fresh_info, &fragment) {
                     throw_persist_error(
                         stack_pointer,
                         &format!("reflect/persist: updating `{}`: {}", full_name, e),
@@ -2322,4 +2336,25 @@ fn patch_disk_location(runtime: &mut Runtime, full_name: &str, loc: DiskLocation
         return;
     }
     runtime.patch_binding_disk_location(full_name, loc);
+}
+
+/// Overwrite the stored `source_text` on whichever runtime record (fn,
+/// struct, enum, or binding) is registered under `full_name`. Called by
+/// `perform_splice` right after the file write, BEFORE recompiling: if
+/// the recompile fails, the record must still describe what is actually
+/// on disk, or every follow-up persist of the same definition drift-fails
+/// with "file has changed" and there is no way to fix a broken splice
+/// through the persist API at all.
+fn patch_source_text(runtime: &mut Runtime, full_name: &str, text: &str) {
+    if let Some(f) = runtime.functions.iter_mut().find(|f| f.name == full_name) {
+        f.source_text = Some(text.to_string());
+        return;
+    }
+    if runtime.patch_struct_source_text(full_name, text.to_string()) {
+        return;
+    }
+    if runtime.patch_enum_source_text(full_name, text.to_string()) {
+        return;
+    }
+    runtime.patch_binding_source_text(full_name, text.to_string());
 }

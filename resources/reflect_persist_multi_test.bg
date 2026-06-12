@@ -1,0 +1,43 @@
+namespace reflect_persist_multi_test
+
+use beagle.reflect as reflect
+
+fn alpha() { 1 }
+
+fn beta() { 2 }
+
+fn main() {
+    // Persist TWO defs from one file in a single call, where the first
+    // redefinition changes length. Its splice shifts beta's byte range
+    // on disk. Regression: the splice loop used classification-time
+    // DefinitionInfo snapshots, so beta's drift check compared against
+    // the pre-shift range and every such persist failed with
+    // "file has changed since loaded".
+    let alpha_src = reflect/source(alpha)
+    let beta_src = reflect/source(beta)
+
+    let r = reflect/persist(
+        "reflect_persist_multi_test",
+        "fn alpha() { 100 + 11 }\n\nfn beta() { 22 }")
+    println(r[0][:action])
+    println(r[1][:action])
+    println(alpha())
+    println(beta())
+
+    // Restore the original text (also a multi-def persist).
+    reflect/persist(
+        "reflect_persist_multi_test",
+        alpha_src ++ "\n\n" ++ beta_src)
+    println(alpha())
+    println(beta())
+    println("end")
+}
+
+// @beagle.core.snapshot
+// updated
+// updated
+// 111
+// 22
+// 1
+// 2
+// end

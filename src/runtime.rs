@@ -680,6 +680,17 @@ impl StructManager {
             false
         }
     }
+
+    /// Overwrite the stored `source_text` of a struct by fully-qualified
+    /// name. Returns `true` if a matching struct was found.
+    pub fn patch_source_text(&mut self, full_name: &str, text: String) -> bool {
+        if let Some(s) = self.structs.iter_mut().find(|s| s.name == full_name) {
+            s.source_text = Some(text);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 pub struct StructRegistry {
@@ -806,6 +817,13 @@ impl StructRegistry {
             .write()
             .expect("struct registry poisoned")
             .patch_disk_location(full_name, loc)
+    }
+
+    pub fn patch_source_text(&self, full_name: &str, text: String) -> bool {
+        self.inner
+            .write()
+            .expect("struct registry poisoned")
+            .patch_source_text(full_name, text)
     }
 }
 
@@ -3939,6 +3957,17 @@ impl EnumManager {
     pub fn patch_disk_location(&mut self, full_name: &str, loc: DiskLocation) -> bool {
         if let Some(e) = self.enums.iter_mut().find(|e| e.name == full_name) {
             e.disk_location = Some(loc);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Overwrite the stored `source_text` of an enum by fully-qualified
+    /// name. Returns `true` if a matching enum was found.
+    pub fn patch_source_text(&mut self, full_name: &str, text: String) -> bool {
+        if let Some(e) = self.enums.iter_mut().find(|e| e.name == full_name) {
+            e.source_text = Some(text);
             true
         } else {
             false
@@ -9352,16 +9381,39 @@ impl Runtime {
         }
     }
 
+    /// Update the stored source text recorded for the binding named
+    /// `full_name`. Returns `true` if the binding was found.
+    pub fn patch_binding_source_text(&mut self, full_name: &str, text: String) -> bool {
+        if let Some(b) = self.bindings.get_mut(full_name) {
+            b.source_text = Some(text);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Update the on-disk location recorded for the struct named
     /// `full_name`. Returns `true` if the struct was found.
     pub fn patch_struct_disk_location(&mut self, full_name: &str, loc: DiskLocation) -> bool {
         self.structs.patch_disk_location(full_name, loc)
     }
 
+    /// Update the stored source text recorded for the struct named
+    /// `full_name`. Returns `true` if the struct was found.
+    pub fn patch_struct_source_text(&mut self, full_name: &str, text: String) -> bool {
+        self.structs.patch_source_text(full_name, text)
+    }
+
     /// Update the on-disk location recorded for the enum named
     /// `full_name`. Returns `true` if the enum was found.
     pub fn patch_enum_disk_location(&mut self, full_name: &str, loc: DiskLocation) -> bool {
         self.enums.patch_disk_location(full_name, loc)
+    }
+
+    /// Update the stored source text recorded for the enum named
+    /// `full_name`. Returns `true` if the enum was found.
+    pub fn patch_enum_source_text(&mut self, full_name: &str, text: String) -> bool {
+        self.enums.patch_source_text(full_name, text)
     }
 
     pub fn add_struct(&mut self, s: Struct) -> bool {

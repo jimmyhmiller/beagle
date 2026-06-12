@@ -1,0 +1,9 @@
+namespace reflect_persist_fail_helper
+
+// Splice target for reflect_persist_fail_test. That test persists a
+// failing multi-def fragment into this namespace and restores this
+// file's bytes afterwards.
+
+fn gamma() { 3 }
+
+fn delta() { 4 }

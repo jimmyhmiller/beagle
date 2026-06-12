@@ -1,0 +1,59 @@
+namespace reflect_persist_fail_test
+
+use beagle.core as core
+use beagle.fs as fs
+use beagle.reflect as reflect
+use reflect_persist_fail_helper as helper
+
+// Regression: a failing multi-def persist must raise a CATCHABLE error.
+// Def #1 splices fine — and runs a recompiled top-level, which used to
+// leave the per-thread saved GC context pointing at dead frames — then
+// def #2 fails to compile and throws. Before the fix, that throw walked
+// reused stack memory, found no enclosing reset, and ABORTED the whole
+// process ("shift without an enclosing reset"). The crash shape from
+// live coding: the persist runs via eval on a worker thread inside a
+// resumable try.
+
+test "failing multi-def persist is catchable from eval on a thread" {
+    let path = reflect/location("reflect_persist_fail_helper/gamma")[:file]
+    let original = match fs/blocking-read-file(path) {
+        Result.Ok { value } => value
+    }
+
+    let done = atom(false)
+    let err = atom(null)
+    thread(fn() {
+        let r = try {
+            eval("use beagle.reflect as reflect\nreflect/persist(\"reflect_persist_fail_helper\", \"fn gamma() { 33 } fn delta() { undefined_var_zzz }\")")
+        } catch (e, resume) {
+            reset!(err, to-string(e))
+            "caught"
+        }
+        reset!(done, true)
+    })
+    while !deref(done) {
+        core/sleep(5)
+    }
+
+    assert-ne!(deref(err), null)
+    // gamma's splice succeeded before delta failed.
+    assert-eq!(helper/gamma(), 33)
+
+    // Recovery: the failed splice left the BROKEN delta text on disk,
+    // but the runtime record must now describe those bytes, so a
+    // corrective persist of the same defs must pass the drift check
+    // and repair the file. Before the source-text patch, this threw
+    // "file has changed since loaded" and a broken splice could never
+    // be fixed through the persist API.
+    let r = reflect/persist(
+        "reflect_persist_fail_helper",
+        "fn gamma() { 3 } fn delta() { 4 }")
+    assert-eq!(r[0][:action], "updated")
+    assert-eq!(r[1][:action], "updated")
+    assert-eq!(helper/gamma(), 3)
+    assert-eq!(helper/delta(), 4)
+
+    // Restore the helper file's exact original bytes (the corrective
+    // persist used single-line formatting).
+    fs/blocking-write-file(path, original)
+}
