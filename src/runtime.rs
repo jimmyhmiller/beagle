@@ -4260,6 +4260,28 @@ pub struct ExceptionHandler {
     pub handler_id: usize,
     pub is_resumable: bool,
     pub resume_local: isize,
+    /// Continuation-mark state snapshotted when the handler was pushed,
+    /// restored when a throw delivers to this handler. Without this,
+    /// marks installed inside the try body (e.g. `binding` redirecting
+    /// `core/out`) survive the unwind — the mark lives in a hoisted
+    /// local of the *handler's own frame*, which stays live — and the
+    /// dynamic var stays bound to a dead value for the rest of the
+    /// thread's life (observed as all REPL output vanishing after a
+    /// thrown eval).
+    pub saved_marks_count: usize,
+    /// `Some(chain_head)` if the handler frame had active marks at push
+    /// time, `None` if its FRAME_HAS_MARKS_FLAG was clear.
+    pub saved_frame_marks: Option<usize>,
+    /// Depths of the per-thread effect-handler and prompt-tag side
+    /// stacks at push time. A throw that unwinds past `handle` /
+    /// `reset(tag)` frames must truncate these stacks back to the
+    /// handler's level — otherwise a later `perform` matches a stale
+    /// record whose SP/FP point into an abandoned stack extent, the
+    /// tagged capture computes a zero-byte segment, and invoking that
+    /// continuation aborts the process ("continuation has no segment
+    /// data" — the REPL-server client-disconnect crash).
+    pub saved_effect_handlers_len: usize,
+    pub saved_prompt_tags_len: usize,
 }
 
 /// Entry on the per-thread effect-handler registry. Installed by

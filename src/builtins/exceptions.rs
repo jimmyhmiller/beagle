@@ -22,6 +22,10 @@ pub unsafe extern "C" fn push_exception_handler_runtime(
         handler_id: 0,
         is_resumable: false,
         resume_local: 0,
+        saved_marks_count: super::current_marks_count(),
+        saved_frame_marks: unsafe { super::snapshot_frame_marks(frame_pointer) },
+        saved_effect_handlers_len: crate::runtime::per_thread_data().effect_handlers.len(),
+        saved_prompt_tags_len: crate::runtime::per_thread_data().prompt_tags.len(),
     };
 
     runtime.push_exception_handler(handler);
@@ -59,6 +63,10 @@ pub unsafe extern "C" fn push_resumable_exception_handler_runtime(
         handler_id,
         is_resumable: true,
         resume_local,
+        saved_marks_count: super::current_marks_count(),
+        saved_frame_marks: unsafe { super::snapshot_frame_marks(frame_pointer) },
+        saved_effect_handlers_len: crate::runtime::per_thread_data().effect_handlers.len(),
+        saved_prompt_tags_len: crate::runtime::per_thread_data().prompt_tags.len(),
     };
 
     runtime.push_exception_handler(handler);
@@ -76,6 +84,31 @@ pub unsafe extern "C" fn pop_exception_handler_by_id_runtime(handler_id: usize) 
         ptd.exception_handlers.pop();
     }
     BuiltInTypes::null_value() as usize
+}
+
+/// Unwind the per-thread effect-handler and prompt-tag side stacks to
+/// the depths recorded when `handler` was pushed. A throw that unwinds
+/// past `handle` / `reset(tag)` frames abandons those extents — their
+/// side-stack records hold SP/FP into now-dead stack and MUST not be
+/// matched by a later `perform` (a stale match produces a zero-byte
+/// continuation segment whose invocation aborts the process).
+/// Handler-registry entries pin their handler instance in a GC root
+/// slot; release those for every dropped entry, mirroring
+/// `pop_handler_builtin`.
+fn unwind_effect_state_to(handler: &crate::runtime::ExceptionHandler) {
+    let ptd = crate::runtime::per_thread_data();
+    if ptd.effect_handlers.len() > handler.saved_effect_handlers_len {
+        let runtime = get_runtime().get_mut();
+        for entry in ptd
+            .effect_handlers
+            .drain(handler.saved_effect_handlers_len..)
+        {
+            runtime.unregister_temporary_root(entry.handler_root_id);
+        }
+    }
+    if ptd.prompt_tags.len() > handler.saved_prompt_tags_len {
+        ptd.prompt_tags.truncate(handler.saved_prompt_tags_len);
+    }
 }
 
 pub unsafe extern "C" fn throw_exception(
@@ -158,6 +191,21 @@ pub unsafe extern "C" fn throw_exception(
                 set_gc_frame_top(hdr);
             }
 
+            // Roll continuation marks back to the handler's level.
+            // Marks in abandoned (deeper) frames die with their frames,
+            // but marks installed in the HANDLER's own frame (e.g. a
+            // `binding` inside the try body — its mark local is hoisted
+            // into the enclosing function's frame) survive the unwind
+            // and must be truncated to the push-time snapshot, or the
+            // dynamic var stays bound to a dead value for the rest of
+            // the thread's life.
+            super::set_marks_count(handler.saved_marks_count);
+            unsafe { super::restore_frame_marks(handler.frame_pointer, handler.saved_frame_marks) };
+
+            // Drop effect-handler / prompt-tag records belonging to the
+            // abandoned frames (see `unwind_effect_state_to`).
+            unwind_effect_state_to(&handler);
+
             // Jump to catch handler with restored SP, FP, and LR
             let handler_address = handler.handler_address;
             let new_sp = handler.stack_pointer;
@@ -183,6 +231,15 @@ pub unsafe extern "C" fn throw_exception(
                 }
                 set_gc_frame_top(hdr);
             }
+
+            // Roll continuation marks back to the handler's level
+            // (same reasoning as the resumable path above).
+            super::set_marks_count(handler.saved_marks_count);
+            unsafe { super::restore_frame_marks(handler.frame_pointer, handler.saved_frame_marks) };
+
+            // Drop effect-handler / prompt-tag records belonging to the
+            // abandoned frames (see `unwind_effect_state_to`).
+            unwind_effect_state_to(&handler);
 
             let handler_address = handler.handler_address;
             let new_sp = handler.stack_pointer;

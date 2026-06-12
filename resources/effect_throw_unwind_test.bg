@@ -1,0 +1,71 @@
+namespace effect_throw_unwind_test
+
+use beagle.effect as effect
+
+// Regression: a throw that unwinds past a `handle` block must drop that
+// handler's per-thread registry entry and prompt-tag record. Before the
+// fix, the stale records survived; the next `perform` matched the dead
+// inner handler, the tagged capture computed a zero-byte segment from
+// the abandoned stack extent, and invoking the continuation aborted the
+// whole process ("continuation has no segment data") — this is how the
+// REPL server died when a client disconnected mid-eval (broken-pipe
+// throw unwinding past the async runtime's handle frames).
+
+enum Ping {
+    Ask {}
+}
+
+struct OuterHandler {}
+struct InnerHandler {}
+
+extend OuterHandler with effect/Handler(Ping) {
+    fn handle(self, op, resume) {
+        match op {
+            Ping.Ask {} => resume("outer")
+        }
+    }
+}
+
+extend InnerHandler with effect/Handler(Ping) {
+    fn handle(self, op, resume) {
+        match op {
+            Ping.Ask {} => resume("inner")
+        }
+    }
+}
+
+test "throw unwinding past handle drops its handler registration" {
+    let answer = handle effect/Handler(Ping) with OuterHandler {} {
+        let r = try {
+            handle effect/Handler(Ping) with InnerHandler {} {
+                throw("boom")
+            }
+        } catch (e, resume) {
+            "caught"
+        }
+        assert-eq!(r, "caught")
+        // The inner handle's extent was abandoned by the throw. This
+        // perform must reach the OUTER handler — matching the dead
+        // inner registration used to abort the process.
+        perform Ping.Ask {}
+    }
+    assert-eq!(answer, "outer")
+}
+
+test "perform still works after repeated unwinds past handle" {
+    let mut i = 0
+    while i < 5 {
+        try {
+            handle effect/Handler(Ping) with InnerHandler {} {
+                throw("boom ${i}")
+            }
+        } catch (e, resume) {
+            null
+        }
+        i = i + 1
+    }
+    let answer = handle effect/Handler(Ping) with OuterHandler {} {
+        perform Ping.Ask {}
+    }
+    assert-eq!(answer, "outer")
+}

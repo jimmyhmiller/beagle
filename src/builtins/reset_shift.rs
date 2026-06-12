@@ -295,10 +295,19 @@ impl ContinuationObject {
     /// trampoline re-pushes them so the resumed body's `perform` calls
     /// see fresh, correctly-relocated records.
     const FIELD_SIDE_STATE: usize = 5;
+    /// Tagged int: number of continuation-mark entries carried by the
+    /// frames inside the captured segment. Capture subtracts this from
+    /// the thread's ACTIVE_MARKS_COUNT (the frames leave the live
+    /// stack); invoke adds it back (the restored segment brings the
+    /// marks with it — they're part of the copied frame bytes). Without
+    /// this, resuming into a `binding` extent leaves the restored mark
+    /// invisible: the count gate in `get_dynamic_var` short-circuits
+    /// the frame walk.
+    const FIELD_CAPTURED_MARKS: usize = 6;
 
     /// Total number of fields; used when allocating a fresh
     /// continuation object.
-    pub const NUM_FIELDS: usize = 6;
+    pub const NUM_FIELDS: usize = 7;
 
     pub fn from_tagged(tagged: usize) -> Option<Self> {
         let heap_obj = HeapObject::try_from_tagged(tagged)?;
@@ -492,6 +501,19 @@ impl ContinuationObject {
         runtime.set_field_with_barrier(self.tagged_ptr(), Self::FIELD_SIDE_STATE, side_state_ptr);
     }
 
+    /// Number of continuation-mark entries carried by the captured
+    /// frames (see `FIELD_CAPTURED_MARKS`).
+    pub fn captured_marks_count(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_CAPTURED_MARKS))
+    }
+
+    fn set_captured_marks_count(&self, count: usize) {
+        self.heap_obj.write_field(
+            Self::FIELD_CAPTURED_MARKS as i32,
+            BuiltInTypes::Int.tag(count as isize) as usize,
+        );
+    }
+
     /// Initialize a freshly-allocated continuation heap object.
     /// Segment metadata is set to zero and expected to be filled in
     /// by the caller after the backing segment object is allocated.
@@ -517,6 +539,10 @@ impl ContinuationObject {
         heap_obj.write_field(
             Self::FIELD_SIDE_STATE as i32,
             BuiltInTypes::null_value() as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_CAPTURED_MARKS as i32,
+            BuiltInTypes::Int.tag(0) as usize,
         );
     }
 }
@@ -887,6 +913,14 @@ pub unsafe fn capture_continuation_runtime_inner(
     // automatic with no slot patching.
     let innermost_fp_offset = frame_pointer - stack_pointer;
 
+    // Count the continuation marks carried by the frames we're about to
+    // capture, BEFORE any allocation can disturb the stack view. The
+    // count travels with the continuation: subtracted from the live
+    // counter here (the frames leave the stack), added back at invoke
+    // (the restored segment brings the marks with it).
+    let captured_marks =
+        unsafe { crate::builtins::count_marks_in_frame_range(frame_pointer, capture_top) };
+
     let runtime = crate::get_runtime().get_mut();
 
     let cont_words = ContinuationObject::NUM_FIELDS;
@@ -964,6 +998,8 @@ pub unsafe fn capture_continuation_runtime_inner(
     let mut cont = ContinuationObject::from_tagged(cont_ptr).unwrap();
     cont.set_segment_ptr_with_barrier(runtime, segment_heap_ptr);
     cont.set_segment_frame_pointer_offset(innermost_fp_offset);
+    cont.set_captured_marks_count(captured_marks);
+    crate::builtins::marks_count_sub(captured_marks);
 
     cont_ptr
 }
@@ -1020,6 +1056,12 @@ pub unsafe extern "C" fn capture_continuation_tagged_runtime(
 
     let stack_size = capture_top.saturating_sub(stack_pointer);
     let innermost_fp_offset = frame_pointer - stack_pointer;
+
+    // Count the continuation marks carried by the frames we're about to
+    // capture (see the untagged path). Subtracted from the live counter
+    // below; added back when the continuation is invoked.
+    let captured_marks =
+        unsafe { crate::builtins::count_marks_in_frame_range(frame_pointer, capture_top) };
 
     // Snapshot any nested handle-scope state whose frames lie inside
     // the captured segment. We need this before allocation because
@@ -1123,6 +1165,8 @@ pub unsafe extern "C" fn capture_continuation_tagged_runtime(
     let mut cont = ContinuationObject::from_tagged(cont_ptr).unwrap();
     cont.set_segment_ptr_with_barrier(runtime, segment_heap_ptr);
     cont.set_segment_frame_pointer_offset(innermost_fp_offset);
+    cont.set_captured_marks_count(captured_marks);
+    crate::builtins::marks_count_sub(captured_marks);
     if side_state_words > 0 {
         cont.set_side_state_with_barrier(runtime, side_state_ptr);
     }
@@ -1381,6 +1425,13 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     let (seg_base, _seg_top, _innermost_fp_heap) = cont
         .segment_frame_info()
         .expect("continuation_trampoline: continuation has no segment data");
+
+    // The restored frames bring their continuation marks back onto this
+    // thread's stack (mark locals + frame-header flags are part of the
+    // copied bytes). Re-add their count so `get_dynamic_var`'s fast-path
+    // gate doesn't render them invisible. Multi-shot safe: every invoke
+    // restores a fresh copy of the frames, so every invoke adds.
+    crate::builtins::marks_count_add(cont.captured_marks_count());
 
     let seg_size = cont.segment_size();
 

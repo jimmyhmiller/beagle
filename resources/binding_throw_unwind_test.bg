@@ -1,0 +1,88 @@
+namespace binding_throw_unwind_test
+
+use beagle.core as core
+
+// Regression tests: a throw that unwinds OUT of a `binding` block must
+// restore the dynamic var. The continuation mark lives in a hoisted
+// local of the enclosing function's frame, which survives the unwind
+// to a catch in that same function — before the fix, the stale mark
+// left the dynamic var bound to a dead value for the rest of the
+// thread's life (observed as all REPL output silently vanishing after
+// any thrown eval error).
+
+test "throw unwinding past binding restores the dynamic var" {
+    let buf = core/new-string-buffer()
+    let r = try {
+        binding (core/out = buf) {
+            throw("boom")
+        }
+    } catch (e, resume) {
+        "caught"
+    }
+    assert-eq!(r, "caught")
+    // After the unwind, output must go to the real printer again, not
+    // the dead buffer.
+    println("probe")
+    assert-eq!(buf.content, "")
+}
+
+test "unwind restores to the outer binding, not past it" {
+    let outer = core/new-string-buffer()
+    let inner = core/new-string-buffer()
+    binding (core/out = outer) {
+        let r = try {
+            binding (core/out = inner) {
+                throw("boom")
+            }
+        } catch (e, resume) {
+            "caught"
+        }
+        println("after-catch")
+    }
+    // The inner binding's extent was abandoned by the throw; the outer
+    // binding (installed before the try) must still be in effect for
+    // the println after the catch.
+    assert-eq!(inner.content, "")
+    assert-eq!(outer.content, "after-catch\n")
+}
+
+test "resume re-enters binding with the dynamic var restored" {
+    // The binding's mark lives in the outlined try-thunk's frame, which
+    // is part of the captured continuation. resume() restores those
+    // frames — and must restore the marks accounting with them, so the
+    // resumed remainder of the body still writes to buf. Regression:
+    // the count gate in get_dynamic_var made the restored mark
+    // invisible and the output leaked to the real stdout.
+    let buf = core/new-string-buffer()
+    let r = try {
+        binding (core/out = buf) {
+            let v = throw("need value")
+            println("resumed ${v}")
+            "body-done"
+        }
+    } catch (e, resume) {
+        resume(42)
+    }
+    assert-eq!(r, "body-done")
+    assert-eq!(buf.content, "resumed 42\n")
+    // And the binding's exit (on the restored frame) uninstalled the
+    // mark: output is back to the test printer.
+    println("after-resume probe")
+}
+
+test "binding works normally again after an unwound binding" {
+    let dead = core/new-string-buffer()
+    try {
+        binding (core/out = dead) {
+            throw("boom")
+        }
+    } catch (e, resume) {
+        null
+    }
+    let live = core/new-string-buffer()
+    binding (core/out = live) {
+        println("captured")
+    }
+    assert-eq!(dead.content, "")
+    assert-eq!(live.content, "captured\n")
+}

@@ -1,7 +1,22 @@
 # Handoff: REPL server aborts when a client disconnects mid-eval
 
-**Status:** OPEN. Reproduced, root-cause *located* (continuation/resumable-exception
-subsystem), not yet fixed.
+**Status:** FIXED. Root cause: `throw_exception` unwound the native stack but
+never truncated the per-thread **effect-handler / prompt-tag side stacks**
+(`PerThreadData::effect_handlers` / `prompt_tags`). The broken-pipe throw from
+`socket/write` unwound past the async runtime's `handle` frames, leaving stale
+records whose SP/FP pointed into abandoned stack. A later `perform` (next
+socket op) matched a stale record, the tagged capture computed a capture
+boundary below the current SP (`saturating_sub` → zero-byte segment), and
+invoking that continuation hit the `segment_frame_info().expect(...)` abort.
+
+Fix: `ExceptionHandler` snapshots both side-stack depths at push
+(`saved_effect_handlers_len` / `saved_prompt_tags_len`); `throw_exception`
+truncates both stacks back to the handler's level on delivery, releasing the
+GC root slots of dropped handler entries (`unwind_effect_state_to` in
+`src/builtins/exceptions.rs`). The same delivery path also rolls back
+continuation marks (`binding`) — see the sibling fix in the same commit.
+
+Verified: §2 repro (30 abrupt disconnects) — zero panics, server keeps serving.
 **Severity:** High for the live-coding setup — a single misbehaving/disconnecting
 client takes down the whole REPL server (process abort, all sessions lost).
 **Pre-existing:** YES. Present on `main`. NOT introduced by `ssa-foundation`

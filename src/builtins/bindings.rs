@@ -7,6 +7,167 @@ thread_local! {
     static ACTIVE_MARKS_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// Latched once: BEAGLE_DEBUG_MARKS=1 traces mark install/uninstall and
+/// reads that resolve through a mark. Diagnostic for dynamic-binding
+/// leaks across unwinds (the `binding` + throw class of bug).
+fn debug_marks() -> bool {
+    static DEBUG_MARKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DEBUG_MARKS.get_or_init(|| std::env::var("BEAGLE_DEBUG_MARKS").is_ok())
+}
+
+/// Current value of the thread's active-marks counter. Snapshotted by
+/// `push_exception_handler` so a throw can roll marks back to the
+/// handler's level.
+pub fn current_marks_count() -> usize {
+    ACTIVE_MARKS_COUNT.with(|c| c.get())
+}
+
+/// Reset the active-marks counter to a snapshotted value. Used by
+/// `throw_exception` when unwinding: marks installed between handler
+/// push and the throw belong to abandoned extents.
+pub fn set_marks_count(count: usize) {
+    ACTIVE_MARKS_COUNT.with(|c| c.set(count));
+}
+
+/// Add to the active-marks counter. Called by `continuation_trampoline`
+/// when a restored segment re-introduces frames that carry continuation
+/// marks: the marks are physically back on the stack (the segment bytes
+/// include the mark locals and frame-header flags), so the fast-path
+/// gate in `get_dynamic_var` must see a non-zero count or the restored
+/// marks would be invisible.
+pub fn marks_count_add(n: usize) {
+    if n > 0 {
+        ACTIVE_MARKS_COUNT.with(|c| c.set(c.get() + n));
+    }
+}
+
+/// Subtract from the active-marks counter. Called by continuation
+/// capture: the captured frames are about to be abandoned (longjmp to
+/// the prompt / jump to the catch), taking their marks off the live
+/// stack. The exception path additionally resets the count absolutely
+/// to the handler's push-time snapshot, which subsumes this.
+pub fn marks_count_sub(n: usize) {
+    if n > 0 {
+        ACTIVE_MARKS_COUNT.with(|c| c.set(c.get().saturating_sub(n)));
+    }
+}
+
+/// Count the continuation-mark entries carried by the live frames whose
+/// frame pointers lie in `[innermost_fp, capture_top)` — exactly the
+/// frames a continuation capture is about to snapshot.
+///
+/// Walks the GC FRAME CHAIN (like `get_dynamic_var`), NOT the raw
+/// saved-FP chain: the FP chain passes through Rust builtin frames,
+/// whose `[fp - 8]` is arbitrary stack data — a random bit pattern there
+/// can masquerade as a marks flag and a junk "mark pointer" can pass the
+/// heap-tag check while being misaligned (observed as a flaky
+/// `Misaligned heap pointer` abort during throw-captures under the
+/// smoke fuzz). The GC chain links only real Beagle frame headers.
+///
+/// # Safety
+/// Must run on the capturing thread, before the GC frame chain is
+/// unwound for the throw/shift, with `innermost_fp`/`capture_top`
+/// bounding the capture region on this thread's stack.
+pub unsafe fn count_marks_in_frame_range(innermost_fp: usize, capture_top: usize) -> usize {
+    let mut total = 0;
+    let mut header_addr = get_gc_frame_top();
+    // Defensive cap mirrors get_dynamic_var's implicit trust with a bound.
+    for _ in 0..100_000 {
+        if header_addr == 0 {
+            break;
+        }
+        let fp = header_addr.wrapping_add(8);
+        if fp >= capture_top {
+            // GC chain is innermost→outermost ascending; everything past
+            // the capture top is outside the captured segment.
+            break;
+        }
+        unsafe {
+            if fp >= innermost_fp {
+                let header_word = *(header_addr as *const usize);
+                let header = crate::types::Header::from_usize(header_word);
+                if header.type_flags & crate::collections::FRAME_HAS_MARKS_FLAG != 0 {
+                    let idx = (header.type_data & 0xFFFF) as usize;
+                    let mut entry_ptr =
+                        *((fp.wrapping_sub(24).wrapping_sub(idx * 8)) as *const usize);
+                    while entry_ptr != BuiltInTypes::null_value() as usize
+                        && entry_ptr != 0
+                        && BuiltInTypes::is_heap_pointer(entry_ptr)
+                    {
+                        total += 1;
+                        let entry = crate::types::HeapObject::from_tagged(entry_ptr);
+                        entry_ptr = entry.get_field(2);
+                    }
+                }
+            }
+            header_addr = *((header_addr.wrapping_sub(8)) as *const usize);
+        }
+    }
+    total
+}
+
+/// Snapshot the continuation-mark chain of a single frame: returns
+/// `Some(chain_head)` if the frame's FRAME_HAS_MARKS_FLAG is set,
+/// `None` otherwise. Called at exception-handler push.
+///
+/// # Safety
+/// `frame_pointer` must be the frame pointer of a live Beagle frame.
+pub unsafe fn snapshot_frame_marks(frame_pointer: usize) -> Option<usize> {
+    unsafe {
+        let header_addr = frame_pointer.wrapping_sub(8);
+        let header = crate::types::Header::from_usize(*(header_addr as *const usize));
+        if header.type_flags & crate::collections::FRAME_HAS_MARKS_FLAG == 0 {
+            return None;
+        }
+        let mark_local_index = (header.type_data & 0xFFFF) as usize;
+        let mark_ptr_addr = frame_pointer
+            .wrapping_sub(24)
+            .wrapping_sub(mark_local_index * 8);
+        Some(*(mark_ptr_addr as *const usize))
+    }
+}
+
+/// Restore a frame's continuation-mark chain to a snapshot taken by
+/// `snapshot_frame_marks`. Called by `throw_exception` on the handler's
+/// frame before jumping to the catch block: marks installed inside the
+/// try body live in a hoisted local of this same frame (it stays live
+/// across the unwind), so without this they would remain visible to
+/// `get_dynamic_var` forever.
+///
+/// Install/uninstall pairs are lexically nested, so at throw time the
+/// frame's chain is exactly the snapshot chain plus zero or more newer
+/// entries — truncating back to the snapshot is always sound.
+///
+/// # Safety
+/// `frame_pointer` must be the frame pointer of a live Beagle frame —
+/// the handler's own frame, which the throw is about to jump into.
+pub unsafe fn restore_frame_marks(frame_pointer: usize, snapshot: Option<usize>) {
+    unsafe {
+        let header_addr = frame_pointer.wrapping_sub(8);
+        let header_word = *(header_addr as *const usize);
+        let mut header = crate::types::Header::from_usize(header_word);
+        if header.type_flags & crate::collections::FRAME_HAS_MARKS_FLAG == 0 {
+            // No marks now — nothing was installed (or everything was
+            // balanced); the snapshot must have been None.
+            return;
+        }
+        let mark_local_index = (header.type_data & 0xFFFF) as usize;
+        let mark_ptr_addr = frame_pointer
+            .wrapping_sub(24)
+            .wrapping_sub(mark_local_index * 8);
+        match snapshot {
+            Some(head) => {
+                *(mark_ptr_addr as *mut usize) = head;
+            }
+            None => {
+                *(mark_ptr_addr as *mut usize) = BuiltInTypes::null_value() as usize;
+                header.type_flags &= !crate::collections::FRAME_HAS_MARKS_FLAG;
+                *(header_addr as *mut usize) = header.to_usize();
+            }
+        }
+    }
+}
+
 /// Get the current value of a dynamic variable.
 /// If any continuation marks are active, walks the GC frame chain looking for marks.
 /// Otherwise falls back directly to the root namespace value.
@@ -39,6 +200,15 @@ pub unsafe extern "C" fn get_dynamic_var(namespace_id: usize, slot: usize) -> us
                     if BuiltInTypes::is_heap_pointer(entry_ptr) {
                         let entry = crate::types::HeapObject::from_tagged(entry_ptr);
                         if BuiltInTypes::untag(entry.get_field(0)) == key {
+                            if debug_marks() {
+                                eprintln!(
+                                    "[marks] key={:#x} FOUND at frame header {:#x} (gc_frame_top={:#x}, active={})",
+                                    key,
+                                    header_addr,
+                                    get_gc_frame_top(),
+                                    marks_active
+                                );
+                            }
                             return entry.get_field(1);
                         }
                         entry_ptr = entry.get_field(2);
@@ -119,6 +289,17 @@ pub unsafe extern "C" fn install_continuation_mark(
         // Store new entry as the mark pointer
         *(mark_ptr_addr as *mut usize) = entry_ptr;
 
+        if debug_marks() {
+            eprintln!(
+                "[marks] INSTALL key={:#x} fp={:#x} header={:#x} local_idx={} old_mark={:#x}",
+                key,
+                frame_pointer,
+                frame_pointer.wrapping_sub(8),
+                mark_local_idx,
+                old_mark_ptr
+            );
+        }
+
         // Increment active marks counter so get_dynamic_var knows to walk frames
         ACTIVE_MARKS_COUNT.with(|c| c.set(c.get() + 1));
 
@@ -151,6 +332,15 @@ pub unsafe extern "C" fn uninstall_continuation_mark(
             .wrapping_sub(mark_local_idx * 8);
         let mark_ptr = *(mark_ptr_addr as *const usize);
 
+        if debug_marks() {
+            eprintln!(
+                "[marks] UNINSTALL fp={:#x} header={:#x} local_idx={} mark_ptr={:#x}",
+                frame_pointer,
+                frame_pointer.wrapping_sub(8),
+                mark_local_idx,
+                mark_ptr
+            );
+        }
         if mark_ptr != BuiltInTypes::null_value() as usize
             && mark_ptr != 0
             && BuiltInTypes::is_heap_pointer(mark_ptr)
