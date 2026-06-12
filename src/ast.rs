@@ -73,6 +73,24 @@ type PropertyFeedback = Option<(u64, u64, u64)>;
 
 /// Check if a variable name is referenced anywhere in an AST slice.
 /// Used to determine if the `resume` binding in `catch(e, resume)` is actually used.
+/// Mangle a `test "name"` string into a valid identifier chunk. Test
+/// blocks compile to functions named `__test_<sanitized>__`, and the
+/// test runner invokes them through a *generated source string* — any
+/// character that can't appear in an identifier (comma, quote, paren,
+/// …) would break that parse with a baffling "compile error" on an
+/// otherwise-valid test. Everything outside [A-Za-z0-9_-] becomes '_'.
+fn sanitize_test_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 fn references_variable(body: &[Ast], name: &str) -> bool {
     fn check(ast: &Ast, name: &str) -> bool {
         match ast {
@@ -5296,7 +5314,7 @@ impl AstCompiler<'_> {
             } => {
                 if self.test_mode {
                     // In test mode, compile as a named function: __test_<name>__()
-                    let sanitized_name = name.replace(' ', "_");
+                    let sanitized_name = sanitize_test_name(&name);
                     let fn_name = format!("__test_{}__", sanitized_name);
 
                     // Compile as a function definition
@@ -6698,7 +6716,7 @@ impl AstCompiler<'_> {
             }
             Ast::Test { name, .. } => {
                 if self.test_mode {
-                    let sanitized_name = name.replace(' ', "_");
+                    let sanitized_name = sanitize_test_name(name);
                     let fn_name = format!("__test_{}__", sanitized_name);
                     let full_function_name =
                         self.compiler.current_namespace_name() + "/" + &fn_name;
