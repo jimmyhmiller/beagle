@@ -1438,18 +1438,26 @@ fn resolve_by_name(runtime: &Runtime, name: &str) -> Option<DefinitionInfo> {
                 disk_location: f.disk_location.clone(),
             });
         }
-        if let Some((_, s)) = runtime.get_struct(candidate) {
-            return Some(DefinitionInfo {
-                full_name: s.name.clone(),
-                source_text: s.source_text.clone(),
-                disk_location: s.disk_location.clone(),
-            });
-        }
+        // Check enums BEFORE structs: an enum is registered both as an `Enum`
+        // and as a companion `Struct` of the same name (used for variant
+        // dispatch). The companion struct carries `source_text: None` /
+        // `disk_location: None` — the real source and on-disk origin live on
+        // the `Enum` record. Resolving the companion struct first would report
+        // an enum as having no source/location (and make it un-persistable via
+        // a string-name lookup). This mirrors the precedence in
+        // `resolve_definition` for the value-based path.
         if let Some(e) = runtime.enums.get(candidate) {
             return Some(DefinitionInfo {
                 full_name: e.name.clone(),
                 source_text: e.source_text.clone(),
                 disk_location: e.disk_location.clone(),
+            });
+        }
+        if let Some((_, s)) = runtime.get_struct(candidate) {
+            return Some(DefinitionInfo {
+                full_name: s.name.clone(),
+                source_text: s.source_text.clone(),
+                disk_location: s.disk_location.clone(),
             });
         }
     }

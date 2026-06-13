@@ -553,6 +553,23 @@ impl StructManager {
             let old_version = self.layout_versions[existing_id];
             let old_def = self.structs[existing_id].clone();
 
+            // Sticky reflect metadata across a REPL redefine (no file context).
+            // `insert` replaces the record wholesale, so without this a plain
+            // `eval` redefinition (which carries `source_text` but no
+            // `disk_location`) would erase the struct's on-disk origin AND the
+            // source text that matches it — breaking the `reflect/persist`
+            // drift invariant `file[disk_location] == source_text`. A
+            // file-context recompile supplies `Some` and overrides. Mirrors the
+            // Function redefinition path; the migration logic below is
+            // unaffected (it keys off fields, not these metadata fields).
+            let mut s = s;
+            if s.disk_location.is_none() {
+                if old_def.disk_location.is_some() {
+                    s.source_text = old_def.source_text.clone();
+                }
+                s.disk_location = old_def.disk_location.clone();
+            }
+
             // Save old definition
             self.previous_definitions[existing_id].push((old_version, old_def));
 
@@ -3236,10 +3253,16 @@ impl BindingManager {
     }
 
     /// Insert or update a binding. Sticky on redefinition:
-    /// - `source_text` is replaced whenever the caller supplies `Some`.
     /// - `disk_location` is only replaced when the caller supplies `Some`
     ///   (so a REPL re-eval that doesn't know the on-disk origin leaves
     ///   the existing location intact).
+    /// - `source_text` is sticky for the SAME reason: the `reflect/persist`
+    ///   drift check relies on `file[disk_location] == source_text` (both
+    ///   captured together at load), so a plain REPL re-eval — which carries
+    ///   `source_text` but no `disk_location` — must not overwrite the stored
+    ///   source of a disk-resident binding, or it manufactures a phantom drift.
+    ///   It IS overwritten when the compile has file context, or when there is
+    ///   no on-disk origin to protect.
     pub fn upsert(
         &mut self,
         name: &str,
@@ -3248,7 +3271,9 @@ impl BindingManager {
     ) {
         if let Some(&id) = self.name_to_id.get(name) {
             let existing = &mut self.bindings[id];
-            if source_text.is_some() {
+            if source_text.is_some()
+                && (disk_location.is_some() || existing.disk_location.is_none())
+            {
                 existing.source_text = source_text;
             }
             if disk_location.is_some() {
@@ -3929,6 +3954,24 @@ impl EnumManager {
     }
 
     pub fn insert(&mut self, e: Enum) {
+        // Sticky reflect metadata across a REPL redefine (no file context):
+        // a redefinition pushes a fresh entry and repoints `name_to_id`, so
+        // without this a plain `eval` redefinition (which carries `source_text`
+        // but no `disk_location`) would leave the active enum with no on-disk
+        // origin and a source text that no longer matches it — breaking the
+        // `reflect/persist` drift invariant `file[disk_location] == source_text`.
+        // A file-context recompile supplies `Some` and overrides. Mirrors the
+        // Function/Struct redefinition paths.
+        let mut e = e;
+        if e.disk_location.is_none()
+            && let Some(&old_id) = self.name_to_id.get(&e.name)
+        {
+            let old = &self.enums[old_id];
+            if old.disk_location.is_some() {
+                e.source_text = old.source_text.clone();
+            }
+            e.disk_location = old.disk_location.clone();
+        }
         let id = self.enums.len();
         self.name_to_id.insert(e.name.clone(), id);
         self.enums.push(e);
@@ -5022,11 +5065,15 @@ impl Runtime {
         }
     }
 
+    /// Compile `string` in `namespace`, returning `(function_pointer,
+    /// ending_namespace)`. `ending_namespace` is the namespace the code left
+    /// the compiler in (after any trailing `namespace X` directive); callers
+    /// that don't care can ignore it.
     pub fn compile_string_in_namespace(
         &mut self,
         string: &str,
         namespace: &str,
-    ) -> Result<usize, Box<dyn Error>> {
+    ) -> Result<(usize, String), Box<dyn Error>> {
         let response = self
             .compiler_channel
             .as_ref()
@@ -5036,7 +5083,9 @@ impl Runtime {
                 namespace.to_string(),
             ));
         match response {
-            CompilerResponse::FunctionPointer(pointer) => Ok(pointer),
+            CompilerResponse::FunctionPointerInNamespace(pointer, ending_namespace) => {
+                Ok((pointer, ending_namespace))
+            }
             CompilerResponse::CompileError(msg) => Err(msg.into()),
             _ => Err("Unexpected compiler response".into()),
         }
@@ -8850,7 +8899,23 @@ impl Runtime {
                     if source_line.is_some() {
                         self.functions[index].source_line = source_line;
                     }
-                    if source_text.is_some() {
+                    // `source_text` is sticky for the SAME reason
+                    // `disk_location` is (just below). The drift check in
+                    // `reflect/persist` depends on the invariant
+                    // `file[disk_location] == source_text`, with both captured
+                    // together when the def was first loaded from disk. A plain
+                    // REPL redefine (`eval`) carries `source_text` (the eval'd
+                    // text) but no file context (`disk_location == None`);
+                    // letting it overwrite a disk-resident def's `source_text`
+                    // breaks the invariant and manufactures a phantom "file has
+                    // changed since loaded" drift even though the file on disk
+                    // never changed. So only overwrite when the new compile has
+                    // file context, or when there is no on-disk origin to
+                    // protect (a pure REPL def, where fresh source is wanted).
+                    if source_text.is_some()
+                        && (disk_location.is_some()
+                            || self.functions[index].disk_location.is_none())
+                    {
                         self.functions[index].source_text = source_text.clone();
                     }
                     // `disk_location` is sticky: a REPL redefinition (where

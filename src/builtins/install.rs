@@ -1267,6 +1267,14 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
+            "beagle.core/last-eval-namespace",
+            last_eval_namespace as *const u8,
+            true,
+            &[],
+            "Return the namespace the most recent eval-in-ns on the calling thread ended in (after any `namespace X` directive), or null. Lets a REPL session track its own current namespace without reading the shared global current-namespace.",
+        )?;
+
+        self.add_builtin_with_doc(
             "beagle.core/sleep",
             sleep as *const u8,
             true,

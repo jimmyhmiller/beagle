@@ -464,6 +464,36 @@ pub extern "C" fn eval(stack_pointer: usize, frame_pointer: usize, code: usize) 
     eval_result
 }
 
+thread_local! {
+    /// The namespace the most recent `eval-in-ns` on THIS thread ended in
+    /// (after any trailing `namespace X` directive). Per-thread so concurrent
+    /// REPL sessions, each on their own eval thread, can't clobber each other.
+    /// Read back via the `last-eval-namespace` builtin immediately after the
+    /// eval, on the same thread, so there is no cross-thread race.
+    static LAST_EVAL_NAMESPACE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `last-eval-namespace()` — the namespace the most recent `eval-in-ns` on the
+/// calling thread ended in, or `null` if there hasn't been one. A REPL session
+/// uses this to update its own current namespace after each eval, so a
+/// `namespace X` directive persists across that session's evals WITHOUT relying
+/// on the shared global current-namespace.
+pub extern "C" fn last_eval_namespace(stack_pointer: usize, frame_pointer: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let ns = LAST_EVAL_NAMESPACE.with(|slot| slot.borrow().clone());
+    match ns {
+        Some(name) => {
+            let runtime = get_runtime().get_mut();
+            match runtime.allocate_string(stack_pointer, name) {
+                Ok(ptr) => ptr.into(),
+                Err(_) => BuiltInTypes::null_value() as usize,
+            }
+        }
+        None => BuiltInTypes::null_value() as usize,
+    }
+}
+
 pub extern "C" fn eval_in_ns(
     stack_pointer: usize,
     frame_pointer: usize,
@@ -526,14 +556,22 @@ pub extern "C" fn eval_in_ns(
         },
     };
 
-    let result = match runtime.compile_string_in_namespace(&code, &ns_str) {
-        Ok(result) => result,
+    let (result, ending_ns) = match runtime.compile_string_in_namespace(&code, &ns_str) {
+        Ok(pair) => pair,
         Err(e) => unsafe {
             throw_runtime_error(stack_pointer, "CompileError", format!("{}", e));
         },
     };
     mem::forget(code);
     mem::forget(ns_str);
+    // Record the namespace this compile ended in (after any trailing
+    // `namespace X` directive) in a per-thread slot. A caller on this same
+    // thread — e.g. a REPL session's eval loop — reads it back via
+    // `last-eval-namespace` to track its own current namespace WITHOUT reading
+    // the shared global current-namespace, which other sessions/threads mutate.
+    // Set before running the compiled code so it's correct even if the run
+    // throws (the namespace is determined at compile time).
+    LAST_EVAL_NAMESPACE.with(|slot| *slot.borrow_mut() = Some(ending_ns));
     if result == 0 {
         return BuiltInTypes::null_value() as usize;
     }

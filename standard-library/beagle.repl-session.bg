@@ -29,9 +29,18 @@ fn create-session(id) {
     let running = atom(false)
     let cancel = atom(false)
     let resume_stack = atom([])
+    // Per-session current namespace. REPL sessions share ONE runtime, so a
+    // single global current-namespace would let one session's `namespace X`
+    // (or a file load) silently change another session's compile context —
+    // the bug that stranded the introspect session's `reflect` alias. Each
+    // session instead remembers its own namespace and pins every eval to it
+    // (see process-eval-request). New sessions inherit whatever namespace is
+    // current at creation time, preserving the old "inherit on connect"
+    // behavior; from then on their namespace is isolated.
+    let ns = atom(current-namespace())
 
     let eval_thread = thread(fn() {
-        session-eval-loop(queue, running, cancel, resume_stack)
+        session-eval-loop(queue, running, cancel, resume_stack, ns)
     })
 
     Session {
@@ -41,7 +50,7 @@ fn create-session(id) {
         is_running: running,
         cancel_token: cancel,
         resume_stack: resume_stack,
-        ns: "user"
+        ns: ns
     }
 }
 
@@ -55,7 +64,7 @@ fn pop-or-empty(items) {
     if remaining == null { [] } else { remaining }
 }
 
-fn session-eval-loop(queue, running, cancel, resume_stack) {
+fn session-eval-loop(queue, running, cancel, resume_stack, ns) {
     while deref(cancel) == false {
         let requests = deref(queue)
         if empty?(requests) {
@@ -65,7 +74,7 @@ fn session-eval-loop(queue, running, cancel, resume_stack) {
             let remaining = rest-or-empty(requests)
             reset!(queue, remaining)
             reset!(running, true)
-            process-eval-request(request, cancel, queue, running, resume_stack)
+            process-eval-request(request, cancel, queue, running, resume_stack, ns)
             reset!(running, false)
         }
     }
@@ -85,17 +94,22 @@ fn build-responses(req_id, buf, result) {
 }
 
 /// Process eval with resumable exception support.
-fn process-eval-request(request, cancel, queue, running, resume_stack) {
+fn process-eval-request(request, cancel, queue, running, resume_stack, ns) {
     let buf = core/new-string-buffer()
 
     // The try body returns ONLY the eval result.
     // Response building happens outside so it's not part of the continuation.
+    // `eval-in-ns` pins the compile to THIS session's namespace, so a namespace
+    // switch left behind by another session can't change where this code
+    // compiles. A `namespace X` directive inside `code` switches this session's
+    // namespace for subsequent evals too — captured from the per-thread slot
+    // below, not the shared global (see the `last-eval-namespace` readback).
     let try_result = try {
         if deref(cancel) {
             null
         } else {
             binding (core/out = buf) {
-                eval(request.code)
+                eval-in-ns(request.code, deref(ns))
             }
         }
     } catch (e, resume) {
@@ -142,7 +156,7 @@ fn process-eval-request(request, cancel, queue, running, resume_stack) {
                     })
 
                     let resume_buf = core/new-string-buffer()
-                    let value = eval(code)
+                    let value = eval-in-ns(code, deref(ns))
                     let resumed_result = binding (core/out = resume_buf) {
                         resume(value)
                     }
@@ -172,7 +186,7 @@ fn process-eval-request(request, cancel, queue, running, resume_stack) {
                     let fix_remaining = rest-or-empty(pending)
                     reset!(queue, fix_remaining)
                     reset!(running, true)
-                    process-eval-request(fix_request, cancel, queue, running, resume_stack)
+                    process-eval-request(fix_request, cancel, queue, running, resume_stack, ns)
                     reset!(running, false)
                 }
             }
@@ -182,6 +196,16 @@ fn process-eval-request(request, cancel, queue, running, resume_stack) {
             }
         }
         final_result
+    }
+
+    // Track the namespace this eval ended in (after any `namespace X`
+    // directive) so it persists across THIS session's evals. We read it from a
+    // per-thread slot (`last-eval-namespace`, set by eval-in-ns on this thread),
+    // NOT the shared global current-namespace — so another session switching
+    // namespaces concurrently can't corrupt ours.
+    let ended_in = last-eval-namespace()
+    if ended_in != null {
+        reset!(ns, ended_in)
     }
 
     // Normal completion — build response OUTSIDE the try/catch

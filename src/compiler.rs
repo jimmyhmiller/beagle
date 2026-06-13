@@ -610,7 +610,10 @@ impl Compiler {
     }
 
     pub fn compile_string(&mut self, string: &str) -> Result<usize, Box<dyn Error>> {
+        // The ending namespace is only of interest to the namespace-tracked
+        // path (CompileStringInNamespace); plain string compiles discard it.
         self.compile_string_in_namespace(string, None)
+            .map(|(pointer, _ending_namespace)| pointer)
     }
 
     /// Compile `string` as if it were a slice of an on-disk file at
@@ -1186,11 +1189,19 @@ impl Compiler {
         }
     }
 
+    /// Compile `string` in `namespace`. Returns `(function_pointer,
+    /// ending_namespace)`, where `ending_namespace` is the namespace the
+    /// compiler is in AFTER processing the code — i.e. the namespace any
+    /// trailing `namespace X` directive switched into (the first pass sets the
+    /// current namespace as it sees those directives). Returning it lets a
+    /// caller (e.g. a REPL session) track its own current namespace WITHOUT
+    /// reading the shared global current-namespace, which other sessions/threads
+    /// mutate. This is the readback that makes per-session namespaces correct.
     pub fn compile_string_in_namespace(
         &mut self,
         string: &str,
         namespace: Option<&str>,
-    ) -> Result<usize, Box<dyn Error>> {
+    ) -> Result<(usize, String), Box<dyn Error>> {
         // Runtime recompile may redefine functions/structs/lets — drop any
         // tier-2 specializations so none keep a stale snapshot of the world.
         self.revert_all_specializations();
@@ -1234,8 +1245,8 @@ impl Compiler {
         // new struct layout) while others are still old (producing old-layout objects).
         self.defer_function_installs = true;
 
-        let compile_result = self.with_namespace_opt(ns_id, |c| {
-            c.compile_ast(
+        let (compile_result, ending_namespace) = self.with_namespace_opt(ns_id, |c| {
+            let result = c.compile_ast(
                 ast,
                 Some("REPL_FUNCTION".to_string()),
                 "repl",
@@ -1243,7 +1254,12 @@ impl Compiler {
                 source_text,
                 token_byte_spans,
                 definition_byte_ranges,
-            )
+            );
+            // Capture the namespace the first pass switched into (a trailing
+            // `namespace X` directive) BEFORE `with_namespace_opt` restores the
+            // caller's namespace. With no directive this is just the namespace
+            // we compiled in.
+            (result, c.current_namespace_name())
         });
 
         let (top_level, diagnostics) = match compile_result {
@@ -1286,9 +1302,9 @@ impl Compiler {
                     function_name: top_level,
                 }
             })?;
-            Ok(function_pointer)
+            Ok((function_pointer, ending_namespace))
         } else {
-            Ok(0)
+            Ok((0, ending_namespace))
         }
     }
 
@@ -2949,6 +2965,11 @@ pub enum CompilerResponse {
     Done,
     FunctionsToRun(Vec<String>),
     FunctionPointer(usize),
+    /// Like `FunctionPointer`, but also reports the namespace the compile
+    /// ended in (after any `namespace X` directive). Used by
+    /// `CompileStringInNamespace` so a REPL session can track its own current
+    /// namespace without reading the shared global.
+    FunctionPointerInNamespace(usize, String),
     CompileError(String),
     CodeBaseAddress(usize),
     /// Per slot: (slot_address, slot_value, owning_code_address, debug_name).
@@ -3066,8 +3087,11 @@ impl CompilerThread {
                             .compiler
                             .compile_string_in_namespace(&string, Some(&namespace))
                         {
-                            Ok(pointer) => {
-                                work_done.mark_done(CompilerResponse::FunctionPointer(pointer));
+                            Ok((pointer, ending_namespace)) => {
+                                work_done.mark_done(CompilerResponse::FunctionPointerInNamespace(
+                                    pointer,
+                                    ending_namespace,
+                                ));
                             }
                             Err(e) => {
                                 work_done
