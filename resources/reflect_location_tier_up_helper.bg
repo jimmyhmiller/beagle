@@ -1,0 +1,8 @@
+namespace reflect_location_tier_up_helper
+
+// Kept on a non-zero line so its disk_location byte offset is clearly
+// distinguishable from a fragment-local (0-based) one. Hammered by
+// reflect_location_tier_up_test to force tier-up specialization.
+fn add(a, b) {
+    a + b
+}

@@ -1756,6 +1756,57 @@ pub extern "C" fn reflect_write_source(
     }
 }
 
+/// Resolve the authoritative byte range of a definition within the current
+/// `file_contents`.
+///
+/// The recorded `disk_location` byte offsets are only a hint. Definitions that
+/// were re-compiled from individually-extracted source fragments during a
+/// multi-module load (anything pulled in via `use` / an `-I` include path) get
+/// *fragment-local* (0-based) offsets, so `file[byte_start..byte_end]` can point
+/// at the wrong region — or out of bounds — even when the file is byte-for-byte
+/// unchanged. The reliable anchor is `original` (the exact `source_text`
+/// captured when the def was loaded). Strategy:
+///   1. Fast path — if the recorded range is in-bounds, on char boundaries, and
+///      already equals `original`, trust it (preserves behaviour for files
+///      loaded directly, e.g. the REPL server, and keeps the common case O(1)).
+///   2. Otherwise locate `original` in the file. Exactly one occurrence is the
+///      true range (self-healing). Zero occurrences = the def's text is gone
+///      (genuine drift). More than one = ambiguous, so refuse rather than guess.
+fn resolve_def_range(
+    file_contents: &str,
+    loc: &DiskLocation,
+    original: &str,
+) -> Result<(usize, usize), String> {
+    if loc.byte_start <= loc.byte_end
+        && loc.byte_end <= file_contents.len()
+        && file_contents.is_char_boundary(loc.byte_start)
+        && file_contents.is_char_boundary(loc.byte_end)
+        && file_contents[loc.byte_start..loc.byte_end] == *original
+    {
+        return Ok((loc.byte_start, loc.byte_end));
+    }
+    if original.is_empty() {
+        return Err("no stored source text to locate the definition".to_string());
+    }
+    let mut found: Option<usize> = None;
+    let mut from = 0;
+    while let Some(rel) = file_contents[from..].find(original) {
+        let idx = from + rel;
+        if found.is_some() {
+            return Err(
+                "stored source text occurs more than once in the file; cannot safely locate the definition to edit"
+                    .to_string(),
+            );
+        }
+        found = Some(idx);
+        from = idx + 1;
+    }
+    found.map(|idx| (idx, idx + original.len())).ok_or_else(|| {
+        "the definition's stored source text is no longer present in the file (it changed since it was loaded)"
+            .to_string()
+    })
+}
+
 /// Execute the full "edit an existing disk-resident definition" sequence:
 /// verify the file hasn't drifted, splice the new text into the file,
 /// shift subsequent byte ranges, patch the record's location, recompile
@@ -1779,38 +1830,38 @@ fn perform_splice(
     let file_contents = std::fs::read_to_string(&loc.file)
         .map_err(|e| format!("failed to read {}: {}", loc.file, e))?;
 
-    if loc.byte_end > file_contents.len() || loc.byte_start > loc.byte_end {
-        return Err("stored byte range is out of bounds for the current file".to_string());
-    }
-    let current_slice = &file_contents[loc.byte_start..loc.byte_end];
-    if current_slice != original_source {
-        return Err(format!(
-            "file `{}` has changed since `{}` was loaded (re-load and retry)",
-            loc.file, info.full_name
-        ));
-    }
+    // The recorded byte range is only a hint (fragment-local offsets are
+    // possible for `use`/`-I`-loaded defs); `original_source` is the real
+    // anchor. resolve_def_range trusts the offsets when valid, else relocates
+    // by the stored text. The resolved range is authoritative for the splice.
+    let (byte_start, byte_end) = resolve_def_range(&file_contents, &loc, &original_source)
+        .map_err(|e| format!("`{}` in {}: {}", info.full_name, loc.file, e))?;
+    // Derive the real starting line from the resolved offset rather than the
+    // (possibly fragment-local) recorded `line_start`, so the rewritten def's
+    // location and the recompiled fragment's line base are both correct.
+    let line_start = file_contents[..byte_start].matches('\n').count() + 1;
 
     let mut new_contents =
-        String::with_capacity(file_contents.len() - original_source.len() + new_text.len());
-    new_contents.push_str(&file_contents[..loc.byte_start]);
+        String::with_capacity(file_contents.len() - (byte_end - byte_start) + new_text.len());
+    new_contents.push_str(&file_contents[..byte_start]);
     new_contents.push_str(new_text);
-    new_contents.push_str(&file_contents[loc.byte_end..]);
+    new_contents.push_str(&file_contents[byte_end..]);
 
     std::fs::write(&loc.file, &new_contents)
         .map_err(|e| format!("failed to write {}: {}", loc.file, e))?;
 
-    let old_len = loc.byte_end - loc.byte_start;
+    let old_len = byte_end - byte_start;
     let new_len = new_text.len();
     let delta = new_len as isize - old_len as isize;
-    shift_byte_ranges_after(runtime, &loc.file, loc.byte_end, delta);
+    shift_byte_ranges_after(runtime, &loc.file, byte_end, delta);
 
-    let new_byte_end = loc.byte_start + new_len;
-    let new_line_end = loc.line_start + new_text.matches('\n').count();
+    let new_byte_end = byte_start + new_len;
+    let new_line_end = line_start + new_text.matches('\n').count();
     let patched_loc = DiskLocation {
         file: loc.file.clone(),
-        byte_start: loc.byte_start,
+        byte_start,
         byte_end: new_byte_end,
-        line_start: loc.line_start,
+        line_start,
         line_end: new_line_end,
     };
     patch_disk_location(runtime, &info.full_name, patched_loc);
@@ -1826,8 +1877,8 @@ fn perform_splice(
         new_text,
         &namespace,
         &loc.file,
-        loc.byte_start,
-        loc.line_start.saturating_sub(1),
+        byte_start,
+        line_start.saturating_sub(1),
     )
     .map_err(|e| format!("wrote {} but re-compile failed: {}", loc.file, e))
 }
@@ -2156,22 +2207,13 @@ pub extern "C" fn reflect_persist(
                     file_cache.entry(loc.file.clone()).or_insert(s)
                 }
             };
-            if loc.byte_end > contents.len() || loc.byte_start > loc.byte_end {
+            // Pre-flight: every splice target must be locatable in its file by
+            // its stored text (recorded offsets are only a hint — see
+            // resolve_def_range). Abort before touching disk if any can't be.
+            if let Err(e) = resolve_def_range(contents, loc, original) {
                 throw_persist_error(
                     stack_pointer,
-                    &format!(
-                        "reflect/persist: byte range for `{}` is out of bounds in {}",
-                        full_name, loc.file
-                    ),
-                );
-            }
-            if &contents[loc.byte_start..loc.byte_end] != original {
-                throw_persist_error(
-                    stack_pointer,
-                    &format!(
-                        "reflect/persist: file `{}` has changed since `{}` was loaded (re-load and retry)",
-                        loc.file, full_name
-                    ),
+                    &format!("reflect/persist: `{}` in {}: {}", full_name, loc.file, e),
                 );
             }
         }

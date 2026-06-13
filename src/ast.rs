@@ -1120,6 +1120,16 @@ impl AstCompiler<'_> {
         if self.file_name.is_empty() || self.file_name == "repl" {
             return None;
         }
+        // A tier-up / OSR recompile re-parses the function's stored source as a
+        // standalone fragment, so `definition_byte_ranges` here is fragment-local
+        // (0-based) — not positions in the real file. The function's
+        // `disk_location` was already captured correctly at first compile and is
+        // sticky against `None`, so decline to re-record it during a tier-up.
+        // Recording the fragment-local range would clobber the good location with
+        // `byte 0` (breaking `reflect/location` and the persist drift anchor).
+        if crate::ir::in_tier_up_compile() {
+            return None;
+        }
         let (byte_start, byte_end) = *self
             .definition_byte_ranges
             .get(&(token_range.start, token_range.end))?;

@@ -1,0 +1,31 @@
+namespace reflect_location_tier_up_test
+
+use beagle.reflect as reflect
+use reflect_location_tier_up_helper as h
+
+// Drive enough calls through h/add to make the optimizer tier it up
+// (specialize / OSR). A tier-up recompile re-parses the function's stored
+// source as a standalone fragment; before the fix it overwrote the
+// function's disk_location with fragment-local byte 0 / line 1, corrupting
+// reflect/location — and the reflect/persist drift anchor — for any
+// `use`-loaded definition. This asserts the location survives tier-up.
+fn hammer() {
+    let mut i = 0
+    let mut s = 0
+    while i < 500000 {
+        s = h/add(s, 1)
+        i = i + 1
+    }
+    s
+}
+
+test "tier-up specialization preserves disk_location for use-loaded defs" {
+    let before = reflect/location("reflect_location_tier_up_helper/add")
+    // sanity: the recorded location is a real, non-zero file position
+    assert-ne!(before[:byte-start], 0)
+    hammer()
+    let after = reflect/location("reflect_location_tier_up_helper/add")
+    assert-eq!(after[:byte-start], before[:byte-start])
+    assert-eq!(after[:byte-end], before[:byte-end])
+    assert-eq!(after[:line-start], before[:line-start])
+}
