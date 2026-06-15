@@ -1,0 +1,31 @@
+namespace stdlib_utils_test
+
+// gc-always
+
+// Utility modules (mathx) + the regex builtin GC fix (find-all/split/captures
+// previously corrupted to [0] under gc-always — now correct).
+
+use beagle.mathx as mathx
+use beagle.regex as rx
+
+fn main() {
+    println(mathx/gcd(12, 18) == 6)
+    println(mathx/lcm(4, 6) == 12)
+    println(mathx/floor-mod(-1, 3) == 2)
+    println(mathx/floor-div(-1, 3) == -1)
+    println(mathx/pow-int(2, 10) == 1024)
+    println(mathx/factorial(5) == 120)
+    let re = rx/compile("[0-9]+")
+    println(rx/find-all(re, "a1b22c333") == ["1", "22", "333"])
+    println(rx/split(rx/compile(","), "a,b,c") == ["a", "b", "c"])
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true

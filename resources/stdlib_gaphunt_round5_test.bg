@@ -1,0 +1,60 @@
+namespace stdlib_gaphunt_round5_test
+
+// gc-always
+
+// Regression coverage for round-5 gap-hunt fixes (vs Python ground truth):
+//  - seq is now IDEMPOTENT (each *Seq type is Seqable, returns itself) so the
+//    seq library / stats work on the value seq() returns
+//  - ip/parse-ipv4 rejects leading-zero octets (CVE-2021-29921 octal class)
+//  - textwrap/shorten THROWS when the placeholder is larger than width
+//  - regex find-all and find-all-positions agree on empty matches (Python re)
+
+use beagle.ip as ip
+use beagle.textwrap as tw
+use beagle.regex-wrapper as re
+use beagle.stats as stats
+
+fn threw?(thunk) {
+    try { thunk(0) false } catch (e) { true }
+}
+
+fn main() {
+    // seq idempotency across collection kinds
+    println(reduce(seq([1, 2, 3]), 0, fn(a, e) { a + e }) == 6)
+    println(stats/mean(seq([2, 4, 6])) == 4.0)
+    println(map(seq([1, 2, 3]), fn(x) { x * 2 }) == [2, 4, 6])
+    println(count(seq("abc")) == 3)
+
+    // ip leading-zero octets rejected; valid still parse; bare 0 ok
+    println(ip/parse-ipv4("010.0.0.1") == null)
+    println(ip/parse-ipv4("192.168.001.1") == null)
+    println(ip/parse-ipv4("192.168.1.1") == 3232235777)
+    println(ip/parse-ipv4("0.0.0.0") == 0)
+
+    // textwrap shorten: placeholder larger than width throws; fitting works
+    println(threw?(fn(x) { tw/shorten("aaaa bbbb", 3, " [...]") }))
+    println(tw/shorten("aaaa bbbb", 5, " [...]") == "[...]")
+    println(tw/shorten("Hello world this is long", 15, " [...]") == "Hello [...]")
+
+    // regex find-all includes empty matches, agreeing with find-all-positions
+    println(re/find-all("a*", "aba") == ["a", "", "a", ""])
+    println(re/find-all("[0-9]+", "a1b22c333") == ["1", "22", "333"])
+    let positions = re/find-all-positions("a*", "aba")
+    println(map(positions, fn(d) { get(d, :match) }) == re/find-all("a*", "aba"))
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true

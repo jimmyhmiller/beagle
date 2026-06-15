@@ -1,0 +1,46 @@
+namespace string_slice_hash_test
+
+// Regression: slice/cons/flat/literal string representations that are == equal
+// must hash identically so they interoperate as map keys. Previously the
+// slice/cons cached-hash encoding (hash << 3) truncated the top 3 bits of a
+// 64-bit hash while flat strings kept all 64, so an equal slice and flat string
+// hashed differently and silently failed map lookups.
+
+fn main() {
+    // off: flat heap string from substring of a literal
+    let off = substring("Xname", 1, 5)
+    // flat: a literal
+    let flat = "name"
+    // cat: substring over a cons string ("name" ++ "Z") -> "name"
+    let cat = substring(to-string(off) ++ "Z", 0, 4)
+    // sl: a slice over a flat heap string
+    let sl = substring(off, 0, 4)
+
+    println(off == flat)
+    println(off == cat)
+    println(off == sl)
+
+    let m = assoc(assoc({}, off, 1), flat, 2)
+    // All four representations must find the same entry
+    println(get(m, off))
+    println(get(m, flat))
+    println(get(m, cat))
+    println(get(m, sl))
+
+    // Reverse: insert under a slice key, look up via flat/literal
+    let m2 = assoc({}, sl, 99)
+    println(get(m2, off))
+    println(get(m2, "name"))
+    ""
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// true
+// 2
+// 2
+// 2
+// 2
+// 99
+// 99

@@ -1,0 +1,511 @@
+namespace beagle.bigint
+
+use beagle.string-builder as sb
+use beagle.builtin as builtin
+use beagle.primitive as primitive
+
+// Arbitrary-precision integers in pure Beagle (native ints are 62-bit).
+//
+// REPRESENTATION
+//   struct BigInt { sign, limbs }
+//     sign  : -1, 0, or 1.  Zero ALWAYS has sign 0 and an empty limbs vector,
+//             so there is exactly one canonical representation of zero.
+//     limbs : a Vec<Int> of base-10000 digit groups, least-significant first.
+//             Each limb is in 0..9999. There are no leading zero limbs
+//             (the most-significant limb, if any, is non-zero).
+//
+// Base 10000 (= 10^4) is chosen so that a limb*limb product is at most
+// 9999*9999 = 99980001 (~10^8), and a full schoolbook column sum
+// (product + carry + accumulator) stays comfortably inside Beagle's 62-bit
+// ints. Base 10000 also makes to-string trivial: each non-top limb prints as
+// a 4-digit zero-padded group.
+
+let BASE = 10000
+
+// ----------------------------------------------------------------------------
+// Construction / canonicalization
+// ----------------------------------------------------------------------------
+
+struct BigInt {
+    sign
+    limbs
+}
+
+// Drop trailing (most-significant) zero limbs from a freshly built limb vector.
+// Returns a NEW vector with no leading zeros.
+fn trim-limbs(limbs) {
+    let mut n = length(limbs)
+    while n > 0 && limbs[n - 1] == 0 {
+        n = n - 1
+    }
+    let mut out = []
+    let mut i = 0
+    while i < n {
+        out = push(out, limbs[i])
+        i = i + 1
+    }
+    out
+}
+
+// Build a canonical BigInt from a sign and a (possibly untrimmed) limb vector.
+// If the trimmed limbs are empty the result is canonical zero (sign 0).
+fn make(sign, limbs) {
+    let trimmed = trim-limbs(limbs)
+    if length(trimmed) == 0 {
+        BigInt { sign: 0, limbs: [] }
+    } else {
+        BigInt { sign: sign, limbs: trimmed }
+    }
+}
+
+// Canonical zero.
+fn zero() {
+    BigInt { sign: 0, limbs: [] }
+}
+
+// Build a BigInt from a native Int (handles negatives and full 62-bit range).
+fn from-int(n) {
+    if n == 0 {
+        zero()
+    } else {
+        let sign = if n < 0 { -1 } else { 1 }
+        // Work with a non-negative magnitude. Beagle ints are 62-bit, so
+        // negating any representable n is safe (no two's-complement overflow).
+        let mut m = if n < 0 { 0 - n } else { n }
+        let mut limbs = []
+        while m > 0 {
+            limbs = push(limbs, m - (m / BASE) * BASE)
+            m = m / BASE
+        }
+        make(sign, limbs)
+    }
+}
+
+// Parse a decimal string into a BigInt. Accepts an optional leading '+' or '-',
+// then one or more decimal digits. Leading zeros are allowed. Throws on any
+// non-digit content or an empty digit section.
+fn from-string(s) {
+    let len = length(s)
+    if len == 0 {
+        throw("beagle.bigint/from-string: empty string")
+    }
+    let first = char-code(s[0])
+    // 45 = '-', 43 = '+'
+    let mut sign = 1
+    let mut start = 0
+    if first == 45 {
+        sign = -1
+        start = 1
+    } else {
+        if first == 43 {
+            sign = 1
+            start = 1
+        }
+    }
+    if start >= len {
+        throw("beagle.bigint/from-string: no digits")
+    }
+    // Find the first non-zero significant digit so we skip leading zeros.
+    // Build limbs by scanning groups of 4 digits from the LEAST significant end.
+    // Validate all chars are digits first.
+    let mut i = start
+    while i < len {
+        let c = char-code(s[i])
+        if c < 48 || c > 57 {
+            throw("beagle.bigint/from-string: invalid digit")
+        }
+        i = i + 1
+    }
+    // Scan 4-digit groups right-to-left into limbs.
+    let mut limbs = []
+    let mut hi = len
+    while hi > start {
+        let lo = if hi - 4 > start { hi - 4 } else { start }
+        let mut acc = 0
+        let mut j = lo
+        while j < hi {
+            acc = acc * 10 + (char-code(s[j]) - 48)
+            j = j + 1
+        }
+        limbs = push(limbs, acc)
+        hi = lo
+    }
+    make(sign, limbs)
+}
+
+// ----------------------------------------------------------------------------
+// Predicates
+// ----------------------------------------------------------------------------
+
+fn is-zero?(b) {
+    b.sign == 0
+}
+
+// ----------------------------------------------------------------------------
+// Magnitude helpers (operate on limb vectors only, ignoring sign)
+// ----------------------------------------------------------------------------
+
+// Compare two magnitudes (limb vectors). Returns -1, 0, or 1.
+fn cmp-mag(a, b) {
+    let la = length(a)
+    let lb = length(b)
+    if la != lb {
+        if la < lb { -1 } else { 1 }
+    } else {
+        let mut i = la - 1
+        let mut result = 0
+        while i >= 0 && result == 0 {
+            let av = a[i]
+            let bv = b[i]
+            if av < bv {
+                result = -1
+            } else {
+                if av > bv {
+                    result = 1
+                }
+            }
+            i = i - 1
+        }
+        result
+    }
+}
+
+// Add two magnitudes (limb vectors). Returns a trimmed limb vector.
+fn add-mag(a, b) {
+    let la = length(a)
+    let lb = length(b)
+    let n = if la > lb { la } else { lb }
+    let mut out = []
+    let mut carry = 0
+    let mut i = 0
+    while i < n {
+        let av = if i < la { a[i] } else { 0 }
+        let bv = if i < lb { b[i] } else { 0 }
+        let sum = av + bv + carry
+        out = push(out, sum - (sum / BASE) * BASE)
+        carry = sum / BASE
+        i = i + 1
+    }
+    if carry > 0 {
+        out = push(out, carry)
+    }
+    trim-limbs(out)
+}
+
+// Subtract magnitude b from magnitude a, where a >= b is REQUIRED by the
+// caller. Returns a trimmed limb vector.
+fn sub-mag(a, b) {
+    let la = length(a)
+    let lb = length(b)
+    let mut out = []
+    let mut borrow = 0
+    let mut i = 0
+    while i < la {
+        let av = a[i]
+        let bv = if i < lb { b[i] } else { 0 }
+        let mut diff = av - bv - borrow
+        if diff < 0 {
+            diff = diff + BASE
+            borrow = 1
+        } else {
+            borrow = 0
+        }
+        out = push(out, diff)
+        i = i + 1
+    }
+    trim-limbs(out)
+}
+
+// Multiply two magnitudes (schoolbook). Returns a trimmed limb vector.
+fn mul-mag(a, b) {
+    let la = length(a)
+    let lb = length(b)
+    if la == 0 || lb == 0 {
+        []
+    } else {
+        // Accumulate into a raw mutable array of zeros of size la+lb.
+        let size = la + lb
+        let acc = builtin/allocate(size)
+        builtin/fill-object-fields(acc, 0)
+        primitive/write-type-id(acc, 1)
+        let mut i = 0
+        while i < la {
+            let av = a[i]
+            let mut carry = 0
+            let mut j = 0
+            while j < lb {
+                let pos = i + j
+                let cur = primitive/read-field(acc, pos)
+                let prod = cur + av * b[j] + carry
+                primitive/write-field(acc, pos, prod - (prod / BASE) * BASE)
+                carry = prod / BASE
+                j = j + 1
+            }
+            // Propagate remaining carry.
+            let mut pos = i + lb
+            while carry > 0 {
+                let cur = primitive/read-field(acc, pos)
+                let prod = cur + carry
+                primitive/write-field(acc, pos, prod - (prod / BASE) * BASE)
+                carry = prod / BASE
+                pos = pos + 1
+            }
+            i = i + 1
+        }
+        // Copy the raw array into an immutable limb vector, then trim.
+        let mut out = []
+        let mut k = 0
+        while k < size {
+            out = push(out, primitive/read-field(acc, k))
+            k = k + 1
+        }
+        trim-limbs(out)
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Public arithmetic
+// ----------------------------------------------------------------------------
+
+// Compare two BigInts. Returns -1, 0, or 1.
+fn compare(a, b) {
+    if a.sign != b.sign {
+        if a.sign < b.sign { -1 } else { 1 }
+    } else {
+        if a.sign == 0 {
+            0
+        } else {
+            // Same non-zero sign: compare magnitudes, flip for negatives.
+            let m = cmp-mag(a.limbs, b.limbs)
+            if a.sign > 0 { m } else { 0 - m }
+        }
+    }
+}
+
+// Negate a BigInt.
+fn negate(b) {
+    BigInt { sign: 0 - b.sign, limbs: b.limbs }
+}
+
+// Add two BigInts.
+fn add(a, b) {
+    if a.sign == 0 {
+        b
+    } else {
+        if b.sign == 0 {
+            a
+        } else {
+            if a.sign == b.sign {
+                // Same sign: add magnitudes, keep sign.
+                make(a.sign, add-mag(a.limbs, b.limbs))
+            } else {
+                // Opposite signs: subtract smaller magnitude from larger.
+                let m = cmp-mag(a.limbs, b.limbs)
+                if m == 0 {
+                    zero()
+                } else {
+                    if m > 0 {
+                        make(a.sign, sub-mag(a.limbs, b.limbs))
+                    } else {
+                        make(b.sign, sub-mag(b.limbs, a.limbs))
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Subtract b from a.
+fn sub(a, b) {
+    add(a, negate(b))
+}
+
+// Multiply two BigInts.
+fn mul(a, b) {
+    if a.sign == 0 || b.sign == 0 {
+        zero()
+    } else {
+        make(a.sign * b.sign, mul-mag(a.limbs, b.limbs))
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Rendering
+// ----------------------------------------------------------------------------
+
+// Append a limb as a 4-digit zero-padded group (used for non-top limbs).
+fn append-padded-limb!(builder, limb) {
+    // limb is in 0..9999
+    if limb < 1000 {
+        sb/append-char!(builder, "0")
+    }
+    if limb < 100 {
+        sb/append-char!(builder, "0")
+    }
+    if limb < 10 {
+        sb/append-char!(builder, "0")
+    }
+    sb/append-int!(builder, limb)
+}
+
+// Render a BigInt as a decimal string.
+fn to-string(b) {
+    if b.sign == 0 {
+        "0"
+    } else {
+        let n = length(b.limbs)
+        let builder = sb/new(n * 4 + 2)
+        if b.sign < 0 {
+            sb/append-char!(builder, "-")
+        }
+        // Most-significant limb: no zero padding.
+        sb/append-int!(builder, b.limbs[n - 1])
+        // Remaining limbs: 4-digit zero-padded.
+        let mut i = n - 2
+        while i >= 0 {
+            append-padded-limb!(builder, b.limbs[i])
+            i = i - 1
+        }
+        sb/to-string(builder)
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Self-tests
+// ----------------------------------------------------------------------------
+
+fn check(name, got, expected) {
+    if got == expected {
+        println("ok   " ++ name)
+        0
+    } else {
+        println("FAIL " ++ name ++ " got=" ++ to-string-any(got) ++ " expected=" ++ to-string-any(expected))
+        1
+    }
+}
+
+fn to-string-any(x) {
+    if instance-of(x, String) {
+        x
+    } else {
+        "" ++ x
+    }
+}
+
+fn main() {
+    let mut fails = 0
+
+    // Required headline vector.
+    let big = mul(from-string("99999999999999999999"), from-string("99999999999999999999"))
+    fails = fails + check("mul 20-nines squared",
+        to-string(big),
+        "9999999999999999999800000000000000000001")
+
+    // from-string / to-string round-trips.
+    fails = fails + check("rt zero", to-string(from-string("0")), "0")
+    fails = fails + check("rt leading zeros", to-string(from-string("00042")), "42")
+    fails = fails + check("rt plus", to-string(from-string("+12345")), "12345")
+    fails = fails + check("rt neg", to-string(from-string("-67890")), "-67890")
+    fails = fails + check("rt big",
+        to-string(from-string("123456789012345678901234567890")),
+        "123456789012345678901234567890")
+    fails = fails + check("rt neg zero", to-string(from-string("-0")), "0")
+
+    // from-int.
+    fails = fails + check("from-int 0", to-string(from-int(0)), "0")
+    fails = fails + check("from-int pos", to-string(from-int(123456789)), "123456789")
+    fails = fails + check("from-int neg", to-string(from-int(-987654321)), "-987654321")
+
+    // add round-trips.
+    fails = fails + check("add basic",
+        to-string(add(from-string("12345"), from-string("67890"))),
+        "80235")
+    fails = fails + check("add carry",
+        to-string(add(from-string("9999"), from-string("1"))),
+        "10000")
+    fails = fails + check("add big carry chain",
+        to-string(add(from-string("99999999999999999999"), from-string("1"))),
+        "100000000000000000000")
+    fails = fails + check("add pos+neg",
+        to-string(add(from-string("100"), from-string("-30"))),
+        "70")
+    fails = fails + check("add neg+pos to neg",
+        to-string(add(from-string("-100"), from-string("30"))),
+        "-70")
+    fails = fails + check("add to zero",
+        to-string(add(from-string("12345"), from-string("-12345"))),
+        "0")
+    fails = fails + check("add two neg",
+        to-string(add(from-string("-100"), from-string("-200"))),
+        "-300")
+
+    // sub round-trips.
+    fails = fails + check("sub basic",
+        to-string(sub(from-string("80235"), from-string("67890"))),
+        "12345")
+    fails = fails + check("sub to neg",
+        to-string(sub(from-string("30"), from-string("100"))),
+        "-70")
+    fails = fails + check("sub borrow",
+        to-string(sub(from-string("10000"), from-string("1"))),
+        "9999")
+    fails = fails + check("sub big borrow",
+        to-string(sub(from-string("100000000000000000000"), from-string("1"))),
+        "99999999999999999999")
+    fails = fails + check("sub neg minus neg",
+        to-string(sub(from-string("-50"), from-string("-80"))),
+        "30")
+
+    // add/sub inverse round-trip: (a + b) - b == a
+    let a1 = from-string("987654321987654321987654321")
+    let b1 = from-string("123456789123456789")
+    fails = fails + check("add-sub inverse",
+        to-string(sub(add(a1, b1), b1)),
+        "987654321987654321987654321")
+
+    // mul.
+    fails = fails + check("mul basic",
+        to-string(mul(from-string("12"), from-string("12"))),
+        "144")
+    fails = fails + check("mul signs neg*pos",
+        to-string(mul(from-string("-12"), from-string("12"))),
+        "-144")
+    fails = fails + check("mul signs neg*neg",
+        to-string(mul(from-string("-12"), from-string("-12"))),
+        "144")
+    fails = fails + check("mul by zero",
+        to-string(mul(from-string("12345678901234567890"), from-string("0"))),
+        "0")
+    fails = fails + check("mul big",
+        to-string(mul(from-string("123456789"), from-string("987654321"))),
+        "121932631112635269")
+
+    // compare ordering.
+    fails = fails + check("cmp eq", compare(from-string("100"), from-string("100")), 0)
+    fails = fails + check("cmp lt", compare(from-string("99"), from-string("100")), -1)
+    fails = fails + check("cmp gt", compare(from-string("100"), from-string("99")), 1)
+    fails = fails + check("cmp neg<pos", compare(from-string("-1"), from-string("1")), -1)
+    fails = fails + check("cmp neg ordering", compare(from-string("-100"), from-string("-99")), -1)
+    fails = fails + check("cmp zero<pos", compare(from-string("0"), from-string("1")), -1)
+    fails = fails + check("cmp neg<zero", compare(from-string("-1"), from-string("0")), -1)
+    fails = fails + check("cmp big",
+        compare(from-string("123456789012345678901"), from-string("123456789012345678900")),
+        1)
+
+    // is-zero?
+    fails = fails + check("is-zero true", is-zero?(from-string("0")), true)
+    fails = fails + check("is-zero false", is-zero?(from-string("5")), false)
+    fails = fails + check("is-zero after sub", is-zero?(sub(from-string("7"), from-string("7"))), true)
+
+    // negate.
+    fails = fails + check("negate pos", to-string(negate(from-string("42"))), "-42")
+    fails = fails + check("negate neg", to-string(negate(from-string("-42"))), "42")
+    fails = fails + check("negate zero", to-string(negate(from-string("0"))), "0")
+
+    if fails == 0 {
+        println("ALL PASS")
+    } else {
+        println("FAILURES: " ++ fails)
+    }
+    fails
+}

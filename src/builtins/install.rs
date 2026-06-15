@@ -255,6 +255,17 @@ impl Runtime {
             2,
         )?;
 
+        // throw_type_error_operands additionally takes the two offending operands
+        // (stack_pointer, frame_pointer, operand_a, operand_b) so the thrown
+        // TypeError can name which operand was null (the stale-instance case).
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/throw-type-error-operands",
+            throw_type_error_operands as *const u8,
+            true,
+            true,
+            4,
+        )?;
+
         // check_arity now takes (stack_pointer, frame_pointer, function_pointer, expected_args)
         self.add_builtin_function_with_fp(
             "beagle.builtin/check-arity",
@@ -747,6 +758,14 @@ impl Runtime {
             true,
             &["x"],
             "Convert a float to an integer by truncating towards zero. If already an integer, returns unchanged.\n\nExamples:\n  (to-int 3.7)   ; => 3\n  (to-int -3.7)  ; => -3\n  (to-int 42)    ; => 42",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.core/parse-float-string",
+            parse_float_string_builtin as *const u8,
+            true,
+            &["s"],
+            "Parse a string into a Float using correctly-rounded IEEE-754 parsing. Returns null if the string is not a valid float.\n\nExamples:\n  (parse-float-string \"6.022e23\")  ; => 6.022e23\n  (parse-float-string \"nope\")      ; => null",
         )?;
 
         // ============================================================================

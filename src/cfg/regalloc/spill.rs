@@ -189,6 +189,40 @@ pub fn allocate_with_spilling(
 
     let mut spilled: Vec<VReg> = Vec::new();
     let mut rematerialized: Vec<VReg> = Vec::new();
+
+    // GC correctness — MANDATORY, independent of the perf spill budget/cap:
+    // a value that might be a relocatable heap pointer and is live across a GC
+    // safepoint MUST be slot-backed. The conservative GC scans frame slots,
+    // not registers, and the allocator pool is callee-saved — so such a value
+    // left in a register survives the call but is invisible to the GC and goes
+    // stale if a moving collection runs (nested-struct corruption like
+    // `op.field == op`). Force-spill these up front (spill_one reloads at each
+    // use, so the value stops crossing safepoints in a register) so the
+    // FUNCTION STAYS IN SSA — we slot only the specific unsafe values instead
+    // of bailing the whole function to legacy. Provably non-pointer values
+    // (ints/floats, via pointer_class) are exempt, preserving numeric SSA
+    // perf. The rare value spill_one can't deliver (e.g. an unspillable block
+    // param) stays cross-safepoint and is caught by verify_clobber_safety,
+    // which bails just that function.
+    {
+        let liveness0 = compute_liveness(f);
+        let cross0 = cross_safepoint_values(f, &liveness0);
+        let non_pointer = crate::cfg::pointer_class::analyze(f).non_pointer_vregs;
+        let mut mandatory: Vec<VReg> = cross0
+            .iter()
+            .copied()
+            .filter(|v| v.class == RegClass::Gp && !non_pointer.contains(v))
+            .collect();
+        mandatory.sort_by_key(|v| v.index); // deterministic order
+        for v in mandatory {
+            // Rematerialization would only apply to pure-immediate (hence
+            // non-pointer) defs, which are already excluded; spill to a slot.
+            // Not tracked in `spilled` so it doesn't count against the perf
+            // cap — these slots are correctness-mandatory.
+            let _ = spill_one(f, v);
+        }
+    }
+
     let mut iterations: u32 = 0;
     loop {
         iterations += 1;

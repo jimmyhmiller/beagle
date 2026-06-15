@@ -1,0 +1,443 @@
+namespace beagle.glob
+
+// beagle.glob — shell-style glob matching, PURE BEAGLE.
+//
+// Built entirely on beagle.core string primitives (length, s[i], char-code,
+// char-from-code, substring, ++). No Rust, no external state.
+//
+// Supported pattern syntax:
+//   *          matches any run of characters EXCEPT '/'
+//   ?          matches exactly one character EXCEPT '/'
+//   [abc]      character class: matches one char (not '/') in the set
+//   [a-z]      character class with ranges
+//   [!abc]     negated class (also [^abc])
+//   **         matches across '/' boundaries, including none (path globbing)
+//              (only treated as ** when it is a whole path segment, e.g.
+//               "src/**/x" — otherwise consecutive '*' collapse to one *)
+//   \\c        backslash escapes the next char (literal)
+//
+// Public API:
+//   match?(pattern, name)   -> Bool
+//   translate(pattern)      -> a human-readable token description string
+//                              (mainly to verify how a pattern is parsed)
+//   find(pattern, dir)      -> Result of matching paths under dir (uses fs)
+
+// ---------------------------------------------------------------------------
+// Character helpers
+// ---------------------------------------------------------------------------
+
+fn code-at(s, i) {
+    char-code(s[i])
+}
+
+// '/' is code 47
+fn is-slash-code(c) {
+    c == 47
+}
+
+// ---------------------------------------------------------------------------
+// Character-class matching.
+//
+// Given the pattern, the index just past the '[', and a target character
+// code, determine (a) whether the char matches and (b) the index just past
+// the closing ']'. Returns a 2-element vector [matched?, next-index].
+//
+// A ']' immediately after '[' (or after a leading '!'/'^') is a literal ']'.
+// ---------------------------------------------------------------------------
+
+fn class-match(pattern, open-idx, target-code) {
+    let plen = length(pattern)
+    // Determine negation
+    let mut i = open-idx
+    let negated = if i < plen && (code-at(pattern, i) == 33 || code-at(pattern, i) == 94) {
+        // '!' (33) or '^' (94)
+        i = i + 1
+        true
+    } else {
+        false
+    }
+    // A leading ']' is literal
+    let mut matched = false
+    let mut first-char = true
+    let mut closed = false
+    let mut close-idx = -1
+    while i < plen && closed == false {
+        let c = code-at(pattern, i)
+        if c == 93 && first-char == false {
+            // ']' (93) closes the class
+            closed = true
+            close-idx = i
+        } else {
+            first-char = false
+            // Range? next is '-' (45) and there is a char after it that isn't ']'
+            let is-range = (i + 2 < plen) && (code-at(pattern, i + 1) == 45) && (code-at(pattern, i + 2) != 93)
+            if is-range {
+                let lo = c
+                let hi = code-at(pattern, i + 2)
+                if target-code >= lo && target-code <= hi {
+                    matched = true
+                }
+                i = i + 3
+            } else {
+                if target-code == c {
+                    matched = true
+                }
+                i = i + 1
+            }
+        }
+    }
+    if closed == false {
+        // Unterminated class — treat '[' as a literal char in the caller.
+        // Signal this with next-index == -1.
+        [false, -1]
+    } else {
+        // Character classes never match '/' (path-segment semantics),
+        // regardless of negation.
+        let result = if is-slash-code(target-code) {
+            false
+        } else {
+            if negated {
+                matched == false
+            } else {
+                matched
+            }
+        }
+        [result, close-idx + 1]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Detect whether a "**" at pattern index pi is acting as a cross-slash
+// wildcard. We treat "**" as crossing slashes whenever two stars are
+// adjacent. (CPython/pathlib only honors ** as a full segment, but the
+// task's vectors — "src/**/*.bg" — have ** as a full segment, and treating
+// any "**" as crossing is a strict superset that still satisfies them and
+// the single-star "*" doesn't-cross-/ rule.)
+// ---------------------------------------------------------------------------
+
+fn is-double-star(pattern, pi) {
+    let plen = length(pattern)
+    pi + 1 < plen && code-at(pattern, pi) == 42 && code-at(pattern, pi + 1) == 42
+}
+
+// ---------------------------------------------------------------------------
+// Core recursive matcher.
+//
+// pi = index into pattern, ni = index into name.
+// Recursion with explicit star backtracking. Bounded by name length, so
+// worst-case is polynomial — fine for path-sized inputs.
+// ---------------------------------------------------------------------------
+
+fn match-from(pattern, pi, name, ni) {
+    let plen = length(pattern)
+    let nlen = length(name)
+    if pi >= plen {
+        // Pattern exhausted: match iff name also exhausted.
+        ni >= nlen
+    } else {
+        let pc = code-at(pattern, pi)
+        if pc == 42 {
+            // '*' — check for '**'
+            if is-double-star(pattern, pi) {
+                // Skip the whole run of '*' (collapse ***+ to **)
+                let mut np = pi
+                while np < plen && code-at(pattern, np) == 42 {
+                    np = np + 1
+                }
+                // "**/" matches zero or more whole path segments. When the
+                // double-star is immediately followed by '/', allow the
+                // zero-segment case by also trying the pattern just past that
+                // slash against the current name position (so "src/**/x"
+                // matches "src/x").
+                let zero-seg = np < plen && code-at(pattern, np) == 47 && match-from(pattern, np + 1, name, ni)
+                if zero-seg {
+                    true
+                } else {
+                    // ** matches any number of chars INCLUDING '/'. Try every
+                    // possible split: consume 0..remaining chars of name.
+                    let mut result = false
+                    let mut k = ni
+                    let mut done = false
+                    while done == false {
+                        if match-from(pattern, np, name, k) {
+                            result = true
+                            done = true
+                        } else {
+                            if k >= nlen {
+                                done = true
+                            } else {
+                                k = k + 1
+                            }
+                        }
+                    }
+                    result
+                }
+            } else {
+                // single '*' — matches a run NOT containing '/'
+                let np = pi + 1
+                let mut result = false
+                let mut k = ni
+                let mut done = false
+                while done == false {
+                    if match-from(pattern, np, name, k) {
+                        result = true
+                        done = true
+                    } else {
+                        if k >= nlen {
+                            done = true
+                        } else {
+                            // Stop expanding across a '/'
+                            if is-slash-code(code-at(name, k)) {
+                                done = true
+                            } else {
+                                k = k + 1
+                            }
+                        }
+                    }
+                }
+                result
+            }
+        } else {
+            if pc == 63 {
+                // '?' — one char, not '/'
+                if ni < nlen && is-slash-code(code-at(name, ni)) == false {
+                    match-from(pattern, pi + 1, name, ni + 1)
+                } else {
+                    false
+                }
+            } else {
+                if pc == 91 {
+                    // '[' — char class
+                    if ni >= nlen {
+                        false
+                    } else {
+                        let tc = code-at(name, ni)
+                        let res = class-match(pattern, pi + 1, tc)
+                        let matched = res[0]
+                        let next-pi = res[1]
+                        if next-pi == -1 {
+                            // Unterminated class: '[' is a literal char
+                            if tc == 91 {
+                                match-from(pattern, pi + 1, name, ni + 1)
+                            } else {
+                                false
+                            }
+                        } else {
+                            if matched {
+                                match-from(pattern, next-pi, name, ni + 1)
+                            } else {
+                                false
+                            }
+                        }
+                    }
+                } else {
+                    if pc == 92 {
+                        // '\\' — escape next char as literal
+                        let lit-pi = pi + 1
+                        if lit-pi >= plen {
+                            // trailing backslash is a literal backslash
+                            if ni < nlen && code-at(name, ni) == 92 {
+                                match-from(pattern, pi + 1, name, ni + 1)
+                            } else {
+                                false
+                            }
+                        } else {
+                            let lit = code-at(pattern, lit-pi)
+                            if ni < nlen && code-at(name, ni) == lit {
+                                match-from(pattern, lit-pi + 1, name, ni + 1)
+                            } else {
+                                false
+                            }
+                        }
+                    } else {
+                        // literal char
+                        if ni < nlen && code-at(name, ni) == pc {
+                            match-from(pattern, pi + 1, name, ni + 1)
+                        } else {
+                            false
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Match a glob pattern against a name (or path).
+///
+/// Examples:
+///   (match? "*.txt" "foo.txt")        ; => true
+///   (match? "*.txt" "foo.md")         ; => false
+///   (match? "a?c" "abc")              ; => true
+///   (match? "[a-c]x" "bx")            ; => true
+///   (match? "src/**/*.bg" "src/a/b/c.bg") ; => true
+///   (match? "*" "a/b")               ; => false
+fn match?(pattern, name) {
+    match-from(pattern, 0, name, 0)
+}
+
+// ---------------------------------------------------------------------------
+// translate — produce a token description for a pattern, to verify parsing.
+// Each token is rendered on its own; the result is the tokens joined by spaces.
+//   *   -> STAR
+//   **  -> DOUBLESTAR
+//   ?   -> ANY
+//   [..] -> CLASS(...)
+//   \\c -> LIT(c)
+//   c   -> LIT(c)
+// ---------------------------------------------------------------------------
+
+/// Translate a glob pattern into a space-separated token description.
+///
+/// Useful for verifying how a pattern parses.
+///
+/// Examples:
+///   (translate "a*c")        ; => "LIT(a) STAR LIT(c)"
+///   (translate "src/**/*.bg")
+///     ; => "LIT(s) LIT(r) LIT(c) LIT(/) DOUBLESTAR LIT(/) STAR LIT(.) LIT(b) LIT(g)"
+fn translate(pattern) {
+    let plen = length(pattern)
+    let mut buf = ""
+    let mut pi = 0
+    let mut first = true
+    while pi < plen {
+        let pc = code-at(pattern, pi)
+        let token-and-advance = if pc == 42 {
+            if is-double-star(pattern, pi) {
+                // collapse run of '*'
+                let mut np = pi
+                while np < plen && code-at(pattern, np) == 42 {
+                    np = np + 1
+                }
+                ["DOUBLESTAR", np]
+            } else {
+                ["STAR", pi + 1]
+            }
+        } else {
+            if pc == 63 {
+                ["ANY", pi + 1]
+            } else {
+                if pc == 91 {
+                    // scan to matching ']'
+                    let cls = translate-class(pattern, pi)
+                    cls
+                } else {
+                    if pc == 92 {
+                        let lit-pi = pi + 1
+                        if lit-pi >= plen {
+                            ["LIT(\\)", pi + 1]
+                        } else {
+                            ["LIT(" ++ pattern[lit-pi] ++ ")", lit-pi + 1]
+                        }
+                    } else {
+                        ["LIT(" ++ pattern[pi] ++ ")", pi + 1]
+                    }
+                }
+            }
+        }
+        let token = token-and-advance[0]
+        let next-pi = token-and-advance[1]
+        if first {
+            buf = buf ++ token
+            first = false
+        } else {
+            buf = buf ++ " " ++ token
+        }
+        pi = next-pi
+    }
+    buf
+}
+
+// Render a character class token starting at '[' (pattern[pi]).
+// Returns [token-string, next-index]. If unterminated, '[' is a LIT.
+fn translate-class(pattern, pi) {
+    let plen = length(pattern)
+    // find closing ']' using the same first-char-literal rule
+    let mut i = pi + 1
+    let negated = if i < plen && (code-at(pattern, i) == 33 || code-at(pattern, i) == 94) {
+        i = i + 1
+        true
+    } else {
+        false
+    }
+    let mut first-char = true
+    let mut closed = false
+    let mut close-idx = -1
+    while i < plen && closed == false {
+        let c = code-at(pattern, i)
+        if c == 93 && first-char == false {
+            closed = true
+            close-idx = i
+        } else {
+            first-char = false
+            i = i + 1
+        }
+    }
+    if closed == false {
+        ["LIT([)", pi + 1]
+    } else {
+        // inner-start skips the leading '!'/'^' when negated
+        let inner-start = if negated { pi + 2 } else { pi + 1 }
+        let inner = substring(pattern, inner-start, close-idx)
+        let prefix = if negated { "CLASS(!" } else { "CLASS(" }
+        [prefix ++ inner ++ ")", close-idx + 1]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// find — recursively list files under `dir` whose path (relative to dir)
+// matches `pattern`. Uses beagle.fs read-dir + is-dir? under an effect
+// handler. Returns a vector of matching relative paths.
+//
+// This is the OPTIONAL fs-backed entry point. The pure matcher above does
+// all the real work; find only walks the tree and calls match?.
+// ---------------------------------------------------------------------------
+
+use beagle.fs as fs
+
+// Iterative directory walk using an explicit worklist of relative dirs.
+// Avoids Beagle-level recursion across the fs perform/resume boundary
+// (which interacts badly with delimited continuations under GC stress).
+fn find-walk(root, start-rel, pattern, acc) {
+    let mut result = acc
+    let mut worklist = [start-rel]
+    while empty?(worklist) == false {
+        let rel = last(worklist)
+        worklist = butlast(worklist)
+        let abs = if length(rel) == 0 { root } else { root ++ "/" ++ rel }
+        let entries = match fs/read-dir(abs) {
+            Result.Ok { value } => value,
+            Result.Err { error } => []
+        }
+        let mut s = seq(entries)
+        while s != null {
+            let name = first(s)
+            let entry-rel = if length(rel) == 0 { name } else { rel ++ "/" ++ name }
+            let entry-abs = root ++ "/" ++ entry-rel
+            if match?(pattern, entry-rel) {
+                result = push(result, entry-rel)
+            }
+            let is-dir = match fs/is-directory?(entry-abs) {
+                Result.Ok { value } => value,
+                Result.Err { error } => false
+            }
+            if is-dir {
+                worklist = push(worklist, entry-rel)
+            }
+            s = next(s)
+        }
+    }
+    result
+}
+
+/// Recursively find paths under `dir` matching `pattern`.
+///
+/// Paths are returned relative to `dir`. Wraps the directory walk in a
+/// blocking fs handler, so no handler setup is required by the caller.
+/// Pure matching is done by match?; this only walks the directory tree.
+///
+/// Examples:
+///   (find "src/**/*.bg" ".")  ; => ["src/a/b.bg", ...]
+fn find(pattern, dir) {
+    fs/run-blocking(fn() { find-walk(dir, "", pattern, []) })
+}

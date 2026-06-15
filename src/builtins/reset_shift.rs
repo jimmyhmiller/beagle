@@ -136,11 +136,39 @@ struct ContinuationRestorePlan {
     /// effect-handler stacks (with SP/FP relocated to `dst`) just
     /// before the final `return_jump`.
     side_state_ptr: usize,
+    /// True for a one-shot `resume-tail`: `dst` is the original captured
+    /// base, the outermost frame's saved-FP/LR are kept (not overwritten)
+    /// so completion returns straight to the handle, and NO per-resume
+    /// prompt-tag record is pushed (nested performs capture against the
+    /// outer handle's record, and the discarded handler frame is gone).
+    tail_resume: bool,
 }
 
 thread_local! {
     static CONTINUATION_RESTORE_PLAN: Cell<*mut ContinuationRestorePlan> = const { Cell::new(std::ptr::null_mut()) };
     static CONTINUATION_SCRATCH_STACK: RefCell<Vec<u8>> = RefCell::new(vec![0u8; CONTINUATION_SCRATCH_STACK_SIZE]);
+    /// Set by `resume_tail_runtime` immediately before it invokes a resume
+    /// closure, signalling the trampoline that this is a TAIL (one-shot)
+    /// resume: land the body back at its captured base and discard the
+    /// handler/dispatch frames (constant stack). The trampoline reads and
+    /// clears it; plain `resume` never sets it (multi-shot-safe default).
+    static TAIL_RESUME: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Mark the next continuation-trampoline invocation as a tail resume.
+pub fn set_tail_resume() {
+    TAIL_RESUME.with(|c| c.set(true));
+}
+
+/// Read and clear the tail-resume flag.
+fn take_tail_resume() -> bool {
+    TAIL_RESUME.with(|c| c.replace(false))
+}
+
+/// Public clear (used by `resume_tail_runtime` after a non-trampoline
+/// closure returns, so a stale flag can't leak onto a later trampoline).
+pub fn take_tail_resume_public() -> bool {
+    take_tail_resume()
 }
 
 /// Returns `true` if `pc` lies within the code range of
@@ -304,10 +332,19 @@ impl ContinuationObject {
     /// invisible: the count gate in `get_dynamic_var` short-circuits
     /// the frame walk.
     const FIELD_CAPTURED_MARKS: usize = 6;
+    /// Tagged int: the ORIGINAL stack base (the `stack_pointer` at
+    /// capture time) the segment was copied FROM. A one-shot tail resume
+    /// (`resume-tail`) lands the body back HERE — exactly where it was
+    /// captured — instead of `trampoline_fp - outermost_offset`, so the
+    /// handler/dispatch/trampoline frames pushed BELOW this base are
+    /// reclaimed and a `handle { loop { perform } }` runs in constant
+    /// stack. Multi-shot (plain `resume`) ignores this and keeps the
+    /// drift-but-multi-shot-safe trampoline-relative placement.
+    const FIELD_ORIGINAL_BASE: usize = 7;
 
     /// Total number of fields; used when allocating a fresh
     /// continuation object.
-    pub const NUM_FIELDS: usize = 7;
+    pub const NUM_FIELDS: usize = 8;
 
     pub fn from_tagged(tagged: usize) -> Option<Self> {
         let heap_obj = HeapObject::try_from_tagged(tagged)?;
@@ -514,6 +551,18 @@ impl ContinuationObject {
         );
     }
 
+    /// The original stack base the segment was captured from (0 if unset).
+    pub fn original_base(&self) -> usize {
+        BuiltInTypes::untag(self.heap_obj.get_field(Self::FIELD_ORIGINAL_BASE))
+    }
+
+    fn set_original_base(&self, base: usize) {
+        self.heap_obj.write_field(
+            Self::FIELD_ORIGINAL_BASE as i32,
+            BuiltInTypes::Int.tag(base as isize) as usize,
+        );
+    }
+
     /// Initialize a freshly-allocated continuation heap object.
     /// Segment metadata is set to zero and expected to be filled in
     /// by the caller after the backing segment object is allocated.
@@ -542,6 +591,10 @@ impl ContinuationObject {
         );
         heap_obj.write_field(
             Self::FIELD_CAPTURED_MARKS as i32,
+            BuiltInTypes::Int.tag(0) as usize,
+        );
+        heap_obj.write_field(
+            Self::FIELD_ORIGINAL_BASE as i32,
             BuiltInTypes::Int.tag(0) as usize,
         );
     }
@@ -999,6 +1052,7 @@ pub unsafe fn capture_continuation_runtime_inner(
     cont.set_segment_ptr_with_barrier(runtime, segment_heap_ptr);
     cont.set_segment_frame_pointer_offset(innermost_fp_offset);
     cont.set_captured_marks_count(captured_marks);
+    cont.set_original_base(stack_pointer);
     crate::builtins::marks_count_sub(captured_marks);
 
     cont_ptr
@@ -1166,6 +1220,7 @@ pub unsafe extern "C" fn capture_continuation_tagged_runtime(
     cont.set_segment_ptr_with_barrier(runtime, segment_heap_ptr);
     cont.set_segment_frame_pointer_offset(innermost_fp_offset);
     cont.set_captured_marks_count(captured_marks);
+    cont.set_original_base(stack_pointer);
     crate::builtins::marks_count_sub(captured_marks);
     if side_state_words > 0 {
         cont.set_side_state_with_barrier(runtime, side_state_ptr);
@@ -1509,7 +1564,21 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     //      through an explicit longjmp rather than relying on the
     //      body's natural epilogue leaving SP at the invoker's SP.
     //      This works regardless of where `dst` lives.
-    let dst = trampoline_fp - outermost_offset;
+    // One-shot TAIL resume (via `resume-tail`): land the body back at its
+    // ORIGINAL captured base. The handler/dispatch/trampoline frames were
+    // pushed at LOWER addresses than that base, so restoring SP to the base
+    // discards them — a `handle { loop { perform } }` then runs in constant
+    // stack instead of leaking a handler frame per iteration. The body's
+    // original outer saved-FP/LR (kept, not overwritten below) still point
+    // at the live `__reset__`/handle, so the body completes naturally back
+    // to the handle. Gated on `resume-tail` so multi-shot `resume` keeps the
+    // trampoline-relative placement (each invoke a fresh copy).
+    let tail_resume = take_tail_resume() && cont.tag() != 0 && cont.original_base() != 0;
+    let dst = if tail_resume {
+        cont.original_base()
+    } else {
+        trampoline_fp - outermost_offset
+    };
     let _ = trampoline_sp;
 
     // Snapshot the trampoline's invoker FP/LR (the values its prologue
@@ -1556,6 +1625,7 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         saved_caller_lr,
         post_overlay_sp,
         side_state_ptr,
+        tail_resume,
     });
     CONTINUATION_RESTORE_PLAN.with(|slot| slot.set(Box::into_raw(plan)));
 
@@ -1602,7 +1672,9 @@ unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target:
         saved_caller_lr,
         post_overlay_sp,
         side_state_ptr,
+        tail_resume,
     } = plan;
+    let mut caller_gc_header = caller_gc_header;
 
     // Copy the FULL segment — including the outermost frame's
     // saved-FP/LR slots at [outermost_offset, outermost_offset+16).
@@ -1617,14 +1689,26 @@ unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target:
         i += 8;
     }
 
-    // Patch the outermost frame's saved-FP/LR so outgoing returns
-    // link back to the invoker. For tagged resumes the saved-LR is
-    // further rewritten below to the pop-tag stub.
     let outermost_fp_slot = (dst + outermost_offset) as *mut usize;
     let saved_lr_slot = (dst + outermost_offset + 8) as *mut usize;
-    unsafe {
-        *outermost_fp_slot = saved_caller_fp;
-        *saved_lr_slot = saved_caller_lr;
+    if tail_resume {
+        // TAIL resume: `dst` == the original captured base, so the body's
+        // outermost frame's saved-FP/LR (copied verbatim) still point at the
+        // live `__reset__`/handle — KEEP them so the body completes naturally
+        // back to the handle, with the handler/dispatch frames (below the
+        // base) discarded. The frame ABOVE the body is `__reset__`; its GC
+        // header is `(saved_fp) - 8`, so splice the GC chain there instead of
+        // through the (now-discarded) handler chain.
+        let outer_saved_fp = unsafe { *outermost_fp_slot };
+        caller_gc_header = outer_saved_fp.wrapping_sub(8);
+    } else {
+        // Patch the outermost frame's saved-FP/LR so outgoing returns
+        // link back to the invoker. For tagged resumes the saved-LR is
+        // further rewritten below to the pop-tag stub.
+        unsafe {
+            *outermost_fp_slot = saved_caller_fp;
+            *saved_lr_slot = saved_caller_lr;
+        }
     }
 
     // Walk saved-FP chain from innermost outward, replacing each
@@ -1723,7 +1807,13 @@ unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target:
     // natural epilogue land SP at the invoker's exact SP via `ldp
     // x29, x30, [sp], #16; ret`, so an untagged continuation doesn't
     // need a stub to restore SP.
-    if cont_tag != 0 {
+    //
+    // TAIL resume skips this entirely: there is no per-resume boundary
+    // (the handler frame is being discarded, not returned to), the body's
+    // kept outer saved-LR returns straight to `__reset__`/the handle, and
+    // nested performs in the resumed body capture against the OUTER handle's
+    // own record (still live) — exactly the constant-stack behaviour we want.
+    if cont_tag != 0 && !tail_resume {
         let runtime = crate::get_runtime().get();
         runtime.push_prompt_tag(
             cont_tag,

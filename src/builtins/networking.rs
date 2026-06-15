@@ -143,7 +143,7 @@ pub extern "C" fn event_loop_destroy(loop_id: usize) -> usize {
 /// In InProcess mode: returns socket_id on success, -1 on error
 /// In Threaded mode: submits operation, returns 0 on success, -1 on error
 pub extern "C" fn tcp_connect_async(
-    _stack_pointer: usize,
+    stack_pointer: usize,
     _frame_pointer: usize,
     loop_id: usize,
     host: usize,
@@ -155,7 +155,10 @@ pub extern "C" fn tcp_connect_async(
     let future_atom = BuiltInTypes::untag(future_atom);
     let runtime = get_runtime().get_mut();
 
-    let host_str = runtime.get_string_literal(host);
+    // Accept ANY string (literal, heap, cons), not just compile-time literals,
+    // so a computed host (e.g. parsed from a URL) works — get_string_literal
+    // aborted on non-literal hosts, which broke the HTTP client.
+    let host_str = runtime.get_string(stack_pointer, host);
     trace!(
         "tcp",
         "tcp_connect_async: loop={} host={} port={} future_atom={}",
@@ -198,7 +201,7 @@ pub extern "C" fn tcp_connect_async(
 /// Create a TCP listener
 /// Returns listener_id on success, -1 on error
 pub extern "C" fn tcp_listen(
-    _stack_pointer: usize,
+    stack_pointer: usize,
     _frame_pointer: usize,
     loop_id: usize,
     host: usize,
@@ -210,7 +213,8 @@ pub extern "C" fn tcp_listen(
     let backlog = BuiltInTypes::untag(backlog) as u32;
     let runtime = get_runtime().get_mut();
 
-    let host_str = runtime.get_string_literal(host);
+    // Accept any string host (computed hosts, not just literals).
+    let host_str = runtime.get_string(stack_pointer, host);
     trace!(
         "tcp",
         "tcp_listen: loop={} host={} port={} backlog={}", loop_id, host_str, port, backlog
@@ -775,7 +779,11 @@ pub extern "C" fn tcp_result_data_for_op_id(
         match event_loop.take_current_result_for_op_id(op_id) {
             None => String::new(),
             Some(result) => match result {
-                TcpResult::ReadOk { data, .. } => String::from_utf8_lossy(&data).to_string(),
+                // Byte-faithful: Beagle strings are raw byte arrays (read back via
+                // from_utf8_unchecked), so preserve every inbound byte instead of
+                // lossily replacing invalid UTF-8 with U+FFFD — which destroyed
+                // binary HTTP bodies and masked WebSocket frames (B6).
+                TcpResult::ReadOk { data, .. } => unsafe { String::from_utf8_unchecked(data) },
                 TcpResult::ConnectErr { error, .. } => error,
                 TcpResult::AcceptErr { error, .. } => error,
                 TcpResult::ReadErr { error, .. } => error,
@@ -874,7 +882,11 @@ pub extern "C" fn tcp_result_data(stack_pointer: usize, loop_id: usize) -> usize
         match event_loop.current_result() {
             None => String::new(),
             Some(result) => match result {
-                TcpResult::ReadOk { data, .. } => String::from_utf8_lossy(&data).to_string(),
+                // Byte-faithful: Beagle strings are raw byte arrays (read back via
+                // from_utf8_unchecked), so preserve every inbound byte instead of
+                // lossily replacing invalid UTF-8 with U+FFFD — which destroyed
+                // binary HTTP bodies and masked WebSocket frames (B6).
+                TcpResult::ReadOk { data, .. } => unsafe { String::from_utf8_unchecked(data) },
                 TcpResult::ConnectErr { error, .. } => error,
                 TcpResult::AcceptErr { error, .. } => error,
                 TcpResult::ReadErr { error, .. } => error,

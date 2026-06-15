@@ -88,7 +88,26 @@ pub unsafe extern "C" fn to_number(
         }
     } else {
         match string.parse::<isize>() {
-            Ok(result) => BuiltInTypes::Int.tag(result) as usize,
+            Ok(result) => {
+                // Tagged ints are 61-bit (3 tag bits). A value outside this range
+                // would be silently truncated/wrapped by `tag()` — a silent
+                // wrong answer. Throw instead, and point at beagle.bigint.
+                const MAX_INT: isize = (1 << 60) - 1;
+                const MIN_INT: isize = -(1 << 60);
+                if result > MAX_INT || result < MIN_INT {
+                    unsafe {
+                        throw_runtime_error(
+                            stack_pointer,
+                            "ParseError",
+                            format!(
+                                "Integer '{}' is out of range for a 61-bit tagged Int (use beagle.bigint for arbitrary precision)",
+                                string
+                            ),
+                        );
+                    }
+                }
+                BuiltInTypes::Int.tag(result) as usize
+            }
             Err(e) => unsafe {
                 throw_runtime_error(
                     stack_pointer,

@@ -1,0 +1,29 @@
+namespace json_float_precision_test
+
+// Regression: json/parse must produce the correctly-rounded IEEE-754 double for
+// numbers with exponents. The old pure-Beagle parser applied the exponent with
+// an iterative *10 / /10 loop, accumulating rounding error (6.022e23 came out
+// off by 67108864). It now routes through beagle.core/parse-float-string
+// (Rust f64::from_str), which is correctly rounded.
+
+use beagle.json as json
+
+fn main() {
+    println(json/stringify(json/parse("1e-7")) == "0.0000001")
+    println(json/stringify(json/parse("6.022e23")) == "602200000000000000000000.0")
+    println(json/stringify(json/parse("1.5e-8")) == "0.000000015")
+    println(json/stringify(json/parse("3.14")) == "3.14")
+    println(json/stringify(json/parse("-2.5e3")) == "-2500.0")
+    // native parse-float-string directly
+    println(parse-float-string("nope") == null)
+    println(parse-float-string("42.5") == 42.5)
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// true
+// true
+// true
+// true
+// true

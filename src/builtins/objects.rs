@@ -206,6 +206,10 @@ pub extern "C" fn property_access(
     } else {
         None
     };
+    // For a field added after this (stale) object was created, property_access
+    // returns the field's declared default (a GC-stable tagged value) with
+    // `index == usize::MAX` so the read isn't memoized. Nothing extra to do
+    // here — the default-or-null is already in `result`.
     let (result, index) = runtime
         .property_access(struct_pointer, str_constant_ptr)
         .unwrap_or_else(|error| unsafe {
@@ -327,6 +331,15 @@ pub extern "C" fn equal(a: usize, b: usize) -> usize {
     } else {
         BuiltInTypes::false_value() as usize
     }
+}
+
+/// Ordered comparison returning a tagged Int -1/0/1. Used by the inline
+/// `<`/`<=`/`>`/`>=` codegen fallback so strings (and mixed numerics) order
+/// lexicographically/by-value instead of by pointer identity.
+pub extern "C" fn compare_values(a: usize, b: usize) -> usize {
+    let runtime = get_runtime().get();
+    let ord = runtime.compare_ordered(a, b);
+    BuiltInTypes::Int.tag(ord as isize) as usize
 }
 
 pub extern "C" fn write_field(
@@ -543,12 +556,18 @@ pub unsafe extern "C" fn copy_object_spread(
         };
         dest.writer_header_direct(new_header);
 
-        // Map fields from source to current layout, null-fill new fields
-        let null_val = BuiltInTypes::null_value() as usize;
+        // Map fields from source to current layout. Fields present in the source
+        // are copied; fields new to this layout get their declared literal
+        // default (a GC-stable tagged value — immediate or eternal-region —
+        // so this needs no heap allocation and can't move the raw
+        // `source`/`dest` pointers), or null if they have none.
+        let def = runtime
+            .get_struct_by_id(expected_struct_id)
+            .expect("Struct must exist");
         for (new_idx, mapping) in field_map.iter().enumerate() {
             let value = match mapping {
                 Some(old_idx) => source.get_field(*old_idx),
-                None => null_val,
+                None => runtime.field_default_value_at(&def, new_idx),
             };
             dest.write_field(new_idx as i32, value);
         }

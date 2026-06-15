@@ -400,6 +400,35 @@ macro_rules! replace_register {
 }
 
 impl Instruction {
+    /// True if this instruction is a GC safepoint: it may call into the
+    /// runtime and trigger a (moving) garbage collection. Any virtual
+    /// register whose live range spans such an instruction MUST be spilled
+    /// to its root slot — the allocator's register pool is the callee-saved
+    /// set, so a value kept in a register survives the call but is invisible
+    /// to the conservative frame-slot GC scan (and goes stale if the GC moves
+    /// the object). TierUpCheck/OsrCheck are deliberately excluded: they go
+    /// through the tier-up/OSR trampolines which the loop codegen relies on to
+    /// preserve callee-saved registers, and the OSR transfer rebuilds state.
+    pub fn is_gc_safepoint(&self) -> bool {
+        matches!(
+            self,
+            Instruction::Call(..)
+                | Instruction::InlineBumpAllocate(..)
+                | Instruction::CaptureContinuation(..)
+                | Instruction::CaptureContinuationTagged(..)
+                | Instruction::PerformEffect(..)
+                | Instruction::ReturnFromShift(..)
+                | Instruction::Throw(..)
+                | Instruction::PushExceptionHandler(..)
+                | Instruction::PushResumableExceptionHandler(..)
+                | Instruction::PopExceptionHandler(..)
+                | Instruction::PopExceptionHandlerById(..)
+                | Instruction::PushPromptHandler(..)
+                | Instruction::PopPromptHandler(..)
+                | Instruction::PushPromptTag(..)
+        )
+    }
+
     pub fn get_registers(&self) -> Vec<VirtualRegister> {
         match self {
             Instruction::Label(_) => vec![],
@@ -1003,6 +1032,10 @@ pub struct Ir {
     pub num_locals: usize,
     allocate_fn_pointer: usize,
     pub error_fn_pointer: usize,
+    /// Pointer to `beagle.builtin/throw-type-error-operands` — the 4-arg variant
+    /// that also receives the offending operands so it can report which one was
+    /// null (the stale-struct-instance case). 0 if not registered.
+    pub error_operands_fn_pointer: usize,
     pub ir_to_machine_code_range: Vec<(usize, MachineCodeRange)>,
     pub ir_range_to_token_range: Vec<(crate::ast::TokenRange, IRRange)>,
     /// Number of argument registers for the target architecture (8 for ARM64, 6 for x86-64)
@@ -1046,6 +1079,7 @@ impl Ir {
             num_locals: 0,
             allocate_fn_pointer,
             error_fn_pointer: 0,
+            error_operands_fn_pointer: 0,
             ir_to_machine_code_range: vec![],
             ir_range_to_token_range: vec![],
             num_arg_registers,
@@ -1205,7 +1239,7 @@ impl Ir {
         ));
         self.jump(after_label);
         self.write_label(error_label);
-        self.emit_type_error_with_resume(result, after_label);
+        self.emit_type_error_with_resume_operands(result, after_label, a.into(), b.into());
         self.write_label(after_label);
         Value::Register(result)
     }
@@ -2004,15 +2038,15 @@ impl Ir {
 
         self.write_label(type_error_1);
         self.feedback_or(feedback_slot, crate::feedback::FB_OTHER);
-        self.emit_type_error_with_resume(result_register, after_slow);
+        self.emit_type_error_with_resume_operands(result_register, after_slow, a.into(), b.into());
 
         self.write_label(type_error_2);
         self.feedback_or(feedback_slot, crate::feedback::FB_OTHER);
-        self.emit_type_error_with_resume(result_register, after_slow);
+        self.emit_type_error_with_resume_operands(result_register, after_slow, a.into(), b.into());
 
         self.write_label(type_error_3);
         self.feedback_or(feedback_slot, crate::feedback::FB_OTHER);
-        self.emit_type_error_with_resume(result_register, after_slow);
+        self.emit_type_error_with_resume_operands(result_register, after_slow, a.into(), b.into());
 
         self.write_label(after_errors);
         Value::Register(result_register)
@@ -2105,7 +2139,7 @@ impl Ir {
         ));
         self.jump(after_label);
         self.write_label(error_label);
-        self.emit_type_error_with_resume(register, after_label);
+        self.emit_type_error_with_resume_operands(register, after_label, a.into(), b.into());
         self.write_label(after_label);
         Value::Register(register)
     }
@@ -2161,7 +2195,14 @@ impl Ir {
         let a = self.assign_new(a.into());
         let b = self.assign_new(b.into());
         let error_label = self.label("div_type_error");
+        let zero_label = self.label("div_zero_error");
         let after_label = self.label("div_after");
+        // Integer divide-by-zero check at the IR level (before the Div
+        // instruction untags operands) so it reports a clear "Division by zero"
+        // instead of the generic arithmetic type error with garbage operands.
+        // Only a tagged Int 0 equals 0; non-int divisors fall through to the
+        // Div instruction's type guard.
+        self.jump_if(zero_label, Condition::Equal, b, Value::TaggedConstant(0));
         self.instructions.push(Instruction::Div(
             register.into(),
             a.into(),
@@ -2169,10 +2210,24 @@ impl Ir {
             error_label,
         ));
         self.jump(after_label);
+        self.write_label(zero_label);
+        self.emit_divide_by_zero(register, after_label);
         self.write_label(error_label);
-        self.emit_type_error_with_resume(register, after_label);
+        self.emit_type_error_with_resume_operands(register, after_label, a.into(), b.into());
         self.write_label(after_label);
         Value::Register(register)
+    }
+
+    /// Emit a call to the divide-by-zero error builtin (always throws).
+    fn emit_divide_by_zero(&mut self, result_register: VirtualRegister, after_label: Label) {
+        let dz_fn = Value::RawValue(
+            (crate::builtins::divide_by_zero_error as usize) << BuiltInTypes::tag_size(),
+        );
+        let stack_pointer = self.get_stack_pointer_imm(0);
+        let frame_pointer = self.get_frame_pointer();
+        let result = self.call_builtin(dz_fn, vec![stack_pointer, frame_pointer]);
+        self.assign(result_register, result);
+        self.jump(after_label);
     }
 
     pub fn div_any<A, B>(&mut self, a: A, b: B, feedback_slot: usize) -> Value
@@ -2226,7 +2281,10 @@ impl Ir {
         let a = self.assign_new(a.into());
         let b = self.assign_new(b.into());
         let error_label = self.label("modulo_type_error");
+        let zero_label = self.label("modulo_zero_error");
         let after_label = self.label("modulo_after");
+        // Modulo-by-zero → clear "Division by zero" (see `div`).
+        self.jump_if(zero_label, Condition::Equal, b, Value::TaggedConstant(0));
         self.instructions.push(Instruction::Modulo(
             register.into(),
             a.into(),
@@ -2234,8 +2292,10 @@ impl Ir {
             error_label,
         ));
         self.jump(after_label);
+        self.write_label(zero_label);
+        self.emit_divide_by_zero(register, after_label);
         self.write_label(error_label);
-        self.emit_type_error_with_resume(register, after_label);
+        self.emit_type_error_with_resume_operands(register, after_label, a.into(), b.into());
         self.write_label(after_label);
         Value::Register(register)
     }
@@ -2431,37 +2491,50 @@ impl Ir {
         // to numeric specialization, so record FB_OTHER.
         self.write_label(default_compare_label);
         self.feedback_or(feedback_slot, crate::feedback::FB_OTHER);
-        let cmp_type_error_label = match condition {
+        match condition {
             Condition::LessThan
             | Condition::LessThanOrEqual
             | Condition::GreaterThan
             | Condition::GreaterThanOrEqual => {
-                let tag_a = self.get_tag(a.into());
-                let tag_b = self.get_tag(b.into());
-                let cmp_type_error = self.label("compare_type_error");
-                self.jump_if(cmp_type_error, Condition::NotEqual, tag_a, tag_b);
-                Some(cmp_type_error)
+                // Generic ordered comparison: route through the compare_values
+                // builtin so strings order LEXICOGRAPHICALLY (and mixed int/float
+                // by value) instead of by pointer identity — the old raw Compare
+                // here made `<` on multi-char strings nondeterministic and broke
+                // `sort`. The builtin returns tagged -1/0/1; compare it to 0 with
+                // the original condition to get the boolean.
+                let cmp_fn = Value::RawValue(
+                    (crate::builtins::compare_values as usize) << BuiltInTypes::tag_size(),
+                );
+                let ord = self.call_builtin(cmp_fn, vec![a.into(), b.into()]);
+                let zero = self.assign_new(Value::TaggedConstant(0));
+                let tag = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
+                let dest = self.volatile_register();
+                self.instructions.push(Instruction::Compare(
+                    dest.into(),
+                    ord,
+                    zero.into(),
+                    condition,
+                ));
+                self.instructions
+                    .push(Instruction::Tag(dest.into(), dest.into(), tag.into()));
+                self.assign(result_register, dest);
             }
             Condition::Equal | Condition::NotEqual => {
-                // Equality/inequality can compare any types - no guard needed
-                None
+                // Reached only by internal callers — the `==`/`!=` operators are
+                // lowered to the structural `equal` builtin in the parser. Keep
+                // identity comparison here.
+                let tag = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
+                let dest = self.volatile_register();
+                self.instructions.push(Instruction::Compare(
+                    dest.into(),
+                    a.into(),
+                    b.into(),
+                    condition,
+                ));
+                self.instructions
+                    .push(Instruction::Tag(dest.into(), dest.into(), tag.into()));
+                self.assign(result_register, dest);
             }
-        };
-        let tag = self.assign_new(Value::RawValue(BuiltInTypes::Bool.get_tag() as usize));
-        let dest = self.volatile_register();
-        self.instructions.push(Instruction::Compare(
-            dest.into(),
-            a.into(),
-            b.into(),
-            condition,
-        ));
-        self.instructions
-            .push(Instruction::Tag(dest.into(), dest.into(), tag.into()));
-        self.assign(result_register, dest);
-        if let Some(cmp_type_error) = cmp_type_error_label {
-            self.jump(after_compare);
-            self.write_label(cmp_type_error);
-            self.emit_type_error_with_resume(result_register, after_compare);
         }
 
         self.write_label(after_compare);
@@ -2679,6 +2752,12 @@ impl Ir {
         destination.into()
     }
 
+    // NOTE: bitwise ops are intentionally LOW-LEVEL/raw — they operate directly
+    // on tagged values and are used by the effect/continuation machinery on
+    // non-Int tagged values. Do NOT add an Int type-guard here: it breaks
+    // try/catch/resume (which relies on raw bitwise on continuation tags). The
+    // consequence is that `null & x` etc. coerce rather than throw — a known,
+    // accepted low-level-semantics tradeoff.
     pub fn bitwise_and(&mut self, a: Value, b: Value) -> Value {
         let a = self.assign_new(a);
         let b = self.assign_new(b);
@@ -3021,6 +3100,10 @@ impl Ir {
         }
 
         self.instructions = linear_scan.instructions.clone();
+        // Register allocation may have inserted safepoint spill/reload
+        // instructions (insert_safepoint_spills), shifting inline label
+        // markers — rebuild the label→index map before lowering reads it.
+        self.rebuild_label_locations();
         self.num_locals = linear_scan.stack_slot;
         backend.set_max_locals(self.num_locals);
         if let Some(mark_idx) = self.mark_local_index {
@@ -3895,8 +3978,16 @@ impl Ir {
                         backend.mov_64(backend.ret_reg(), BuiltInTypes::construct_boolean(false));
                         backend.jump(exit);
                     }
-                    Value::RawValue(_) => {
-                        panic!("Should we be returing a raw value?")
+                    Value::RawValue(val) => {
+                        // A `RawValue` in return position is a value whose bits
+                        // are already a valid Beagle value — most commonly an
+                        // interned float literal (`ast.rs` FloatLiteral emits
+                        // `RawValue(<tagged float ptr>)`). `fn f() { 1.5 }` and
+                        // `eval("1.5")` put the literal directly in tail position,
+                        // so move the bits into the return register exactly as
+                        // `value_to_register` does, rather than panicking.
+                        backend.mov_64(backend.ret_reg(), *val as isize);
+                        backend.jump(exit);
                     }
                     Value::Null => {
                         backend.mov_64(backend.ret_reg(), 0b111);
@@ -5242,6 +5333,33 @@ impl Ir {
         let frame_pointer = self.get_frame_pointer();
         let f = self.assign_new(Value::Function(self.error_fn_pointer));
         let resumed_value = self.call_builtin(f.into(), vec![stack_pointer, frame_pointer]);
+        // If we reach here, the error was caught and resumed with a value
+        self.assign(result_register, resumed_value);
+        self.jump(after_label);
+    }
+
+    /// Like `emit_type_error_with_resume`, but passes the two offending operands
+    /// to the throw helper so the resulting TypeError can name which operand was
+    /// null. Use at binary-arithmetic / comparison guard sites where both
+    /// operands are live. Falls back to the operand-free helper if the 4-arg
+    /// builtin wasn't registered.
+    fn emit_type_error_with_resume_operands(
+        &mut self,
+        result_register: VirtualRegister,
+        after_label: Label,
+        operand_a: Value,
+        operand_b: Value,
+    ) {
+        if self.error_operands_fn_pointer == 0 {
+            return self.emit_type_error_with_resume(result_register, after_label);
+        }
+        let stack_pointer = self.get_stack_pointer_imm(0);
+        let frame_pointer = self.get_frame_pointer();
+        let f = self.assign_new(Value::Function(self.error_operands_fn_pointer));
+        let resumed_value = self.call_builtin(
+            f.into(),
+            vec![stack_pointer, frame_pointer, operand_a, operand_b],
+        );
         // If we reach here, the error was caught and resumed with a value
         self.assign(result_register, resumed_value);
         self.jump(after_label);

@@ -108,28 +108,84 @@ pub unsafe extern "C" fn throw_error(stack_pointer: usize, frame_pointer: usize)
     std::process::exit(1);
 }
 
-pub unsafe extern "C" fn throw_type_error(stack_pointer: usize, frame_pointer: usize) -> ! {
-    save_gc_context!(stack_pointer, frame_pointer);
+/// Human-readable name for a value's kind, for error messages.
+fn kind_name(kind: BuiltInTypes) -> &'static str {
+    match kind {
+        BuiltInTypes::Int => "an int",
+        BuiltInTypes::Float => "a float",
+        BuiltInTypes::String => "a string",
+        BuiltInTypes::Bool => "a bool",
+        BuiltInTypes::Function => "a function",
+        BuiltInTypes::Closure => "a closure",
+        BuiltInTypes::HeapObject => "a heap object (struct/enum/collection)",
+        BuiltInTypes::Null => "null",
+    }
+}
 
-    let (kind_str, message_str) = {
+/// Shared tail for arithmetic type errors. Allocates the kind + a caller-chosen
+/// message, resolves the *real* source location from the saved Beagle return
+/// address (the throw site), and throws a resumable TypeError. Callers must
+/// already have run `save_gc_context!`.
+/// Throw a clear, catchable "Division by zero" error. Called from the inline
+/// `/` and `%` codegen when the (integer) divisor is zero — previously that
+/// case jumped to the generic arithmetic type-error path, which reported a
+/// bogus "got a closure and an int" message (the operands had already been
+/// untagged). Returns `!` (always throws); the `usize` return satisfies the
+/// extern-C signature the call site expects.
+pub unsafe extern "C" fn divide_by_zero_error(stack_pointer: usize, frame_pointer: usize) -> usize {
+    crate::save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        throw_runtime_error(
+            stack_pointer,
+            "RuntimeError",
+            "Division by zero".to_string(),
+        )
+    }
+}
+
+unsafe fn throw_arith_type_error(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    message: String,
+) -> ! {
+    let (kind_str, message_str, location_str) = {
         let runtime = get_runtime().get_mut();
-        let kind = runtime
+        let kind: usize = runtime
             .allocate_string(stack_pointer, "TypeError".to_string())
             .expect("Failed to allocate kind string")
             .into();
-        let kind_root_id = runtime.register_temporary_root(kind);
-        let msg = runtime
-            .allocate_string(
-                stack_pointer,
-                "Type mismatch in arithmetic operation. To mix integers and floats, use to-float() to convert integers: e.g., 3.14 * to-float(2)".to_string(),
-            )
+        let kind_root = runtime.register_temporary_root(kind);
+        let msg: usize = runtime
+            .allocate_string(stack_pointer, message)
             .expect("Failed to allocate message string")
             .into();
-        let kind = runtime.unregister_temporary_root(kind_root_id);
-        (kind, msg)
+        let msg_root = runtime.register_temporary_root(msg);
+
+        // Resolve the throw site to "<fn> at <file>:<line>" so the error points
+        // at the offending function instead of carrying a null location. The
+        // saved GC return address is the instruction after the throw-type-error
+        // builtin call, i.e. inside the user function that did the bad math.
+        let return_addr = get_saved_gc_return_addr();
+        let loc_string: Option<String> = runtime
+            .get_function_containing_pointer(return_addr as *const u8)
+            .map(|(function, _)| match (&function.source_file, function.source_line) {
+                (Some(file), Some(line)) => format!("{} at {}:{}", function.name, file, line),
+                (Some(file), None) => format!("{} at {}", function.name, file),
+                _ => function.name.clone(),
+            });
+        let location: usize = match loc_string {
+            Some(loc) => runtime
+                .allocate_string(stack_pointer, loc)
+                .map(|s| s.into())
+                .unwrap_or(BuiltInTypes::Null.tag(0) as usize),
+            None => BuiltInTypes::Null.tag(0) as usize,
+        };
+
+        let msg = runtime.unregister_temporary_root(msg_root);
+        let kind = runtime.unregister_temporary_root(kind_root);
+        (kind, msg, location)
     };
 
-    let null_location = BuiltInTypes::Null.tag(0) as usize;
     let resume_address = get_saved_gc_return_addr();
     unsafe {
         let error = create_error(
@@ -137,10 +193,59 @@ pub unsafe extern "C" fn throw_type_error(stack_pointer: usize, frame_pointer: u
             frame_pointer,
             kind_str,
             message_str,
-            null_location,
+            location_str,
         );
         throw_exception(stack_pointer, frame_pointer, error, resume_address, 0);
     }
+}
+
+pub unsafe extern "C" fn throw_type_error(stack_pointer: usize, frame_pointer: usize) -> ! {
+    save_gc_context!(stack_pointer, frame_pointer);
+    // No operand info at this call site (shift/bitwise guards). Name the null
+    // possibility explicitly so a stale-instance field read is still diagnosable.
+    let message = "Type mismatch in a numeric/bitwise operation: an operand is not \
+                   the required number type, or is null. A null operand usually \
+                   means a field read returned null — e.g. a field that does not \
+                   exist on a stale struct instance after a live struct \
+                   redefinition. Inspect the actual live value."
+        .to_string();
+    throw_arith_type_error(stack_pointer, frame_pointer, message)
+}
+
+/// Like `throw_type_error`, but the guard site passed both operands so we can
+/// say *which* one is null — the common cause being a field read that returned
+/// null on a stale struct instance.
+pub unsafe extern "C" fn throw_type_error_operands(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    operand_a: usize,
+    operand_b: usize,
+) -> ! {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let a_kind = BuiltInTypes::get_kind(operand_a);
+    let b_kind = BuiltInTypes::get_kind(operand_b);
+    let a_null = a_kind == BuiltInTypes::Null;
+    let b_null = b_kind == BuiltInTypes::Null;
+    let stale_hint = "A null operand usually means a field read returned null — \
+                      e.g. a field that does not exist on a stale struct instance \
+                      after a live struct redefinition. Inspect the actual live value.";
+    let message = if a_null && b_null {
+        format!("Arithmetic on null: both operands are null. {}", stale_hint)
+    } else if a_null {
+        format!("Arithmetic on null: the left operand is null. {}", stale_hint)
+    } else if b_null {
+        format!("Arithmetic on null: the right operand is null. {}", stale_hint)
+    } else {
+        // Not null, but at least one operand isn't numeric (ints and floats
+        // mix fine via the slow path). Name the actual kinds so the cause is
+        // unambiguous instead of the misleading "mix integers and floats".
+        format!(
+            "Arithmetic requires numeric operands (int or float), but got {} and {}.",
+            kind_name(a_kind),
+            kind_name(b_kind),
+        )
+    };
+    throw_arith_type_error(stack_pointer, frame_pointer, message)
 }
 
 pub unsafe extern "C" fn check_arity(

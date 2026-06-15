@@ -1,0 +1,79 @@
+namespace stdlib_gaphunt_round4_test
+
+// gc-always
+
+// Regression coverage for round-4 gap-hunt fixes (vs Python ground truth):
+//  - mathx factorial / pow-int now THROW on 61-bit overflow (was silent wrap)
+//  - struct-pack '=' = native (little-endian) byte order (was silently BE)
+//  - struct-pack unsigned/signed pack codes THROW out of range (was silent mask)
+//  - path/dirname strips trailing slash on duplicate-slash separators
+//  - path/extension & strip-extension leave all-dot names ("..","...") alone
+//  - semver/satisfies? excludes next-tuple prereleases from stable ranges
+
+use beagle.mathx as m
+use beagle.struct-pack as sp
+use beagle.path as path
+use beagle.semver as semver
+
+fn threw?(thunk) {
+    try { thunk(0) false } catch (e) { true }
+}
+
+fn main() {
+    // mathx overflow -> clear error, not silent wrap
+    println(m/factorial(19) == 121645100408832000)
+    println(threw?(fn(x) { m/factorial(20) }))
+    println(threw?(fn(x) { m/pow-int(2, 60) }))
+    println(m/pow-int(2, 31) == 2147483648)
+    println(m/pow-int(10, 18) == 1000000000000000000)
+
+    // struct-pack native '=' is little-endian here
+    println(sp/pack("=H", [0x0102]) == [2, 1])
+    println(sp/unpack("=H", [2, 1]) == [258])
+    // big-endian still works
+    println(sp/pack(">H", [0x0102]) == [1, 2])
+    // out-of-range -> throw
+    println(threw?(fn(x) { sp/pack-u8(256) }))
+    println(threw?(fn(x) { sp/pack(">H", [70000]) }))
+    println(threw?(fn(x) { sp/pack(">B", [-1]) }))
+
+    // path dirname: no trailing slash from duplicate separators
+    println(path/dirname("a//b") == "a")
+    println(path/dirname("x//y//z") == "x//y")
+    println(path/dirname("/a//b") == "/a")
+    println(path/dirname("/a/b/c.txt") == "/a/b")
+    // path extension: all-dot names have no extension
+    println(path/extension("..") == "")
+    println(path/strip-extension("..") == "..")
+    println(path/extension("...") == "")
+    println(path/extension("a.txt") == ".txt")
+
+    // semver: prerelease of the next tuple does not satisfy a stable range
+    println(semver/satisfies?("2.0.0-alpha", "^1.2.0") == false)
+    println(semver/satisfies?("1.2.5", "^1.2.0") == true)
+    println(semver/satisfies?("1.2.3-beta", "^1.2.3-alpha") == true)
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true

@@ -5043,10 +5043,17 @@ impl Parser {
                 args: vec![lhs, rhs],
                 token_range,
             },
-            Token::NotEqual => Ast::Condition {
-                operator: crate::ir::Condition::NotEqual,
-                left: Box::new(lhs),
-                right: Box::new(rhs),
+            // `!=` is the negation of structural `==`. Lower it to
+            // `not(equal(lhs, rhs))` so it reuses the exact deep-equality path
+            // `==` uses (previously it compiled to a raw identity `Compare`, so
+            // two structurally-equal-but-distinct heap values reported both
+            // `==` true AND `!=` true).
+            Token::NotEqual => Ast::Not {
+                expr: Box::new(Ast::Call {
+                    name: "beagle.core/equal".to_string(),
+                    args: vec![lhs, rhs],
+                    token_range,
+                }),
                 token_range,
             },
             Token::GreaterThan => Ast::Condition {
@@ -5282,9 +5289,13 @@ impl Parser {
         loop {
             let key_position = self.position;
 
-            // Parse key (any expression)
+            // Parse key at postfix precedence (100) so it does NOT greedily
+            // consume the value's leading `[`/`{`/`.` as a postfix index/call on
+            // the key. Without this, `{:a [1,2]}` parsed as `(:a)[1` and failed
+            // with "Expected close bracket ']'". Keys are keywords/strings/atoms,
+            // which parse fine at this precedence.
             let key =
-                self.parse_expression(0, true, true)?
+                self.parse_expression(100, true, true)?
                     .ok_or_else(|| ParseError::UnexpectedEof {
                         expected: "key expression in map literal".to_string(),
                     })?;

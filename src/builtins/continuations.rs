@@ -99,7 +99,17 @@ pub unsafe extern "C" fn resume_tail_runtime(
     // body's outermost frame points at our caller's frame via the
     // Beagle ABI. For regular closures (e.g. deep-handler-wrapped),
     // the call returns normally with the closure's result.
+    // Signal the continuation trampoline that this is a one-shot TAIL
+    // resume so it lands the body at its captured base and reclaims the
+    // handler/dispatch frames (constant stack for handler loops). For a
+    // continuation_trampoline closure this call never returns; the
+    // trampoline reads-and-clears the flag. For a non-trampoline closure
+    // (deep-handler-wrapped) the call returns normally — clear the flag
+    // afterward so it can't leak onto an unrelated later trampoline call.
+    crate::builtins::reset_shift::set_tail_resume();
     let closure_body: extern "C" fn(usize, usize) -> usize =
         unsafe { std::mem::transmute(raw_fn_ptr) };
-    closure_body(resume_closure, value)
+    let result = closure_body(resume_closure, value);
+    let _ = crate::builtins::reset_shift::take_tail_resume_public();
+    result
 }

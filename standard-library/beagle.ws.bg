@@ -1,0 +1,529 @@
+namespace beagle.ws
+
+// beagle.ws — RFC 6455 WebSocket server, in pure Beagle.
+//
+// Built on beagle.http (request parsing / Response type), beagle.hash (SHA-1),
+// beagle.base64 (Accept-key + frame helpers), beagle.socket (transport), and
+// beagle.string-builder (byte-faithful frame construction).
+//
+// BYTE MODEL
+// ----------
+// Sockets carry bytes as a String (byte-faithful): s[i] is a one-byte slice
+// whose char-code is the byte value 0..255. We build outbound frames by
+// appending char-from-code(byte) into a string-builder, and we parse inbound
+// frames by indexing the received string with char-code. All multi-byte
+// integers on the wire are big-endian (network order). All 32-bit-ish
+// arithmetic stays well within Beagle's 62-bit ints, so no masking is needed
+// beyond the per-byte & 0xFF.
+
+use beagle.http as http
+use beagle.hash as hash
+use beagle.base64 as base64
+use beagle.socket as socket
+use beagle.string-builder as sb
+use beagle.core as core
+
+// The RFC 6455 GUID concatenated to the client key before SHA-1.
+let WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+// ===========================================================================
+// Opcodes (RFC 6455 §5.2)
+// ===========================================================================
+
+fn opcode-continuation() { 0x0 }
+fn opcode-text() { 0x1 }
+fn opcode-binary() { 0x2 }
+fn opcode-close() { 0x8 }
+fn opcode-ping() { 0x9 }
+fn opcode-pong() { 0xA }
+
+// ===========================================================================
+// Byte helpers
+// ===========================================================================
+//
+// CRITICAL: Beagle strings are byte-faithful at the socket layer, but the
+// `s[i]` / `length(s)` operations decode UTF-8 — a frame header byte like 0x81
+// is an invalid lone UTF-8 byte and corrupts that codepoint view. So we never
+// index a wire string directly. Instead we push it into a string-builder once
+// and read individual bytes back with sb/byte-at (which is byte-exact), and
+// take its byte count with sb/length. This is the same pattern beagle.url uses.
+
+// Wrap a byte-faithful string in a string-builder so its raw bytes can be read
+// by index regardless of UTF-8 validity.
+fn to-buf(s) {
+    let b = sb/new(length-or-zero(s) + 1)
+    sb/append!(b, s)
+    b
+}
+
+// length() can throw or mislead on invalid-UTF-8 strings; only used as a size
+// hint for the builder, so guard it.
+fn length-or-zero(s) {
+    try {
+        length(s)
+    } catch (e) {
+        0
+    }
+}
+
+// Read byte i (0..255) from a builder produced by to-buf.
+fn buf-byte(buf, i) {
+    sb/byte-at(buf, i) & 0xFF
+}
+
+// Convert a lowercase hex string (such as hash/sha1 output) into a Vec<Int>
+// of byte values. Each pair of hex digits becomes one byte.
+fn hex-to-bytes(hex) {
+    let n = length(hex)
+    let mut out = []
+    let mut i = 0
+    while i + 1 < n {
+        let hi = hex-digit-value(char-code(hex[i]))
+        let lo = hex-digit-value(char-code(hex[i + 1]))
+        out = push(out, (hi << 4) | lo)
+        i = i + 2
+    }
+    out
+}
+
+fn hex-digit-value(code) {
+    if code >= 48 && code <= 57 {
+        code - 48
+    } else {
+        if code >= 97 && code <= 102 {
+            code - 97 + 10
+        } else {
+            if code >= 65 && code <= 70 {
+                code - 65 + 10
+            } else {
+                throw("beagle.ws/hex-to-bytes: invalid hex digit code ${code}")
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// Handshake (RFC 6455 §4)
+// ===========================================================================
+
+// Compute the Sec-WebSocket-Accept value for a client's Sec-WebSocket-Key.
+//   accept = base64( sha1( key ++ GUID ) )
+// SHA-1 here yields the 20 raw digest bytes (decoded from hash/sha1's hex),
+// which are then standard-base64-encoded.
+fn accept-key(client-key) {
+    let digest-hex = hash/sha1(client-key ++ WS_GUID)
+    let digest-bytes = hex-to-bytes(digest-hex)
+    base64/encode(digest-bytes)
+}
+
+// Is this http/Request a WebSocket upgrade request? RFC 6455 requires
+// Upgrade: websocket and a Connection header that includes "upgrade"
+// (case-insensitive), plus a Sec-WebSocket-Key. http stores header keys
+// lowercased, so we read them directly.
+fn is-websocket-upgrade?(request) {
+    let upgrade = http/header(request, "upgrade")
+    let connection = http/header(request, "connection")
+    let key = http/header(request, "sec-websocket-key")
+    if upgrade == null || connection == null || key == null {
+        false
+    } else {
+        let upgrade-ok = contains?(lowercase(upgrade), "websocket")
+        let connection-ok = contains?(lowercase(connection), "upgrade")
+        upgrade-ok && connection-ok
+    }
+}
+
+// Build the 101 Switching Protocols Response that completes the handshake.
+// The caller is responsible for serializing + writing it (or use serve-ws,
+// which does the whole dance). Header keys are lowercased to match http's
+// convention; http/serialize-response emits them verbatim.
+fn handshake-response(request) {
+    let key = http/header(request, "sec-websocket-key")
+    if key == null {
+        throw("beagle.ws/handshake-response: request has no Sec-WebSocket-Key header")
+    } else {
+        let accept = accept-key(key)
+        http/Response {
+            status: 101,
+            reason: "Switching Protocols",
+            headers: {
+                "upgrade" "websocket",
+                "connection" "Upgrade",
+                "sec-websocket-accept" accept
+            },
+            body: ""
+        }
+    }
+}
+
+// ===========================================================================
+// Frames (RFC 6455 §5)
+// ===========================================================================
+
+// A parsed WebSocket frame.
+//   fin     — Bool: is this the final fragment?
+//   opcode  — Int opcode
+//   masked  — Bool: was the payload masked? (client->server frames must be)
+//   payload — String: the (unmasked) payload bytes, byte-faithful
+struct Frame {
+    fin
+    opcode
+    masked
+    payload
+}
+
+// Parse a single WebSocket frame from a byte-faithful string `bytes`.
+// Decodes FIN/opcode/MASK/length (including the 126 = 16-bit and 127 = 64-bit
+// extended length forms) and, if MASK is set, XOR-unmasks the payload with the
+// 4-byte masking key. Returns a Frame. Assumes `bytes` contains at least one
+// complete frame starting at index 0 (which is the case after read-frame).
+fn parse-frame(bytes) {
+    let buf = to-buf(bytes)
+    let b0 = buf-byte(buf, 0)
+    let b1 = buf-byte(buf, 1)
+    let fin = (b0 & 0x80) != 0
+    let opcode = b0 & 0x0F
+    let masked = (b1 & 0x80) != 0
+    let len7 = b1 & 0x7F
+
+    // Determine payload length and where the payload starts.
+    let mut payload-len = len7
+    let mut offset = 2
+    if len7 == 126 {
+        // 16-bit extended length.
+        payload-len = (buf-byte(buf, 2) << 8) | buf-byte(buf, 3)
+        offset = 4
+    } else {
+        if len7 == 127 {
+            // 64-bit extended length. Beagle ints are 62-bit; real-world
+            // frames never approach that, so we accumulate all 8 bytes.
+            let mut acc = 0
+            let mut i = 0
+            while i < 8 {
+                acc = (acc << 8) | buf-byte(buf, 2 + i)
+                i = i + 1
+            }
+            payload-len = acc
+            offset = 10
+        }
+    }
+
+    // Read the 4-byte masking key if present.
+    let mut mask0 = 0
+    let mut mask1 = 0
+    let mut mask2 = 0
+    let mut mask3 = 0
+    if masked {
+        mask0 = buf-byte(buf, offset)
+        mask1 = buf-byte(buf, offset + 1)
+        mask2 = buf-byte(buf, offset + 2)
+        mask3 = buf-byte(buf, offset + 3)
+        offset = offset + 4
+    }
+
+    // Extract and unmask the payload, byte by byte.
+    let payload-builder = sb/new(payload-len + 1)
+    let mut j = 0
+    while j < payload-len {
+        let raw = buf-byte(buf, offset + j)
+        let unmasked = if masked {
+            let mask-byte = if (j & 3) == 0 {
+                mask0
+            } else {
+                if (j & 3) == 1 {
+                    mask1
+                } else {
+                    if (j & 3) == 2 {
+                        mask2
+                    } else {
+                        mask3
+                    }
+                }
+            }
+            raw ^ mask-byte
+        } else {
+            raw
+        }
+        sb/append-byte!(payload-builder, unmasked)
+        j = j + 1
+    }
+
+    Frame {
+        fin: fin,
+        opcode: opcode,
+        masked: masked,
+        payload: sb/to-string(payload-builder)
+    }
+}
+
+// Encode a server->client frame (unmasked, FIN=1) for the given opcode and
+// payload String. Emits the header (FIN+opcode, length using the 126/127
+// extended forms when needed) followed by the raw payload bytes. Returns a
+// byte-faithful String suitable for socket/write.
+fn encode-frame(opcode, payload) {
+    let payload-buf = to-buf(payload)
+    let payload-len = sb/length(payload-buf)
+    let builder = sb/new(payload-len + 10)
+
+    // First byte: FIN (0x80) | opcode.
+    sb/append-byte!(builder, 0x80 | (opcode & 0x0F))
+
+    // Length byte(s). MASK bit is 0 (servers never mask).
+    if payload-len < 126 {
+        sb/append-byte!(builder, payload-len)
+    } else {
+        if payload-len < 65536 {
+            sb/append-byte!(builder, 126)
+            sb/append-byte!(builder, (payload-len >>> 8) & 0xFF)
+            sb/append-byte!(builder, payload-len & 0xFF)
+        } else {
+            sb/append-byte!(builder, 127)
+            // 64-bit big-endian length. Top bytes are 0 for sane sizes; emit
+            // all 8 by repeated right shifts.
+            let mut shift = 56
+            while shift >= 0 {
+                sb/append-byte!(builder, (payload-len >>> shift) & 0xFF)
+                shift = shift - 8
+            }
+        }
+    }
+
+    // Payload bytes, byte-faithful (copied straight from the payload builder).
+    sb/append-builder-range!(builder, payload-buf, 0, payload-len)
+    sb/to-string(builder)
+}
+
+// Opcode-specialized frame encoders.
+fn text-frame(payload) {
+    encode-frame(opcode-text(), payload)
+}
+
+fn binary-frame(payload) {
+    encode-frame(opcode-binary(), payload)
+}
+
+fn ping-frame(payload) {
+    encode-frame(opcode-ping(), payload)
+}
+
+fn pong-frame(payload) {
+    encode-frame(opcode-pong(), payload)
+}
+
+// A close frame. RFC 6455 close frames may carry a 2-byte status code; we send
+// an empty close payload (a clean, codeless close).
+fn close-frame() {
+    encode-frame(opcode-close(), "")
+}
+
+// Opcode predicates for dispatching parsed frames.
+fn text?(frame) { frame.opcode == opcode-text() }
+fn binary?(frame) { frame.opcode == opcode-binary() }
+fn ping?(frame) { frame.opcode == opcode-ping() }
+fn pong?(frame) { frame.opcode == opcode-pong() }
+fn close?(frame) { frame.opcode == opcode-close() }
+
+// ===========================================================================
+// Streaming frame reads from a live socket
+// ===========================================================================
+
+// Read exactly n bytes (or fewer at EOF) from a connection into a string-
+// builder, which is byte-faithful. socket/read may return short, so we loop —
+// and we measure progress by the builder's byte length delta, NOT length(data)
+// (which would mis-decode high bytes).
+fn read-exact-buf(conn, n) {
+    let builder = sb/new(n + 1)
+    let mut got = 0
+    let mut done = false
+    while got < n && done == false {
+        let data = socket/read(conn, n - got)
+        if data == null || data == "" {
+            done = true
+        } else {
+            let before = sb/length(builder)
+            sb/append!(builder, data)
+            let after = sb/length(builder)
+            if after == before {
+                done = true
+            } else {
+                got = after
+            }
+        }
+    }
+    builder
+}
+
+// Read one complete WebSocket frame off the socket and parse it. Returns a
+// Frame, or null at EOF (connection closed before a full header arrived).
+fn read-frame(conn) {
+    // read-exact returns the bytes already wrapped in a builder so we can read
+    // header bytes by index without tripping over UTF-8 decoding.
+    let head = read-exact-buf(conn, 2)
+    if sb/length(head) < 2 {
+        null
+    } else {
+        let b1 = buf-byte(head, 1)
+        let masked = (b1 & 0x80) != 0
+        let len7 = b1 & 0x7F
+
+        // Read any extended-length bytes.
+        let mut payload-len = len7
+        let mut ext = sb/new(1)
+        if len7 == 126 {
+            ext = read-exact-buf(conn, 2)
+            payload-len = (buf-byte(ext, 0) << 8) | buf-byte(ext, 1)
+        } else {
+            if len7 == 127 {
+                ext = read-exact-buf(conn, 8)
+                let mut acc = 0
+                let mut i = 0
+                while i < 8 {
+                    acc = (acc << 8) | buf-byte(ext, i)
+                    i = i + 1
+                }
+                payload-len = acc
+            }
+        }
+
+        let mask = if masked { read-exact-buf(conn, 4) } else { sb/new(1) }
+        let payload = read-exact-buf(conn, payload-len)
+
+        // Reassemble the whole frame into one builder and hand it to
+        // parse-frame, which owns the unmasking logic (single source of truth).
+        let whole = sb/new(2 + sb/length(ext) + sb/length(mask) + payload-len + 1)
+        sb/append-builder-range!(whole, head, 0, sb/length(head))
+        sb/append-builder-range!(whole, ext, 0, sb/length(ext))
+        sb/append-builder-range!(whole, mask, 0, sb/length(mask))
+        sb/append-builder-range!(whole, payload, 0, sb/length(payload))
+        parse-frame(sb/to-string(whole))
+    }
+}
+
+// ===========================================================================
+// Server
+// ===========================================================================
+
+// Perform the HTTP upgrade handshake on an accepted connection. Reads the HTTP
+// request; if it is a valid WebSocket upgrade, writes the 101 response and
+// returns true. Otherwise writes a 400 and returns false.
+fn do-handshake(conn) {
+    let req = http/read-request(conn)
+    if req == null {
+        false
+    } else {
+        if is-websocket-upgrade?(req) {
+            let resp = handshake-response(req)
+            socket/write(conn, http/serialize-response(resp))
+            true
+        } else {
+            socket/write(conn, http/serialize-response(http/status-response(400, "Expected WebSocket upgrade")))
+            false
+        }
+    }
+}
+
+// Cooperative single-thread WebSocket server. Accepts one connection at a
+// time, performs the upgrade, then runs a read loop on that connection:
+//   - text/binary frames -> call (on-message conn payload); if it returns a
+//     non-null String, that string is sent back as a text frame.
+//   - ping  -> reply with a pong carrying the same payload.
+//   - close -> reply with a close frame and end the connection.
+// Everything runs on the calling thread (no thread-per-connection), so it is
+// GC-safe. Blocks forever.
+fn serve-ws(host, port, on-message) {
+    let listener = socket/listen(host, port)
+    println("beagle.ws serving on " ++ host ++ ":" ++ to-string(port))
+    let mut running = true
+    while running {
+        let conn = socket/accept(listener)
+        if conn == null {
+            running = false
+        } else {
+            handle-ws-connection(conn, on-message)
+        }
+    }
+    socket/close-listener(listener)
+    null
+}
+
+// Handle a single upgraded connection's frame loop. Isolated in a try so one
+// bad client never takes down the accept loop.
+fn handle-ws-connection(conn, on-message) {
+    try {
+        if do-handshake(conn) {
+            let mut open = true
+            while open {
+                let frame = read-frame(conn)
+                if frame == null {
+                    open = false
+                } else {
+                    if close?(frame) {
+                        socket/write(conn, close-frame())
+                        open = false
+                    } else {
+                        if ping?(frame) {
+                            socket/write(conn, pong-frame(frame.payload))
+                        } else {
+                            if text?(frame) || binary?(frame) {
+                                let reply = on-message(conn, frame.payload)
+                                if reply != null {
+                                    socket/write(conn, text-frame(reply))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        null
+    }
+    try {
+        socket/close(conn)
+    } catch (e) {
+        null
+    }
+    null
+}
+
+// ===========================================================================
+// Demo / self-test (offline — no sockets)
+// ===========================================================================
+
+fn main() {
+    // 1. MANDATORY accept-key vector.
+    let got = accept-key("dGhlIHNhbXBsZSBub25jZQ==")
+    let want = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+    println("accept-key: " ++ got)
+    println("accept-key correct: " ++ to-string(got == want))
+
+    // 2. Frame round-trip: encode a text frame, parse it back.
+    let encoded = text-frame("Hello")
+    let parsed = parse-frame(encoded)
+    println("round-trip opcode-text?: " ++ to-string(text?(parsed)))
+    println("round-trip fin: " ++ to-string(parsed.fin))
+    println("round-trip payload: " ++ parsed.payload)
+    println("round-trip correct: " ++ to-string(parsed.payload == "Hello"))
+
+    // 3. Unmask a known masked client frame.
+    //    A masked text frame for "Hello" from RFC 6455 §5.7:
+    //    0x81 0x85 0x37 0xfa 0x21 0x3d 0x7f 0x9f 0x4d 0x51 0x58
+    let mb = sb/new(16)
+    sb/append-byte!(mb, 0x81)
+    sb/append-byte!(mb, 0x85)
+    sb/append-byte!(mb, 0x37)
+    sb/append-byte!(mb, 0xfa)
+    sb/append-byte!(mb, 0x21)
+    sb/append-byte!(mb, 0x3d)
+    sb/append-byte!(mb, 0x7f)
+    sb/append-byte!(mb, 0x9f)
+    sb/append-byte!(mb, 0x4d)
+    sb/append-byte!(mb, 0x51)
+    sb/append-byte!(mb, 0x58)
+    let masked-frame = parse-frame(sb/to-string(mb))
+    println("masked is-masked: " ++ to-string(masked-frame.masked))
+    println("masked payload: " ++ masked-frame.payload)
+    println("masked correct: " ++ to-string(masked-frame.payload == "Hello"))
+
+    "done"
+}

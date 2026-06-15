@@ -1,6 +1,30 @@
 use super::*;
 use crate::save_gc_context;
 
+/// Read a numeric argument as `f64`, coercing a tagged `Int` and unboxing a
+/// boxed `Float`. Previously the math builtins blindly treated the argument as
+/// a float heap pointer, so passing an `Int` (e.g. `sqrt(2)`) dereferenced the
+/// untagged integer as a pointer and silently crashed the process. This throws
+/// a clear `TypeError` for non-numeric arguments instead. Must be called from an
+/// `unsafe` builtin holding a valid `stack_pointer` for error unwinding.
+#[inline]
+unsafe fn arg_as_f64(value: usize, stack_pointer: usize) -> f64 {
+    match BuiltInTypes::get_kind(value) {
+        BuiltInTypes::Int => BuiltInTypes::untag_isize(value as isize) as f64,
+        BuiltInTypes::Float => {
+            let untagged = BuiltInTypes::untag(value);
+            unsafe { *((untagged as *const f64).add(1)) }
+        }
+        other => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                format!("Expected a number (Int or Float) but got {:?}", other),
+            )
+        },
+    }
+}
+
 pub unsafe extern "C" fn sqrt_builtin(
     stack_pointer: usize,
     frame_pointer: usize,
@@ -10,10 +34,8 @@ pub unsafe extern "C" fn sqrt_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
-        // Read the float value from the heap object
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1); // Float value is at offset 1 (after header)
+        // Read the numeric argument (Int coerced to float, Float unboxed).
+        let float_value = arg_as_f64(value, stack_pointer);
 
         // Compute sqrt
         let result = float_value.sqrt();
@@ -49,9 +71,7 @@ pub unsafe extern "C" fn floor_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1);
+        let float_value = arg_as_f64(value, stack_pointer);
 
         let result = float_value.floor();
 
@@ -84,9 +104,7 @@ pub unsafe extern "C" fn ceil_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1);
+        let float_value = arg_as_f64(value, stack_pointer);
 
         let result = float_value.ceil();
 
@@ -175,9 +193,7 @@ pub unsafe extern "C" fn round_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1);
+        let float_value = arg_as_f64(value, stack_pointer);
 
         let result = float_value.round();
 
@@ -202,7 +218,7 @@ pub unsafe extern "C" fn round_builtin(
 
 /// truncate builtin - truncates a float towards zero
 pub unsafe extern "C" fn truncate_builtin(
-    _stack_pointer: usize,
+    stack_pointer: usize,
     _frame_pointer: usize,
     value: usize,
 ) -> usize {
@@ -212,9 +228,7 @@ pub unsafe extern "C" fn truncate_builtin(
             return value;
         }
 
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1);
+        let float_value = arg_as_f64(value, stack_pointer);
 
         let result = float_value.trunc() as isize;
         BuiltInTypes::Int.tag(result) as usize
@@ -592,9 +606,7 @@ pub unsafe extern "C" fn sin_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1);
+        let float_value = arg_as_f64(value, stack_pointer);
 
         let result = float_value.sin();
 
@@ -627,9 +639,7 @@ pub unsafe extern "C" fn cos_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1);
+        let float_value = arg_as_f64(value, stack_pointer);
 
         let result = float_value.cos();
 
@@ -662,9 +672,7 @@ pub unsafe extern "C" fn tan_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1);
+        let float_value = arg_as_f64(value, stack_pointer);
 
         let result = float_value.tan();
 
@@ -697,9 +705,7 @@ pub unsafe extern "C" fn asin_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1);
+        let float_value = arg_as_f64(value, stack_pointer);
 
         let result = float_value.asin();
 
@@ -732,9 +738,7 @@ pub unsafe extern "C" fn acos_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1);
+        let float_value = arg_as_f64(value, stack_pointer);
 
         let result = float_value.acos();
 
@@ -767,9 +771,7 @@ pub unsafe extern "C" fn atan_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1);
+        let float_value = arg_as_f64(value, stack_pointer);
 
         let result = float_value.atan();
 
@@ -803,13 +805,8 @@ pub unsafe extern "C" fn atan2_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
-        let y_untagged = BuiltInTypes::untag(y);
-        let y_float_ptr = y_untagged as *const f64;
-        let y_value = *y_float_ptr.add(1);
-
-        let x_untagged = BuiltInTypes::untag(x);
-        let x_float_ptr = x_untagged as *const f64;
-        let x_value = *x_float_ptr.add(1);
+        let y_value = arg_as_f64(y, stack_pointer);
+        let x_value = arg_as_f64(x, stack_pointer);
 
         let result = y_value.atan2(x_value);
 
@@ -842,9 +839,7 @@ pub unsafe extern "C" fn exp_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1);
+        let float_value = arg_as_f64(value, stack_pointer);
 
         let result = float_value.exp();
 
@@ -877,9 +872,7 @@ pub unsafe extern "C" fn log_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1);
+        let float_value = arg_as_f64(value, stack_pointer);
 
         let result = float_value.ln();
 
@@ -912,9 +905,7 @@ pub unsafe extern "C" fn log10_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1);
+        let float_value = arg_as_f64(value, stack_pointer);
 
         let result = float_value.log10();
 
@@ -947,9 +938,7 @@ pub unsafe extern "C" fn log2_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1);
+        let float_value = arg_as_f64(value, stack_pointer);
 
         let result = float_value.log2();
 
@@ -983,13 +972,8 @@ pub unsafe extern "C" fn pow_builtin(
     unsafe {
         let runtime = get_runtime().get_mut();
 
-        let base_untagged = BuiltInTypes::untag(base);
-        let base_float_ptr = base_untagged as *const f64;
-        let base_value = *base_float_ptr.add(1);
-
-        let exp_untagged = BuiltInTypes::untag(exponent);
-        let exp_float_ptr = exp_untagged as *const f64;
-        let exp_value = *exp_float_ptr.add(1);
+        let base_value = arg_as_f64(base, stack_pointer);
+        let exp_value = arg_as_f64(exponent, stack_pointer);
 
         let result = base_value.powf(exp_value);
 
@@ -1049,9 +1033,45 @@ pub unsafe extern "C" fn to_float_builtin(
     }
 }
 
+/// parse_float_string builtin - parse a string into a Float using Rust's
+/// correctly-rounded f64::from_str. Returns null if the string is not a valid
+/// float. Pure-Beagle exponent application (repeated *10 / /10) accumulates
+/// rounding error, so number parsers (beagle.json) route through this instead.
+pub unsafe extern "C" fn parse_float_string_builtin(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    unsafe {
+        let runtime = get_runtime().get_mut();
+        let s = runtime.get_string(stack_pointer, value);
+        match s.trim().parse::<f64>() {
+            Ok(float_value) => {
+                let new_float_ptr =
+                    match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+                        Ok(ptr) => ptr,
+                        Err(_) => {
+                            throw_runtime_error(
+                                stack_pointer,
+                                "AllocationError",
+                                "Failed to allocate float result - out of memory".to_string(),
+                            );
+                        }
+                    };
+                let untagged_result = BuiltInTypes::untag(new_float_ptr);
+                let result_ptr = untagged_result as *mut f64;
+                *result_ptr.add(1) = float_value;
+                new_float_ptr
+            }
+            Err(_) => BuiltInTypes::null_value() as usize,
+        }
+    }
+}
+
 /// to_int builtin - converts a float to a tagged integer (truncating towards zero)
 pub unsafe extern "C" fn to_int_builtin(
-    _stack_pointer: usize,
+    stack_pointer: usize,
     _frame_pointer: usize,
     value: usize,
 ) -> usize {
@@ -1061,9 +1081,7 @@ pub unsafe extern "C" fn to_int_builtin(
             return value;
         }
 
-        let untagged = BuiltInTypes::untag(value);
-        let float_ptr = untagged as *const f64;
-        let float_value = *float_ptr.add(1);
+        let float_value = arg_as_f64(value, stack_pointer);
 
         let result = float_value.trunc() as isize;
         BuiltInTypes::Int.tag(result) as usize

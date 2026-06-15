@@ -1,0 +1,231 @@
+namespace beagle.test
+
+// ============================================================================
+// beagle.test — a minimal, pure-Beagle test framework.
+//
+// Results accumulate in an atom holding {:passed n :failed n :failures [..]}.
+// The accumulator is passed explicitly to each assert helper (the first arg),
+// so tests stay self-contained and there is no hidden global state. A test
+// function is `fn(acc) { ... }`: it receives the accumulator and calls the
+// assert helpers with it.
+//
+// API:
+//   new-results()                          -> a fresh accumulator atom
+//   assert-eq(acc, actual, expected, name) -> records pass/fail, returns bool
+//   assert-true(acc, cond, name)           -> records pass/fail, returns bool
+//   assert-throws(acc, thunk, name)        -> records pass/fail (passes if thunk throws)
+//   run-tests(vector-of-test-fns)          -> {:passed n :failed n :failures [..]}
+//                                             (also prints a summary)
+//
+// run-tests calls each test fn as `t(acc)`; a test fn that itself throws is
+// caught and recorded as a failure so one broken test never aborts the run.
+// ============================================================================
+
+/// Create a fresh, empty results accumulator (an atom).
+fn new-results() {
+    atom({:passed 0 :failed 0 :failures []})
+}
+
+/// Snapshot the current results map out of the accumulator atom.
+fn results-snapshot(acc) {
+    deref(acc)
+}
+
+// Record a passing assertion into the accumulator.
+fn record-pass(acc) {
+    swap!(acc, fn(r) {
+        assoc(r, :passed, get(r, :passed) + 1)
+    })
+    null
+}
+
+// Record a failing assertion into the accumulator. `failure` is a map
+// describing what went wrong.
+fn record-fail(acc, failure) {
+    swap!(acc, fn(r) {
+        let r2 = assoc(r, :failed, get(r, :failed) + 1)
+        assoc(r2, :failures, push(get(r2, :failures), failure))
+    })
+    null
+}
+
+/// Assert that `actual` equals `expected` (structural equality).
+/// Records a pass or a failure into `acc`. Returns true on pass.
+fn assert-eq(acc, actual, expected, name) {
+    if equal(actual, expected) {
+        record-pass(acc)
+        true
+    } else {
+        record-fail(acc, {
+            :name name
+            :kind "assert-eq"
+            :message "expected " ++ format(expected, 1) ++ " but got " ++ format(actual, 1)
+        })
+        false
+    }
+}
+
+/// Assert that `cond` is truthy (not null, not false).
+/// Records a pass or a failure into `acc`. Returns true on pass.
+fn assert-true(acc, cond, name) {
+    if cond == null || cond == false {
+        record-fail(acc, {
+            :name name
+            :kind "assert-true"
+            :message "expected truthy value but got " ++ format(cond, 1)
+        })
+        false
+    } else {
+        record-pass(acc)
+        true
+    }
+}
+
+/// Assert that calling `thunk` (a zero-arg function) throws.
+/// Passes if the thunk raises; fails if it returns normally. Returns true on pass.
+fn assert-throws(acc, thunk, name) {
+    let threw = try {
+        thunk()
+        false
+    } catch (e) {
+        true
+    }
+    if threw {
+        record-pass(acc)
+        true
+    } else {
+        record-fail(acc, {
+            :name name
+            :kind "assert-throws"
+            :message "expected thunk to throw but it returned normally"
+        })
+        false
+    }
+}
+
+// Print the failures section of a summary, one line per failure.
+fn print-failures(failures, idx, len) {
+    if idx >= len {
+        null
+    } else {
+        let f = get(failures, idx)
+        println("  FAIL [" ++ get(f, :name) ++ "] (" ++ get(f, :kind) ++ "): " ++ get(f, :message))
+        print-failures(failures, idx + 1, len)
+    }
+}
+
+/// Print a human-readable summary of a results map.
+fn print-summary(results) {
+    let passed = get(results, :passed)
+    let failed = get(results, :failed)
+    let total = passed + failed
+    let failures = get(results, :failures)
+    println("================ test summary ================")
+    println("ran " ++ to-string(total) ++ " assertions: " ++ to-string(passed) ++ " passed, " ++ to-string(failed) ++ " failed")
+    if failed > 0 {
+        print-failures(failures, 0, length(failures))
+        println("RESULT: FAIL")
+    } else {
+        println("RESULT: PASS")
+    }
+    println("==============================================")
+    null
+}
+
+// Run each test function in turn. Crashes inside a test are caught and recorded
+// as failures rather than aborting the whole suite.
+fn run-tests-loop(test-fns, idx, len, acc) {
+    if idx >= len {
+        null
+    } else {
+        let t = get(test-fns, idx)
+        try {
+            t(acc)
+            null
+        } catch (e) {
+            record-fail(acc, {
+                :name "test #" ++ to-string(idx)
+                :kind "test-crash"
+                :message "test function threw: " ++ format(e, 0)
+            })
+        }
+        run-tests-loop(test-fns, idx + 1, len, acc)
+    }
+}
+
+/// Run a vector of one-arg test functions `fn(acc) { ... }`. Each test function
+/// calls the assert helpers (assert-eq / assert-true / assert-throws) with the
+/// accumulator it is given. A test function that itself throws is caught and
+/// recorded as a failure (so one broken test never aborts the run).
+///
+/// Returns {:passed n :failed n :failures [..]} and prints a summary.
+fn run-tests(test-fns) {
+    let acc = new-results()
+    run-tests-loop(test-fns, 0, length(test-fns), acc)
+    let results = results-snapshot(acc)
+    print-summary(results)
+    results
+}
+
+// ============================================================================
+// Self-test / demo: exercise the framework ON ITSELF.
+//   demo-test-passing:  2 passing assertions
+//   demo-test-failing:  1 failing assertion (RECORDED, must not crash the run)
+//   demo-test-throws:   1 assert-throws that catches a throw (passes)
+// => expected totals: passed = 3, failed = 1
+// ============================================================================
+
+fn demo-test-passing(acc) {
+    assert-eq(acc, 1 + 1, 2, "math works")
+    assert-true(acc, length([1, 2, 3]) == 3, "length works")
+    null
+}
+
+fn demo-test-failing(acc) {
+    // This assertion fails on purpose. It must be RECORDED as a failure,
+    // not crash the run.
+    assert-eq(acc, 2 + 2, 5, "deliberately wrong")
+    null
+}
+
+fn demo-test-throws(acc) {
+    assert-throws(acc, fn() { throw("boom") }, "catches a throw")
+    null
+}
+
+fn main() {
+    println("Running beagle.test self-tests...")
+    println("")
+
+    let results = run-tests([
+        demo-test-passing,
+        demo-test-failing,
+        demo-test-throws
+    ])
+
+    println("")
+    println("Now verifying the framework recorded the right thing...")
+
+    let passed = get(results, :passed)
+    let failed = get(results, :failed)
+    let failures = get(results, :failures)
+
+    // Meta-check using the framework on itself, in a fresh run.
+    let meta = run-tests([
+        fn(acc) { assert-eq(acc, passed, 3, "self-test pass count") },
+        fn(acc) { assert-eq(acc, failed, 1, "self-test fail count") },
+        fn(acc) { assert-eq(acc, length(failures), 1, "self-test failure list length") },
+        fn(acc) { assert-true(acc, get(get(failures, 0), :name) == "deliberately wrong", "failure carries name") }
+    ])
+
+    let meta-failed = get(meta, :failed)
+    if meta-failed == 0 {
+        println("")
+        println("ALL META-CHECKS PASSED — framework is self-consistent.")
+        "ok"
+    } else {
+        println("")
+        println("META-CHECKS FAILED")
+        throw("beagle.test self-verification failed")
+    }
+}

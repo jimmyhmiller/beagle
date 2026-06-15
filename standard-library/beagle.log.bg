@@ -1,0 +1,320 @@
+namespace beagle.log
+
+use beagle.time as time
+use beagle.io as io
+
+// ============================================================================
+// beagle.log — leveled logging (PURE Beagle)
+//
+// Four ordered levels: debug < info < warn < error. A module-global minimum
+// level (atom-backed, since top-level `let mut` is illegal) suppresses any
+// message below it. debug/info go to stdout; warn/error go to stderr.
+//
+// Each emitted line is formatted as:
+//     LEVEL [timestamp] msg
+// where timestamp is Unix epoch milliseconds. The pure `format-line` helper
+// produces the line WITHOUT a timestamp so it can be asserted exactly,
+// decoupled from wall-clock time.
+// ============================================================================
+
+// --- Level model -----------------------------------------------------------
+
+// Levels are represented as ints so ordering is trivial: a message at
+// `level` is emitted iff level >= current-min-level.
+let LEVEL-DEBUG = 0
+let LEVEL-INFO = 1
+let LEVEL-WARN = 2
+let LEVEL-ERROR = 3
+
+// Module-global minimum level. Defaults to debug (everything emitted).
+let min-level = atom(LEVEL-DEBUG)
+
+// Map a level int to its uppercase name. Throws on an unknown level rather
+// than silently returning a sentinel.
+fn level-name(level) {
+    if level == LEVEL-DEBUG {
+        "DEBUG"
+    } else {
+        if level == LEVEL-INFO {
+            "INFO"
+        } else {
+            if level == LEVEL-WARN {
+                "WARN"
+            } else {
+                if level == LEVEL-ERROR {
+                    "ERROR"
+                } else {
+                    throw("beagle.log: unknown level int: ${level}")
+                }
+            }
+        }
+    }
+}
+
+// Normalize a caller-supplied level to its int. Accepts either the int
+// constants above or the keywords :debug/:info/:warn/:error. Throws on
+// anything else (no silent fallback).
+fn normalize-level(level) {
+    if level == :debug {
+        LEVEL-DEBUG
+    } else {
+        if level == :info {
+            LEVEL-INFO
+        } else {
+            if level == :warn {
+                LEVEL-WARN
+            } else {
+                if level == :error {
+                    LEVEL-ERROR
+                } else {
+                    // Already an int constant in range?
+                    if level == LEVEL-DEBUG || level == LEVEL-INFO || level == LEVEL-WARN || level == LEVEL-ERROR {
+                        level
+                    } else {
+                        throw("beagle.log: invalid level (use :debug/:info/:warn/:error): ${level}")
+                    }
+                }
+            }
+        }
+    }
+}
+
+// --- Configuration ---------------------------------------------------------
+
+/// Set the minimum level that will be emitted. Accepts a keyword
+/// (:debug/:info/:warn/:error) or one of the LEVEL-* int constants.
+/// Messages below this level are suppressed.
+fn set-level!(level) {
+    let normalized = normalize-level(level)
+    reset!(min-level, normalized)
+    normalized
+}
+
+/// Return the current minimum level as an int.
+fn current-level() {
+    deref(min-level)
+}
+
+/// True if a message at `level` would be emitted under the current min-level.
+fn enabled?(level) {
+    normalize-level(level) >= deref(min-level)
+}
+
+// --- Formatting ------------------------------------------------------------
+
+// Render a fields-map as " key=value key2=value2 ...", sorted by nothing in
+// particular (map key order). Returns "" for an empty/absent map so plain
+// messages stay clean.
+fn format-fields(fields) {
+    if fields == null {
+        ""
+    } else {
+        let ks = keys(fields)
+        let len = length(ks)
+        if len == 0 {
+            ""
+        } else {
+            format-fields-helper(fields, ks, 0, len, "")
+        }
+    }
+}
+
+fn format-fields-helper(fields, ks, idx, len, acc) {
+    if idx >= len {
+        acc
+    } else {
+        let k = get(ks, idx)
+        let v = get(fields, k)
+        let k-str = if keyword?(k) {
+            keyword->string(k)
+        } else {
+            to-string(k)
+        }
+        let entry = " " ++ k-str ++ "=" ++ to-string(v)
+        format-fields-helper(fields, ks, idx + 1, len, acc ++ entry)
+    }
+}
+
+/// Build a log line WITHOUT a timestamp, for exact-assertion testing:
+///     "LEVEL msg"
+/// `level` may be a keyword or int constant.
+fn format-line(level, msg) {
+    let lvl = normalize-level(level)
+    level-name(lvl) ++ " " ++ to-string(msg)
+}
+
+/// Build a structured log line WITHOUT a timestamp:
+///     "LEVEL msg key=value ..."
+fn format-line-fields(level, msg, fields) {
+    format-line(level, msg) ++ format-fields(fields)
+}
+
+// Build the full line that actually gets written, including the live
+// timestamp: "LEVEL [<epoch-millis>] msg<fields>".
+fn build-emit-line(level, msg, fields) {
+    let lvl = normalize-level(level)
+    let ts = time/epoch-millis()
+    level-name(lvl) ++ " [" ++ to-string(ts) ++ "] " ++ to-string(msg) ++ format-fields(fields)
+}
+
+// --- Emission --------------------------------------------------------------
+
+// Write a fully-built line to the appropriate sink. debug/info -> stdout
+// (via println), warn/error -> stderr (via io/write-stderr).
+fn emit-line!(lvl, line) {
+    if lvl >= LEVEL-WARN {
+        io/write-stderr(line ++ "\n")
+        null
+    } else {
+        println(line)
+        null
+    }
+}
+
+// Core logging entry point. Suppresses below-min-level messages, otherwise
+// builds and emits the line. Returns true if emitted, false if suppressed.
+fn log-at(level, msg, fields) {
+    let lvl = normalize-level(level)
+    if lvl >= deref(min-level) {
+        let line = build-emit-line(lvl, msg, fields)
+        emit-line!(lvl, line)
+        true
+    } else {
+        false
+    }
+}
+
+/// Structured log: log(level, msg, fields-map). Returns true if emitted.
+fn log(level, msg, fields) {
+    log-at(level, msg, fields)
+}
+
+/// Log at debug level. Returns true if emitted (false if suppressed).
+fn debug(msg) {
+    log-at(LEVEL-DEBUG, msg, null)
+}
+
+/// Log at info level. Returns true if emitted (false if suppressed).
+fn info(msg) {
+    log-at(LEVEL-INFO, msg, null)
+}
+
+/// Log at warn level (stderr). Returns true if emitted.
+fn warn(msg) {
+    log-at(LEVEL-WARN, msg, null)
+}
+
+/// Log at error level (stderr). Returns true if emitted.
+fn error(msg) {
+    log-at(LEVEL-ERROR, msg, null)
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "format-line is exact and timestamp-free" {
+    assert-eq!(format-line(:debug, "hello"), "DEBUG hello")
+    assert-eq!(format-line(:info, "hi there"), "INFO hi there")
+    assert-eq!(format-line(:warn, "careful"), "WARN careful")
+    assert-eq!(format-line(:error, "boom"), "ERROR boom")
+}
+
+test "format-line accepts int level constants" {
+    assert-eq!(format-line(LEVEL-INFO, "x"), "INFO x")
+    assert-eq!(format-line(LEVEL-ERROR, "y"), "ERROR y")
+}
+
+test "format-line stringifies non-string messages" {
+    assert-eq!(format-line(:info, 42), "INFO 42")
+}
+
+test "structured format-line includes fields" {
+    assert-eq!(
+        format-line-fields(:warn, "req", {:status 500 :path "/x"}),
+        "WARN req status=500 path=/x"
+    )
+}
+
+test "structured format-line with empty/null fields is plain" {
+    assert-eq!(format-line-fields(:info, "msg", {}), "INFO msg")
+    assert-eq!(format-line-fields(:info, "msg", null), "INFO msg")
+}
+
+test "set-level returns the normalized int" {
+    assert-eq!(set-level!(:warn), LEVEL-WARN)
+    assert-eq!(set-level!(:debug), LEVEL-DEBUG)
+}
+
+test "enabled? respects min-level ordering" {
+    set-level!(:warn)
+    assert-eq!(enabled?(:debug), false)
+    assert-eq!(enabled?(:info), false)
+    assert-eq!(enabled?(:warn), true)
+    assert-eq!(enabled?(:error), true)
+    // restore default for other tests
+    set-level!(:debug)
+}
+
+test "below-min messages are suppressed and return false" {
+    set-level!(:warn)
+    // info is below warn -> suppressed (returns false, does not throw)
+    assert-eq!(info("should be suppressed"), false)
+    assert-eq!(debug("also suppressed"), false)
+    set-level!(:debug)
+}
+
+test "at-or-above-min messages emit and return true" {
+    set-level!(:warn)
+    // error is at/above warn -> emitted (returns true, does not throw)
+    assert-eq!(error("real error"), true)
+    assert-eq!(warn("a warning"), true)
+    set-level!(:debug)
+}
+
+test "log structured does not throw and respects level" {
+    set-level!(:error)
+    assert-eq!(log(:info, "suppressed", {:a 1}), false)
+    assert-eq!(log(:error, "emitted", {:a 1}), true)
+    set-level!(:debug)
+}
+
+test "default level emits everything" {
+    set-level!(:debug)
+    assert!(debug("d"))
+    assert!(info("i"))
+    assert!(warn("w"))
+    assert!(error("e"))
+}
+
+test "invalid level throws" {
+    assert-throws!(fn() { normalize-level(:trace) })
+    assert-throws!(fn() { format-line(:nope, "x") })
+}
+
+test "level-name throws on out-of-range int" {
+    assert-throws!(fn() { level-name(99) })
+}
+
+fn main() {
+    set-level!(:debug)
+    debug("debug message")
+    info("info message")
+    warn("warn message")
+    error("error message")
+
+    println("--- raising min-level to warn ---")
+    set-level!(:warn)
+    debug("hidden debug")
+    info("hidden info")
+    warn("visible warn")
+    error("visible error")
+
+    println("--- structured logging ---")
+    set-level!(:debug)
+    log(:info, "request handled", {:status 200 :ms 12})
+
+    println("format-line: ${format-line(:info, "sample")}")
+    println("format-line-fields: ${format-line-fields(:warn, "req", {:code 404})}")
+    "done"
+}

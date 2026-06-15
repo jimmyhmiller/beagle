@@ -1,0 +1,216 @@
+namespace beagle.ansi
+
+use beagle.string-builder as sb
+
+// ANSI terminal styling — pure Beagle.
+//
+// Every styling function wraps its argument in a Select-Graphic-Rendition (SGR)
+// escape sequence and a reset:
+//
+//   ESC [ <code> m   <text>   ESC [ 0 m
+//
+// where ESC is the byte 27 (char-from-code(27)). The standard SGR codes used:
+//
+//   reset 0   bold 1   dim 2   italic 3   underline 4
+//   fg:        black 30 red 31 green 32 yellow 33 blue 34 magenta 35 cyan 36 white 37
+//   fg bright: black 90 red 91 green 92 yellow 93 blue 94 magenta 95 cyan 96 white 97
+//   bg:        black 40 red 41 green 42 yellow 43 blue 44 magenta 45 cyan 46 white 47
+//   bg bright: black 100 ... white 107
+//
+//   red("hi")        == ESC ++ "[31m" ++ "hi" ++ ESC ++ "[0m"
+//   bold(red("x"))   nests correctly (two wraps, two resets)
+//   strip-ansi(...)  removes every ESC [ ... m sequence, leaving plain text
+//   style(s, codes)  applies several SGR codes in one escape (e.g. [1;31m)
+
+// The ESC byte (27). Computed once at load and reused.
+let ESC = char-from-code(27)
+
+// The full reset sequence: ESC [ 0 m
+let RESET = ESC ++ "[0m"
+
+// ---------------------------------------------------------------------------
+// Core wrapping
+// ---------------------------------------------------------------------------
+
+// Wrap `s` with a single SGR code: ESC[<code>m s ESC[0m.
+fn wrap(code, s) {
+    ESC ++ "[" ++ to-string(code) ++ "m" ++ s ++ RESET
+}
+
+// Apply a vector of SGR codes as one combined escape: ESC[<c0>;<c1>;...m s ESC[0m.
+// An empty codes vector returns `s` unchanged (no escape emitted).
+//
+//   style("x", [1, 31]) == ESC ++ "[1;31m" ++ "x" ++ ESC ++ "[0m"
+fn style(s, codes) {
+    let n = count(codes)
+    if n == 0 {
+        s
+    } else {
+        let builder = sb/new(16)
+        sb/append!(builder, ESC)
+        sb/append!(builder, "[")
+        let mut i = 0
+        while i < n {
+            if i > 0 {
+                sb/append!(builder, ";")
+            }
+            sb/append!(builder, to-string(codes[i]))
+            i = i + 1
+        }
+        sb/append!(builder, "m")
+        sb/append!(builder, s)
+        sb/append!(builder, RESET)
+        sb/to-string(builder)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Text attributes
+// ---------------------------------------------------------------------------
+
+fn bold(s)      { wrap(1, s) }
+fn dim(s)       { wrap(2, s) }
+fn italic(s)    { wrap(3, s) }
+fn underline(s) { wrap(4, s) }
+fn blink(s)     { wrap(5, s) }
+fn reverse(s)   { wrap(7, s) }
+fn hidden(s)    { wrap(8, s) }
+fn strikethrough(s) { wrap(9, s) }
+
+// ---------------------------------------------------------------------------
+// Foreground colors (30..37)
+// ---------------------------------------------------------------------------
+
+fn black(s)   { wrap(30, s) }
+fn red(s)     { wrap(31, s) }
+fn green(s)   { wrap(32, s) }
+fn yellow(s)  { wrap(33, s) }
+fn blue(s)    { wrap(34, s) }
+fn magenta(s) { wrap(35, s) }
+fn cyan(s)    { wrap(36, s) }
+fn white(s)   { wrap(37, s) }
+
+// ---------------------------------------------------------------------------
+// Bright foreground colors (90..97)
+// ---------------------------------------------------------------------------
+
+fn bright-black(s)   { wrap(90, s) }
+fn bright-red(s)     { wrap(91, s) }
+fn bright-green(s)   { wrap(92, s) }
+fn bright-yellow(s)  { wrap(93, s) }
+fn bright-blue(s)    { wrap(94, s) }
+fn bright-magenta(s) { wrap(95, s) }
+fn bright-cyan(s)    { wrap(96, s) }
+fn bright-white(s)   { wrap(97, s) }
+
+// `gray`/`grey` are common aliases for bright-black.
+fn gray(s) { wrap(90, s) }
+fn grey(s) { wrap(90, s) }
+
+// ---------------------------------------------------------------------------
+// Background colors (40..47)
+// ---------------------------------------------------------------------------
+
+fn bg-black(s)   { wrap(40, s) }
+fn bg-red(s)     { wrap(41, s) }
+fn bg-green(s)   { wrap(42, s) }
+fn bg-yellow(s)  { wrap(43, s) }
+fn bg-blue(s)    { wrap(44, s) }
+fn bg-magenta(s) { wrap(45, s) }
+fn bg-cyan(s)    { wrap(46, s) }
+fn bg-white(s)   { wrap(47, s) }
+
+// ---------------------------------------------------------------------------
+// Bright background colors (100..107)
+// ---------------------------------------------------------------------------
+
+fn bg-bright-black(s)   { wrap(100, s) }
+fn bg-bright-red(s)     { wrap(101, s) }
+fn bg-bright-green(s)   { wrap(102, s) }
+fn bg-bright-yellow(s)  { wrap(103, s) }
+fn bg-bright-blue(s)    { wrap(104, s) }
+fn bg-bright-magenta(s) { wrap(105, s) }
+fn bg-bright-cyan(s)    { wrap(106, s) }
+fn bg-bright-white(s)   { wrap(107, s) }
+
+// ---------------------------------------------------------------------------
+// 256-color / truecolor (extended SGR)
+// ---------------------------------------------------------------------------
+
+// 256-color palette foreground: ESC[38;5;<n>m ... ESC[0m  (n in 0..255).
+fn fg-256(n, s) { style(s, [38, 5, n]) }
+
+// 256-color palette background: ESC[48;5;<n>m ... ESC[0m.
+fn bg-256(n, s) { style(s, [48, 5, n]) }
+
+// Truecolor foreground: ESC[38;2;<r>;<g>;<b>m ... ESC[0m  (each 0..255).
+fn rgb(r, g, b, s) { style(s, [38, 2, r, g, b]) }
+
+// Truecolor background: ESC[48;2;<r>;<g>;<b>m ... ESC[0m.
+fn bg-rgb(r, g, b, s) { style(s, [48, 2, r, g, b]) }
+
+// ---------------------------------------------------------------------------
+// Combining styles
+// ---------------------------------------------------------------------------
+
+// Combine several styling functions into one. Each fn must take a string and
+// return a string (e.g. `red`, `bold`). Returns a new function that applies
+// them left-to-right (so `combine([bold, red])("x")` == `bold(red("x"))`).
+fn combine(fns) {
+    fn(s) {
+        let n = count(fns)
+        let mut i = n - 1
+        let mut acc = s
+        while i >= 0 {
+            let f = fns[i]
+            acc = f(acc)
+            i = i - 1
+        }
+        acc
+    }
+}
+
+// ---------------------------------------------------------------------------
+// strip-ansi
+// ---------------------------------------------------------------------------
+
+// True when byte code `c` is a decimal digit '0'..'9' or a ';' separator —
+// the only characters allowed inside an SGR parameter list.
+fn sgr-param-code?(c) {
+    (c >= 48 && c <= 57) || c == 59
+}
+
+// Remove all SGR escape sequences (ESC [ <params> m) from `s`, returning the
+// plain text. Non-SGR escape sequences (a lone ESC, or ESC followed by
+// something other than '[') are left untouched rather than silently eaten.
+//
+//   strip-ansi(red("hi")) == "hi"
+fn strip-ansi(s) {
+    let n = length(s)
+    let builder = sb/new(n + 1)
+    let mut i = 0
+    while i < n {
+        let c = char-code(s[i])
+        if c == 27 && i + 1 < n && char-code(s[i + 1]) == 91 {
+            // Saw "ESC [". Scan over the parameter bytes (digits + ';') and the
+            // terminating 'm'. If the run is not a well-formed SGR sequence we
+            // keep the ESC verbatim and resume one char later.
+            let mut j = i + 2
+            while j < n && sgr-param-code?(char-code(s[j])) {
+                j = j + 1
+            }
+            if j < n && char-code(s[j]) == 109 {
+                // 'm' terminator — drop the whole sequence [i..j].
+                i = j + 1
+            } else {
+                // Not a valid SGR sequence; keep the ESC byte and move on.
+                sb/append!(builder, s[i])
+                i = i + 1
+            }
+        } else {
+            sb/append!(builder, s[i])
+            i = i + 1
+        }
+    }
+    sb/to-string(builder)
+}

@@ -1,0 +1,43 @@
+namespace stdlib_breadth2_test
+
+// gc-always
+
+use beagle.ini as ini
+use beagle.priorityqueue as pq
+use beagle.semver as semver
+use beagle.ansi as ansi
+use beagle.glob as glob
+
+fn drain(q, acc) {
+    if pq/pq-empty?(q) { acc }
+    else {
+        let r = pq/pq-pop(q)
+        drain(r[1], push(acc, r[0]))
+    }
+}
+
+fn main() {
+    let d = ini/parse("[db]\nhost=localhost\nport=5432\n[web]\ndebug=true")
+    println(get(get(d, :db), "host") == "localhost")
+    println(get(get(d, :web), "debug") == "true")
+    let mut q = pq/pq-new()
+    q = pq/pq-push(q, 5) q = pq/pq-push(q, 3) q = pq/pq-push(q, 8) q = pq/pq-push(q, 1)
+    println(drain(q, []) == [1, 3, 5, 8])
+    println(semver/compare("1.0.0", "2.0.0") == -1)
+    println(semver/compare("1.0.0-alpha", "1.0.0") == -1)
+    println(ansi/strip-ansi(ansi/bold(ansi/red("x"))) == "x")
+    println(glob/match?("a?c", "abc"))
+    println(glob/match?("[a-c]x", "bx"))
+    println(glob/match?("*", "a/b") == false)
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true

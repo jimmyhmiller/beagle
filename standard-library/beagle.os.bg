@@ -1,0 +1,233 @@
+namespace beagle.os
+
+// Operating-system / process introspection built on libc via the FFI.
+//
+// PURE BEAGLE: every function here is a thin wrapper over a libc symbol
+// loaded through beagle.ffi. No Rust builtins are added. macOS resolves
+// libc through libSystem.B.dylib; Linux through libc.so.6.
+//
+// Pointer-out functions (getcwd, gethostname) allocate an off-heap buffer,
+// let C fill it, scan for the NUL terminator, then materialize an immutable
+// Beagle string and free the buffer.
+
+use beagle.ffi as ffi
+
+// Resolve the platform's libc. On macOS libc lives in the shared cache and
+// is reached via libSystem; on Linux we use the canonical soname.
+fn __libc-path() {
+    let os = get-os()
+    if os == "macos" {
+        "libSystem.B.dylib"
+    } else if os == "linux" {
+        "libc.so.6"
+    } else {
+        // Best-effort fallback for other unixes.
+        "libc.so.6"
+    }
+}
+
+let __libc = ffi/load-library(__libc-path())
+
+// --- libc symbol handles -----------------------------------------------------
+
+let __getpid = ffi/get-function(__libc, "getpid", [], ffi/Type.I32)
+let __getppid = ffi/get-function(__libc, "getppid", [], ffi/Type.I32)
+let __getuid = ffi/get-function(__libc, "getuid", [], ffi/Type.U32)
+let __getcwd = ffi/get-function(__libc, "getcwd", [ffi/Type.Pointer, ffi/Type.U64], ffi/Type.Pointer)
+let __getenv = ffi/get-function(__libc, "getenv", [ffi/Type.String], ffi/Type.String)
+let __setenv = ffi/get-function(__libc, "setenv", [ffi/Type.String, ffi/Type.String, ffi/Type.I32], ffi/Type.I32)
+let __unsetenv = ffi/get-function(__libc, "unsetenv", [ffi/Type.String], ffi/Type.I32)
+let __gethostname = ffi/get-function(__libc, "gethostname", [ffi/Type.Pointer, ffi/Type.U64], ffi/Type.I32)
+let __exit = ffi/get-function(__libc, "exit", [ffi/Type.I32], ffi/Type.Void)
+
+// Read a NUL-terminated C string out of an FFI buffer starting at offset 0.
+// Scans for the terminating zero byte, then copies exactly that many bytes
+// into an immutable Beagle string. The buffer itself is not freed here.
+fn __read-cstring(buf) {
+    let mut i = 0
+    while ffi/get-u8(buf, i) != 0 {
+        i = i + 1
+    }
+    ffi/get-string(buf, 0, i)
+}
+
+// --- Public API --------------------------------------------------------------
+
+/// Return the current process id.
+///
+/// Examples:
+///   (getpid)  ; => 90718
+fn getpid() {
+    __getpid()
+}
+
+/// Return the parent process id.
+///
+/// Examples:
+///   (getppid)  ; => 90715
+fn getppid() {
+    __getppid()
+}
+
+/// Return the real user id of the calling process.
+///
+/// Examples:
+///   (getuid)  ; => 501
+fn getuid() {
+    __getuid()
+}
+
+/// Return the current working directory as a string.
+///
+/// Allocates a buffer, calls getcwd, then reads back the NUL-terminated path.
+/// Throws if getcwd fails (returns NULL — e.g. path longer than the buffer).
+///
+/// Examples:
+///   (getcwd)  ; => "/Users/me/project"
+fn getcwd() {
+    let size = 4096
+    let buf = ffi/allocate(size)
+    let r = __getcwd(buf, size)
+    if r == null {
+        ffi/deallocate(buf)
+        throw("beagle.os/getcwd: getcwd failed")
+    } else {
+        let s = __read-cstring(buf)
+        ffi/deallocate(buf)
+        s
+    }
+}
+
+/// Look up an environment variable by name.
+///
+/// Returns the value string, or null if the variable is not set.
+///
+/// Examples:
+///   (getenv "HOME")          ; => "/Users/me"
+///   (getenv "NOPE_NOT_SET")  ; => null
+fn getenv(name) {
+    __getenv(name)
+}
+
+/// Set an environment variable, overwriting any existing value.
+///
+/// Returns true on success, false on failure.
+///
+/// Examples:
+///   (setenv "FOO" "bar")  ; => true
+fn setenv(name, value) {
+    __setenv(name, value, 1) == 0
+}
+
+/// Remove an environment variable.
+///
+/// Returns true on success, false on failure. Removing an unset variable
+/// still succeeds.
+///
+/// Examples:
+///   (unsetenv "FOO")  ; => true
+fn unsetenv(name) {
+    __unsetenv(name) == 0
+}
+
+/// Return the system hostname as a string.
+///
+/// Allocates a buffer, calls gethostname, then reads back the NUL-terminated
+/// name. Throws if gethostname reports an error.
+///
+/// Examples:
+///   (hostname)  ; => "mymachine.local"
+fn hostname() {
+    let size = 256
+    let buf = ffi/allocate(size)
+    let r = __gethostname(buf, size)
+    if r != 0 {
+        ffi/deallocate(buf)
+        throw("beagle.os/hostname: gethostname failed")
+    } else {
+        let s = __read-cstring(buf)
+        ffi/deallocate(buf)
+        s
+    }
+}
+
+/// Terminate the process immediately with the given exit code.
+///
+/// Calls C exit(3): runs atexit handlers and flushes stdio, then never
+/// returns. Do not call this in a test you expect to continue.
+///
+/// Examples:
+///   (process-exit 0)  ; clean exit
+///   (process-exit 1)  ; failure exit
+fn process-exit(code) {
+    __exit(code)
+}
+
+fn main() {
+    println("=== beagle.os tests ===")
+    let mut pass = 0
+    let mut fail = 0
+
+    fn check(name, cond) {
+        if cond {
+            pass = pass + 1
+            println("PASS: " ++ name)
+        } else {
+            fail = fail + 1
+            println("FAIL: " ++ name)
+        }
+    }
+
+    // getpid > 0
+    let pid = getpid()
+    check("getpid() > 0", pid > 0)
+
+    // getppid > 0
+    let ppid = getppid()
+    check("getppid() > 0", ppid > 0)
+
+    // getuid >= 0
+    let uid = getuid()
+    check("getuid() >= 0", uid >= 0)
+
+    // getcwd nonempty
+    let cwd = getcwd()
+    check("getcwd() is non-empty", length(cwd) > 0)
+    check("getcwd() starts with /", cwd[0] == "/")
+
+    // hostname nonempty
+    let host = hostname()
+    check("hostname() is non-empty", length(host) > 0)
+
+    // getenv of HOME (set in the shell) is non-null
+    let home = getenv("HOME")
+    check("getenv(HOME) is non-null", home != null)
+
+    // getenv of a definitely-missing var is null
+    let missing = getenv("BEAGLE_OS_DEFINITELY_NOT_SET_98765")
+    check("getenv(missing) == null", missing == null)
+
+    // setenv + getenv round-trip
+    let set-ok = setenv("BEAGLE_OS_TEST_VAR", "round-trip-value")
+    check("setenv returns true", set-ok)
+    let got = getenv("BEAGLE_OS_TEST_VAR")
+    check("getenv after setenv == value", got == "round-trip-value")
+
+    // overwrite round-trip
+    setenv("BEAGLE_OS_TEST_VAR", "second-value")
+    check("setenv overwrite round-trip", getenv("BEAGLE_OS_TEST_VAR") == "second-value")
+
+    // unsetenv + getenv -> null
+    let unset-ok = unsetenv("BEAGLE_OS_TEST_VAR")
+    check("unsetenv returns true", unset-ok)
+    check("getenv after unsetenv == null", getenv("BEAGLE_OS_TEST_VAR") == null)
+
+    println("")
+    println("Passed: " ++ to-string(pass) ++ "  Failed: " ++ to-string(fail))
+    if fail == 0 {
+        println("ALL TESTS PASSED")
+    } else {
+        println("SOME TESTS FAILED")
+    }
+    "done"
+}

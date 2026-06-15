@@ -1,0 +1,22 @@
+namespace bug_b11_compound_key_test
+
+// B11 regression: compound values (vectors/maps) as map keys / set members failed
+// because hash_value hashed raw field pointers instead of recursing structurally
+// like `equal`. Floats as keys failed too (hashed by pointer). Both now hash by
+// structural content.
+
+fn main() {
+    let m = assoc(assoc({}, [1, 2], "v"), [3, 4], "w")
+    println(get(m, [1, 2]))
+    println(get(m, [3, 4]))
+    println(get(m, [9, 9]) == null)
+    // float key
+    let m2 = assoc({}, 3.5, "fv")
+    println(get(m2, 3.5))
+}
+
+// @beagle.core.snapshot
+// v
+// w
+// true
+// fv

@@ -1,0 +1,31 @@
+namespace qualified_fn_value_test
+
+// gc-always
+
+// Regression: a qualified function reference (alias/name) can be used as a
+// first-class VALUE, not just in call position. Previously `let g = ansi/bold`
+// or `map(xs, text/capitalize)` failed to compile with "Binding not found"
+// because functions key their namespace binding by the fully-qualified name,
+// which the qualified-value lookup did not try.
+
+use beagle.text as text
+use beagle.ansi as ansi
+
+fn main() {
+    // qualified fn bound to a local, then called
+    let cap = text/capitalize
+    println(cap("hello") == "Hello")
+
+    // qualified fn passed as an argument to a higher-order function
+    println(map(["ab", "cd"], text/capitalize) == ["Ab", "Cd"])
+
+    // qualified fns stored in a vector and consumed by another module fn
+    let styles = [ansi/bold, ansi/red]
+    let combined = ansi/combine(styles)
+    println(ansi/strip-ansi(combined("x")) == "x")
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// true

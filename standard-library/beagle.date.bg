@@ -1,0 +1,383 @@
+namespace beagle.date
+
+use beagle.time as time
+
+// ============================================================================
+// beagle.date — calendar dates/times on top of beagle.time.
+//
+// A DateTime is a plain struct carrying the broken-down UTC fields
+// (year, month, day, hour, minute, second). All the heavy calendar math
+// (days <-> civil) lives in beagle.time (Howard Hinnant's algorithm); this
+// module only wraps it in an ergonomic struct and adds ISO-8601 I/O plus a
+// few derived operations (add-days/add-seconds/diff/weekday).
+//
+// Everything is UTC. format-iso8601 always emits a trailing 'Z'.
+// ============================================================================
+
+struct DateTime {
+    year
+    month
+    day
+    hour
+    minute
+    second
+}
+
+// ---------------------------------------------------------------------------
+// Construction / epoch conversion
+// ---------------------------------------------------------------------------
+
+// Decompose an epoch-seconds value (UTC) into a DateTime.
+fn from-epoch(secs) {
+    let c = time/civil-from-epoch(secs)
+    DateTime {
+        year: c[0],
+        month: c[1],
+        day: c[2],
+        hour: c[3],
+        minute: c[4],
+        second: c[5]
+    }
+}
+
+// Current time as a DateTime (UTC).
+fn now() {
+    from-epoch(time/epoch-seconds())
+}
+
+// Convert a DateTime back to epoch seconds (UTC).
+fn to-epoch(dt) {
+    let days = time/days-from-civil(dt.year, dt.month, dt.day)
+    days * 86400 + dt.hour * 3600 + dt.minute * 60 + dt.second
+}
+
+// ---------------------------------------------------------------------------
+// Leap year
+// ---------------------------------------------------------------------------
+
+// Proleptic Gregorian leap-year rule.
+fn is-leap-year?(y) {
+    if time/floor-mod(y, 4) != 0 {
+        false
+    } else if time/floor-mod(y, 100) != 0 {
+        true
+    } else {
+        time/floor-mod(y, 400) == 0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Weekday — 0 = Sunday .. 6 = Saturday
+// ---------------------------------------------------------------------------
+
+fn weekday(dt) {
+    time/weekday(to-epoch(dt))
+}
+
+// ---------------------------------------------------------------------------
+// Arithmetic
+// ---------------------------------------------------------------------------
+
+fn add-seconds(dt, n) {
+    from-epoch(to-epoch(dt) + n)
+}
+
+fn add-days(dt, n) {
+    add-seconds(dt, n * 86400)
+}
+
+// b - a, in whole seconds.
+fn diff-seconds(a, b) {
+    to-epoch(b) - to-epoch(a)
+}
+
+// ---------------------------------------------------------------------------
+// ISO-8601 formatting:  "2024-01-15T08:30:00Z"
+// ---------------------------------------------------------------------------
+
+// Append n as a zero-padded `width`-digit decimal onto a string builder
+// (year is assumed non-negative and < 10000 for the ISO range; the headline
+// vectors all sit in [1970, 9999]).
+fn pad-num(n, width) {
+    let s = to-string(n)
+    let len = length(s)
+    let mut pad = ""
+    let mut i = len
+    while i < width {
+        pad = pad ++ "0"
+        i = i + 1
+    }
+    pad ++ s
+}
+
+fn format-iso8601(dt) {
+    pad-num(dt.year, 4) ++ "-" ++
+    pad-num(dt.month, 2) ++ "-" ++
+    pad-num(dt.day, 2) ++ "T" ++
+    pad-num(dt.hour, 2) ++ ":" ++
+    pad-num(dt.minute, 2) ++ ":" ++
+    pad-num(dt.second, 2) ++ "Z"
+}
+
+// ---------------------------------------------------------------------------
+// ISO-8601 parsing:  "YYYY-MM-DDTHH:MM:SSZ"
+//
+// Strict positional parse. The required separators MUST appear at their
+// expected positions: '-' at index 4 and 7, 'T' at index 10, ':' at index 13
+// and 16. A trailing 'Z' is tolerated but not required, and (if present) must
+// be exactly "Z" with no other trailing characters.
+//
+// Every component is range-validated: month 1-12, day 1-(days in that
+// month/year, leap-aware), hour 0-23, minute 0-59, second 0-59. Any violation
+// is signalled the same way every other failure in this module is — via
+// `throw` with a clear "beagle.date/parse-iso8601: ..." message. (Callers that
+// want a soft failure can wrap the call in try/catch.)
+// ---------------------------------------------------------------------------
+
+// Number of days in `month` (1-12) of year `y`, leap-aware.
+fn days-in-month(y, month) {
+    if month == 1 || month == 3 || month == 5 || month == 7 ||
+       month == 8 || month == 10 || month == 12 {
+        31
+    } else if month == 4 || month == 6 || month == 9 || month == 11 {
+        30
+    } else {
+        // February.
+        if is-leap-year?(y) { 29 } else { 28 }
+    }
+}
+
+// Parse a fixed-width unsigned integer of `width` digits starting at `start`.
+fn parse-digits(s, start, width) {
+    let mut acc = 0
+    let mut i = 0
+    while i < width {
+        let code = char-code(s[start + i])
+        if code < 48 || code > 57 {
+            throw("beagle.date/parse-iso8601: non-digit at index " ++
+                  to-string(start + i) ++ " in \"" ++ s ++ "\"")
+        }
+        acc = acc * 10 + (code - 48)
+        i = i + 1
+    }
+    acc
+}
+
+// Assert that the character at `idx` is exactly `expected` (a single-char
+// string); throw a clear separator error otherwise.
+fn expect-sep(s, idx, expected) {
+    if s[idx] != expected {
+        throw("beagle.date/parse-iso8601: expected separator '" ++ expected ++
+              "' at index " ++ to-string(idx) ++ " in \"" ++ s ++ "\"")
+    } else {
+        null
+    }
+}
+
+fn parse-iso8601(s) {
+    let len = length(s)
+    if len < 19 {
+        throw("beagle.date/parse-iso8601: too short, expected at least 19 chars: \"" ++ s ++ "\"")
+    } else {
+        null
+    }
+    // Required separators at fixed positions.
+    expect-sep(s, 4, "-")
+    expect-sep(s, 7, "-")
+    expect-sep(s, 10, "T")
+    expect-sep(s, 13, ":")
+    expect-sep(s, 16, ":")
+    // After the seconds field (indices 17,18) only an optional single 'Z' is
+    // allowed — reject any other trailing junk.
+    if len > 19 {
+        if len != 20 || s[19] != "Z" {
+            throw("beagle.date/parse-iso8601: unexpected trailing characters after seconds in \"" ++ s ++ "\"")
+        } else {
+            null
+        }
+    } else {
+        null
+    }
+
+    let year = parse-digits(s, 0, 4)
+    let month = parse-digits(s, 5, 2)
+    let day = parse-digits(s, 8, 2)
+    let hour = parse-digits(s, 11, 2)
+    let minute = parse-digits(s, 14, 2)
+    let second = parse-digits(s, 17, 2)
+
+    if month < 1 || month > 12 {
+        throw("beagle.date/parse-iso8601: month out of range (1-12): " ++ to-string(month) ++ " in \"" ++ s ++ "\"")
+    } else {
+        null
+    }
+    let max-day = days-in-month(year, month)
+    if day < 1 || day > max-day {
+        throw("beagle.date/parse-iso8601: day out of range (1-" ++ to-string(max-day) ++
+              ") for " ++ to-string(year) ++ "-" ++ pad-num(month, 2) ++ ": " ++ to-string(day) ++ " in \"" ++ s ++ "\"")
+    } else {
+        null
+    }
+    if hour < 0 || hour > 23 {
+        throw("beagle.date/parse-iso8601: hour out of range (0-23): " ++ to-string(hour) ++ " in \"" ++ s ++ "\"")
+    } else {
+        null
+    }
+    if minute < 0 || minute > 59 {
+        throw("beagle.date/parse-iso8601: minute out of range (0-59): " ++ to-string(minute) ++ " in \"" ++ s ++ "\"")
+    } else {
+        null
+    }
+    if second < 0 || second > 59 {
+        throw("beagle.date/parse-iso8601: second out of range (0-59): " ++ to-string(second) ++ " in \"" ++ s ++ "\"")
+    } else {
+        null
+    }
+
+    DateTime {
+        year: year,
+        month: month,
+        day: day,
+        hour: hour,
+        minute: minute,
+        second: second
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Equality helper (structs don't compare field-wise with ==, so compare via
+// epoch + components for the test suite).
+// ---------------------------------------------------------------------------
+
+fn dt-equal?(a, b) {
+    a.year == b.year && a.month == b.month && a.day == b.day &&
+    a.hour == b.hour && a.minute == b.minute && a.second == b.second
+}
+
+// ---------------------------------------------------------------------------
+// Self-checking test suite
+// ---------------------------------------------------------------------------
+
+let pass-count = atom(0)
+let fail-count = atom(0)
+
+fn check(name, expected, actual) {
+    if expected == actual {
+        swap!(pass-count, fn(x) { x + 1 })
+        println("PASS: " ++ name)
+    } else {
+        swap!(fail-count, fn(x) { x + 1 })
+        println("FAIL: " ++ name ++ " expected=" ++ to-string(expected) ++ " actual=" ++ to-string(actual))
+    }
+}
+
+fn check-true(name, cond) {
+    if cond {
+        swap!(pass-count, fn(x) { x + 1 })
+        println("PASS: " ++ name)
+    } else {
+        swap!(fail-count, fn(x) { x + 1 })
+        println("FAIL: " ++ name)
+    }
+}
+
+fn main() {
+    println("=== beagle.date tests ===")
+
+    // from-epoch(0) is the epoch.
+    let e0 = from-epoch(0)
+    check("from-epoch 0 year", 1970, e0.year)
+    check("from-epoch 0 month", 1, e0.month)
+    check("from-epoch 0 day", 1, e0.day)
+    check("from-epoch 0 hour", 0, e0.hour)
+    check("from-epoch 0 minute", 0, e0.minute)
+    check("from-epoch 0 second", 0, e0.second)
+    check("format-iso8601 epoch", "1970-01-01T00:00:00Z", format-iso8601(e0))
+
+    // Headline vector: 784111777 = Sun 06 Nov 1994 08:49:37 UTC.
+    let v = from-epoch(784111777)
+    check("format-iso8601 784111777", "1994-11-06T08:49:37Z", format-iso8601(v))
+    check("to-epoch round-trip 784111777", 784111777, to-epoch(v))
+
+    // parse-iso8601 round-trips.
+    let parsed = parse-iso8601("1994-11-06T08:49:37Z")
+    check-true("parse-iso8601 round-trips structurally", dt-equal?(parsed, v))
+    check("parse-iso8601 to-epoch", 784111777, to-epoch(parsed))
+    check("parse(format(x)) == x",
+          784111777,
+          to-epoch(parse-iso8601(format-iso8601(v))))
+
+    // parse tolerates missing trailing Z.
+    check("parse without Z", 784111777,
+          to-epoch(parse-iso8601("1994-11-06T08:49:37")))
+
+    // A modern timestamp.
+    let m = from-epoch(1700000000)
+    check("format-iso8601 1700000000", "2023-11-14T22:13:20Z", format-iso8601(m))
+    check("to-epoch 1700000000", 1700000000, to-epoch(m))
+
+    // add-seconds.
+    check("add-seconds +1 epoch", 784111778, to-epoch(add-seconds(v, 1)))
+    check("add-seconds -37 to second 0",
+          784111740, to-epoch(add-seconds(v, -37)))
+
+    // add-days round-trips.
+    let plus10 = add-days(v, 10)
+    check("add-days +10 epoch", 784111777 + 10 * 86400, to-epoch(plus10))
+    check("add-days +10 day", 16, plus10.day)
+    check("add-days round-trip", 784111777, to-epoch(add-days(plus10, -10)))
+    // crossing a month boundary.
+    let crossed = add-days(from-epoch(0), 31)
+    check("add-days cross month", "1970-02-01T00:00:00Z", format-iso8601(crossed))
+
+    // diff-seconds.
+    check("diff-seconds", 10 * 86400, diff-seconds(v, plus10))
+    check("diff-seconds reverse", -(10 * 86400), diff-seconds(plus10, v))
+
+    // weekday: 1994-11-06 was a Sunday (0); 1970-01-01 was Thursday (4).
+    check("weekday epoch (Thu)", 4, weekday(e0))
+    check("weekday 1994-11-06 (Sun)", 0, weekday(v))
+
+    // is-leap-year?
+    check-true("leap 2000", is-leap-year?(2000))
+    check-true("not leap 1900", is-leap-year?(1900) == false)
+    check-true("leap 2024", is-leap-year?(2024))
+    check-true("not leap 2023", is-leap-year?(2023) == false)
+    check-true("leap 1996", is-leap-year?(1996))
+    check-true("not leap 2100", is-leap-year?(2100) == false)
+
+    // now() sanity.
+    check-true("now() year >= 2024", now().year >= 2024)
+
+    // epoch round-trip over a span (stress the calendar math + arithmetic).
+    let mut t = -500000000
+    let mut rt-ok = true
+    while t < 2000000000 {
+        if to-epoch(from-epoch(t)) != t {
+            rt-ok = false
+        }
+        t = t + 97654321
+    }
+    check-true("from/to-epoch round-trips over span", rt-ok)
+
+    // format/parse round-trip over the same span.
+    let mut t2 = 0
+    let mut fp-ok = true
+    while t2 < 4000000000 {
+        let dt = from-epoch(t2)
+        if to-epoch(parse-iso8601(format-iso8601(dt))) != t2 {
+            fp-ok = false
+        }
+        t2 = t2 + 86399 * 17
+    }
+    check-true("format/parse round-trips over span", fp-ok)
+
+    println("")
+    println("PASS: " ++ to-string(deref(pass-count)) ++ "  FAIL: " ++ to-string(deref(fail-count)))
+    if deref(fail-count) == 0 {
+        println("ALL TESTS PASSED")
+    } else {
+        println("SOME TESTS FAILED")
+    }
+    "done"
+}

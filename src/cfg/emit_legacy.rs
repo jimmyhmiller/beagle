@@ -1189,15 +1189,18 @@ pub fn compile_via_ssa<B: CodegenBackend>(
     // verifier below.
     let liveness = compute_liveness(&cfg);
     let cross_safepoint = cross_safepoint_values(&cfg, &liveness);
+    // Provably-non-pointer VRegs: exempt from the GC-slot requirement below
+    // (the GC never relocates a tagged immediate).
+    let non_pointer = crate::cfg::pointer_class::analyze(&cfg).non_pointer_vregs;
 
-    // Verifier: no cross-safepoint GP value may have landed in a
-    // caller-saved physical register (it would be clobbered by the
-    // call). The color constraint guarantees this for allocator-pool
-    // values; it can still catch a cross-safepoint *entry param* pinned
-    // to an arg reg (the documented "clobber a live entry-param" case),
-    // which the constraint doesn't control. Either way, bail to legacy
-    // — never emit code that clobbers a live value.
-    if let Err(bad) = verify_clobber_safety(&physical, &cross_safepoint, layout) {
+    // Verifier: a cross-safepoint GP value must be either (a) spilled to a
+    // GC-scanned slot, or (b) provably non-pointer — otherwise the value is
+    // unsafe at the safepoint. Caller-saved placement is clobbered by the
+    // call; a callee-saved register survives the call but is invisible to the
+    // conservative frame-slot GC scan, so a maybe-pointer there goes stale
+    // under a moving collection. Either way, bail to the legacy path (whose
+    // allocator now spills live values to root slots across safepoints).
+    if let Err(bad) = verify_clobber_safety(&physical, &cross_safepoint, layout, &non_pointer) {
         let name = ir.debug_name.clone().unwrap_or_else(|| "<anon>".into());
         return Err((
             SsaCompileError::BuildFailed(format!(

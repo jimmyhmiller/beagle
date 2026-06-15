@@ -148,32 +148,18 @@ pub unsafe extern "C" fn regex_find_all(
 
     let string_str = runtime.get_string(stack_pointer, string);
 
-    // Collect all matches
-    let matches: Vec<String> = regex
+    // Collect all matches as owned strings (GC-safe), then build the result vec
+    // with correct rooting (the old inline loop left the accumulator unrooted
+    // across allocations and corrupted the result under --gc-always).
+    let matches: Vec<Option<String>> = regex
         .find_iter(&string_str)
-        .map(|m| m.as_str().to_string())
+        .map(|m| Some(m.as_str().to_string()))
         .collect();
 
-    // Create a PersistentVec with all matches
-    use crate::collections::PersistentVec;
-
-    let mut vec = match PersistentVec::empty(runtime, stack_pointer) {
+    match runtime.build_persistent_string_vec(stack_pointer, &matches) {
         Ok(v) => v,
-        Err(_) => return BuiltInTypes::null_value() as usize,
-    };
-
-    for matched in matches {
-        let str_ptr = match runtime.allocate_string(stack_pointer, matched) {
-            Ok(ptr) => ptr.into(),
-            Err(_) => return BuiltInTypes::null_value() as usize,
-        };
-        vec = match PersistentVec::push(runtime, stack_pointer, vec, str_ptr) {
-            Ok(v) => v,
-            Err(_) => return BuiltInTypes::null_value() as usize,
-        };
+        Err(_) => BuiltInTypes::null_value() as usize,
     }
-
-    vec.as_tagged()
 }
 
 /// Replace first match
@@ -251,29 +237,16 @@ pub unsafe extern "C" fn regex_split(
 
     let string_str = runtime.get_string(stack_pointer, string);
 
-    // Split the string
-    let parts: Vec<&str> = regex.split(&string_str).collect();
+    // Split into owned strings, then build the result vec with correct rooting.
+    let parts: Vec<Option<String>> = regex
+        .split(&string_str)
+        .map(|p| Some(p.to_string()))
+        .collect();
 
-    // Create a PersistentVec with all parts
-    use crate::collections::PersistentVec;
-
-    let mut vec = match PersistentVec::empty(runtime, stack_pointer) {
+    match runtime.build_persistent_string_vec(stack_pointer, &parts) {
         Ok(v) => v,
-        Err(_) => return BuiltInTypes::null_value() as usize,
-    };
-
-    for part in parts {
-        let str_ptr = match runtime.allocate_string(stack_pointer, part.to_string()) {
-            Ok(ptr) => ptr.into(),
-            Err(_) => return BuiltInTypes::null_value() as usize,
-        };
-        vec = match PersistentVec::push(runtime, stack_pointer, vec, str_ptr) {
-            Ok(v) => v,
-            Err(_) => return BuiltInTypes::null_value() as usize,
-        };
+        Err(_) => BuiltInTypes::null_value() as usize,
     }
-
-    vec.as_tagged()
 }
 
 /// Get capture groups from first match
@@ -295,30 +268,15 @@ pub unsafe extern "C" fn regex_captures(
 
     match regex.captures(&string_str) {
         Some(caps) => {
-            use crate::collections::PersistentVec;
-
-            let mut vec = match PersistentVec::empty(runtime, stack_pointer) {
+            // Each group is Some(text) or None (unmatched optional group → null),
+            // built with correct GC rooting.
+            let groups: Vec<Option<String>> = (0..caps.len())
+                .map(|i| caps.get(i).map(|m| m.as_str().to_string()))
+                .collect();
+            match runtime.build_persistent_string_vec(stack_pointer, &groups) {
                 Ok(v) => v,
-                Err(_) => return BuiltInTypes::null_value() as usize,
-            };
-
-            for i in 0..caps.len() {
-                let value = match caps.get(i) {
-                    Some(m) => {
-                        match runtime.allocate_string(stack_pointer, m.as_str().to_string()) {
-                            Ok(ptr) => ptr.into(),
-                            Err(_) => return BuiltInTypes::null_value() as usize,
-                        }
-                    }
-                    None => BuiltInTypes::null_value() as usize,
-                };
-                vec = match PersistentVec::push(runtime, stack_pointer, vec, value) {
-                    Ok(v) => v,
-                    Err(_) => return BuiltInTypes::null_value() as usize,
-                };
+                Err(_) => BuiltInTypes::null_value() as usize,
             }
-
-            vec.as_tagged()
         }
         None => BuiltInTypes::null_value() as usize,
     }

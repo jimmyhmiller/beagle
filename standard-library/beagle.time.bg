@@ -1,0 +1,322 @@
+namespace beagle.time
+
+use beagle.ffi as ffi
+use beagle.string-builder as sb
+
+// ============================================================================
+// beagle.time — clock access via FFI + pure-Beagle calendar math.
+//
+// The clock primitives (epoch-seconds / epoch-millis) call into libc through
+// the FFI. Everything else — civil/days conversion, weekday, RFC 1123 date
+// formatting — is pure Beagle so it works deterministically and is GC-safe.
+//
+// Calendar conversions use Howard Hinnant's days_from_civil / civil_from_days
+// algorithm (http://howardhinnant.github.io/date_algorithms.html), which is
+// exact for the proleptic Gregorian calendar over the full range of Int.
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// libc binding
+// ---------------------------------------------------------------------------
+
+fn libc-path() {
+    let os = get-os()
+    if os == "macos" {
+        "libSystem.B.dylib"
+    } else if os == "linux" {
+        "/lib/x86_64-linux-gnu/libc.so.6"
+    } else {
+        "libc.so.6"
+    }
+}
+
+let libc = ffi/load-library(libc-path())
+
+// time_t time(time_t *tloc); pass NULL → returns seconds since the epoch.
+let c-time = ffi/get-function(libc, "time", [ffi/Type.Pointer], ffi/Type.I64)
+
+// int gettimeofday(struct timeval *tv, struct timezone *tz);
+// struct timeval { time_t tv_sec; suseconds_t tv_usec; } — both 8 bytes on
+// 64-bit, so we read tv_sec at offset 0 and tv_usec at offset 8.
+let c-gettimeofday = ffi/get-function(
+    libc,
+    "gettimeofday",
+    [ffi/Type.Pointer, ffi/Type.Pointer],
+    ffi/Type.I32
+)
+
+// ---------------------------------------------------------------------------
+// Clock primitives
+// ---------------------------------------------------------------------------
+
+// Current Unix time in whole seconds (UTC).
+fn epoch-seconds() {
+    c-time(null)
+}
+
+// Current Unix time in milliseconds (UTC). Reads a struct timeval via
+// gettimeofday and combines tv_sec*1000 + tv_usec/1000.
+fn epoch-millis() {
+    // 16-byte off-heap struct timeval; the I8 array gives us a raw pointer
+    // (field 0) that we hand to C, then read back the two 8-byte fields.
+    let tv = ffi/array(ffi/Type.I8, 16)
+    c-gettimeofday(tv, null)
+    let sec = ffi/read-at(tv, 0, ffi/Type.I64)
+    let usec = ffi/read-at(tv, 8, ffi/Type.I64)
+    sec * 1000 + floor-div(usec, 1000)
+}
+
+// ---------------------------------------------------------------------------
+// Integer floor division / modulo
+//
+// Beagle integer division truncates toward zero. The Hinnant algorithm
+// requires Euclidean/floored division for negative inputs (pre-1970 dates),
+// so we implement floor-div and floor-mod explicitly.
+// ---------------------------------------------------------------------------
+
+fn floor-div(a, b) {
+    let q = a / b
+    let r = a - q * b
+    // If the remainder is non-zero and its sign differs from the divisor,
+    // the truncated quotient is one too large for floored division.
+    if r != 0 {
+        if (r < 0) != (b < 0) {
+            q - 1
+        } else {
+            q
+        }
+    } else {
+        q
+    }
+}
+
+fn floor-mod(a, b) {
+    a - floor-div(a, b) * b
+}
+
+// ---------------------------------------------------------------------------
+// Howard Hinnant civil <-> days
+// ---------------------------------------------------------------------------
+
+// Number of days from 1970-01-01 to the civil date y-m-d (m in 1..12,
+// d in 1..28/31). Result is negative for dates before the epoch.
+fn days-from-civil(y, m, d) {
+    // Shift the year so that March is the first month (Feb's leap day lands
+    // at the end of the year, simplifying the era arithmetic).
+    let yy = if m <= 2 { y - 1 } else { y }
+    let era = floor-div(if yy >= 0 { yy } else { yy - 399 }, 400)
+    let yoe = yy - era * 400                       // [0, 399]
+    let mp = if m > 2 { m - 3 } else { m + 9 }     // [0, 11]
+    let doy = floor-div(153 * mp + 2, 5) + d - 1   // [0, 365]
+    let doe = yoe * 365 + floor-div(yoe, 4) - floor-div(yoe, 100) + doy
+    era * 146097 + doe - 719468
+}
+
+// Inverse of days-from-civil. Returns [year, month, day].
+fn civil-from-days(z0) {
+    let z = z0 + 719468
+    let era = floor-div(if z >= 0 { z } else { z - 146096 }, 146097)
+    let doe = z - era * 146097                                  // [0, 146096]
+    let yoe = floor-div(doe - floor-div(doe, 1460) + floor-div(doe, 36524) - floor-div(doe, 146096), 365)  // [0, 399]
+    let y = yoe + era * 400
+    let doy = doe - (365 * yoe + floor-div(yoe, 4) - floor-div(yoe, 100))  // [0, 365]
+    let mp = floor-div(5 * doy + 2, 153)                        // [0, 11]
+    let d = doy - floor-div(153 * mp + 2, 5) + 1               // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }             // [1, 12]
+    [if m <= 2 { y + 1 } else { y }, m, d]
+}
+
+// ---------------------------------------------------------------------------
+// Public calendar helpers
+// ---------------------------------------------------------------------------
+
+// Day count (floored) since the epoch for an epoch-seconds value.
+fn days-since-epoch(epoch) {
+    floor-div(epoch, 86400)
+}
+
+// Weekday for an epoch-seconds value. 0 = Sunday .. 6 = Saturday.
+// 1970-01-01 was a Thursday (day 0 → 4).
+fn weekday(epoch) {
+    let days = days-since-epoch(epoch)
+    floor-mod(days + 4, 7)
+}
+
+// Decompose an epoch-seconds value into [year, month, day, hour, minute,
+// second, weekday] in UTC.
+fn civil-from-epoch(epoch) {
+    let days = days-since-epoch(epoch)
+    let secs-of-day = floor-mod(epoch, 86400)
+    let ymd = civil-from-days(days)
+    let hour = floor-div(secs-of-day, 3600)
+    let minute = floor-div(floor-mod(secs-of-day, 3600), 60)
+    let second = floor-mod(secs-of-day, 60)
+    let wd = floor-mod(days + 4, 7)
+    [ymd[0], ymd[1], ymd[2], hour, minute, second, wd]
+}
+
+// ---------------------------------------------------------------------------
+// RFC 1123 / HTTP date formatting
+// ---------------------------------------------------------------------------
+
+let day-names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+let month-names = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+// Append n as a zero-padded two-digit decimal.
+fn append-2!(b, n) {
+    if n < 10 {
+        sb/append-byte!(b, 48)
+    } else {
+        b
+    }
+    sb/append-int!(b, n)
+}
+
+// Append n as a zero-padded four-digit decimal (years are always >= 0 in the
+// HTTP date range, so no sign handling).
+fn append-4!(b, n) {
+    if n < 1000 { sb/append-byte!(b, 48) } else { b }
+    if n < 100 { sb/append-byte!(b, 48) } else { b }
+    if n < 10 { sb/append-byte!(b, 48) } else { b }
+    sb/append-int!(b, n)
+}
+
+// Format an epoch-seconds value as an RFC 1123 date string suitable for an
+// HTTP Date header, e.g. "Sun, 06 Nov 1994 08:49:37 GMT".
+fn http-date(epoch) {
+    let c = civil-from-epoch(epoch)
+    let year = c[0]
+    let month = c[1]
+    let day = c[2]
+    let hour = c[3]
+    let minute = c[4]
+    let second = c[5]
+    let wd = c[6]
+
+    let b = sb/new(29)
+    sb/append!(b, day-names[wd])
+    sb/append!(b, ", ")
+    append-2!(b, day)
+    sb/append-byte!(b, 32)
+    sb/append!(b, month-names[month])
+    sb/append-byte!(b, 32)
+    append-4!(b, year)
+    sb/append-byte!(b, 32)
+    append-2!(b, hour)
+    sb/append-byte!(b, 58)
+    append-2!(b, minute)
+    sb/append-byte!(b, 58)
+    append-2!(b, second)
+    sb/append!(b, " GMT")
+    sb/to-string(b)
+}
+
+// ---------------------------------------------------------------------------
+// Self-checking test suite
+// ---------------------------------------------------------------------------
+
+let pass-count = atom(0)
+let fail-count = atom(0)
+
+fn check(name, expected, actual) {
+    if expected == actual {
+        swap!(pass-count, fn(x) { x + 1 })
+        println("PASS: " ++ name)
+    } else {
+        swap!(fail-count, fn(x) { x + 1 })
+        println("FAIL: " ++ name ++ " expected=" ++ to-string(expected) ++ " actual=" ++ to-string(actual))
+    }
+}
+
+fn check-true(name, cond) {
+    if cond {
+        swap!(pass-count, fn(x) { x + 1 })
+        println("PASS: " ++ name)
+    } else {
+        swap!(fail-count, fn(x) { x + 1 })
+        println("FAIL: " ++ name)
+    }
+}
+
+fn main() {
+    println("=== beagle.time tests ===")
+
+    // Clock primitives.
+    check-true("epoch-seconds > 1700000000", epoch-seconds() > 1700000000)
+    check-true("epoch-millis > epoch-seconds*1000-ish",
+               epoch-millis() > 1700000000000)
+    // millis and seconds should agree to within a couple seconds.
+    let s = epoch-seconds()
+    let ms = epoch-millis()
+    check-true("epoch-millis ~ epoch-seconds", floor-div(ms, 1000) - s >= -2)
+    check-true("epoch-millis ~ epoch-seconds 2", floor-div(ms, 1000) - s <= 2)
+
+    // floor-div / floor-mod.
+    check("floor-div 7 3", 2, floor-div(7, 3))
+    check("floor-div -7 3", -3, floor-div(-7, 3))
+    check("floor-div 7 -3", -3, floor-div(7, -3))
+    check("floor-div -7 -3", 2, floor-div(-7, -3))
+    check("floor-mod -7 3", 2, floor-mod(-7, 3))
+    check("floor-mod 7 3", 1, floor-mod(7, 3))
+    check("floor-div 6 3", 2, floor-div(6, 3))
+    check("floor-mod 6 3", 0, floor-mod(6, 3))
+
+    // days-from-civil epoch anchor.
+    check("days-from-civil 1970-01-01", 0, days-from-civil(1970, 1, 1))
+    check("days-from-civil 1970-01-02", 1, days-from-civil(1970, 1, 2))
+    check("days-from-civil 1969-12-31", -1, days-from-civil(1969, 12, 31))
+    check("days-from-civil 2000-01-01", 10957, days-from-civil(2000, 1, 1))
+
+    // civil-from-days round-trips.
+    check("civil-from-days 0", [1970, 1, 1], civil-from-days(0))
+    check("civil-from-days 10957", [2000, 1, 1], civil-from-days(10957))
+    check("civil-from-days -1", [1969, 12, 31], civil-from-days(-1))
+
+    // Round-trip a span of days.
+    let mut d = -1000
+    let mut rt-ok = true
+    while d < 20000 {
+        let ymd = civil-from-days(d)
+        let back = days-from-civil(ymd[0], ymd[1], ymd[2])
+        if back != d {
+            rt-ok = false
+        }
+        d = d + 137
+    }
+    check-true("civil/days round-trips", rt-ok)
+
+    // weekday: 1970-01-01 = Thursday (4).
+    check("weekday epoch 0 (Thu)", 4, weekday(0))
+    // 784111777 = Sun 06 Nov 1994.
+    check("weekday 784111777 (Sun)", 0, weekday(784111777))
+
+    // civil-from-epoch decomposition for the known vector.
+    check("civil-from-epoch 784111777",
+          [1994, 11, 6, 8, 49, 37, 0],
+          civil-from-epoch(784111777))
+
+    // The headline vector.
+    check("http-date 784111777",
+          "Sun, 06 Nov 1994 08:49:37 GMT",
+          http-date(784111777))
+
+    // Epoch zero formats correctly.
+    check("http-date 0",
+          "Thu, 01 Jan 1970 00:00:00 GMT",
+          http-date(0))
+
+    // A modern-ish round value: 2000-01-01 00:00:00 = 946684800.
+    check("http-date 946684800",
+          "Sat, 01 Jan 2000 00:00:00 GMT",
+          http-date(946684800))
+
+    println("")
+    println("PASS: " ++ to-string(deref(pass-count)) ++ "  FAIL: " ++ to-string(deref(fail-count)))
+    if deref(fail-count) == 0 {
+        println("ALL TESTS PASSED")
+    } else {
+        println("SOME TESTS FAILED")
+    }
+    "done"
+}

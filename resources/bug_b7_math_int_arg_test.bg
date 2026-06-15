@@ -1,0 +1,17 @@
+namespace bug_b7_math_int_arg_test
+
+// B7 regression: math builtins (sqrt/trig/log/pow/...) blindly treated their
+// argument as a boxed-float pointer, so an Int argument dereferenced the untagged
+// integer as a pointer and silently terminated the process. They now coerce Int
+// to Float. Self-checking to avoid float-format fragility.
+
+fn main() {
+    println(sqrt(2) > 1.414 && sqrt(2) < 1.415)
+    println(pow(2, 3) > 7.999 && pow(2, 3) < 8.001)
+    println(sqrt(2.0) > 1.414 && sqrt(2.0) < 1.415)
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// true

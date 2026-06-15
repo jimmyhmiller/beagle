@@ -1,0 +1,40 @@
+namespace map_seqable_test
+
+// gc-always
+
+// Regression: a PersistentMap is now Seqable, yielding [key value] entry pairs
+// (Clojure semantics), so the whole seq library and beagle.iter combinators
+// work over maps. Previously seq(map) threw "Function not implemented".
+
+use beagle.iter as it
+
+fn main() {
+    let m = assoc(assoc(assoc({}, :a, 1), :b, 2), :c, 3)
+
+    // seq is non-null and entries are [k v] pairs
+    println(seq(m) != null)
+
+    // sum the values via reduce over entries
+    println(reduce(m, 0, fn(acc, e) { acc + e[1] }) == 6)
+
+    // count works
+    println(count(m) == 3)
+
+    // map over entries (sort the resulting keys to make it deterministic)
+    let ks = sort(map(m, fn(e) { e[0] }))
+    println(ks == [:a, :b, :c])
+
+    // empty map seqs to null
+    println(seq({}) == null)
+
+    // iter combinator over a map
+    println(count(it/enumerate(m)) == 3)
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// true
+// true
+// true
+// true

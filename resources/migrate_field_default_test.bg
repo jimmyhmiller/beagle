@@ -1,0 +1,26 @@
+namespace migrate_field_default_test
+
+// Regression: when a GC migrates a stale object to a struct's new layout, a
+// field added in the new layout must be filled with its declared DEFAULT, not
+// null. (Read-time defaulting alone isn't enough — once migrated, the field is
+// a "real" slot, so a null-fill would permanently stick.) This is what keeps a
+// live-coded `stamina`-with-default working on a running game's existing Player
+// even across collections.
+
+fn churn(n) { if n > 0 { let x = [1, 2, 3, 4, 5, 6, 7, 8] churn(n - 1) } else { 0 } }
+
+fn main() {
+    eval("struct M { a }")
+    eval("let h = atom(M { a: 1 })")
+    eval("struct M { a, b: 55.0 }")
+    churn(200000)
+    gc()
+    println(to-string(eval("deref(h).a")))
+    println(to-string(eval("deref(h).b")))
+    println("done")
+}
+
+// @beagle.core.snapshot
+// 1
+// 55.0
+// done

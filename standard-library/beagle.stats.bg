@@ -1,0 +1,252 @@
+namespace beagle.stats
+
+// Statistics over numeric vectors. PURE Beagle, built only on beagle.core
+// (sum/sort/length/get via the global stdlib, sqrt builtin, float math).
+//
+// Conventions
+// -----------
+//  * Input is any Seqable of numbers (typically a vector like [1, 2, 3]).
+//  * All averaging / dispersion functions return Floats (so mean([1,2,3,4])
+//    is 2.5, not truncated integer 2).
+//  * EMPTY INPUT IS A HARD ERROR: every function that needs at least one
+//    element throws a clear message rather than returning a silent null.
+//    This matches the global CLAUDE.md rule: no silent -1/null stubs.
+//
+// Examples
+//   mean([1, 2, 3, 4])      // => 2.5
+//   median([1, 2, 3])       // => 2
+//   median([1, 2, 3, 4])    // => 2.5
+//   stdev([2, 4, 4, 4, 5, 5, 7, 9])        // => 2.0 (population)
+//   percentile([1,2,3,4,5,6,7,8,9,10], 50) // => 5.5
+
+// --- internal helpers --------------------------------------------------------
+
+// Materialize any Seqable into a plain vector so we can index it and reuse it
+// without re-walking a one-shot seq. Vectors pass through unchanged.
+fn as-vector(coll) {
+    if instance-of(coll, PersistentVector) {
+        coll
+    } else {
+        reduce(coll, [], fn(acc, x) { push(acc, x) })
+    }
+}
+
+// Force a number into the Float domain. Multiplying by 1.0 promotes an Int
+// (62-bit) to a Float; a value that is already a Float is unchanged.
+fn to-float(x) {
+    x * 1.0
+}
+
+// Guard: throw a legible error when a statistic is undefined on empty input.
+fn require-non-empty(v, who) {
+    if length(v) == 0 {
+        throw("beagle.stats/" ++ who ++ ": empty input — statistic is undefined for an empty collection")
+    } else {
+        null
+    }
+}
+
+// --- basic aggregates --------------------------------------------------------
+
+/// Sum of all elements. Returns 0 for an empty collection (the additive
+/// identity — summation is well-defined on the empty set).
+///
+///   sum([1, 2, 3, 4])  // => 10
+fn sum(coll) {
+    reduce(coll, 0, fn(acc, x) { acc + x })
+}
+
+/// Arithmetic mean (average) as a Float.
+/// Throws on empty input.
+///
+///   mean([1, 2, 3, 4])  // => 2.5
+fn mean(coll) {
+    let v = as-vector(coll)
+    require-non-empty(v, "mean")
+    to-float(sum(v)) / to-float(length(v))
+}
+
+/// Smallest element. Throws on empty input.
+///
+///   min([3, 1, 4, 1, 5])  // => 1
+fn min(coll) {
+    let v = as-vector(coll)
+    require-non-empty(v, "min")
+    min-of(v)
+}
+
+/// Largest element. Throws on empty input.
+///
+///   max([3, 1, 4, 1, 5])  // => 5
+fn max(coll) {
+    let v = as-vector(coll)
+    require-non-empty(v, "max")
+    max-of(v)
+}
+
+/// Range: the spread between the largest and smallest element (max - min).
+/// Throws on empty input.
+///
+///   range-of([3, 1, 4, 1, 5])  // => 4
+fn range-of(coll) {
+    let v = as-vector(coll)
+    require-non-empty(v, "range-of")
+    max-of(v) - min-of(v)
+}
+
+// --- median ------------------------------------------------------------------
+
+/// Median (middle value of the sorted data).
+///   * odd count  -> the single middle element (preserves its type)
+///   * even count -> the Float average of the two middle elements
+/// Throws on empty input.
+///
+///   median([1, 2, 3])     // => 2
+///   median([1, 2, 3, 4])  // => 2.5
+fn median(coll) {
+    let v = as-vector(coll)
+    require-non-empty(v, "median")
+    let s = sort(v)
+    let n = length(s)
+    let mid = n / 2
+    if n - (n / 2) * 2 == 1 {
+        // odd: exact middle element
+        s[mid]
+    } else {
+        // even: average of the two central elements (always Float)
+        (to-float(s[mid - 1]) + to-float(s[mid])) / 2.0
+    }
+}
+
+// --- mode --------------------------------------------------------------------
+
+/// Mode: the most frequently occurring value. Ties are broken by the smallest
+/// value (the data is sorted first, then the first value to reach the max run
+/// length wins), so the result is deterministic. Throws on empty input.
+///
+///   mode([1, 2, 2, 3, 3, 3])  // => 3
+///   mode([4, 4, 1, 1])        // => 1  (tie -> smallest)
+fn mode(coll) {
+    let v = as-vector(coll)
+    require-non-empty(v, "mode")
+    let s = sort(v)
+    let n = length(s)
+    let mut best-val = s[0]
+    let mut best-count = 1
+    let mut cur-val = s[0]
+    let mut cur-count = 1
+    let mut i = 1
+    while i < n {
+        let x = s[i]
+        if x == cur-val {
+            cur-count = cur-count + 1
+        } else {
+            cur-val = x
+            cur-count = 1
+        }
+        if cur-count > best-count {
+            best-count = cur-count
+            best-val = cur-val
+        }
+        i = i + 1
+    }
+    best-val
+}
+
+// --- variance / standard deviation -------------------------------------------
+
+// Shared core: sum of squared deviations from the mean (always a Float).
+fn sum-squared-deviations(v) {
+    let m = mean(v)
+    reduce(v, 0.0, fn(acc, x) {
+        let d = to-float(x) - m
+        acc + d * d
+    })
+}
+
+/// Population variance: average squared deviation from the mean (divides by n).
+/// Throws on empty input.
+///
+///   variance([2, 4, 4, 4, 5, 5, 7, 9])  // => 4.0
+fn variance(coll) {
+    let v = as-vector(coll)
+    require-non-empty(v, "variance")
+    sum-squared-deviations(v) / to-float(length(v))
+}
+
+/// Sample variance: divides by (n - 1) (Bessel's correction). Requires at
+/// least two data points; throws otherwise.
+///
+///   variance-sample([2, 4, 4, 4, 5, 5, 7, 9])  // => 4.571428571428571
+fn variance-sample(coll) {
+    let v = as-vector(coll)
+    let n = length(v)
+    if n < 2 {
+        throw("beagle.stats/variance-sample: need at least 2 data points for a sample variance")
+    } else {
+        sum-squared-deviations(v) / to-float(n - 1)
+    }
+}
+
+/// Population standard deviation: sqrt of the population variance.
+/// Throws on empty input.
+///
+///   stdev([2, 4, 4, 4, 5, 5, 7, 9])  // => 2.0
+fn stdev(coll) {
+    sqrt(variance(coll))
+}
+
+/// Sample standard deviation: sqrt of the sample variance. Needs >= 2 points.
+///
+///   stdev-sample([2, 4, 4, 4, 5, 5, 7, 9])  // => 2.138...
+fn stdev-sample(coll) {
+    sqrt(variance-sample(coll))
+}
+
+// --- percentile --------------------------------------------------------------
+
+/// Percentile via linear interpolation between closest ranks (the same
+/// "linear" / type-7 method used by NumPy's default and Excel PERCENTILE).
+///   * p is in 0..100 (inclusive).
+///   * p == 0   -> minimum, p == 100 -> maximum.
+/// Throws on empty input or when p is outside [0, 100].
+///
+///   percentile([1,2,3,4,5,6,7,8,9,10], 50)  // => 5.5
+///   percentile([1,2,3,4],            0)      // => 1.0
+///   percentile([1,2,3,4],            100)    // => 4.0
+fn percentile(coll, p) {
+    let v = as-vector(coll)
+    require-non-empty(v, "percentile")
+    if p < 0 || p > 100 {
+        throw("beagle.stats/percentile: p must be in 0..100")
+    } else {
+        let s = sort(v)
+        let n = length(s)
+        if n == 1 {
+            to-float(s[0])
+        } else {
+            // rank in [0, n-1] for the requested percentile
+            let rank = to-float(p) / 100.0 * to-float(n - 1)
+            let lo = float-floor-to-int(rank)
+            let frac = rank - to-float(lo)
+            if lo >= n - 1 {
+                to-float(s[n - 1])
+            } else {
+                let a = to-float(s[lo])
+                let b = to-float(s[lo + 1])
+                a + (b - a) * frac
+            }
+        }
+    }
+}
+
+// Floor a non-negative Float to an Int. percentile only ever floors values in
+// [0, n-1], so a simple count-up loop is exact and avoids needing a builtin
+// float->int truncation. (n is small relative to integer range here.)
+fn float-floor-to-int(x) {
+    let mut i = 0
+    while to-float(i + 1) <= x {
+        i = i + 1
+    }
+    i
+}

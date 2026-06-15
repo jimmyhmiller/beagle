@@ -1,0 +1,6 @@
+namespace wsserver
+use beagle.ws as ws
+fn main() {
+    println("ws on 18090")
+    ws/serve-ws("127.0.0.1", 18090, fn(conn, msg) { "echo:" ++ msg })
+}

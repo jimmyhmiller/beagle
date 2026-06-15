@@ -1,0 +1,43 @@
+namespace division_no_spaces_test
+
+use beagle.mutable-array as arr
+
+// Regression: `a/b` written WITHOUT spaces must parse as division, not as a
+// namespace-qualified access, UNLESS the left segment is a real namespace alias.
+
+fn divide(total, n) {
+    total/n
+}
+
+fn three(a, b, c) {
+    a/b/c
+}
+
+fn main() {
+    println(divide(10, 2))           // var/var, no spaces
+    let x = 20
+    println(x/2)                     // var/literal, no spaces
+    println(three(100, 5, 2))        // (a/b)/c left-assoc
+    let a = 60
+    let b = 3
+    let c = 2
+    println(a/b/c)                   // x/y/z vars
+    println(a / b / c)               // spaced equivalent
+    let p = 8
+    let q = 2
+    println((p+q)/2)                 // close-paren then /
+    // Qualified name with a real alias still resolves as qualified.
+    let ar = arr/new-array(2)
+    arr/write-field(ar, 0, 40)
+    println(arr/read-field(ar, 0)/4) // qualified call, then division
+    ""
+}
+
+// @beagle.core.snapshot
+// 5
+// 10
+// 10
+// 10
+// 10
+// 5
+// 10

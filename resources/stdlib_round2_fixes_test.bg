@@ -1,0 +1,44 @@
+namespace stdlib_round2_fixes_test
+
+// gc-always
+
+// Round-2 safe fixes: UTF-8 byte access + base64/hash non-ASCII correctness,
+// template numeric-0 falsiness, date ISO-8601 validation, regex-wrapper marker.
+
+use beagle.text as text
+use beagle.base64 as b64
+use beagle.hash as hash
+use beagle.template as tmpl
+use beagle.date as date
+use beagle.regex-wrapper as rxw
+
+fn main() {
+    // UTF-8 bytes (match python s.encode())
+    println(text/string->bytes("é") == [195, 169])
+    println(text/string->bytes("abc") == [97, 98, 99])
+    println(text/bytes->string([104, 233 + 0]) == text/bytes->string([104, 233]))
+    // base64 + sha256 of non-ASCII == python (UTF-8)
+    println(b64/encode("é") == "w6k=")
+    println(hash/sha256("héllo") == "3c48591d8d098a4538f5e013dfcf406e948eac4d3277b10bf614e295d6068179")
+    println(hash/sha256("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    // template 0 is falsy
+    println(tmpl/render("{% if n %}Y{% else %}N{% endif %}", {:n 0}) == "N")
+    println(tmpl/render("{% if n %}Y{% else %}N{% endif %}", {:n 5}) == "Y")
+    // date validation throws on bad components
+    let bad = try { date/parse-iso8601("2024-13-45T00:00:00Z") "no" } catch (e) { "caught" }
+    println(bad == "caught")
+    // regex-wrapper find-all delegates to native, correct
+    println(rxw/find-all("[0-9]+", "a1b22c333") == ["1", "22", "333"])
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true

@@ -1,0 +1,45 @@
+namespace concurrent_card_table_barrier_test
+
+// gc-always
+
+// Regression: the generational write barrier must be safe under concurrent
+// mutators. A long-lived (old-gen) atom gets a fresh young struct swapped in on
+// every iteration (an old->young edge that must be card-marked), while two
+// worker threads churn young allocations that drive minor GCs. The old barrier
+// pushed to shared `Vec`s (dirty_card_indices / remembered_set) per write — a
+// data race that dropped old->young edges, so the young struct was lost across a
+// minor GC and a later field read hit a stale/forwarded pointer ("Struct not
+// found by ID" / "stale young gen pointer"). The lock-free card-byte barrier
+// fixes it: every read below must see the well-formed struct (bad stays 0).
+
+struct W { n, tag }
+let w_atom = atom(W { n: 0, tag: 99 })
+let done1 = atom(0)
+let done2 = atom(0)
+
+fn churn(i) { if i <= 0 { 0 } else { let _ = W { n: i, tag: 7 } churn(i - 1) } }
+fn wait_done(a, attempts) {
+    if deref(a) >= 1 { true }
+    else { if attempts > 100000000 { false } else { wait_done(a, attempts + 1) } }
+}
+
+fn main() {
+    thread(fn() { churn(350) swap!(done1, fn(x) { 1 }) })
+    thread(fn() { churn(350) swap!(done2, fn(x) { 1 }) })
+    let mut i = 0
+    let mut bad = 0
+    while i < 350 {
+        let w = deref(w_atom)
+        if w.tag != 99 { bad = bad + 1 }
+        swap!(w_atom, fn(prev) { W { n: i, tag: 99 } })
+        i = i + 1
+    }
+    wait_done(done1, 0)
+    wait_done(done2, 0)
+    println("bad=" ++ to-string(bad))
+    println("done")
+}
+
+// @beagle.core.snapshot
+// bad=0
+// done

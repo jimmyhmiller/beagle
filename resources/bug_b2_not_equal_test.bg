@@ -1,0 +1,27 @@
+namespace bug_b2_not_equal_test
+
+// B2 regression: `!=` was raw identity comparison, so two structurally-equal but
+// distinct heap values reported BOTH `==` true and `!=` true. `!=` now lowers to
+// not(equal(a, b)).
+
+fn build() { "f" }
+
+fn main() {
+    let a = "foo"
+    let b = build() ++ "oo"
+    println(a == b)
+    println(a != b)
+    // numeric and distinct-value cases stay correct
+    println(1 != 2)
+    println(1 != 1)
+    println([1, 2] != [1, 2])
+    println([1, 2] != [1, 3])
+}
+
+// @beagle.core.snapshot
+// true
+// false
+// true
+// false
+// false
+// true

@@ -55,6 +55,43 @@ pub mod embedded_stdlib {
                 Some(include_str!("../standard-library/beagle.string-builder.bg"))
             }
             "beagle.bail.bg" => Some(include_str!("../standard-library/beagle.bail.bg")),
+            // Batteries-included stdlib modules (pure Beagle). Loaded on demand
+            // via `use`; embedded here so the installed `beag` (no sibling files)
+            // can resolve them.
+            "beagle.text.bg" => Some(include_str!("../standard-library/beagle.text.bg")),
+            "beagle.base64.bg" => Some(include_str!("../standard-library/beagle.base64.bg")),
+            "beagle.hex.bg" => Some(include_str!("../standard-library/beagle.hex.bg")),
+            "beagle.hash.bg" => Some(include_str!("../standard-library/beagle.hash.bg")),
+            "beagle.url.bg" => Some(include_str!("../standard-library/beagle.url.bg")),
+            "beagle.os.bg" => Some(include_str!("../standard-library/beagle.os.bg")),
+            "beagle.path.bg" => Some(include_str!("../standard-library/beagle.path.bg")),
+            "beagle.process.bg" => Some(include_str!("../standard-library/beagle.process.bg")),
+            "beagle.time.bg" => Some(include_str!("../standard-library/beagle.time.bg")),
+            "beagle.http.bg" => Some(include_str!("../standard-library/beagle.http.bg")),
+            "beagle.template.bg" => Some(include_str!("../standard-library/beagle.template.bg")),
+            "beagle.ws.bg" => Some(include_str!("../standard-library/beagle.ws.bg")),
+            "beagle.iter.bg" => Some(include_str!("../standard-library/beagle.iter.bg")),
+            "beagle.containers.bg" => Some(include_str!("../standard-library/beagle.containers.bg")),
+            "beagle.stats.bg" => Some(include_str!("../standard-library/beagle.stats.bg")),
+            "beagle.random.bg" => Some(include_str!("../standard-library/beagle.random.bg")),
+            "beagle.ip.bg" => Some(include_str!("../standard-library/beagle.ip.bg")),
+            "beagle.json.bg" => Some(include_str!("../standard-library/beagle.json.bg")),
+            "beagle.csv.bg" => Some(include_str!("../standard-library/beagle.csv.bg")),
+            "beagle.bigint.bg" => Some(include_str!("../standard-library/beagle.bigint.bg")),
+            "beagle.channel.bg" => Some(include_str!("../standard-library/beagle.channel.bg")),
+            "beagle.date.bg" => Some(include_str!("../standard-library/beagle.date.bg")),
+            "beagle.regex-wrapper.bg" => Some(include_str!("../standard-library/beagle.regex-wrapper.bg")),
+            "beagle.cli.bg" => Some(include_str!("../standard-library/beagle.cli.bg")),
+            "beagle.log.bg" => Some(include_str!("../standard-library/beagle.log.bg")),
+            "beagle.test.bg" => Some(include_str!("../standard-library/beagle.test.bg")),
+            "beagle.mathx.bg" => Some(include_str!("../standard-library/beagle.mathx.bg")),
+            "beagle.ini.bg" => Some(include_str!("../standard-library/beagle.ini.bg")),
+            "beagle.priorityqueue.bg" => Some(include_str!("../standard-library/beagle.priorityqueue.bg")),
+            "beagle.semver.bg" => Some(include_str!("../standard-library/beagle.semver.bg")),
+            "beagle.ansi.bg" => Some(include_str!("../standard-library/beagle.ansi.bg")),
+            "beagle.glob.bg" => Some(include_str!("../standard-library/beagle.glob.bg")),
+            "beagle.textwrap.bg" => Some(include_str!("../standard-library/beagle.textwrap.bg")),
+            "beagle.struct-pack.bg" => Some(include_str!("../standard-library/beagle.struct-pack.bg")),
             _ => None,
         }
     }

@@ -1,0 +1,50 @@
+namespace stdlib_phase7_4_6_test
+
+// gc-always
+
+// Regression coverage for Phase 7 (websockets — offline: accept-key vector +
+// frame codec; the live handshake/echo is verified manually with a real client),
+// Phase 4 (ip), Phase 6 (stats/random) and Phase 1 leftovers (iter/collections).
+
+use beagle.ws as ws
+use beagle.iter as iter
+use beagle.containers as col
+use beagle.stats as stats
+use beagle.random as rand
+use beagle.ip as ip
+
+fn main() {
+    // ws — the canonical RFC 6455 accept-key vector + frame round-trip
+    println(ws/accept-key("dGhlIHNhbXBsZSBub25jZQ==") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+    let f = ws/encode-frame(ws/opcode-text(), "Hello")
+    let parsed = ws/parse-frame(f)
+    println(parsed.payload == "Hello")
+    // iter
+    println(iter/sum([1, 2, 3, 4]) == 10)
+    println(iter/distinct([1, 1, 2, 3, 3]) == [1, 2, 3])
+    // ip
+    println(ip/parse-ipv4("192.168.1.1") == 3232235777)
+    println(ip/ipv4-to-string(3232235777) == "192.168.1.1")
+    println(ip/ipv4-in-cidr?("192.168.1.5", "192.168.1.0/24"))
+    println(ip/ipv4-in-cidr?("192.168.2.5", "192.168.1.0/24") == false)
+    // stats
+    println(stats/mean([1, 2, 3, 4]) == 2.5)
+    println(stats/median([1, 2, 3]) == 2)
+    // random determinism
+    let r1 = rand/make-rng(42)
+    let r2 = rand/make-rng(42)
+    println(rand/next-int(r1) == rand/next-int(r2))
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true

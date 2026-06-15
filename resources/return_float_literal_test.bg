@@ -1,0 +1,35 @@
+namespace return_float_literal_test
+
+// Regression: a float literal in tail/return position compiles to
+// `Instruction::Ret(RawValue)`, which used to panic the compiler
+// ("Should we be returing a raw value?") and hard-abort the process.
+// This broke `fn f() { 1.5 }`, `eval("1.5")`, and — fatally —
+// `main-resume`-ing a game with a float value (run-with-recovery evals
+// the resume code). All three must just work now.
+
+fn returns_float() { 1.5 }
+
+fn returns_float_via_if(b) {
+    if b { 2.5 } else { 3.5 }
+}
+
+fn main() {
+    println(to-string(returns_float()))
+    println(to-string(returns_float_via_if(true)))
+    println(to-string(eval("4.5")))
+    // float literal eval inside a resumable catch, then resume (the game path)
+    let r = try {
+        null + 1.0
+    } catch (e, resume) {
+        resume(eval("5.5"))
+    }
+    println(to-string(r))
+    println("done")
+}
+
+// @beagle.core.snapshot
+// 1.5
+// 2.5
+// 4.5
+// 5.5
+// done

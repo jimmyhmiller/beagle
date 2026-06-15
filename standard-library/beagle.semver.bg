@@ -1,0 +1,515 @@
+namespace beagle.semver
+
+// Semantic Versioning 2.0.0 — pure Beagle implementation.
+//
+// parse(s)            -> SemVer { major, minor, patch, prerelease, build } or null
+// compare(a, b)       -> -1 | 0 | 1  (precedence per the SemVer 2.0.0 spec)
+// satisfies?(v, range)-> bool  (exact, ^caret, ~tilde, >=, <=, >, <, =)
+//
+// `prerelease` and `build` are the raw strings between the `-`/`+` markers
+// (null when absent). Precedence ignores `build` entirely, exactly as the spec
+// requires.
+
+struct SemVer {
+    major
+    minor
+    patch
+    prerelease
+    build
+}
+
+// ---------------------------------------------------------------------------
+// Character helpers (we parse by hand so we can enforce the spec strictly —
+// e.g. reject leading zeros in numeric identifiers, which parse-int allows).
+// ---------------------------------------------------------------------------
+
+fn digit?(c) {
+    let code = char-code(c)
+    code >= 48 && code <= 57
+}
+
+fn alpha?(c) {
+    let code = char-code(c)
+    (code >= 65 && code <= 90) || (code >= 97 && code <= 122)
+}
+
+// Identifier char allowed in prerelease/build: [0-9A-Za-z-]
+fn ident-char?(c) {
+    digit?(c) || alpha?(c) || char-code(c) == 45
+}
+
+// Every character of s is a digit (and s is non-empty).
+fn all-digits?(s) {
+    let len = length(s)
+    if len == 0 {
+        false
+    } else {
+        let mut i = 0
+        let mut ok = true
+        while i < len && ok {
+            if digit?(s[i]) == false {
+                ok = false
+            }
+            i = i + 1
+        }
+        ok
+    }
+}
+
+// Every character of s is a legal identifier char (and s is non-empty).
+fn all-ident-chars?(s) {
+    let len = length(s)
+    if len == 0 {
+        false
+    } else {
+        let mut i = 0
+        let mut ok = true
+        while i < len && ok {
+            if ident-char?(s[i]) == false {
+                ok = false
+            }
+            i = i + 1
+        }
+        ok
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Validation of the numeric core (major / minor / patch)
+// ---------------------------------------------------------------------------
+
+// A valid numeric version part: all digits, and no leading zero unless it is
+// exactly "0".
+fn valid-num-part?(s) {
+    if all-digits?(s) == false {
+        false
+    } else {
+        if length(s) > 1 && s[0] == "0" {
+            false
+        } else {
+            true
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Prerelease / build validation
+// ---------------------------------------------------------------------------
+
+// A prerelease is a dot-separated series of identifiers. Each identifier is
+// non-empty and contains only [0-9A-Za-z-]; numeric identifiers may not have
+// leading zeros.
+fn valid-prerelease?(s) {
+    if length(s) == 0 {
+        false
+    } else {
+        let parts = split(s, ".")
+        let mut i = 0
+        let mut ok = true
+        let n = length(parts)
+        while i < n && ok {
+            let part = parts[i]
+            if length(part) == 0 {
+                ok = false
+            } else {
+                if all-ident-chars?(part) == false {
+                    ok = false
+                } else {
+                    // numeric identifiers must not have leading zeros
+                    if all-digits?(part) && length(part) > 1 && part[0] == "0" {
+                        ok = false
+                    }
+                }
+            }
+            i = i + 1
+        }
+        ok
+    }
+}
+
+// Build metadata: dot-separated identifiers, each non-empty, [0-9A-Za-z-].
+// Leading zeros ARE permitted in build identifiers.
+fn valid-build?(s) {
+    if length(s) == 0 {
+        false
+    } else {
+        let parts = split(s, ".")
+        let mut i = 0
+        let mut ok = true
+        let n = length(parts)
+        while i < n && ok {
+            let part = parts[i]
+            if length(part) == 0 {
+                ok = false
+            } else {
+                if all-ident-chars?(part) == false {
+                    ok = false
+                }
+            }
+            i = i + 1
+        }
+        ok
+    }
+}
+
+// ---------------------------------------------------------------------------
+// parse
+// ---------------------------------------------------------------------------
+
+/// Parse a SemVer 2.0.0 string into a SemVer struct, or null if invalid.
+///
+/// Examples:
+///   (parse "1.2.3")               ; => SemVer { 1 2 3 null null }
+///   (parse "1.2.3-alpha.1+build") ; => SemVer { 1 2 3 "alpha.1" "build" }
+///   (parse "1.2")                 ; => null
+fn parse(s) {
+    if length(s) == 0 {
+        null
+    } else {
+        // Split off build metadata (everything after the first '+').
+        let plus = index-of(s, "+")
+        let core-pre = if plus < 0 { s } else { substring(s, 0, plus) }
+        let build = if plus < 0 {
+            null
+        } else {
+            substring(s, plus + 1, length(s))
+        }
+
+        // Split off prerelease (everything after the first '-' in core-pre).
+        let dash = index-of(core-pre, "-")
+        let core = if dash < 0 { core-pre } else { substring(core-pre, 0, dash) }
+        let prerelease = if dash < 0 {
+            null
+        } else {
+            substring(core-pre, dash + 1, length(core-pre))
+        }
+
+        parse-validated(core, prerelease, build)
+    }
+}
+
+fn parse-validated(core, prerelease, build) {
+    let nums = split(core, ".")
+    if length(nums) != 3 {
+        null
+    } else {
+        let major-s = nums[0]
+        let minor-s = nums[1]
+        let patch-s = nums[2]
+        if valid-num-part?(major-s) == false {
+            null
+        } else {
+            if valid-num-part?(minor-s) == false {
+                null
+            } else {
+                if valid-num-part?(patch-s) == false {
+                    null
+                } else {
+                    // prerelease/build, if present, must validate
+                    let pre-ok = if prerelease == null {
+                        true
+                    } else {
+                        valid-prerelease?(prerelease)
+                    }
+                    let build-ok = if build == null {
+                        true
+                    } else {
+                        valid-build?(build)
+                    }
+                    if pre-ok == false || build-ok == false {
+                        null
+                    } else {
+                        SemVer {
+                            major: parse-int(major-s),
+                            minor: parse-int(minor-s),
+                            patch: parse-int(patch-s),
+                            prerelease: prerelease,
+                            build: build
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// True if `s` parses as a valid SemVer string.
+fn valid?(s) {
+    parse(s) != null
+}
+
+// ---------------------------------------------------------------------------
+// compare
+// ---------------------------------------------------------------------------
+
+fn cmp-int(a, b) {
+    if a < b {
+        -1
+    } else {
+        if a > b {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+// Lexicographic compare of two ASCII strings -> -1/0/1.
+fn cmp-string(a, b) {
+    if a < b {
+        -1
+    } else {
+        if a > b {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+// Compare two prerelease identifiers per the spec:
+//   - numeric identifiers compare numerically
+//   - alphanumeric identifiers compare lexically (ASCII)
+//   - numeric identifiers always have LOWER precedence than alphanumeric ones
+fn cmp-pre-identifier(a, b) {
+    let a-num = all-digits?(a)
+    let b-num = all-digits?(b)
+    if a-num && b-num {
+        cmp-int(parse-int(a), parse-int(b))
+    } else {
+        if a-num && b-num == false {
+            // numeric < alphanumeric
+            -1
+        } else {
+            if a-num == false && b-num {
+                1
+            } else {
+                cmp-string(a, b)
+            }
+        }
+    }
+}
+
+// Compare two prerelease strings (already known to be valid). Either may be
+// null, meaning "no prerelease" (release), which has HIGHER precedence than
+// any prerelease.
+fn cmp-prerelease(a, b) {
+    if a == null && b == null {
+        0
+    } else {
+        if a == null {
+            // release > prerelease
+            1
+        } else {
+            if b == null {
+                -1
+            } else {
+                cmp-pre-parts(split(a, "."), split(b, "."))
+            }
+        }
+    }
+}
+
+fn cmp-pre-parts(a-parts, b-parts) {
+    let a-len = length(a-parts)
+    let b-len = length(b-parts)
+    let mut i = 0
+    let mut result = 0
+    let mut done = false
+    while done == false {
+        let a-has = i < a-len
+        let b-has = i < b-len
+        if a-has == false && b-has == false {
+            // ran out of both, all equal
+            result = 0
+            done = true
+        } else {
+            if a-has == false {
+                // a is a prefix of b -> a has fewer fields -> a is lower
+                result = -1
+                done = true
+            } else {
+                if b-has == false {
+                    result = 1
+                    done = true
+                } else {
+                    let c = cmp-pre-identifier(a-parts[i], b-parts[i])
+                    if c != 0 {
+                        result = c
+                        done = true
+                    } else {
+                        i = i + 1
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+// Compare two SemVer structs -> -1/0/1.
+fn compare-semver(a, b) {
+    let c-major = cmp-int(a.major, b.major)
+    if c-major != 0 {
+        c-major
+    } else {
+        let c-minor = cmp-int(a.minor, b.minor)
+        if c-minor != 0 {
+            c-minor
+        } else {
+            let c-patch = cmp-int(a.patch, b.patch)
+            if c-patch != 0 {
+                c-patch
+            } else {
+                cmp-prerelease(a.prerelease, b.prerelease)
+            }
+        }
+    }
+}
+
+/// Compare two version strings -> -1/0/1 (precedence per SemVer spec).
+/// Throws if either argument is not a valid SemVer string.
+///
+/// Examples:
+///   (compare "1.0.0" "2.0.0")        ; => -1
+///   (compare "1.0.0-alpha" "1.0.0")  ; => -1
+///   (compare "1.0.0" "1.0.0")        ; => 0
+fn compare(a, b) {
+    let pa = parse(a)
+    let pb = parse(b)
+    if pa == null {
+        throw("semver/compare: invalid version string: ${a}")
+    } else {
+        if pb == null {
+            throw("semver/compare: invalid version string: ${b}")
+        } else {
+            compare-semver(pa, pb)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// satisfies?
+// ---------------------------------------------------------------------------
+
+// Caret range: ^X.Y.Z allows changes that do not modify the left-most
+// non-zero element.
+//   ^1.2.3 := >=1.2.3 <2.0.0
+//   ^0.2.3 := >=0.2.3 <0.3.0
+//   ^0.0.3 := >=0.0.3 <0.0.4
+fn caret-upper(base) {
+    if base.major > 0 {
+        SemVer { major: base.major + 1, minor: 0, patch: 0, prerelease: null, build: null }
+    } else {
+        if base.minor > 0 {
+            SemVer { major: 0, minor: base.minor + 1, patch: 0, prerelease: null, build: null }
+        } else {
+            SemVer { major: 0, minor: 0, patch: base.patch + 1, prerelease: null, build: null }
+        }
+    }
+}
+
+// Tilde range: allows patch-level changes if a minor version is specified.
+//   ~1.2.3 := >=1.2.3 <1.3.0
+fn tilde-upper(base) {
+    SemVer { major: base.major, minor: base.minor + 1, patch: 0, prerelease: null, build: null }
+}
+
+// version >= lower (strict numeric+prerelease precedence)
+fn ge?(v, lower) {
+    compare-semver(v, lower) >= 0
+}
+
+// version < upper
+fn lt?(v, upper) {
+    compare-semver(v, upper) < 0
+}
+
+// node-semver prerelease rule: a version carrying a prerelease tag (e.g.
+// 2.0.0-alpha) may satisfy a range ONLY if a comparator with the same
+// [major,minor,patch] tuple also carries a prerelease. Otherwise prereleases of
+// some OTHER tuple (like the next major) would silently leak into a stable
+// range. Stable versions (no prerelease) are always allowed by this rule.
+fn same-tuple?(a, b) {
+    a.major == b.major && a.minor == b.minor && a.patch == b.patch
+}
+
+fn prerelease-ok?(v, base) {
+    if v.prerelease == null {
+        true
+    } else {
+        base.prerelease != null && same-tuple?(v, base)
+    }
+}
+
+/// Does `version` satisfy `range`?
+///
+/// Supported range forms:
+///   "1.2.3"   exact          (also "=1.2.3")
+///   "^1.2.0"  caret          (compatible-with)
+///   "~1.2.0"  tilde          (approximately-equivalent)
+///   ">=1.2.0" ">1.2.0" "<=1.2.0" "<1.2.0"  comparators
+///
+/// Throws if the version or range cannot be parsed.
+///
+/// Examples:
+///   (satisfies? "1.2.5" "^1.2.0")  ; => true
+///   (satisfies? "2.0.0" "^1.2.0")  ; => false
+fn satisfies?(version, range) {
+    let v = parse(version)
+    if v == null {
+        throw("semver/satisfies?: invalid version string: ${version}")
+    } else {
+        satisfies-parsed?(v, trim(range))
+    }
+}
+
+fn require-parse(s, range) {
+    let p = parse(s)
+    if p == null {
+        throw("semver/satisfies?: invalid version in range: ${range}")
+    } else {
+        p
+    }
+}
+
+fn satisfies-parsed?(v, range) {
+    if starts-with?(range, "^") {
+        let base = require-parse(substring(range, 1, length(range)), range)
+        ge?(v, base) && lt?(v, caret-upper(base)) && prerelease-ok?(v, base)
+    } else {
+        if starts-with?(range, "~") {
+            let base = require-parse(substring(range, 1, length(range)), range)
+            ge?(v, base) && lt?(v, tilde-upper(base)) && prerelease-ok?(v, base)
+        } else {
+            if starts-with?(range, ">=") {
+                let base = require-parse(substring(range, 2, length(range)), range)
+                compare-semver(v, base) >= 0 && prerelease-ok?(v, base)
+            } else {
+                if starts-with?(range, "<=") {
+                    let base = require-parse(substring(range, 2, length(range)), range)
+                    compare-semver(v, base) <= 0 && prerelease-ok?(v, base)
+                } else {
+                    if starts-with?(range, ">") {
+                        let base = require-parse(substring(range, 1, length(range)), range)
+                        compare-semver(v, base) > 0 && prerelease-ok?(v, base)
+                    } else {
+                        if starts-with?(range, "<") {
+                            let base = require-parse(substring(range, 1, length(range)), range)
+                            compare-semver(v, base) < 0 && prerelease-ok?(v, base)
+                        } else {
+                            if starts-with?(range, "=") {
+                                let base = require-parse(substring(range, 1, length(range)), range)
+                                compare-semver(v, base) == 0
+                            } else {
+                                // bare version => exact match
+                                let base = require-parse(range, range)
+                                compare-semver(v, base) == 0
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

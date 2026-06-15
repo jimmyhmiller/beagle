@@ -1,0 +1,731 @@
+namespace beagle.json
+
+// beagle.json — JSON parsing and generation.
+//
+// PURE BEAGLE. A recursive-descent parser + generator built on the core
+// string primitives (length, [], char-code, char-from-code, substring,
+// to-string, to-float, ++) and beagle.string-builder for efficient output.
+//
+// The Rust runtime contains a json.rs module, but it is not wired up as a
+// reachable Beagle builtin (it is gated behind a cargo `json` feature and is
+// never registered under a callable name), so this is a self-contained
+// implementation.
+//
+// API
+//   parse(string)                  -> value      (objects -> maps, arrays -> vectors)
+//   stringify(value)               -> string     (compact)
+//   stringify-pretty(value, indent)-> string     (indent spaces per level)
+//
+// Mapping
+//   object  <-> map        (parsed object keys are keyword-by-default; see
+//                           parse-with-string-keys for raw string keys)
+//   array   <-> vector
+//   number  <-> Int (no '.'/exponent) or Float (otherwise)
+//   string  <-> String
+//   true/false -> true/false
+//   null    -> null
+
+use beagle.string-builder as sb
+
+// ---------------------------------------------------------------------------
+// Parser
+// ---------------------------------------------------------------------------
+
+// Mutable cursor threaded through the recursive descent.
+//   s            : the source string
+//   pos          : current byte index (mutated in place)
+//   keyword-keys : when true, object keys become keywords; else stay strings
+struct Cursor {
+    s
+    mut pos
+    keyword-keys
+}
+
+// char code at the current position, or -1 at end of input.
+fn cur-code(c) {
+    if c.pos < length(c.s) {
+        char-code(c.s[c.pos])
+    } else {
+        0 - 1
+    }
+}
+
+fn at-end?(c) {
+    c.pos >= length(c.s)
+}
+
+fn ws-code?(code) {
+    code == 32 || code == 9 || code == 10 || code == 13
+}
+
+fn skip-ws(c) {
+    while c.pos < length(c.s) && ws-code?(cur-code(c)) {
+        c.pos = c.pos + 1
+    }
+}
+
+fn parse-error(c, msg) {
+    throw("beagle.json/parse: " ++ msg ++ " at position " ++ to-string(c.pos))
+}
+
+// Parse a complete JSON document. Errors on trailing non-whitespace.
+fn parse-document(c) {
+    skip-ws(c)
+    let v = parse-value(c)
+    skip-ws(c)
+    if at-end?(c) {
+        v
+    } else {
+        parse-error(c, "Unexpected trailing data")
+    }
+}
+
+fn parse-value(c) {
+    skip-ws(c)
+    if at-end?(c) {
+        parse-error(c, "Unexpected end of input")
+    } else {
+        let code = cur-code(c)
+        if code == 123 {            // '{'
+            parse-object(c)
+        } else {
+            if code == 91 {         // '['
+                parse-array(c)
+            } else {
+                if code == 34 {     // '"'
+                    parse-string(c)
+                } else {
+                    if code == 116 {        // 't'
+                        parse-literal(c, "true", true)
+                    } else {
+                        if code == 102 {    // 'f'
+                            parse-literal(c, "false", false)
+                        } else {
+                            if code == 110 {    // 'n'
+                                parse-literal(c, "null", null)
+                            } else {
+                                if code == 45 || (code >= 48 && code <= 57) {
+                                    parse-number(c)
+                                } else {
+                                    parse-error(c, "Unexpected character")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Match an exact keyword literal (true/false/null) and return its value.
+fn parse-literal(c, word, value) {
+    let n = length(word)
+    let start = c.pos
+    if start + n > length(c.s) {
+        parse-error(c, "Unexpected end of input")
+    } else {
+        let lit = substring(c.s, start, start + n)
+        if lit == word {
+            c.pos = start + n
+            value
+        } else {
+            parse-error(c, "Invalid literal")
+        }
+    }
+}
+
+fn parse-object(c) {
+    c.pos = c.pos + 1            // consume '{'
+    skip-ws(c)
+    let mut m = {}
+    if cur-code(c) == 125 {      // '}' empty object
+        c.pos = c.pos + 1
+        m
+    } else {
+        let mut going = true
+        while going {
+            skip-ws(c)
+            if cur-code(c) != 34 {      // expect '"'
+                parse-error(c, "Expected string key in object")
+            } else {
+                let key-str = parse-string(c)
+                skip-ws(c)
+                if cur-code(c) != 58 {  // ':'
+                    parse-error(c, "Expected ':' after object key")
+                } else {
+                    c.pos = c.pos + 1   // consume ':'
+                    let v = parse-value(c)
+                    let key = if c.keyword-keys {
+                        string->keyword(key-str)
+                    } else {
+                        key-str
+                    }
+                    m = assoc(m, key, v)
+                    skip-ws(c)
+                    let nxt = cur-code(c)
+                    if nxt == 44 {          // ','
+                        c.pos = c.pos + 1
+                    } else {
+                        if nxt == 125 {     // '}'
+                            c.pos = c.pos + 1
+                            going = false
+                        } else {
+                            parse-error(c, "Expected ',' or '}' in object")
+                        }
+                    }
+                }
+            }
+        }
+        m
+    }
+}
+
+fn parse-array(c) {
+    c.pos = c.pos + 1            // consume '['
+    skip-ws(c)
+    let mut v = []
+    if cur-code(c) == 93 {       // ']' empty array
+        c.pos = c.pos + 1
+        v
+    } else {
+        let mut going = true
+        while going {
+            let elem = parse-value(c)
+            v = push(v, elem)
+            skip-ws(c)
+            let nxt = cur-code(c)
+            if nxt == 44 {          // ','
+                c.pos = c.pos + 1
+            } else {
+                if nxt == 93 {      // ']'
+                    c.pos = c.pos + 1
+                    going = false
+                } else {
+                    parse-error(c, "Expected ',' or ']' in array")
+                }
+            }
+        }
+        v
+    }
+}
+
+// Parse a JSON string starting at the opening quote.
+fn parse-string(c) {
+    c.pos = c.pos + 1            // consume opening '"'
+    let out = sb/new(16)
+    let mut going = true
+    while going {
+        if at-end?(c) {
+            parse-error(c, "Unterminated string")
+        } else {
+            let code = cur-code(c)
+            if code == 34 {             // closing '"'
+                c.pos = c.pos + 1
+                going = false
+            } else {
+                if code == 92 {         // backslash escape
+                    c.pos = c.pos + 1
+                    if at-end?(c) {
+                        parse-error(c, "Unterminated escape")
+                    } else {
+                        parse-escape(c, out)
+                    }
+                } else {
+                    sb/append-char!(out, c.s[c.pos])
+                    c.pos = c.pos + 1
+                }
+            }
+        }
+    }
+    sb/to-string(out)
+}
+
+fn parse-escape(c, out) {
+    let e = cur-code(c)
+    if e == 34 {                    // \"
+        sb/append-byte!(out, 34)
+        c.pos = c.pos + 1
+    } else {
+        if e == 92 {                // backslash
+            sb/append-byte!(out, 92)
+            c.pos = c.pos + 1
+        } else {
+            if e == 47 {            // \/
+                sb/append-byte!(out, 47)
+                c.pos = c.pos + 1
+            } else {
+                if e == 110 {       // \n
+                    sb/append-byte!(out, 10)
+                    c.pos = c.pos + 1
+                } else {
+                    if e == 116 {   // \t
+                        sb/append-byte!(out, 9)
+                        c.pos = c.pos + 1
+                    } else {
+                        if e == 114 {       // \r
+                            sb/append-byte!(out, 13)
+                            c.pos = c.pos + 1
+                        } else {
+                            if e == 98 {    // \b
+                                sb/append-byte!(out, 8)
+                                c.pos = c.pos + 1
+                            } else {
+                                if e == 102 {   // \f
+                                    sb/append-byte!(out, 12)
+                                    c.pos = c.pos + 1
+                                } else {
+                                    if e == 117 {   // \uXXXX
+                                        parse-unicode-escape(c, out)
+                                    } else {
+                                        parse-error(c, "Invalid escape sequence")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Parse \uXXXX (with surrogate-pair support) and encode the code point as UTF-8.
+fn parse-unicode-escape(c, out) {
+    c.pos = c.pos + 1                       // consume 'u'
+    let cp = read-hex4(c)
+    if cp >= 55296 && cp <= 56319 {         // high surrogate
+        // expect a following \uXXXX low surrogate
+        if c.pos + 1 < length(c.s) && char-code(c.s[c.pos]) == 92 && char-code(c.s[c.pos + 1]) == 117 {
+            c.pos = c.pos + 2               // consume "\u"
+            let lo = read-hex4(c)
+            if lo >= 56320 && lo <= 57343 {
+                let combined = 65536 + ((cp - 55296) << 10) + (lo - 56320)
+                encode-utf8(out, combined)
+            } else {
+                parse-error(c, "Invalid low surrogate")
+            }
+        } else {
+            parse-error(c, "Expected low surrogate after high surrogate")
+        }
+    } else {
+        encode-utf8(out, cp)
+    }
+}
+
+// Read exactly 4 hex digits, returning the integer value.
+fn read-hex4(c) {
+    let mut n = 0
+    let mut i = 0
+    while i < 4 {
+        if at-end?(c) {
+            parse-error(c, "Incomplete \\u escape")
+        } else {
+            let d = hex-digit-value(cur-code(c))
+            if d < 0 {
+                parse-error(c, "Invalid hex digit in \\u escape")
+            } else {
+                n = (n << 4) | d
+                c.pos = c.pos + 1
+            }
+        }
+        i = i + 1
+    }
+    n
+}
+
+fn hex-digit-value(code) {
+    if code >= 48 && code <= 57 {
+        code - 48               // '0'..'9'
+    } else {
+        if code >= 97 && code <= 102 {
+            code - 97 + 10      // 'a'..'f'
+        } else {
+            if code >= 65 && code <= 70 {
+                code - 65 + 10  // 'A'..'F'
+            } else {
+                0 - 1
+            }
+        }
+    }
+}
+
+// Encode a Unicode code point as UTF-8 bytes into the builder.
+fn encode-utf8(out, cp) {
+    if cp < 128 {
+        sb/append-byte!(out, cp)
+    } else {
+        if cp < 2048 {
+            sb/append-byte!(out, 192 | (cp >> 6))
+            sb/append-byte!(out, 128 | (cp & 63))
+        } else {
+            if cp < 65536 {
+                sb/append-byte!(out, 224 | (cp >> 12))
+                sb/append-byte!(out, 128 | ((cp >> 6) & 63))
+                sb/append-byte!(out, 128 | (cp & 63))
+            } else {
+                sb/append-byte!(out, 240 | (cp >> 18))
+                sb/append-byte!(out, 128 | ((cp >> 12) & 63))
+                sb/append-byte!(out, 128 | ((cp >> 6) & 63))
+                sb/append-byte!(out, 128 | (cp & 63))
+            }
+        }
+    }
+}
+
+fn digit-code?(code) {
+    code >= 48 && code <= 57
+}
+
+// Parse a JSON number. Returns an Int if it has no fraction/exponent,
+// otherwise a Float.
+fn parse-number(c) {
+    let start = c.pos
+    let mut is-float = false
+
+    // optional leading '-'
+    if cur-code(c) == 45 {
+        c.pos = c.pos + 1
+    }
+
+    // integer part
+    if at-end?(c) || (digit-code?(cur-code(c)) == false) {
+        parse-error(c, "Invalid number: expected digit")
+    } else {
+        // leading-zero rule is lenient — we accept and let the value stand
+        while c.pos < length(c.s) && digit-code?(cur-code(c)) {
+            c.pos = c.pos + 1
+        }
+    }
+
+    // fractional part
+    if c.pos < length(c.s) && cur-code(c) == 46 {       // '.'
+        is-float = true
+        c.pos = c.pos + 1
+        if at-end?(c) || (digit-code?(cur-code(c)) == false) {
+            parse-error(c, "Invalid number: expected fraction digit")
+        } else {
+            while c.pos < length(c.s) && digit-code?(cur-code(c)) {
+                c.pos = c.pos + 1
+            }
+        }
+    }
+
+    // exponent part
+    if c.pos < length(c.s) && (cur-code(c) == 101 || cur-code(c) == 69) {   // 'e'/'E'
+        is-float = true
+        c.pos = c.pos + 1
+        if c.pos < length(c.s) && (cur-code(c) == 43 || cur-code(c) == 45) {
+            c.pos = c.pos + 1
+        }
+        if at-end?(c) || (digit-code?(cur-code(c)) == false) {
+            parse-error(c, "Invalid number: expected exponent digit")
+        } else {
+            while c.pos < length(c.s) && digit-code?(cur-code(c)) {
+                c.pos = c.pos + 1
+            }
+        }
+    }
+
+    let text = substring(c.s, start, c.pos)
+    if is-float {
+        to-float-checked(c, text)
+    } else {
+        parse-int-text(c, text)
+    }
+}
+
+// Parse a definitely-integer numeric substring into an Int.
+//
+// The maximum tagged Int is 1152921504606846975 (2^60 - 1). A raw
+// n*10+digit accumulation silently wraps past that boundary, so we detect
+// the overflow up front and degrade to a Float approximation of the whole
+// number instead (matching JS/Python json, where every JSON number is
+// conceptually a double — large integers come back as floats rather than
+// silently-wrong wrapped integers). Normal in-range integers stay exact.
+fn parse-int-text(c, text) {
+    let mut neg = false
+    let mut i = 0
+    if char-code(text[0]) == 45 {
+        neg = true
+        i = 1
+    }
+    let mut n = 0
+    let mut overflow = false
+    let len = length(text)
+    // Largest n for which n*10 + d (d in 0..9) can still fit in a tagged Int:
+    //   max = 1152921504606846975, max/10 = 115292150460684697, max%10 = 5
+    let int-max-div10 = 115292150460684697
+    let int-max-mod10 = 5
+    while i < len && (overflow == false) {
+        let d = char-code(text[i]) - 48
+        if n > int-max-div10 || (n == int-max-div10 && d > int-max-mod10) {
+            overflow = true
+        } else {
+            n = n * 10 + d
+            i = i + 1
+        }
+    }
+    if overflow {
+        // degrade to a Float approximation of the full numeric text
+        parse-float-text(text)
+    } else {
+        if neg {
+            0 - n
+        } else {
+            n
+        }
+    }
+}
+
+// Parse a float substring; the substring is already validated by the scanner.
+fn to-float-checked(c, text) {
+    parse-float-text(text)
+}
+
+// Float parser for an already-validated numeric substring (with optional sign,
+// fraction, and exponent). Delegates to the correctly-rounded native parser
+// (beagle.core/parse-float-string == Rust f64::from_str). The previous
+// pure-Beagle implementation applied the exponent with an iterative *10 / /10
+// loop, each step rounding to a double, so values like 6.022e23 / 1e-7 came out
+// off by many ULPs. JSON number syntax is a subset of Rust's float grammar, so
+// from_str accepts every scanner-validated token exactly.
+fn parse-float-text(s) {
+    let parsed = parse-float-string(s)
+    if parsed == null {
+        throw("beagle.json: internal error — scanner-validated number not parseable as float: " ++ s)
+    } else {
+        parsed
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public parse entry points
+// ---------------------------------------------------------------------------
+
+/// Parse a JSON string into a Beagle value. Object keys become keywords.
+///
+/// Examples:
+///   (parse "{\"a\":[1,2,3],\"b\":true,\"c\":null}")
+///     ; => {:a [1, 2, 3], :b true, :c null}
+fn parse(s) {
+    let c = Cursor { s: s, pos: 0, keyword-keys: true }
+    parse-document(c)
+}
+
+/// Parse a JSON string into a Beagle value, keeping object keys as Strings.
+///
+/// Examples:
+///   (parse-with-string-keys "{\"a\":1}")  ; => {"a" 1}
+fn parse-with-string-keys(s) {
+    let c = Cursor { s: s, pos: 0, keyword-keys: false }
+    parse-document(c)
+}
+
+// ---------------------------------------------------------------------------
+// Generator
+// ---------------------------------------------------------------------------
+
+/// Serialize a Beagle value to compact JSON.
+///
+/// Examples:
+///   (stringify {:a 1 :b [1, 2]})  ; => {"a":1,"b":[1,2]}
+fn stringify(value) {
+    let out = sb/new(64)
+    write-value(out, value, 0 - 1, 0)
+    sb/to-string(out)
+}
+
+/// Serialize a Beagle value to pretty-printed JSON using `indent` spaces per
+/// nesting level.
+///
+/// Examples:
+///   (stringify-pretty {:a 1} 2)
+///     ; => {\n  "a": 1\n}
+fn stringify-pretty(value, indent) {
+    let out = sb/new(64)
+    write-value(out, value, indent, 0)
+    sb/to-string(out)
+}
+
+// Write a value. indent < 0 means compact; depth is the current nesting level.
+fn write-value(out, value, indent, depth) {
+    if value == null {
+        sb/append!(out, "null")
+    } else {
+        if value == true {
+            sb/append!(out, "true")
+        } else {
+            if value == false {
+                sb/append!(out, "false")
+            } else {
+                if instance-of(value, String) {
+                    write-string(out, value)
+                } else {
+                    if instance-of(value, Int) {
+                        sb/append!(out, to-string(value))
+                    } else {
+                        if instance-of(value, Float) {
+                            sb/append!(out, to-string(value))
+                        } else {
+                            if instance-of(value, PersistentVector) {
+                                write-array(out, value, indent, depth)
+                            } else {
+                                if instance-of(value, PersistentMap) {
+                                    write-object(out, value, indent, depth)
+                                } else {
+                                    if instance-of(value, Keyword) {
+                                        // keyword as a scalar value -> JSON string
+                                        write-string(out, keyword->string(value))
+                                    } else {
+                                        throw("beagle.json/stringify: cannot serialize unsupported value type")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn write-newline-indent(out, indent, depth) {
+    if indent >= 0 {
+        sb/append-byte!(out, 10)        // '\n'
+        let mut spaces = indent * depth
+        while spaces > 0 {
+            sb/append-byte!(out, 32)    // ' '
+            spaces = spaces - 1
+        }
+    }
+}
+
+fn write-array(out, vec, indent, depth) {
+    let n = length(vec)
+    if n == 0 {
+        sb/append!(out, "[]")
+    } else {
+        sb/append-byte!(out, 91)        // '['
+        let mut i = 0
+        while i < n {
+            if i > 0 {
+                sb/append-byte!(out, 44) // ','
+            }
+            write-newline-indent(out, indent, depth + 1)
+            write-value(out, vec[i], indent, depth + 1)
+            i = i + 1
+        }
+        write-newline-indent(out, indent, depth)
+        sb/append-byte!(out, 93)        // ']'
+    }
+}
+
+fn write-object(out, m, indent, depth) {
+    let ks = keys(m)
+    let n = length(ks)
+    if n == 0 {
+        sb/append!(out, "{}")
+    } else {
+        sb/append-byte!(out, 123)       // '{'
+        let mut i = 0
+        while i < n {
+            if i > 0 {
+                sb/append-byte!(out, 44) // ','
+            }
+            write-newline-indent(out, indent, depth + 1)
+            let k = ks[i]
+            write-string(out, key->string(k))
+            sb/append-byte!(out, 58)    // ':'
+            if indent >= 0 {
+                sb/append-byte!(out, 32) // ' ' after colon in pretty mode
+            }
+            write-value(out, get(m, k), indent, depth + 1)
+            i = i + 1
+        }
+        write-newline-indent(out, indent, depth)
+        sb/append-byte!(out, 125)       // '}'
+    }
+}
+
+// Convert a map key (keyword or string) to its JSON string form.
+fn key->string(k) {
+    if instance-of(k, Keyword) {
+        keyword->string(k)
+    } else {
+        if instance-of(k, String) {
+            k
+        } else {
+            to-string(k)
+        }
+    }
+}
+
+// Write a JSON-escaped string literal (including surrounding quotes).
+fn write-string(out, s) {
+    sb/append-byte!(out, 34)            // opening '"'
+    let n = length(s)
+    let mut i = 0
+    while i < n {
+        let code = char-code(s[i])
+        if code == 34 {                 // '"'
+            sb/append-byte!(out, 92)
+            sb/append-byte!(out, 34)
+        } else {
+            if code == 92 {             // backslash
+                sb/append-byte!(out, 92)
+                sb/append-byte!(out, 92)
+            } else {
+                if code == 10 {         // '\n'
+                    sb/append-byte!(out, 92)
+                    sb/append-byte!(out, 110)
+                } else {
+                    if code == 13 {     // '\r'
+                        sb/append-byte!(out, 92)
+                        sb/append-byte!(out, 114)
+                    } else {
+                        if code == 9 {  // '\t'
+                            sb/append-byte!(out, 92)
+                            sb/append-byte!(out, 116)
+                        } else {
+                            if code == 8 {  // '\b'
+                                sb/append-byte!(out, 92)
+                                sb/append-byte!(out, 98)
+                            } else {
+                                if code == 12 {     // '\f'
+                                    sb/append-byte!(out, 92)
+                                    sb/append-byte!(out, 102)
+                                } else {
+                                    if code < 32 {      // other controls -> \u00XX
+                                        write-control-escape(out, code)
+                                    } else {
+                                        sb/append-char!(out, s[i])
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    sb/append-byte!(out, 34)            // closing '"'
+}
+
+fn write-control-escape(out, code) {
+    sb/append-byte!(out, 92)            // backslash
+    sb/append-byte!(out, 117)           // 'u'
+    sb/append-byte!(out, 48)            // '0'
+    sb/append-byte!(out, 48)            // '0'
+    sb/append-byte!(out, hex-char(code >> 4))
+    sb/append-byte!(out, hex-char(code & 15))
+}
+
+fn hex-char(d) {
+    if d < 10 {
+        48 + d                          // '0'..'9'
+    } else {
+        97 + (d - 10)                   // 'a'..'f'
+    }
+}

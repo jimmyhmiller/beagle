@@ -475,11 +475,48 @@ impl Iterator for GlobalBlockIter {
     }
 }
 
+/// A compile-time-constant struct field default, retained on the runtime struct
+/// definition so that reading a field which did not exist when an object was
+/// created (a stale instance after a live struct redefinition) yields the
+/// declared default instead of null. Only *literal* defaults are stored; a
+/// non-constant default expression (e.g. `half = v/make(14.0, 14.0)`) is `None`
+/// because it can't be evaluated at field-read time.
+#[derive(Clone, Debug)]
+pub enum LiteralDefault {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
+    Null,
+}
+
+impl LiteralDefault {
+    /// Resolve this default to a tagged Beagle value that is GC-STABLE: an
+    /// immediate (Int/Bool/Null) or an eternal-region pointer (Float). Such a
+    /// value can be filled into a struct field with no heap allocation and
+    /// without being moved by a collector — so it's safe to use both at field
+    /// read time AND from inside a GC migration pass. Returns `None` for
+    /// `Str` (the eternal region only interns floats today) so string defaults
+    /// fall back to null rather than risk an allocation mid-collection.
+    pub fn to_tagged(&self, eternal: &crate::eternal::EternalSpace) -> Option<usize> {
+        match self {
+            LiteralDefault::Int(n) => Some(BuiltInTypes::Int.tag(*n as isize) as usize),
+            LiteralDefault::Bool(b) => Some(BuiltInTypes::construct_boolean(*b) as usize),
+            LiteralDefault::Null => Some(BuiltInTypes::null_value() as usize),
+            LiteralDefault::Float(f) => eternal.intern_float(f.to_bits()),
+            LiteralDefault::Str(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Struct {
     pub name: String,
     pub fields: Vec<String>,
     pub mutable_fields: Vec<bool>,
+    /// Literal default per field (same order/length as `fields`); `None` if the
+    /// field has no default or a non-constant one. Used to fill stale reads.
+    pub field_defaults: Vec<Option<LiteralDefault>>,
     /// Docstring for the struct (from /// comments in source)
     pub docstring: Option<String>,
     /// Docstrings for each field (in same order as fields)
@@ -854,6 +891,7 @@ mod struct_manager_tests {
             name: name.to_string(),
             fields: fields.iter().map(|field| field.to_string()).collect(),
             mutable_fields: vec![false; fields.len()],
+            field_defaults: vec![None; fields.len()],
             docstring: None,
             field_docstrings: vec![None; fields.len()],
             source_text: None,
@@ -4781,6 +4819,7 @@ impl Runtime {
                 "arity".to_string(),
             ],
             mutable_fields: vec![false, false, false],
+            field_defaults: vec![None, None, None],
             docstring: Some("A first-class function object.".to_string()),
             field_docstrings: vec![None, None, None],
             source_text: None,
@@ -5363,19 +5402,77 @@ impl Runtime {
             .add_handle_root(array_ptr)
             .ok_or("Failed to add root")?;
 
-        for (i, s) in strings.iter().enumerate() {
+        // Each freshly-allocated string must stay reachable until it has been
+        // written into the array. Writing the string into the rooted array is
+        // NOT sufficient during construction under collection pressure: the next
+        // `allocate_string`'s GC collects the just-written young string (the
+        // freshly-built young array does not yet keep its fields alive the way a
+        // settled object would), so its storage is reused and every slot ends up
+        // aliasing the last string (B1: split/words/lines collapse-to-last).
+        // Pinning each string with its own handle root across the whole build
+        // guarantees distinct, surviving strings; roots are released once the
+        // array is fully populated and is itself the returned, reachable value.
+        let mut string_root_slots: Vec<usize> = Vec::with_capacity(num_elements);
+        for s in strings.iter() {
             let string_ptr = self.allocate_string(stack_pointer, s.clone())?;
-            // Get the current array pointer from the root (GC updates this when array moves)
+            let slot = self
+                .add_handle_root(string_ptr.into())
+                .ok_or("Failed to add string root")?;
+            string_root_slots.push(slot);
+        }
+        for (i, slot) in string_root_slots.iter().enumerate() {
+            // Re-read string and array from their roots (GC may have moved either).
+            let string_ptr = self.get_handle_root(*slot);
             let current_array_ptr = self.get_handle_root(array_root_slot);
             heap_obj = HeapObject::from_tagged(current_array_ptr);
-            heap_obj.write_field(i as i32, string_ptr.into());
+            heap_obj.write_field(i as i32, string_ptr);
         }
 
-        // Get final pointer and remove root
+        // Get final pointer and release all roots.
         let final_array_ptr = self.get_handle_root(array_root_slot);
+        for slot in string_root_slots {
+            self.remove_handle_root(slot);
+        }
         self.remove_handle_root(array_root_slot);
 
         Ok(final_array_ptr)
+    }
+
+    /// Build a PersistentVec of strings (or nulls) with correct GC rooting.
+    /// Each element is `Some(text)` → a freshly allocated string, or `None` →
+    /// the null value. The accumulator vec and each allocated string are pinned
+    /// with handle roots across every allocation, so building survives a GC mid-
+    /// build (including `--gc-always`). Used by the regex builtins, whose naive
+    /// loops corrupted the result under collection pressure (B1 class).
+    pub fn build_persistent_string_vec(
+        &mut self,
+        stack_pointer: usize,
+        items: &[Option<String>],
+    ) -> Result<usize, Box<dyn Error>> {
+        use crate::collections::{GcHandle, PersistentVec};
+        let vec0 = PersistentVec::empty(self, stack_pointer)?;
+        let mut vec_root = self
+            .add_handle_root(vec0.as_tagged())
+            .ok_or("Failed to add vec root")?;
+        for item in items {
+            let value: usize = match item {
+                Some(text) => self.allocate_string(stack_pointer, text.clone())?.into(),
+                None => BuiltInTypes::null_value() as usize,
+            };
+            // Pin the value across the push (and the root bookkeeping).
+            let value_root = self.add_handle_root(value).ok_or("Failed to add value root")?;
+            let cur_vec = GcHandle::from_tagged(self.get_handle_root(vec_root));
+            let cur_val = self.get_handle_root(value_root);
+            let new_vec = PersistentVec::push(self, stack_pointer, cur_vec, cur_val)?;
+            self.remove_handle_root(value_root);
+            self.remove_handle_root(vec_root);
+            vec_root = self
+                .add_handle_root(new_vec.as_tagged())
+                .ok_or("Failed to re-root vec")?;
+        }
+        let result = self.get_handle_root(vec_root);
+        self.remove_handle_root(vec_root);
+        Ok(result)
     }
 
     /// Low-level keyword allocation. Private because keywords must be interned
@@ -7894,8 +7991,66 @@ impl Runtime {
         self.collect_map_entries(map)
     }
 
+    /// Best-effort resolution of a namespace name to its source file via the
+    /// configured include paths (and cwd). Fallback for `reflect/persist` when
+    /// no loaded definition in the namespace carries a `disk_location` (so the
+    /// per-def lookup can't supply an append target), letting an append still
+    /// land in the right file. Mirrors the compiler's `resolve_namespace_to_file`
+    /// candidate order (folder form, dotted form, last segment).
+    pub fn resolve_namespace_file(&self, namespace: &str) -> Option<String> {
+        let parts: Vec<&str> = namespace.split('.').collect();
+        let mut candidates: Vec<String> =
+            vec![format!("{}.bg", parts.join("/")), format!("{}.bg", namespace)];
+        if let Some(last) = parts.last() {
+            candidates.push(format!("{}.bg", last));
+        }
+        for cand in &candidates {
+            for dir in &self.command_line_arguments.include_paths {
+                let p = std::path::Path::new(dir).join(cand);
+                if p.exists() {
+                    if let Ok(abs) = std::fs::canonicalize(&p) {
+                        return Some(abs.to_string_lossy().to_string());
+                    }
+                }
+            }
+            let p = std::path::Path::new(cand);
+            if p.exists() {
+                if let Ok(abs) = std::fs::canonicalize(p) {
+                    return Some(abs.to_string_lossy().to_string());
+                }
+            }
+        }
+        None
+    }
+
     pub fn get_struct_by_id(&self, struct_id: usize) -> Option<Struct> {
         self.structs.get_by_id(struct_id)
+    }
+
+    /// Resolve a struct field's declared default to a GC-stable tagged value
+    /// (immediate, or eternal-region pointer for floats), or null if the field
+    /// has no literal default. Used identically by the field-read path and the
+    /// GC migration path, so a field added to a struct after an object was
+    /// created reads its default whether the object is read before or after it
+    /// gets migrated to the new layout. No heap allocation — safe mid-GC.
+    pub fn field_default_value(&self, def: &Struct, field_name: &str) -> usize {
+        def.fields
+            .iter()
+            .position(|f| f == field_name)
+            .and_then(|idx| def.field_defaults.get(idx).cloned().flatten())
+            .and_then(|d| d.to_tagged(&self.eternal_space))
+            .unwrap_or(BuiltInTypes::null_value() as usize)
+    }
+
+    /// Default value for the field at a given current-layout index on a struct.
+    /// The migration path already knows the index, so it skips the name lookup.
+    pub fn field_default_value_at(&self, def: &Struct, field_index: usize) -> usize {
+        def.field_defaults
+            .get(field_index)
+            .cloned()
+            .flatten()
+            .and_then(|d| d.to_tagged(&self.eternal_space))
+            .unwrap_or(BuiltInTypes::null_value() as usize)
     }
 
     pub fn property_access(
@@ -7975,8 +8130,11 @@ impl Runtime {
                 if let Some(field_index) = old_def.fields.iter().position(|f| f == string) {
                     Ok((heap_object.get_field(field_index), field_index))
                 } else {
-                    // Field was added after this object was created — return null
-                    Ok((BuiltInTypes::null_value() as usize, usize::MAX))
+                    // Field was added after this object was created: yield its
+                    // declared literal default (a GC-stable tagged value), or
+                    // null if it has none. `usize::MAX` flags "not a real slot"
+                    // so the inline cache won't memoize this read.
+                    Ok((self.field_default_value(&current_def, string), usize::MAX))
                 }
             } else {
                 // No old definition found (migrations completed?) — try current layout
@@ -8096,6 +8254,67 @@ impl Runtime {
             .find_binding(beagle_core_id, type_name)
             .ok_or_else(|| format!("Type descriptor '{}' not found in beagle.core", type_name))?;
         Ok(self.get_binding(beagle_core_id, slot))
+    }
+
+    /// Total-order comparison for the `<`/`<=`/`>`/`>=` operators on values that
+    /// aren't both Int or both Float (the inline fast paths handle those).
+    /// Returns -1 / 0 / 1. STRINGS are compared lexicographically by bytes (the
+    /// old code compared string pointers — heap allocation order — which made
+    /// `<` on multi-char strings nondeterministic and broke `sort`). Numeric
+    /// mixed int/float compares by value. Anything else falls back to comparing
+    /// the raw tagged representations (preserves prior behavior for exotic same-
+    /// tag operands without introducing a new wrong-answer).
+    pub fn compare_ordered(&self, a: usize, b: usize) -> i64 {
+        use std::cmp::Ordering;
+        let is_str = |v: usize| -> bool {
+            match BuiltInTypes::get_kind(v) {
+                BuiltInTypes::String => true,
+                BuiltInTypes::HeapObject => {
+                    let t = HeapObject::from_tagged(v).get_type_id();
+                    t == TYPE_ID_STRING as usize
+                        || t == TYPE_ID_STRING_SLICE as usize
+                        || t == TYPE_ID_CONS_STRING as usize
+                }
+                _ => false,
+            }
+        };
+        if is_str(a) && is_str(b) {
+            let ab = self.get_string_bytes_vec(a);
+            let bb = self.get_string_bytes_vec(b);
+            return match ab.cmp(&bb) {
+                Ordering::Less => -1,
+                Ordering::Equal => 0,
+                Ordering::Greater => 1,
+            };
+        }
+        let as_num = |v: usize| -> Option<f64> {
+            match BuiltInTypes::get_kind(v) {
+                BuiltInTypes::Int => Some(BuiltInTypes::untag_isize(v as isize) as f64),
+                BuiltInTypes::Float => {
+                    let p = BuiltInTypes::untag(v) as *const f64;
+                    Some(unsafe { *p.add(1) })
+                }
+                _ => None,
+            }
+        };
+        if let (Some(x), Some(y)) = (as_num(a), as_num(b)) {
+            return if x < y {
+                -1
+            } else if x > y {
+                1
+            } else {
+                0
+            };
+        }
+        // Fallback: raw tagged comparison (unchanged behavior for exotic cases).
+        let (x, y) = (a as isize, b as isize);
+        if x < y {
+            -1
+        } else if x > y {
+            1
+        } else {
+            0
+        }
     }
 
     pub fn equal(&self, a: usize, b: usize) -> bool {
@@ -8380,6 +8599,17 @@ impl Runtime {
                 value.hash(&mut s);
                 s.finish() as usize
             }
+            BuiltInTypes::Float => {
+                // Floats are boxed: hash the f64 VALUE bits, not the pointer, so
+                // two distinct boxes holding the same value hash equally (mirrors
+                // `equal`, which compares float values). Without this, floats as
+                // map keys / set members never matched.
+                let ptr = BuiltInTypes::untag(value) as *const f64;
+                let bits = unsafe { *ptr.add(1) }.to_bits();
+                let mut s = DefaultHasher::new();
+                bits.hash(&mut s);
+                s.finish() as usize
+            }
             BuiltInTypes::HeapObject => {
                 let heap_object = HeapObject::from_tagged(value);
                 let type_id = heap_object.get_header().type_id;
@@ -8395,7 +8625,15 @@ impl Runtime {
                     let string = unsafe { std::str::from_utf8_unchecked(&bytes) };
                     let mut s = DefaultHasher::new();
                     string.hash(&mut s);
-                    let hash = s.finish();
+                    // Mask to 61 bits. Slice/cons strings cache the hash in a
+                    // GC-scanned field as a tagged Int (`hash << 3`), which only
+                    // holds 61 bits; a full 64-bit hash would silently truncate
+                    // there while flat strings keep all 64, so the two
+                    // representations of an equal string would cache DIFFERENT
+                    // hashes and `equal` (which short-circuits on cached-hash
+                    // mismatch) would wrongly call them unequal. Masking here
+                    // keeps every representation consistent.
+                    let hash = s.finish() & 0x1FFF_FFFF_FFFF_FFFF;
                     let hash = if hash == 0 { 1 } else { hash };
                     heap_object.set_string_hash(hash);
                     hash as usize
@@ -8403,11 +8641,19 @@ impl Runtime {
                     // Keyword - use cached hash
                     heap_object.get_keyword_hash() as usize
                 } else {
-                    // Generic struct - hash all fields
-                    let fields = heap_object.get_fields();
+                    // Generic heap object (struct, vector, map, ...). The hash
+                    // MUST agree with `equal`, which compares struct_id and then
+                    // RECURSIVELY compares each field. So hash the struct_id plus
+                    // the recursive hash of every field — not the raw tagged
+                    // field values. Two structurally-equal compound values have
+                    // distinct pointers, so raw-pointer field hashing made equal
+                    // vectors/maps hash differently and silently fail as map
+                    // keys / set members (B11).
                     let mut s = DefaultHasher::new();
+                    heap_object.get_struct_id().hash(&mut s);
+                    let fields = heap_object.get_fields();
                     for field in fields {
-                        field.hash(&mut s);
+                        self.hash_value(*field).hash(&mut s);
                     }
                     s.finish() as usize
                 }
@@ -8416,7 +8662,12 @@ impl Runtime {
                 let string = self.get_string_literal(value);
                 let mut s = DefaultHasher::new();
                 string.hash(&mut s);
-                s.finish() as usize
+                // Mask to 61 bits to match heap strings (slice/cons cache the
+                // hash as a tagged Int, which only holds 61 bits). A literal and
+                // an equal heap string must hash identically.
+                let hash = s.finish() & 0x1FFF_FFFF_FFFF_FFFF;
+                let hash = if hash == 0 { 1 } else { hash };
+                hash as usize
             }
             _ => {
                 // For other types, just hash the raw value

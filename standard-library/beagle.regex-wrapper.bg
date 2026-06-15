@@ -1,0 +1,211 @@
+namespace beagle.regex-wrapper
+
+use beagle.regex as regex
+use beagle.string-builder as sb
+
+// ============================================================================
+// beagle.regex-wrapper — an ergonomic wrapper over Beagle's built-in regex
+// builtins (beagle.regex/...).
+//
+// Design
+// ------
+// Every public function accepts EITHER a pattern string OR an already-compiled
+// regex (the value returned by `compile`). Passing a pattern string is the
+// ergonomic default; passing a pre-compiled regex avoids recompiling on every
+// call in a hot loop. `as-regex` normalizes the argument.
+//
+// The regex syntax is the Rust `regex` crate's syntax (RE2-style, linear time).
+//   - NO backreferences / lookaround (the engine is linear-time by design).
+//   - Class shorthands must be double-escaped in Beagle literals: "\\d", "\\w".
+//
+// GC note
+// -------
+// The native vector-building builtins  regex/find-all, regex/split and
+// regex/captures  used to corrupt results under `beag run --gc-always` because
+// the accumulator was left unrooted across allocations. That has been FIXED in
+// the runtime (they now collect owned strings and call build_persistent_string_vec
+// with correct rooting). So this module delegates directly to the native ops
+// instead of the old char-code(1)/char-code(2) MARKER-byte hack, which corrupted
+// any input that itself contained byte 0x01 or 0x02.
+//
+// find-all-positions is the one op the native builtins do NOT expose (they give
+// match strings but not offsets). It is reimplemented WITHOUT markers: walk the
+// string with regex/find over successive substrings(offset..end), locating each
+// match's start within the remaining substring via index-of of the matched text
+// (searching only from the current offset, so an earlier literal occurrence of
+// the match text can't be picked up), and advancing past each match.
+//
+// Semantics:
+//   - `match?`        : true if the pattern matches ANYWHERE in the string
+//                       (regex/matches? is is_match, i.e. unanchored).
+//   - `matches-full?` : true only if the pattern matches the ENTIRE string,
+//                       via anchoring with ^(?:...)$ .
+//
+// Documented capability gaps (NOT silently stubbed):
+//   - Named capture groups: returned POSITIONALLY only (index 0 = whole match);
+//     there is no builtin exposing group names. Patterns using (?P<name>...) /
+//     (?<name>...) still work — you just read the group by index.
+//   - A capture group that did not participate in the match is `null` at its
+//     position in the `captures` result (this mirrors the native builtin).
+// ============================================================================
+
+// Normalize a pattern-or-regex argument into a compiled regex.
+fn as-regex(pattern-or-regex) {
+    if regex/is-regex?(pattern-or-regex) {
+        pattern-or-regex
+    } else {
+        regex/compile(pattern-or-regex)
+    }
+}
+
+// Compile a pattern string into a reusable regex value.
+// Throws (RegexError) on an invalid pattern.
+fn compile(pattern) {
+    regex/compile(pattern)
+}
+
+// True if `value` is a compiled regex.
+fn regex? (value) {
+    regex/is-regex?(value)
+}
+
+// True if `pattern` matches anywhere in `s`.
+//   match?("[0-9]+", "abc123")  // => true
+fn match?(pattern, s) {
+    regex/matches?(as-regex(pattern), s)
+}
+
+// True only if `pattern` matches the ENTIRE string `s` (anchored).
+// Requires a PATTERN STRING (a compiled regex cannot be re-anchored — we don't
+// have its source), and throws clearly if given a compiled regex.
+//   matches-full?("[0-9]+", "123")   // => true
+//   matches-full?("[0-9]+", "12a3")  // => false
+fn matches-full?(pattern, s) {
+    if regex/is-regex?(pattern) {
+        throw("beagle.regex-wrapper/matches-full?: pass a PATTERN STRING (a compiled regex cannot be re-anchored)")
+    }
+    let anchored = "^(?:" ++ pattern ++ ")$"
+    regex/matches?(regex/compile(anchored), s)
+}
+
+// First match in `s`, or null if none. Returns the matched STRING.
+//   find("[0-9]+", "abc123def")  // => "123"
+fn find(pattern, s) {
+    regex/find(as-regex(pattern), s)
+}
+
+// Vector of every (non-overlapping) match string in `s`, in order (empty if
+// none). Derived from find-all-positions so the two agree on EMPTY matches:
+// the native regex/find-all (Rust find_iter) silently drops empty matches,
+// which disagrees with both find-all-positions and Python's re.findall
+// (re.findall("a*","aba") == ["a","","a",""]). Mapping the positional walk to
+// its :match strings makes the policy uniform and matches Python.
+//   find-all("[0-9]+", "a1b22c333")  // => ["1", "22", "333"]
+//   find-all("a*", "aba")            // => ["a", "", "a", ""]
+fn find-all(pattern, s) {
+    map(find-all-positions(pattern, s), fn(d) { get(d, :match) })
+}
+
+// Vector of match descriptors for every match: each is a map
+//   {:match <string> :start <int-in-original> :end <int-in-original>}
+// (:end is exclusive). This is the positional information the native builtins do
+// NOT expose. Reimplemented WITHOUT marker bytes (so byte 0x01/0x02 in the input
+// is safe): walk the string with regex/find over the remaining substring,
+// locate the matched text via index-of from the current offset, advance past it.
+// Empty matches advance by one position (RE2 semantics).
+//   find-all-positions("[0-9]+", "a1b22") // => [{:match "1" :start 1 :end 2} {:match "22" :start 3 :end 5}]
+fn find-all-positions(pattern, s) {
+    let re = as-regex(pattern)
+    let total = length(s)
+    let mut out = []
+    let mut offset = 0
+    let mut go = true
+    while go {
+        let rest = substring(s, offset, total)
+        let m = regex/find(re, rest)
+        if m == null {
+            go = false
+        } else {
+            let len = length(m)
+            // Locate the matched text within `rest`. Because `rest` begins at the
+            // current offset, an earlier literal occurrence of this text (before
+            // the current offset) cannot be picked up. index-of returns the first
+            // occurrence from the start of `rest`, which is the regex's leftmost
+            // match position within `rest`.
+            let rel-start =
+                if len == 0 {
+                    0
+                } else {
+                    index-of(rest, m)
+                }
+            let abs-start = offset + rel-start
+            out = push(out, {:match m :start abs-start :end abs-start + len})
+            if len == 0 {
+                // Empty match: emit, then step one char forward to make progress.
+                offset = abs-start + 1
+            } else {
+                offset = abs-start + len
+            }
+            if offset > total {
+                go = false
+            }
+        }
+    }
+    out
+}
+
+// Split `s` on `pattern`, returning the vector of between-match segments.
+// Delegates to the native (now GC-safe) builtin, so edge behavior matches it
+// exactly (leading/trailing matches yield empty-string segments at the ends).
+//   split(",", "a,b,c")    // => ["a", "b", "c"]
+//   split("[0-9]+", "1a2") // => ["", "a", ""]
+fn split(pattern, s) {
+    regex/split(as-regex(pattern), s)
+}
+
+// Capture groups of the FIRST match as a positional vector, or null if no match.
+// Index 0 is the whole match; indices 1.. are the parenthesized groups. A group
+// that did not participate in the match is `null` at its position (mirrors the
+// native builtin). Delegates to the native (now GC-safe) builtin.
+//   captures("(\\w+)@(\\w+)", "x@y")  // => ["x@y", "x", "y"]
+//   captures("(a)(b)?", "a")          // => ["a", "a", null]
+fn captures(pattern, s) {
+    regex/captures(as-regex(pattern), s)
+}
+
+// Replace ALL non-overlapping matches with `replacement` (may use $1 / ${name}
+// group references). GC-safe builtin.
+//   replace-all("[aeiou]", "hello", "_")  // => "h_ll_"
+fn replace-all(pattern, s, replacement) {
+    regex/replace-all(as-regex(pattern), s, replacement)
+}
+
+// Replace only the FIRST match with `replacement`. GC-safe builtin.
+//   replace-first("[0-9]+", "a1b2c3", "X")  // => "aXb2c3"
+fn replace-first(pattern, s, replacement) {
+    regex/replace(as-regex(pattern), s, replacement)
+}
+
+// Function-based replacement: replace every match with the result of calling
+// `f` on the matched substring. Built on the marker-free find-all-positions, so
+// it is exact for empty and adjacent matches and safe on any input bytes.
+//   replace-with("[0-9]+", "a1b22c", fn(m) { "<" ++ m ++ ">" })  // => "a<1>b<22>c"
+fn replace-with(pattern, s, f) {
+    let positions = find-all-positions(pattern, s)
+    let n = count(positions)
+    let total = length(s)
+    let builder = sb/new(total + n)
+    let mut prev = 0
+    let mut i = 0
+    while i < n {
+        let m = positions[i]
+        let st = m[:start]
+        let en = m[:end]
+        sb/append!(builder, substring(s, prev, st))
+        sb/append!(builder, f(m[:match]))
+        prev = en
+        i = i + 1
+    }
+    sb/append!(builder, substring(s, prev, total))
+    sb/to-string(builder)
+}

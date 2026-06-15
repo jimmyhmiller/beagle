@@ -1,0 +1,66 @@
+namespace spawned_thread_nested_ctor_gc_test
+
+// gc-always
+
+// Regression for B4: building a NESTED struct/enum inline on a SPAWNED thread
+// could corrupt the object under a moving GC. The register allocator's pool is
+// the callee-saved set, so the inner intermediate (e.g. the `IOAction` inside
+// `Async.IO{action: ...}` for socket effects) was kept in a callee-saved
+// register across the OUTER allocation's GC safepoint — invisible to the
+// conservative frame-slot GC scan — and went stale when the collection
+// relocated it, producing a self-referential object (`outer.payload == outer`).
+// Crashed deterministically on a spawned thread under --gc-always. Fixed by
+// spilling register-resident values live across GC safepoints to their root
+// slots (and reloading after) in the register allocator.
+
+use beagle.core as core
+
+enum Inner {
+    Leaf { a, b }
+}
+enum Outer {
+    Wrap { payload }
+}
+
+fn build-and-check(n) {
+    let mut i = 0
+    let mut bad = 0
+    while i < n {
+        // Inline nested construction: the inner Leaf is an intermediate live
+        // across the outer Wrap's allocation.
+        let o = Outer.Wrap { payload: Inner.Leaf { a: i, b: i + 1 } }
+        let ok = match o {
+            Outer.Wrap { payload } => match payload {
+                Inner.Leaf { a, b } => a + b == 2 * i + 1
+            }
+        }
+        if ok == false { bad = bad + 1 }
+        i = i + 1
+    }
+    bad
+}
+
+fn main() {
+    let result = atom(0 - 1)
+    let done = atom(false)
+    thread(fn() {
+        let bad = build-and-check(3000)
+        reset!(result, bad)
+        reset!(done, true)
+    })
+    // Main allocates concurrently to keep GC pressure up.
+    let mut k = 0
+    while k < 20000 {
+        let _ = Inner.Leaf { a: k, b: k }
+        k = k + 1
+    }
+    loop {
+        if deref(done) { break(null) }
+        core/sleep(1)
+    }
+    // 0 corrupted entries across 3000 nested constructions on the spawned thread
+    println(deref(result))
+}
+
+// @beagle.core.snapshot
+// 0

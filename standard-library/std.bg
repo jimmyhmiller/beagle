@@ -484,6 +484,19 @@ extend ArraySeq with Seq {
     }
 }
 
+// seq is idempotent: a live seq object is itself Seqable (it always points at a
+// valid element — empty is represented as null). Without this, passing the
+// result of seq(...) (or any function that already returned a seq) back into a
+// seq-driven function like reduce/map/stats crashes with "Function not
+// implemented for Struct value: ...Seq".
+extend ArraySeq with Seqable {
+    fn seq(s) { s }
+}
+
+extend ArraySeq with Length {
+    fn length(s) { primitive/size(s.arr) - s.index }
+}
+
 // PersistentVector protocol extensions (Rust-backed vector from literals)
 extend PersistentVector with Length {
     fn length(vec) {
@@ -551,6 +564,14 @@ extend PersistentVectorSeq with Seq {
             PersistentVectorSeq { vec: seq.vec, index: next-index }
         }
     }
+}
+
+extend PersistentVectorSeq with Seqable {
+    fn seq(s) { s }
+}
+
+extend PersistentVectorSeq with Length {
+    fn length(s) { rust-coll/vec-count(s.vec) - s.index }
 }
 
 // Helper for formatting PersistentVector
@@ -650,7 +671,15 @@ fn parse-int-helper(s, idx, acc) {
         // '0' is 48, '9' is 57
         if code >= 48 && code <= 57 {
             let digit = code - 48
-            parse-int-helper(s, idx + 1, acc * 10 + digit)
+            // Overflow guard: tagged Ints are 61-bit (max 1152921504606846975).
+            // Past that, `acc * 10 + digit` silently wraps to a wrong (often
+            // negative) value. Return null (parse-int's documented failure
+            // signal) instead — use beagle.bigint for arbitrary precision.
+            if acc > (1152921504606846975 - digit) / 10 {
+                null
+            } else {
+                parse-int-helper(s, idx + 1, acc * 10 + digit)
+            }
         } else {
             null
         }
@@ -809,6 +838,18 @@ enum SystemError {
     MutabilityError { message, location }
     JsonError { message, location }
     AssertError { message, location }
+    IOError { message, location }
+    // Variants below are thrown by various Rust builtins (char-from-code,
+    // string/regex/ffi/json paths, allocation failure). They MUST exist here or
+    // create_error() unwraps None and panic-aborts the process uncatchably
+    // instead of raising a catchable Beagle exception.
+    AllocationError { message, location }
+    ArgumentError { message, location }
+    InvalidArgument { message, location }
+    StringError { message, location }
+    RegexError { message, location }
+    EncodingError { message, location }
+    CopyError { message, location }
 }
 
 // Diagnostic severity levels
@@ -912,6 +953,14 @@ extend StringSeq with Seq {
             StringSeq { str: seq.str, index: next-index }
         }
     }
+}
+
+extend StringSeq with Seqable {
+    fn seq(s) { s }
+}
+
+extend StringSeq with Length {
+    fn length(s) { length(s.str) - s.index }
 }
 
 // ============================================================================
@@ -2587,6 +2636,14 @@ extend PersistentSetSeq with Seq {
     }
 }
 
+extend PersistentSetSeq with Seqable {
+    fn seq(s) { s }
+}
+
+extend PersistentSetSeq with Length {
+    fn length(s) { rust-coll/vec-count(s.elements) - s.index }
+}
+
 extend PersistentSet with Seqable {
     fn seq(set) {
         let elems = rust-coll/set-elements(set)
@@ -2594,6 +2651,50 @@ extend PersistentSet with Seqable {
             null
         } else {
             PersistentSetSeq { elements: elems, index: 0 }
+        }
+    }
+}
+
+// Sequence type for iterating over a PersistentMap. Each element is a 2-element
+// [key value] entry vector, mirroring Clojure's (seq {:a 1}) => ([:a 1]). This
+// makes every seq-library function (map/filter/reduce/into/count/…) and the
+// beagle.iter combinators work over maps.
+struct PersistentMapSeq {
+    map
+    keys
+    index
+}
+
+extend PersistentMapSeq with Seq {
+    fn first(seq) {
+        let k = rust-coll/vec-get(seq.keys, seq.index)
+        [k, rust-coll/map-get(seq.map, k)]
+    }
+    fn next(seq) {
+        let next-idx = seq.index + 1
+        if next-idx >= rust-coll/vec-count(seq.keys) {
+            null
+        } else {
+            PersistentMapSeq { map: seq.map, keys: seq.keys, index: next-idx }
+        }
+    }
+}
+
+extend PersistentMapSeq with Seqable {
+    fn seq(s) { s }
+}
+
+extend PersistentMapSeq with Length {
+    fn length(s) { rust-coll/vec-count(s.keys) - s.index }
+}
+
+extend PersistentMap with Seqable {
+    fn seq(map) {
+        let ks = rust-coll/map-keys(map)
+        if rust-coll/vec-count(ks) == 0 {
+            null
+        } else {
+            PersistentMapSeq { map: map, keys: ks, index: 0 }
         }
     }
 }

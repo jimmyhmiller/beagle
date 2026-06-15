@@ -56,6 +56,6 @@ fn main() {
 // This is a test function that adds two numbers.
 // It demonstrates multi-line docstrings.
 // true
-// ["add", "add_three", "no_doc_function", "main", "__top_level"]
+// ["__top_level", "add", "add_three", "main", "no_doc_function"]
 // true
 // true

@@ -620,8 +620,12 @@ impl HeapObject {
     pub fn set_string_hash(&self, hash: u64) {
         let type_id = self.get_header().type_id;
         if type_id == Self::STRING_SLICE_TYPE_ID || type_id == Self::CONS_STRING_TYPE_ID {
-            // Store as (hash << 3) so GC sees tag 000 (Int), not a heap pointer
-            let encoded = (hash as usize) << 3;
+            // Store as (hash << 3) so GC sees tag 000 (Int), not a heap pointer.
+            // Only 61 bits fit; callers (hash_value) must pre-mask. Mask again
+            // here so a stray full-width hash can never silently truncate and
+            // produce a hash that disagrees with a flat string's cached hash.
+            let masked = (hash as usize) & 0x1FFF_FFFF_FFFF_FFFF;
+            let encoded = masked << 3;
             self.write_field(2, encoded);
             return;
         }

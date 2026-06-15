@@ -1,0 +1,57 @@
+namespace effect_tail_resume_constant_stack_test
+
+use beagle.core as core
+use beagle.effect as effect
+
+// Regression: a `handle { loop { perform } }` whose handler resumes in TAIL
+// position via effect/resume-tail must run in CONSTANT stack. Previously every
+// perform/resume cycle leaked one handler+dispatch frame (~1216 bytes), so a
+// loop overflowed the stack around 40k-60k iterations. The continuation
+// trampoline now lands a one-shot tail resume back at the body's captured base,
+// discarding the handler/dispatch frames. 80k iterations would have overflowed
+// before this fix; it completes now.
+
+enum Inner {
+    A { x }
+    B { y }
+}
+enum Eff {
+    Op { payload }
+}
+
+struct H {}
+extend H with effect/Handler(Eff) {
+    fn handle(self, op, resume) {
+        match op {
+            Eff.Op { payload } => {
+                let result = match payload {
+                    Inner.A { x } => x
+                    Inner.B { y } => y
+                }
+                effect/resume-tail(resume, result)
+            }
+        }
+    }
+}
+
+fn run(iters) {
+    let handler = H {}
+    handle effect/Handler(Eff) with handler {
+        let mut i = 0
+        let mut acc = 0
+        while i < iters {
+            let inner = if i - (i / 2) * 2 == 0 { Inner.A { x: 1 } } else { Inner.B { y: 2 } }
+            acc = acc + perform Eff.Op { payload: inner }
+            i = i + 1
+        }
+        acc
+    }
+}
+
+fn main() {
+    // 300000 cycles (past the old ~150k heap-frontier panic + far past the ~40-60k stack overflow)
+    println(run(300000))
+}
+
+// @beagle.core.snapshot
+// 450000

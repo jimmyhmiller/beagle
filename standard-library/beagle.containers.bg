@@ -1,0 +1,356 @@
+namespace beagle.containers
+
+// beagle.collections — convenience structures, PURE Beagle.
+//
+// Provides:
+//   * Deque    — double-ended queue over two vectors (amortized O(1) both ends)
+//   * DefaultMap — a map with a default value for missing keys
+//   * OrderedMap — a map that preserves insertion order
+//   * Set helpers over vectors-as-sets (union / intersection / difference)
+//
+// Everything here builds only on std.bg primitives (persistent vectors +
+// persistent maps + the global collection helpers like distinct/reduce).
+
+// ============================================================================
+// Deque — double-ended queue
+// ============================================================================
+//
+// Implemented with two vectors: `front` holds the head-side elements in
+// REVERSED order (so pushing/popping the front is a push/pop on the tail of
+// `front`), and `back` holds the tail-side elements in natural order. The
+// logical sequence is: reverse(front) ++ back.
+//
+// This is the classic functional banker's-deque trick. To keep both ends
+// cheap, whenever one side is empty and the other has >= 2 elements we
+// rebalance by splitting the non-empty side in half.
+
+struct Deque {
+    front   // vector, head elements in reverse order
+    back    // vector, tail elements in natural order
+}
+
+/// Create a new empty deque.
+fn deque-new() {
+    Deque { front: [], back: [] }
+}
+
+/// Number of elements in the deque.
+fn deque-count(d) {
+    length(d.front) + length(d.back)
+}
+
+/// Is the deque empty?
+fn deque-empty?(d) {
+    deque-count(d) == 0
+}
+
+// Build a vector that is the reverse of `v`.
+fn coll-reverse(v) {
+    let mut acc = []
+    let mut i = length(v) - 1
+    while i >= 0 {
+        acc = push(acc, get(v, i))
+        i = i - 1
+    }
+    acc
+}
+
+// Take the sub-vector v[start..end) (end exclusive).
+fn coll-subvec(v, start, end) {
+    let mut acc = []
+    let mut i = start
+    while i < end {
+        acc = push(acc, get(v, i))
+        i = i + 1
+    }
+    acc
+}
+
+/// Push a value onto the FRONT of the deque, returning a new deque.
+fn push-front(d, value) {
+    Deque { front: push(d.front, value), back: d.back }
+}
+
+/// Push a value onto the BACK of the deque, returning a new deque.
+fn push-back(d, value) {
+    Deque { front: d.front, back: push(d.back, value) }
+}
+
+// When one side is empty, rebalance: move half of the other side over,
+// reversing as needed so the logical order is preserved.
+//
+// logical order = reverse(front) ++ back
+fn deque-rebalance(d) {
+    let fl = length(d.front)
+    let bl = length(d.back)
+    if fl == 0 && bl > 1 {
+        // back = [b0, b1, ..., b(n-1)]  (b0 is logical head)
+        // Move first half to front (reversed), keep second half in back.
+        let half = bl / 2
+        let head-part = coll-subvec(d.back, 0, half)        // logical head side
+        let tail-part = coll-subvec(d.back, half, bl)
+        Deque { front: coll-reverse(head-part), back: tail-part }
+    } else {
+        if bl == 0 && fl > 1 {
+            // front = reverse(logical-head-region). logical order of these
+            // elements is reverse(front). Front holds the HEAD region.
+            // Split: keep head half in front, send tail half to back.
+            let half = fl / 2
+            // Logical sequence of front portion = reverse(front):
+            let logical = coll-reverse(d.front)             // head .. (toward middle)
+            let head-part = coll-subvec(logical, 0, half)
+            let tail-part = coll-subvec(logical, half, fl)
+            Deque { front: coll-reverse(head-part), back: tail-part }
+        } else {
+            d
+        }
+    }
+}
+
+/// Pop from the FRONT. Returns [value, new-deque].
+/// Throws on an empty deque.
+fn pop-front(d) {
+    if deque-empty?(d) {
+        throw("pop-front: deque is empty")
+    } else {
+        let fl = length(d.front)
+        if fl > 0 {
+            // Front head is the LAST element of `front` (front is reversed).
+            let value = get(d.front, fl - 1)
+            let new-front = coll-subvec(d.front, 0, fl - 1)
+            [value, Deque { front: new-front, back: d.back }]
+        } else {
+            // front empty: rebalance then retry.
+            let rb = deque-rebalance(d)
+            if length(rb.front) > 0 {
+                let n = length(rb.front)
+                let value = get(rb.front, n - 1)
+                [value, Deque { front: coll-subvec(rb.front, 0, n - 1), back: rb.back }]
+            } else {
+                // back has exactly one element (bl == 1, no rebalance)
+                let value = get(rb.back, 0)
+                [value, Deque { front: [], back: coll-subvec(rb.back, 1, length(rb.back)) }]
+            }
+        }
+    }
+}
+
+/// Pop from the BACK. Returns [value, new-deque].
+/// Throws on an empty deque.
+fn pop-back(d) {
+    if deque-empty?(d) {
+        throw("pop-back: deque is empty")
+    } else {
+        let bl = length(d.back)
+        if bl > 0 {
+            // Back tail is the LAST element of `back`.
+            let value = get(d.back, bl - 1)
+            let new-back = coll-subvec(d.back, 0, bl - 1)
+            [value, Deque { front: d.front, back: new-back }]
+        } else {
+            // back empty: rebalance then retry.
+            let rb = deque-rebalance(d)
+            if length(rb.back) > 0 {
+                let n = length(rb.back)
+                let value = get(rb.back, n - 1)
+                [value, Deque { front: rb.front, back: coll-subvec(rb.back, 0, n - 1) }]
+            } else {
+                // front has exactly one element. Logical tail = front[0]
+                // (reverse(front) with one element is itself).
+                let value = get(rb.front, 0)
+                [value, Deque { front: coll-subvec(rb.front, 1, length(rb.front)), back: [] }]
+            }
+        }
+    }
+}
+
+/// Materialize the deque into a plain vector in logical (head->tail) order.
+fn deque-to-vec(d) {
+    concat(coll-reverse(d.front), d.back)
+}
+
+// ============================================================================
+// DefaultMap — map with a default value for missing keys
+// ============================================================================
+//
+// Wraps a persistent map plus a default. dm-get returns the default when the
+// key is absent; dm-update applies a function to the current value (or the
+// default when absent).
+
+struct DefaultMap {
+    default
+    table     // persistent map
+}
+
+/// Create a new default-map with the given default value.
+fn dm-new(default) {
+    DefaultMap { default: default, table: {} }
+}
+
+/// Look up a key, returning the default if the key is absent.
+fn dm-get(dm, key) {
+    let v = get(dm.table, key)
+    if v == null {
+        dm.default
+    } else {
+        v
+    }
+}
+
+/// Associate key->value, returning a new default-map.
+fn dm-assoc(dm, key, value) {
+    DefaultMap { default: dm.default, table: assoc(dm.table, key, value) }
+}
+
+/// Update key by applying f to its current value (or the default if absent),
+/// returning a new default-map.
+fn dm-update(dm, key, f) {
+    let current = dm-get(dm, key)
+    dm-assoc(dm, key, f(current))
+}
+
+/// Number of explicitly-stored keys.
+fn dm-count(dm) {
+    length(dm.table)
+}
+
+// ============================================================================
+// OrderedMap — preserves insertion order
+// ============================================================================
+//
+// Keeps a vector of keys in insertion order plus a backing persistent map.
+// Re-assoc-ing an existing key updates its value but does NOT move its
+// position in the order (matching common insertion-ordered-map semantics).
+
+struct OrderedMap {
+    order   // vector of keys in insertion order
+    table   // persistent map key->value
+}
+
+/// Create a new empty ordered map.
+fn om-new() {
+    OrderedMap { order: [], table: {} }
+}
+
+/// Look up a key (null if absent).
+fn om-get(om, key) {
+    get(om.table, key)
+}
+
+// Does the order vector already contain this key?
+fn om-has-key?(om, key) {
+    let mut i = 0
+    let mut found = false
+    let len = length(om.order)
+    while i < len && found == false {
+        if equal(get(om.order, i), key) {
+            found = true
+        }
+        i = i + 1
+    }
+    found
+}
+
+/// Associate key->value, returning a new ordered map. New keys are appended
+/// to the insertion order; existing keys keep their position.
+fn om-assoc(om, key, value) {
+    let new-table = assoc(om.table, key, value)
+    if om-has-key?(om, key) {
+        OrderedMap { order: om.order, table: new-table }
+    } else {
+        OrderedMap { order: push(om.order, key), table: new-table }
+    }
+}
+
+/// The keys in insertion order (a vector).
+fn om-keys-in-order(om) {
+    om.order
+}
+
+/// The [key, value] pairs in insertion order (a vector of 2-vectors).
+fn om-pairs(om) {
+    let mut acc = []
+    let mut i = 0
+    let len = length(om.order)
+    while i < len {
+        let k = get(om.order, i)
+        acc = push(acc, [k, get(om.table, k)])
+        i = i + 1
+    }
+    acc
+}
+
+/// The values in insertion order (a vector).
+fn om-vals-in-order(om) {
+    let mut acc = []
+    let mut i = 0
+    let len = length(om.order)
+    while i < len {
+        acc = push(acc, get(om.table, get(om.order, i)))
+        i = i + 1
+    }
+    acc
+}
+
+/// Number of entries.
+fn om-count(om) {
+    length(om.order)
+}
+
+// ============================================================================
+// Set helpers over vectors-as-sets
+// ============================================================================
+//
+// These treat plain vectors as sets (membership by structural equality, via
+// distinct). They return de-duplicated vectors, preserving first-seen order.
+
+// Linear membership test using structural equality.
+fn vec-member?(v, x) {
+    let mut i = 0
+    let mut found = false
+    let len = length(v)
+    while i < len && found == false {
+        if equal(get(v, i), x) {
+            found = true
+        }
+        i = i + 1
+    }
+    found
+}
+
+/// Union of two vectors-as-sets: all distinct elements from both.
+fn set-union-vec(a, b) {
+    distinct(concat(a, b))
+}
+
+/// Intersection: distinct elements of `a` that also appear in `b`.
+fn set-intersection-vec(a, b) {
+    let da = distinct(a)
+    let mut acc = []
+    let mut i = 0
+    let len = length(da)
+    while i < len {
+        let x = get(da, i)
+        if vec-member?(b, x) {
+            acc = push(acc, x)
+        }
+        i = i + 1
+    }
+    acc
+}
+
+/// Difference: distinct elements of `a` that do NOT appear in `b`.
+fn set-difference-vec(a, b) {
+    let da = distinct(a)
+    let mut acc = []
+    let mut i = 0
+    let len = length(da)
+    while i < len {
+        let x = get(da, i)
+        if vec-member?(b, x) == false {
+            acc = push(acc, x)
+        }
+        i = i + 1
+    }
+    acc
+}

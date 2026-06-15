@@ -1,0 +1,20 @@
+namespace bug_b5_io_missing_file_test
+
+use beagle.fs as fs
+
+// B5 regression: reading a missing file SIGABRTed the whole process (the runtime
+// threw kind "IOError" but SystemError had no such variant). SystemError now has
+// an IOError variant, so the read returns a catchable Result.Err instead.
+
+fn main() {
+    let r = fs/blocking-read-file("/definitely/missing/path.txt")
+    match r {
+        Result.Err { error } => println("got-err"),
+        Result.Ok { value } => println("unexpected-ok"),
+    }
+    println("survived")
+}
+
+// @beagle.core.snapshot
+// got-err
+// survived

@@ -1,0 +1,280 @@
+namespace beagle.url
+
+// Percent-encoding (RFC 3986) and query-string (application/x-www-form-urlencoded)
+// utilities, implemented purely in Beagle.
+//
+// All encoding/decoding is byte-oriented: Beagle strings are codepoint-indexed,
+// so we route every character through a byte-level string-builder to obtain its
+// UTF-8 bytes (for encoding) and to reassemble UTF-8 from raw bytes (for
+// decoding). This makes the codecs correct for the full Unicode range, not just
+// ASCII.
+//
+// parse-query / build-query use STRING keys (not keywords), so round-tripping
+// preserves arbitrary key text exactly.
+
+use beagle.string-builder as sb
+
+// ---------------------------------------------------------------------------
+// Byte / hex helpers
+// ---------------------------------------------------------------------------
+
+// Uppercase hex digit (0..15 -> "0".."F"). Errors loudly on out-of-range input
+// so codec bugs surface immediately rather than producing silent garbage.
+fn hex-digit(n) {
+    if n >= 0 && n <= 9 {
+        char-from-code(48 + n)        // '0'..'9'
+    } else {
+        if n >= 10 && n <= 15 {
+            char-from-code(55 + n)    // 'A'..'F'  (65 == 'A', so 55 + 10)
+        } else {
+            throw("beagle.url/hex-digit: value out of range 0..15: " ++ to-string(n))
+        }
+    }
+}
+
+// Parse a single hex character (its char code) into 0..15, or -1 if it is not
+// a hex digit. Accepts both upper and lower case.
+fn hex-value(code) {
+    if code >= 48 && code <= 57 {
+        code - 48                     // '0'..'9'
+    } else {
+        if code >= 65 && code <= 70 {
+            code - 55                 // 'A'..'F'
+        } else {
+            if code >= 97 && code <= 102 {
+                code - 87             // 'a'..'f'
+            } else {
+                -1
+            }
+        }
+    }
+}
+
+// True for the RFC 3986 "unreserved" set: A-Z a-z 0-9 - _ . ~
+fn unreserved-byte?(b) {
+    let upper = b >= 65 && b <= 90
+    let lower = b >= 97 && b <= 122
+    let digit = b >= 48 && b <= 57
+    let dash = b == 45      // '-'
+    let under = b == 95     // '_'
+    let dot = b == 46       // '.'
+    let tilde = b == 126    // '~'
+    upper || lower || digit || dash || under || dot || tilde
+}
+
+// Append the UTF-8 bytes of a single character (a 1-codepoint string) onto
+// `bytes-out` (a string-builder used purely as a byte scratch buffer), then
+// percent-encode/copy each byte into `result` according to whether it is
+// unreserved.
+fn encode-char-into(result, ch) {
+    let scratch = sb/new(4)
+    sb/append-char!(scratch, ch)
+    let n = sb/length(scratch)
+    let mut i = 0
+    while i < n {
+        let b = sb/byte-at(scratch, i)
+        if unreserved-byte?(b) {
+            sb/append-byte!(result, b)
+        } else {
+            sb/append-byte!(result, 37)                 // '%'
+            sb/append!(result, hex-digit((b >>> 4) & 0xF))
+            sb/append!(result, hex-digit(b & 0xF))
+        }
+        i = i + 1
+    }
+    null
+}
+
+// ---------------------------------------------------------------------------
+// Component encode / decode
+// ---------------------------------------------------------------------------
+
+// Percent-encode a string for use as a URI component. Every byte outside the
+// unreserved set A-Za-z0-9-_.~ is encoded as %XX (uppercase hex).
+//
+//   (encode-component "a b&c")  => "a%20b%26c"
+fn encode-component(s) {
+    let result = sb/new(length(s) * 2 + 8)
+    let n = length(s)
+    let mut i = 0
+    while i < n {
+        encode-char-into(result, s[i])
+        i = i + 1
+    }
+    sb/to-string(result)
+}
+
+// Decode a percent-encoded component. %XX sequences become their byte value;
+// '+' is left as a literal '+' (component semantics, NOT form semantics — use
+// parse-query for form decoding where '+' means space). A malformed '%' (not
+// followed by two hex digits) is left verbatim.
+//
+//   (decode-component "a%20b%26c")  => "a b&c"
+fn decode-component(s) {
+    decode-into(s, false)
+}
+
+// Decode with form semantics: '+' decodes to a space (0x20). Used by parse-query
+// for application/x-www-form-urlencoded values.
+fn decode-form(s) {
+    decode-into(s, true)
+}
+
+// Shared decode driver. `plus-is-space` selects form vs component handling of '+'.
+// Bytes are accumulated in a byte-level builder so the final to-string
+// reinterprets the decoded byte stream as UTF-8.
+fn decode-into(s, plus-is-space) {
+    let result = sb/new(length(s) + 8)
+    let n = length(s)
+    let mut i = 0
+    while i < n {
+        let code = char-code(s[i])
+        if code == 37 {                                  // '%'
+            if i + 2 < n {
+                let hi = hex-value(char-code(s[i + 1]))
+                let lo = hex-value(char-code(s[i + 2]))
+                if hi >= 0 && lo >= 0 {
+                    sb/append-byte!(result, hi * 16 + lo)
+                    i = i + 3
+                } else {
+                    // Malformed escape: keep the '%' literally and advance one.
+                    sb/append-byte!(result, 37)
+                    i = i + 1
+                }
+            } else {
+                sb/append-byte!(result, 37)
+                i = i + 1
+            }
+        } else {
+            if plus-is-space && code == 43 {             // '+'
+                sb/append-byte!(result, 32)              // ' '
+                i = i + 1
+            } else {
+                // Re-emit the character's own UTF-8 bytes faithfully.
+                append-char-bytes(result, s[i])
+                i = i + 1
+            }
+        }
+    }
+    sb/to-string(result)
+}
+
+// Append the UTF-8 bytes of a single character to a byte builder.
+fn append-char-bytes(result, ch) {
+    let scratch = sb/new(4)
+    sb/append-char!(scratch, ch)
+    let n = sb/length(scratch)
+    let mut i = 0
+    while i < n {
+        sb/append-byte!(result, sb/byte-at(scratch, i))
+        i = i + 1
+    }
+    null
+}
+
+// ---------------------------------------------------------------------------
+// Query string parse / build
+// ---------------------------------------------------------------------------
+
+// Parse an application/x-www-form-urlencoded query string into a map with
+// STRING keys and STRING values. Both keys and values are form-decoded
+// ('+' -> space, %XX -> byte). A leading '?' is tolerated and stripped.
+// Pairs without '=' map the key to an empty string. Empty pairs (from "&&")
+// are skipped. On duplicate keys, the last value wins.
+//
+//   (parse-query "x=1&y=hello%20world")  => {"x" "1", "y" "hello world"}
+fn parse-query(s) {
+    let trimmed = if length(s) > 0 && char-code(s[0]) == 63 {   // '?'
+        substring(s, 1, length(s))
+    } else {
+        s
+    }
+    let mut result = {}
+    let n = length(trimmed)
+    let mut start = 0
+    let mut i = 0
+    // Walk byte-pairs split on '&'. We re-derive substrings by codepoint index,
+    // which is fine because split chars '&' and '=' are ASCII.
+    while i <= n {
+        if i == n || char-code(trimmed[i]) == 38 {             // '&' or end
+            if i > start {
+                let pair = substring(trimmed, start, i)
+                result = parse-pair-into(result, pair)
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    result
+}
+
+// Parse one "key=value" pair and assoc it into the map.
+fn parse-pair-into(m, pair) {
+    let eq = index-of-char(pair, 61)                           // '='
+    if eq < 0 {
+        assoc(m, decode-form(pair), "")
+    } else {
+        let k = substring(pair, 0, eq)
+        let v = substring(pair, eq + 1, length(pair))
+        assoc(m, decode-form(k), decode-form(v))
+    }
+}
+
+// Index of the first character with char-code `code`, or -1.
+fn index-of-char(s, code) {
+    let n = length(s)
+    let mut i = 0
+    let mut found = -1
+    while i < n && found < 0 {
+        if char-code(s[i]) == code {
+            found = i
+        }
+        i = i + 1
+    }
+    found
+}
+
+// Build an application/x-www-form-urlencoded query string from a map. Keys and
+// values are coerced to strings and percent-encoded with component rules
+// (spaces become %20, not '+'; this is valid form encoding and round-trips
+// cleanly through parse-query). Key order follows the map's key iteration.
+//
+//   (build-query {"x" "1", "y" "hello world"})  => "x=1&y=hello%20world"
+fn build-query(m) {
+    let ks = keys(m)
+    let kn = length(ks)
+    let result = sb/new(64)
+    let mut i = 0
+    while i < kn {
+        let k = ks[i]
+        let v = get(m, k)
+        if i > 0 {
+            sb/append-byte!(result, 38)                        // '&'
+        }
+        sb/append!(result, encode-component(coerce-string(k)))
+        sb/append-byte!(result, 61)                            // '='
+        sb/append!(result, encode-component(coerce-string(v)))
+        i = i + 1
+    }
+    sb/to-string(result)
+}
+
+// Coerce a key/value to a string. Keywords are converted to their name; other
+// non-strings go through to-string.
+fn coerce-string(x) {
+    if keyword?(x) {
+        keyword->string(x)
+    } else {
+        if instance-of(x, String) {
+            x
+        } else {
+            to-string(x)
+        }
+    }
+}
+
+fn main() {
+    println(encode-component("a b&c"))
+    println(decode-component("a%20b%26c"))
+    "ok"
+}

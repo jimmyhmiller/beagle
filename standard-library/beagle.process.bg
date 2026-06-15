@@ -1,0 +1,162 @@
+namespace beagle.process
+
+use beagle.ffi as ffi
+use beagle.string-builder as sb
+
+// beagle.process — run external shell commands via libc popen/system.
+//
+// Pure Beagle on top of the existing FFI surface. Three entry points:
+//   run-capture(cmd)      -> String  (stdout of the command, newlines intact)
+//   run-capture-trim(cmd) -> String  (run-capture with trailing whitespace trimmed)
+//   system(cmd)           -> Int     (raw status from C system())
+//
+// All commands are run through `/bin/sh -c` (that is what popen/system do),
+// so shell features — pipes, redirection, globbing, quoting — work.
+//
+// popen quirks (documented because they bite):
+//  - popen returns a FILE* (an ffi Pointer). A null pointer (lo == 0) means
+//    the fork/exec of the shell itself failed; we raise an FFIError. It does
+//    NOT mean the command failed — a command that exits non-zero still gives a
+//    valid FILE* and (usually empty) output.
+//  - We read with fread in a loop until it returns 0. fread on a pipe can
+//    return a short count (fewer than requested) without being EOF, so the
+//    only reliable terminator is a 0-byte read. We do not trust feof alone.
+//  - pclose returns the wait4-style status of the child, NOT a clean exit
+//    code. On a normal exit that value is (exit_code << 8); use
+//    exit-status(...) to decode it. run-capture ignores it — it only cares
+//    about stdout — but it is still called so the child is reaped (no zombie).
+//  - stderr is NOT captured. If you want stderr too, put "2>&1" in the command.
+//  - The buffer bytes are read as raw u8s, so any byte 0..255 round-trips;
+//    embedded NULs inside the stream would terminate a C string but we copy
+//    by length via get-string so they are preserved as far as Beagle strings
+//    allow.
+
+fn get-libc-path() {
+    let os = get-os()
+    if os == "macos" {
+        "libSystem.B.dylib"
+    } else if os == "linux" {
+        "libc.so.6"
+    } else {
+        "libc"
+    }
+}
+
+let libc = ffi/load-library(get-libc-path())
+
+// FILE* popen(const char *command, const char *type)
+let _popen = ffi/get-function(libc, "popen",
+    [ffi/Type.String, ffi/Type.String], ffi/Type.Pointer)
+// int pclose(FILE *stream)
+let _pclose = ffi/get-function(libc, "pclose",
+    [ffi/Type.Pointer], ffi/Type.I32)
+// size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream)
+let _fread = ffi/get-function(libc, "fread",
+    [ffi/Type.Pointer, ffi/Type.U64, ffi/Type.U64, ffi/Type.Pointer], ffi/Type.U64)
+// int system(const char *command)
+let _system = ffi/get-function(libc, "system",
+    [ffi/Type.String], ffi/Type.I32)
+
+// How many bytes we pull per fread call.
+let CHUNK-SIZE = 65536
+
+fn is-null-ptr(p) {
+    p.lo == 0
+}
+
+/// Run `cmd` through the shell and return everything it writes to stdout.
+///
+/// The command runs via popen(cmd, "r"); stdout is read in full and returned
+/// as a String. stderr is not captured (append "2>&1" if you want it).
+/// The child's exit status is discarded — see `system` if you need it.
+///
+/// Examples:
+///   (run-capture "echo hello")        ; => "hello\n"
+///   (run-capture "printf 'a\nb'")     ; => "a\nb"
+fn run-capture(cmd) {
+    let handle = _popen(cmd, "r")
+    if is-null-ptr(handle) {
+        throw("beagle.process/run-capture: popen failed for command: " ++ cmd)
+    } else {
+        let out = read-all(handle)
+        // Reap the child even though we ignore its status.
+        _pclose(handle)
+        out
+    }
+}
+
+// Read the whole FILE* stream into a String, chunk by chunk.
+// A 0-byte fread is the only reliable EOF signal on a pipe.
+fn read-all(handle) {
+    let builder = sb/new(CHUNK-SIZE)
+    let buf = ffi/allocate(CHUNK-SIZE)
+    let mut done = false
+    while done == false {
+        let n = _fread(buf, 1, CHUNK-SIZE, handle)
+        if n == 0 {
+            done = true
+        } else {
+            // get-string copies exactly n bytes (length-based, so any byte
+            // value round-trips), then we append to the growable builder.
+            let chunk = ffi/get-string(buf, 0, n)
+            sb/append!(builder, chunk)
+        }
+    }
+    ffi/deallocate(buf)
+    sb/to-string(builder)
+}
+
+/// Like run-capture but trims leading/trailing whitespace from the result.
+///
+/// Handy for commands whose output ends in a newline you do not want, e.g.
+/// `pwd`, `whoami`, `git rev-parse HEAD`.
+///
+/// Examples:
+///   (run-capture-trim "echo hello")   ; => "hello"
+fn run-capture-trim(cmd) {
+    trim(run-capture(cmd))
+}
+
+/// Run `cmd` through the shell and return the raw status from C system().
+///
+/// This is the wait4-style status value, NOT a clean exit code. For a normal
+/// exit the low byte is the signal/termination info and the next byte is the
+/// exit code (status >> 8 & 0xFF). A command that exits 0 yields a status of 0,
+/// so `(system "true") == 0` while `(system "false")` is non-zero.
+///
+/// Use `exit-status` to decode the actual exit code.
+///
+/// Examples:
+///   (system "true")           ; => 0
+///   (system "exit 3")         ; => 768   (3 << 8)
+///   (exit-status (system "exit 3"))  ; => 3
+fn system(cmd) {
+    _system(cmd)
+}
+
+/// Decode the exit code from a raw status returned by `system` or pclose.
+///
+/// On POSIX, WEXITSTATUS(status) == (status >> 8) & 0xFF for a normally-exited
+/// child. Returns -1 if the status indicates the child did not exit normally
+/// (was killed by a signal — low 7 bits non-zero).
+///
+/// Examples:
+///   (exit-status (system "exit 5"))  ; => 5
+///   (exit-status 0)                  ; => 0
+fn exit-status(status) {
+    let sig = status & 127
+    if sig != 0 {
+        -1
+    } else {
+        (status >> 8) & 255
+    }
+}
+
+/// Convenience: true if `system(cmd)` reported a clean zero exit.
+///
+/// Examples:
+///   (success? "true")   ; => true
+///   (success? "false")  ; => false
+fn success?(cmd) {
+    system(cmd) == 0
+}

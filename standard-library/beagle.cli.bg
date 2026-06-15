@@ -1,0 +1,446 @@
+namespace beagle.cli
+
+// ============================================================================
+// beagle.cli — spec-driven command-line argument parsing (pure Beagle)
+// ============================================================================
+//
+// A spec is a plain map:
+//   {:prog "name"
+//    :desc "description"
+//    :flags    [ {:name "verbose" :short "v" :help "..."} ... ]
+//    :options  [ {:name "out" :short "o" :help "..." :required false :default null} ... ]
+//    :positionals [ {:name "file" :help "..." :required true} ... ]}
+//
+// parse(argv, spec) returns:
+//   {:options map-from-name-to-value  (flags -> true/false, options -> string/default)
+//    :positionals vector-of-strings
+//    :errors vector-of-strings}
+//
+// Supported argv forms:
+//   --flag                  boolean flag
+//   --opt value             option with separate value
+//   --opt=value             option with inline value
+//   -f                      short flag
+//   -o value                short option with separate value
+//   -abc                    combined short flags (a, b, c each boolean) —
+//                           if a char in the cluster is an option, the rest of
+//                           the cluster after it is taken as its value: -ovalue
+//   --                      end-of-options; everything after is positional
+//   -h / --help             recognized; surfaces :help true in options
+//
+// NOTE on help-text: the help builders use `++` string concatenation rather
+// than `${...}` interpolation. Interpolating a call result (e.g.
+// pad-right(...)) together with an adjacent field read in one string literal
+// is miscompiled under aggressive GC in the current runtime (the first
+// segment is dropped, the second duplicated). Plain `++` chains are correct,
+// so they are used throughout the help builders. The parse path uses `${...}`
+// only for simple single-expression error messages, which is unaffected.
+
+// ----------------------------------------------------------------------------
+// Spec construction
+// ----------------------------------------------------------------------------
+
+/// Create an empty spec with a program name and description.
+fn make-spec(prog, desc) {
+    {:prog prog
+     :desc desc
+     :flags []
+     :options []
+     :positionals []}
+}
+
+/// Add a boolean flag to the spec. `short` may be null for no short form.
+fn add-flag(spec, name, short, help) {
+    let entry = {:name name :short short :help help}
+    assoc(spec, :flags, push(get(spec, :flags), entry))
+}
+
+/// Add a value-taking option to the spec.
+/// `short` may be null. `required` is a bool. `default` is used when absent.
+fn add-option(spec, name, short, help, required, default) {
+    let entry = {:name name
+                 :short short
+                 :help help
+                 :required required
+                 :default default}
+    assoc(spec, :options, push(get(spec, :options), entry))
+}
+
+/// Add a positional argument to the spec.
+fn add-positional(spec, name, help, required) {
+    let entry = {:name name :help help :required required}
+    assoc(spec, :positionals, push(get(spec, :positionals), entry))
+}
+
+// ----------------------------------------------------------------------------
+// Spec lookup helpers
+// ----------------------------------------------------------------------------
+
+// Find a flag entry by its long name. Returns the entry map or null.
+fn find-flag-by-name(spec, name) {
+    find(get(spec, :flags), fn(e) { get(e, :name) == name })
+}
+
+// Find an option entry by its long name. Returns the entry map or null.
+fn find-option-by-name(spec, name) {
+    find(get(spec, :options), fn(e) { get(e, :name) == name })
+}
+
+// Find a flag entry by its single-character short name. Returns entry or null.
+fn find-flag-by-short(spec, short) {
+    find(get(spec, :flags), fn(e) { get(e, :short) == short })
+}
+
+// Find an option entry by its single-character short name. Returns entry or null.
+fn find-option-by-short(spec, short) {
+    find(get(spec, :options), fn(e) { get(e, :short) == short })
+}
+
+// ----------------------------------------------------------------------------
+// Default-population
+// ----------------------------------------------------------------------------
+
+// Seed the result options map: every flag defaults to false, every option to
+// its declared :default (or null), and :help to false.
+fn seed-defaults(spec) {
+    let with-flags = reduce(get(spec, :flags), {:help false}, fn(acc, e) {
+        assoc(acc, get(e, :name), false)
+    })
+    reduce(get(spec, :options), with-flags, fn(acc, e) {
+        assoc(acc, get(e, :name), get(e, :default))
+    })
+}
+
+// ----------------------------------------------------------------------------
+// Parsing
+// ----------------------------------------------------------------------------
+
+// Mutable parse state lives in an atom holding a map:
+//   {:options map :positionals vector :errors vector}
+fn st-new(spec) {
+    atom({:options seed-defaults(spec)
+          :positionals []
+          :errors []})
+}
+
+fn st-set-option(state, name, value) {
+    swap!(state, fn(s) {
+        assoc(s, :options, assoc(get(s, :options), name, value))
+    })
+}
+
+fn st-add-positional(state, value) {
+    swap!(state, fn(s) {
+        assoc(s, :positionals, push(get(s, :positionals), value))
+    })
+}
+
+fn st-add-error(state, msg) {
+    swap!(state, fn(s) {
+        assoc(s, :errors, push(get(s, :errors), msg))
+    })
+}
+
+/// Parse argv (a vector of strings) against a spec.
+/// Returns {:options map :positionals vector :errors vector}.
+fn parse(argv, spec) {
+    let state = st-new(spec)
+    let n = length(argv)
+    let mut i = 0
+    let mut only-positionals = false
+    while i < n {
+        let arg = get(argv, i)
+        if only-positionals {
+            st-add-positional(state, arg)
+            i = i + 1
+        } else {
+            if arg == "--" {
+                only-positionals = true
+                i = i + 1
+            } else {
+                if is-long-arg(arg) {
+                    i = parse-long(state, spec, argv, arg, i, n)
+                } else {
+                    if is-short-arg(arg) {
+                        i = parse-short(state, spec, argv, arg, i, n)
+                    } else {
+                        st-add-positional(state, arg)
+                        i = i + 1
+                    }
+                }
+            }
+        }
+    }
+    finalize(state, spec)
+}
+
+// An argument is a long option if it begins with "--" and is longer than 2.
+fn is-long-arg(arg) {
+    length(arg) > 2 && starts-with?(arg, "--")
+}
+
+// An argument is a short option if it begins with "-", is longer than 1, and
+// is not "--" and not a negative number like "-5".
+fn is-short-arg(arg) {
+    if length(arg) < 2 {
+        false
+    } else {
+        if starts-with?(arg, "--") {
+            false
+        } else {
+            if starts-with?(arg, "-") {
+                // Reject negative numbers: char after '-' is a digit.
+                let c = char-code(get(arg, 1))
+                not(c >= 48 && c <= 57)
+            } else {
+                false
+            }
+        }
+    }
+}
+
+// Handle a "--..." token. Returns the next index to read.
+fn parse-long(state, spec, argv, arg, i, n) {
+    // Strip leading "--".
+    let body = substring(arg, 2, length(arg))
+    let eq = index-of(body, "=")
+    if eq >= 0 {
+        // --name=value form
+        let name = substring(body, 0, eq)
+        let value = substring(body, eq + 1, length(body))
+        apply-long-option(state, spec, name, value)
+        i + 1
+    } else {
+        // --name form: flag, help, or option taking the next token.
+        if body == "help" {
+            st-set-option(state, :help, true)
+            i + 1
+        } else {
+            let flag = find-flag-by-name(spec, body)
+            if flag != null {
+                st-set-option(state, body, true)
+                i + 1
+            } else {
+                let opt = find-option-by-name(spec, body)
+                if opt != null {
+                    if i + 1 < n {
+                        st-set-option(state, body, get(argv, i + 1))
+                        i + 2
+                    } else {
+                        st-add-error(state, "option --${body} requires a value")
+                        i + 1
+                    }
+                } else {
+                    st-add-error(state, "unknown option --${body}")
+                    i + 1
+                }
+            }
+        }
+    }
+}
+
+// Apply a "--name=value" where the option type is resolved by name.
+fn apply-long-option(state, spec, name, value) {
+    let opt = find-option-by-name(spec, name)
+    if opt != null {
+        st-set-option(state, name, value)
+    } else {
+        let flag = find-flag-by-name(spec, name)
+        if flag != null {
+            // A flag given "=value": record presence as true, but flag a misuse.
+            st-add-error(state, "flag --${name} does not take a value")
+            st-set-option(state, name, true)
+        } else {
+            st-add-error(state, "unknown option --${name}")
+        }
+    }
+}
+
+// Handle a "-..." token (possibly a cluster of short flags). Returns next index.
+fn parse-short(state, spec, argv, arg, i, n) {
+    // Strip leading "-".
+    let cluster = substring(arg, 1, length(arg))
+    if cluster == "h" {
+        st-set-option(state, :help, true)
+        i + 1
+    } else {
+        parse-short-cluster(state, spec, argv, cluster, i, n)
+    }
+}
+
+// Walk each char in a short cluster. A flag char sets its flag true; an option
+// char consumes either the remainder of the cluster (e.g. -ovalue) or the next
+// argv token (-o value).
+fn parse-short-cluster(state, spec, argv, cluster, i, n) {
+    let clen = length(cluster)
+    let mut j = 0
+    let mut next-i = i + 1
+    let mut stop = false
+    while j < clen && not(stop) {
+        let ch = get(cluster, j)
+        if ch == "h" {
+            st-set-option(state, :help, true)
+            j = j + 1
+        } else {
+            let flag = find-flag-by-short(spec, ch)
+            if flag != null {
+                st-set-option(state, get(flag, :name), true)
+                j = j + 1
+            } else {
+                let opt = find-option-by-short(spec, ch)
+                if opt != null {
+                    let name = get(opt, :name)
+                    let remainder = substring(cluster, j + 1, clen)
+                    if length(remainder) > 0 {
+                        // -ovalue : rest of cluster is the value.
+                        st-set-option(state, name, remainder)
+                        stop = true
+                    } else {
+                        // -o value : take the next argv token.
+                        if i + 1 < n {
+                            st-set-option(state, name, get(argv, i + 1))
+                            next-i = i + 2
+                        } else {
+                            st-add-error(state, "option -${ch} requires a value")
+                        }
+                        stop = true
+                    }
+                } else {
+                    st-add-error(state, "unknown flag -${ch}")
+                    j = j + 1
+                }
+            }
+        }
+    }
+    next-i
+}
+
+// ----------------------------------------------------------------------------
+// Finalization: check required options / positionals
+// ----------------------------------------------------------------------------
+
+fn finalize(state, spec) {
+    let s = deref(state)
+    let help-requested = get(get(s, :options), :help)
+    if help-requested {
+        // When help is requested, skip required-checking; the caller prints help.
+        s
+    } else {
+        check-required-options(state, spec)
+        check-required-positionals(state, spec)
+        deref(state)
+    }
+}
+
+fn check-required-options(state, spec) {
+    let opts = get(deref(state), :options)
+    for e in get(spec, :options) {
+        if get(e, :required) {
+            let name = get(e, :name)
+            if get(opts, name) == null {
+                st-add-error(state, "missing required option --${name}")
+            }
+        }
+    }
+    null
+}
+
+fn check-required-positionals(state, spec) {
+    let positionals = get(deref(state), :positionals)
+    let given = length(positionals)
+    let mut idx = 0
+    for e in get(spec, :positionals) {
+        if get(e, :required) && idx >= given {
+            st-add-error(state, "missing required positional <" ++ get(e, :name) ++ ">")
+        }
+        idx = idx + 1
+    }
+    null
+}
+
+// ----------------------------------------------------------------------------
+// Help text  (uses `++` only — see top-of-file note about interpolation+GC)
+// ----------------------------------------------------------------------------
+
+/// Build a usage / help string from a spec.
+fn help-text(spec) {
+    let usage = build-usage-line(spec)
+    let header = usage ++ "\n\n" ++ get(spec, :desc)
+    let positionals-section = build-positionals-section(spec)
+    let options-section = build-options-section(spec)
+    let flags-section = build-flags-section(spec)
+    header
+        ++ positionals-section
+        ++ options-section
+        ++ flags-section
+}
+
+fn build-usage-line(spec) {
+    let prog = get(spec, :prog)
+    let has-flags = length(get(spec, :flags)) > 0
+    let has-opts = length(get(spec, :options)) > 0
+    let base = "Usage: " ++ prog
+    let with-opts = if has-flags || has-opts {
+        base ++ " [options]"
+    } else {
+        base
+    }
+    reduce(get(spec, :positionals), with-opts, fn(acc, e) {
+        let name = get(e, :name)
+        if get(e, :required) {
+            acc ++ " <" ++ name ++ ">"
+        } else {
+            acc ++ " [" ++ name ++ "]"
+        }
+    })
+}
+
+fn build-positionals-section(spec) {
+    let ps = get(spec, :positionals)
+    if length(ps) == 0 {
+        ""
+    } else {
+        reduce(ps, "\n\nArguments:", fn(acc, e) {
+            acc ++ "\n  " ++ pad-right(get(e, :name), 18, " ") ++ get(e, :help)
+        })
+    }
+}
+
+fn build-options-section(spec) {
+    let os = get(spec, :options)
+    if length(os) == 0 {
+        ""
+    } else {
+        reduce(os, "\n\nOptions:", fn(acc, e) {
+            let name = get(e, :name)
+            let short = get(e, :short)
+            let names = if short == null {
+                "--" ++ name ++ " <value>"
+            } else {
+                "-" ++ short ++ ", --" ++ name ++ " <value>"
+            }
+            let req = if get(e, :required) { " (required)" } else { "" }
+            acc ++ "\n  " ++ pad-right(names, 26, " ") ++ get(e, :help) ++ req
+        })
+    }
+}
+
+fn build-flags-section(spec) {
+    let fs = get(spec, :flags)
+    let help-line = "\n  " ++ pad-right("-h, --help", 26, " ") ++ "Show this help message"
+    if length(fs) == 0 {
+        "\n\nFlags:" ++ help-line
+    } else {
+        let body = reduce(fs, "\n\nFlags:", fn(acc, e) {
+            let name = get(e, :name)
+            let short = get(e, :short)
+            let names = if short == null {
+                "--" ++ name
+            } else {
+                "-" ++ short ++ ", --" ++ name
+            }
+            acc ++ "\n  " ++ pad-right(names, 26, " ") ++ get(e, :help)
+        })
+        body ++ help-line
+    }
+}

@@ -1,0 +1,28 @@
+namespace gap_hunt_fixes_test
+
+// Regression for gap-hunt findings:
+//  - char-from-code(invalid) must throw a CATCHABLE exception, not panic-abort
+//    (missing SystemError.InvalidArgument variant made it uncatchable).
+//  - parse-int overflow past the 61-bit Int max must return null, not silently
+//    wrap to a wrong value.
+
+fn main() {
+    let r1 = try { char-from-code(-1) } catch (e) { "caught" }
+    println(r1 == "caught")
+    let r2 = try { char-from-code(2000000000) } catch (e) { "caught" }
+    println(r2 == "caught")
+    println(char-from-code(65) == "A")
+    println(parse-int("42") == 42)
+    println(parse-int("1152921504606846975") == 1152921504606846975)
+    println(parse-int("1152921504606846976") == null)
+    println(parse-int("99999999999999999999") == null)
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// true
+// true
+// true
+// true
+// true

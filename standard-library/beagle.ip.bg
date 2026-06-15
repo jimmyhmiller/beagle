@@ -1,0 +1,169 @@
+namespace beagle.ip
+
+// IP address utilities — pure Beagle, bitwise.
+//
+// IPv4 addresses are represented as 32-bit integers in host order
+// (a.b.c.d => (a<<24)|(b<<16)|(c<<8)|d). Beagle ints are 62-bit, so all
+// 32-bit results are masked with 0xFFFFFFFF to stay in the unsigned range.
+
+let MASK32 = 0xFFFFFFFF
+
+// Validate that a string is a non-empty run of ASCII digits with no
+// leading/trailing junk, then parse it. Returns the int, or null.
+// We do NOT accept "+5", "-5", " 5", "", or "0x..." — only pure decimal.
+// We also reject octets longer than 3 chars (cheap overflow guard) and any
+// octet with a leading zero ("010", "001"): libc inet_aton reads a leading-zero
+// octet as OCTAL, so parsing it as decimal disagrees with the OS resolver — an
+// SSRF/octal-confusion vector (CVE-2021-29921). Python's ipaddress rejects
+// these; we match by returning null. Bare "0" is still valid.
+fn parse-octet(s) {
+    let len = length(s)
+    if len == 0 {
+        null
+    } else if len > 1 && char-code(s[0]) == 48 {
+        null
+    } else {
+        if len > 3 {
+            null
+        } else {
+            let mut i = 0
+            let mut acc = 0
+            let mut ok = true
+            while i < len {
+                let code = char-code(s[i])
+                if code >= 48 && code <= 57 {
+                    acc = acc * 10 + (code - 48)
+                } else {
+                    ok = false
+                }
+                i = i + 1
+            }
+            if ok == false {
+                null
+            } else {
+                if acc > 255 {
+                    null
+                } else {
+                    acc
+                }
+            }
+        }
+    }
+}
+
+/// Parse a dotted-quad IPv4 string into a 32-bit Int.
+///
+/// Returns null if the string is not a valid IPv4 address.
+///
+/// Examples:
+///   (parse-ipv4 "192.168.1.1")  ; => 3232235777
+///   (parse-ipv4 "999.1.1.1")    ; => null
+fn parse-ipv4(s) {
+    let parts = split(s, ".")
+    if length(parts) != 4 {
+        null
+    } else {
+        let a = parse-octet(parts[0])
+        let b = parse-octet(parts[1])
+        let c = parse-octet(parts[2])
+        let d = parse-octet(parts[3])
+        if a == null || b == null || c == null || d == null {
+            null
+        } else {
+            ((a << 24) | (b << 16) | (c << 8) | d) & MASK32
+        }
+    }
+}
+
+/// Convert a 32-bit Int into a dotted-quad IPv4 string.
+///
+/// Examples:
+///   (ipv4-to-string 3232235777)  ; => "192.168.1.1"
+fn ipv4-to-string(n) {
+    let m = n & MASK32
+    let a = (m >> 24) & 0xFF
+    let b = (m >> 16) & 0xFF
+    let c = (m >> 8) & 0xFF
+    let d = m & 0xFF
+    to-string(a) ++ "." ++ to-string(b) ++ "." ++ to-string(c) ++ "." ++ to-string(d)
+}
+
+// Build a /prefix netmask as a 32-bit int. prefix in [0,32].
+// prefix 0 => 0; prefix 32 => 0xFFFFFFFF.
+fn prefix-to-mask(prefix) {
+    if prefix <= 0 {
+        0
+    } else {
+        if prefix >= 32 {
+            MASK32
+        } else {
+            // (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF
+            (MASK32 << (32 - prefix)) & MASK32
+        }
+    }
+}
+
+/// Parse a CIDR string ("a.b.c.d/prefix") into [network-int, mask-int].
+///
+/// Returns null if the CIDR is malformed.
+///
+/// Examples:
+///   (cidr-network "192.168.1.0/24")  ; => [3232235776, 4294967040]
+fn cidr-network(cidr) {
+    let parts = split(cidr, "/")
+    if length(parts) != 2 {
+        null
+    } else {
+        let ip = parse-ipv4(parts[0])
+        let prefix = parse-octet(parts[1])
+        if ip == null || prefix == null {
+            null
+        } else {
+            if prefix > 32 {
+                null
+            } else {
+                let mask = prefix-to-mask(prefix)
+                let network = ip & mask
+                [network, mask]
+            }
+        }
+    }
+}
+
+/// Check whether an IPv4 address string lies within a CIDR block.
+///
+/// Examples:
+///   (ipv4-in-cidr? "192.168.1.5" "192.168.1.0/24")  ; => true
+///   (ipv4-in-cidr? "192.168.2.5" "192.168.1.0/24")  ; => false
+fn ipv4-in-cidr?(ip-str, cidr-str) {
+    let ip = parse-ipv4(ip-str)
+    let net = cidr-network(cidr-str)
+    if ip == null || net == null {
+        false
+    } else {
+        let network = net[0]
+        let mask = net[1]
+        (ip & mask) == network
+    }
+}
+
+/// Check whether an IPv4 address string is in a private range.
+///
+/// Covers RFC 1918 (10/8, 172.16/12, 192.168/16), loopback (127/8),
+/// and link-local (169.254/16). Returns false for invalid input.
+///
+/// Examples:
+///   (is-private-ipv4? "10.0.0.1")     ; => true
+///   (is-private-ipv4? "8.8.8.8")      ; => false
+fn is-private-ipv4?(s) {
+    let ip = parse-ipv4(s)
+    if ip == null {
+        false
+    } else {
+        ipv4-in-cidr?(s, "10.0.0.0/8")
+            || ipv4-in-cidr?(s, "172.16.0.0/12")
+            || ipv4-in-cidr?(s, "192.168.0.0/16")
+            || ipv4-in-cidr?(s, "127.0.0.0/8")
+            || ipv4-in-cidr?(s, "169.254.0.0/16")
+    }
+}

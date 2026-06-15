@@ -1,0 +1,15 @@
+namespace bug_b8_map_vector_literal_test
+
+// B8 regression: an inline vector literal as a map value, `{:a [1, 2]}`, failed
+// to parse because the key greedily consumed the value's leading `[` as a postfix
+// index. Map keys now parse at postfix precedence.
+
+fn main() {
+    let m = {:a [1, 2], :b [3, 4]}
+    println(get(m, :a))
+    println(get(m, :b))
+}
+
+// @beagle.core.snapshot
+// [1, 2]
+// [3, 4]

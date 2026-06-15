@@ -1,0 +1,248 @@
+namespace beagle.channel
+
+// beagle.channel — concurrency primitives built ENTIRELY on atoms +
+// compare-and-swap! (plus thread() for the demo/tests). PURE Beagle, no Rust.
+//
+// The whole module rests on one runtime guarantee: compare-and-swap! is a
+// hardware CAS on the value WORD stored in the atom (pointer identity / the
+// exact loaded word), NOT a structural-equality compare. So the safe pattern
+// is always:
+//
+//     let cur = deref(a)            // capture the exact word
+//     let next = f(cur)             // compute a NEW value off it
+//     compare-and-swap!(a, cur, next)   // succeeds iff nobody else swapped
+//
+// core/swap! already implements exactly this retry loop, so single-atom
+// updates (queue push, counter incr) just use swap! and inherit lock-free
+// linearizability for free. The channel dequeue needs to both READ a value
+// and INSTALL a new state, so it runs its own CAS loop.
+//
+// CONTENTS
+//   make-channel()            -> Channel    (unbounded FIFO over an atom)
+//   send!(ch, v)              -> v          (lock-free enqueue)
+//   try-receive(ch)           -> {:some v} | {:none}   (non-blocking)
+//   receive(ch)               -> v          (blocks/spins until available)
+//   make-mutex()              -> Mutex
+//   with-lock(mutex, thunk)   -> thunk()    (CAS-acquired critical section)
+//   make-counter()            -> Counter
+//   incr!(counter)            -> new value  (atomic +1)
+//   counter-value(counter)    -> current value
+//
+// GC SAFETY
+//   Every mutable cell is a core Atom holding an immutable persistent vector
+//   or Int. No raw arrays, no shared mutable structs, no thread()+socket mix.
+//   Producers push into one channel; a single consumer (main thread or one
+//   dedicated thread) drains it. This single-channel / single-consumer shape
+//   keeps the live set entirely in GC-managed persistent values.
+
+// ---------------------------------------------------------------------------
+// Channel: unbounded FIFO queue
+// ---------------------------------------------------------------------------
+//
+// State is an atom holding a persistent vector used as the queue. send!
+// appends to the tail (push); receive/try-receive remove from the head
+// (index 0). Because both ends mutate the SAME vector value, the dequeue
+// must be a CAS loop (read head + install the rest) so a concurrent send!
+// or another receiver can't clobber it. Order is strict FIFO: index 0 is
+// always the oldest unread element.
+
+struct Channel {
+    queue   // atom of persistent-vector
+}
+
+// Create a new empty unbounded channel.
+fn make-channel() {
+    Channel { queue: atom([]) }
+}
+
+// Enqueue v at the tail. Lock-free via an inlined CAS retry loop. Returns
+// the value sent. O(retry) under contention; each attempt builds a new vector
+// with v appended (persistent => structural sharing, no copy of existing
+// elements).
+fn send!(ch, v) {
+    send-loop(ch, v)
+    v
+}
+
+// Inlined CAS retry (instead of swap! with a closure) so the hot send path
+// allocates no per-call closure — only the new tail vector. Fewer allocations
+// = far less GC pressure when many producers hammer one channel.
+fn send-loop(ch, v) {
+    let q = deref(ch.queue)
+    let next = push(q, v)
+    let ok = compare-and-swap!(ch.queue, q, next)
+    if ok {
+        null
+    } else {
+        send-loop(ch, v)
+    }
+}
+
+// Non-blocking receive. Returns {:some value} if an element was dequeued,
+// or {:none} if the channel was empty at the moment we looked. Runs its own
+// CAS loop because it must read the head element AND atomically install the
+// tail (drop index 0) without losing a concurrent send.
+fn try-receive(ch) {
+    try-receive-loop(ch)
+}
+
+fn try-receive-loop(ch) {
+    let q = deref(ch.queue)
+    if length(q) == 0 {
+        {:none true}
+    } else {
+        let head = get(q, 0)
+        let tail = drop(q, 1)
+        // Install the tail iff the queue is still exactly the q we read.
+        // If a concurrent send! or receive changed it, retry from the top.
+        let ok = compare-and-swap!(ch.queue, q, tail)
+        if ok {
+            {:some head}
+        } else {
+            try-receive-loop(ch)
+        }
+    }
+}
+
+// Blocking receive: spins until a value is available, then returns it.
+//
+// SPIN / BACKOFF
+//   Beagle has no condition variables or park/unpark, so this is a busy spin.
+//   To avoid pinning a core while idle we yield cooperatively: after each
+//   empty poll we burn a small, growing amount of CPU (a bounded counting
+//   loop) before re-polling. The backoff counter grows linearly each empty
+//   round and is capped, then resets the moment work appears. This keeps a
+//   hot channel low-latency while an empty channel doesn't spin at full tilt.
+//   On a single-consumer channel there is no thundering herd to worry about.
+fn receive(ch) {
+    receive-spin(ch, 1)
+}
+
+fn receive-spin(ch, backoff) {
+    let r = try-receive(ch)
+    // r is {:some v} on success or {:none true} when empty. We test for the
+    // :none marker rather than map-pattern matching (keyword map patterns are
+    // not supported by the matcher), reading :some otherwise.
+    if get(r, :none) == true {
+        spin-backoff(backoff)
+        // grow backoff up to a cap (256), then hold
+        let next-backoff = if backoff < 256 { backoff * 2 } else { backoff }
+        receive-spin(ch, next-backoff)
+    } else {
+        get(r, :some)
+    }
+}
+
+// Burn `n` iterations of pure work so we are not re-polling the atom as fast
+// as the CPU can issue loads. Returns null. Kept deliberately trivial (a
+// counting loop) so it has no allocation and no GC interaction.
+fn spin-backoff(n) {
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        acc = acc + i
+        i = i + 1
+    }
+    null
+}
+
+// Current number of buffered (unreceived) elements. Snapshot — may be stale
+// the instant it returns under concurrency. Useful for tests / draining.
+fn channel-count(ch) {
+    length(deref(ch.queue))
+}
+
+// True iff the channel had no buffered elements at the moment we looked.
+fn channel-empty?(ch) {
+    channel-count(ch) == 0
+}
+
+// ---------------------------------------------------------------------------
+// Mutex: CAS-acquired lock
+// ---------------------------------------------------------------------------
+//
+// State is an atom holding a bool: false = unlocked, true = locked. Acquire
+// = CAS false -> true; release = reset! back to false. Acquisition spins
+// with the same growing backoff as receive. with-lock guarantees release
+// even if the thunk throws (try/catch), so a panicking critical section can't
+// permanently wedge the lock.
+
+struct Mutex {
+    locked   // atom of bool
+}
+
+fn make-mutex() {
+    Mutex { locked: atom(false) }
+}
+
+// Spin until we win the CAS that flips false -> true.
+fn acquire!(mutex) {
+    acquire-spin(mutex, 1)
+}
+
+fn acquire-spin(mutex, backoff) {
+    let got = compare-and-swap!(mutex.locked, false, true)
+    if got {
+        null
+    } else {
+        spin-backoff(backoff)
+        let next-backoff = if backoff < 256 { backoff * 2 } else { backoff }
+        acquire-spin(mutex, next-backoff)
+    }
+}
+
+// Release the lock. Unconditional — only the holder should call this.
+fn release!(mutex) {
+    reset!(mutex.locked, false)
+    null
+}
+
+// Run thunk while holding the mutex, releasing on both normal return and
+// exception. Returns the thunk's value.
+fn with-lock(mutex, thunk) {
+    acquire!(mutex)
+    try {
+        let result = thunk()
+        release!(mutex)
+        result
+    } catch (e) {
+        release!(mutex)
+        // re-surface the failure rather than swallow it
+        throw(e)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Counter: atomic integer
+// ---------------------------------------------------------------------------
+
+struct Counter {
+    value   // atom of int
+}
+
+fn make-counter() {
+    Counter { value: atom(0) }
+}
+
+// Atomically add 1 and return the NEW value. Inlined CAS loop (no closure
+// allocation) to minimize GC pressure on a hot counter.
+fn incr!(counter) {
+    add!(counter, 1)
+}
+
+// Atomically add a delta and return the NEW value.
+fn add!(counter, delta) {
+    let cur = deref(counter.value)
+    let next = cur + delta
+    let ok = compare-and-swap!(counter.value, cur, next)
+    if ok {
+        next
+    } else {
+        add!(counter, delta)
+    }
+}
+
+// Read the current value (snapshot).
+fn counter-value(counter) {
+    deref(counter.value)
+}

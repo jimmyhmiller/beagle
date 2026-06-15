@@ -9,6 +9,13 @@ use crate::types::{BuiltInTypes, Header, HeapObject, Word};
 
 use super::{AllocateAction, Allocator, AllocatorOptions, stack_walker::StackWalker};
 
+/// Shared with the generational card table so the Block Offset Table indexes by
+/// the exact same card geometry (a dirty card index is fed straight into the BOT).
+use crate::gc::generational::CARD_SIZE_LOG2;
+
+/// BOT sentinel: no live object starts in this card.
+const BOT_NONE: usize = usize::MAX;
+
 const DEFAULT_PAGE_COUNT: usize = 1024;
 // Aribtary number that should be changed when I have
 // better options for gc
@@ -290,6 +297,19 @@ pub struct MarkAndSweep {
     /// contiguous range `(offset, end)` carved out of the free list to absorb
     /// many small promotion copies without re-walking the free list per copy.
     promotion_bump: Option<(usize, usize)>,
+    /// Block Offset Table: one entry per card (same 512-byte cards as the
+    /// generational card table). `bot[card]` is the byte offset of the FIRST
+    /// live object whose base falls in that card, or [`BOT_NONE`] if none.
+    ///
+    /// Invariant: `bot[card]` is a conservative **lower bound** on the first
+    /// live object starting in the card. It's lowered whenever an object is
+    /// placed ([`bot_record`]) and made exact at every sweep; frees needn't
+    /// touch it because the dirty-card walk skips free regions, so starting the
+    /// walk at-or-before the true first object is always correct. This lets
+    /// `process_dirty_cards` jump straight to the objects in dirty cards instead
+    /// of walking the entire old generation. Old gen never compacts (sweep is
+    /// free-in-place), so object addresses — and thus BOT entries — stay valid.
+    bot: Vec<usize>,
 }
 
 struct PendingMark {
@@ -421,6 +441,7 @@ impl MarkAndSweep {
         let offset = self.free_list.allocate(size_bytes);
         if let Some(offset) = offset {
             self.space.update_highmark(offset);
+            self.bot_record(offset);
             if let Some(data) = data {
                 // When data is provided, copy it directly without first writing
                 // a temporary non-opaque header via write_object. The data already
@@ -467,6 +488,7 @@ impl MarkAndSweep {
                 let offset = *cursor;
                 *cursor += size;
                 self.space.update_highmark(offset);
+                self.bot_record(offset);
                 let pointer = self.space.copy_data_to_offset(offset, data) as *const u8;
                 assert!(self.space.contains(pointer));
                 return pointer;
@@ -480,6 +502,7 @@ impl MarkAndSweep {
             return self.copy_data_to_offset(data);
         };
         self.space.update_highmark(offset);
+        self.bot_record(offset);
         let pointer = self.space.copy_data_to_offset(offset, data) as *const u8;
         assert!(self.space.contains(pointer));
         pointer
@@ -622,6 +645,12 @@ impl MarkAndSweep {
             .into_iter()
             .peekable();
         let mut rebuilt_free_list = FreeList::empty_with_capacity(existing_range_count + 8);
+        // Rebuild the BOT from scratch as we walk: clear it, then record each
+        // live object below. The walk is in ascending offset order, so the
+        // first live object in each card sets that card's entry exactly. This
+        // is free — the sweep already visits every object.
+        self.bot_resize();
+        self.bot.iter_mut().for_each(|e| *e = BOT_NONE);
         let mut offset = 0;
 
         while offset <= self.space.highmark {
@@ -657,6 +686,7 @@ impl MarkAndSweep {
 
             if heap_object.marked() {
                 heap_object.unmark();
+                self.bot_record(offset);
                 offset += full_size;
                 offset = (offset + 7) & !7;
                 continue;
@@ -698,11 +728,69 @@ impl MarkAndSweep {
     pub fn new_with_page_count(page_count: usize, options: AllocatorOptions) -> Self {
         let space = Space::new(page_count);
         let size = space.byte_count();
+        let card_count = size.div_ceil(1 << CARD_SIZE_LOG2);
         Self {
             space,
             free_list: FreeList::new(FreeListEntry { offset: 0, size }),
             options,
             promotion_bump: None,
+            bot: vec![BOT_NONE; card_count],
+        }
+    }
+
+    /// Record that a live object now starts at `offset` (relative to heap start).
+    /// Lowers the card's BOT entry if this object precedes the current one — the
+    /// lower-bound invariant. O(1); called at every old-gen placement.
+    #[inline]
+    fn bot_record(&mut self, offset: usize) {
+        let card = offset >> CARD_SIZE_LOG2;
+        if card < self.bot.len() && offset < self.bot[card] {
+            self.bot[card] = offset;
+        }
+    }
+
+    /// Extend the BOT to cover the (possibly grown) heap. New tail cards start
+    /// empty. Kept in lock-step with the card table's resize on `grow`.
+    fn bot_resize(&mut self) {
+        let needed = self.space.byte_count().div_ceil(1 << CARD_SIZE_LOG2);
+        if needed > self.bot.len() {
+            self.bot.resize(needed, BOT_NONE);
+        }
+    }
+
+    /// Collect the live old-gen objects whose base falls in any of `dirty_cards`,
+    /// pushing each as a tagged `HeapObject` pointer onto `out`. This is the BOT
+    /// fast path that replaces walking the entire old generation: for each dirty
+    /// card we jump to `bot[card]` and walk forward (skipping free regions) only
+    /// until we leave the card. Total work is proportional to the objects in
+    /// dirty cards, not to the whole heap.
+    pub fn collect_objects_in_dirty_cards(&self, dirty_cards: &[usize], out: &mut Vec<usize>) {
+        let card_bytes = 1usize << CARD_SIZE_LOG2;
+        for &card in dirty_cards {
+            let start = match self.bot.get(card) {
+                // A card beyond the old-gen extent can't legitimately be dirty;
+                // tolerate it (e.g. a transient resize skew) rather than panic.
+                None => continue,
+                Some(&BOT_NONE) => panic!(
+                    "BOT invariant violated: dirty card {card} has no live object start. \
+                     A write-barrier-marked object went missing — an old→young edge would \
+                     be silently dropped (heap corruption). This must be fixed, not skipped."
+                ),
+                Some(&start) => start,
+            };
+            let card_end = (card + 1) * card_bytes;
+            let mut offset = start;
+            while offset < card_end && offset <= self.space.highmark {
+                if let Some(entry) = self.free_list.find_entry_contains(offset) {
+                    offset = entry.end();
+                    continue;
+                }
+                let ptr = unsafe { self.space.start.add(offset) };
+                let heap_object = HeapObject::from_untagged(ptr);
+                out.push(BuiltInTypes::HeapObject.tag(ptr as isize) as usize);
+                offset += heap_object.full_size();
+                offset = (offset + 7) & !7;
+            }
         }
     }
 
@@ -790,6 +878,22 @@ impl MarkAndSweep {
                         .structs
                         .migration_plan_for(struct_id, layout_version)
                     {
+                        // Resolve defaults for fields new to this layout to
+                        // GC-stable tagged values (no heap allocation), so a
+                        // migrated object gets its field defaults, not null.
+                        let def = runtime.get_struct_by_id(struct_id);
+                        let new_field_defaults: Vec<usize> = plan
+                            .field_map
+                            .iter()
+                            .enumerate()
+                            .map(|(new_idx, mapping)| match mapping {
+                                Some(_) => BuiltInTypes::null_value() as usize,
+                                None => def
+                                    .as_ref()
+                                    .map(|d| runtime.field_default_value_at(d, new_idx))
+                                    .unwrap_or(BuiltInTypes::null_value() as usize),
+                            })
+                            .collect();
                         let old_header = heap_object.get_header();
                         let new_header = Header {
                             type_id: old_header.type_id,
@@ -805,11 +909,13 @@ impl MarkAndSweep {
                         let mut data = vec![0u8; total_bytes];
                         data[0..8].copy_from_slice(&new_header.to_usize().to_ne_bytes());
 
-                        let null_val = BuiltInTypes::null_value() as usize;
                         for (new_idx, mapping) in plan.field_map.iter().enumerate() {
                             let value = match mapping {
                                 Some(old_idx) => heap_object.get_field(*old_idx),
-                                None => null_val,
+                                None => new_field_defaults
+                                    .get(new_idx)
+                                    .copied()
+                                    .unwrap_or(BuiltInTypes::null_value() as usize),
                             };
                             let field_offset = (1 + new_idx) * 8;
                             data[field_offset..field_offset + 8]
@@ -984,6 +1090,9 @@ impl Allocator for MarkAndSweep {
             offset: current_max_offset,
             size: after_max_offset - current_max_offset,
         });
+        // Extend the BOT to cover the new tail cards (kept in lock-step with the
+        // card table, which `GenerationalGC::grow` resizes right after this).
+        self.bot_resize();
     }
 
     fn get_allocation_options(&self) -> AllocatorOptions {

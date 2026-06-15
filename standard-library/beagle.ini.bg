@@ -1,0 +1,288 @@
+namespace beagle.ini
+
+use beagle.string-builder as sb
+
+// INI / .conf config parser + writer (PURE Beagle).
+//
+//   parse(text)      -> Map of section-keyword -> (Map of string-key -> string-value)
+//   stringify(data)  -> String
+//
+// KEY/VALUE MODEL
+//   - Section names are KEYWORD keys (e.g. [db] -> :db). Keys that appear
+//     before any [section] header live in a DEFAULT section under the
+//     keyword :default. The :default section is only present if such keys
+//     actually exist.
+//   - Within a section, property keys are STRING keys and values are STRINGS.
+//     (INI has no real types; everything is text.)
+//
+// SYNTAX HANDLED
+//   - [section] headers (surrounding whitespace inside the brackets trimmed).
+//   - key=value AND key:value. The FIRST '=' or ':' on the line is the
+//     separator; whichever comes first wins. Any later '=' / ':' is part of
+//     the value.
+//   - Comments: a line whose first non-whitespace character is ';' or '#'
+//     is ignored. (Inline/trailing comments are NOT stripped — a ';' or '#'
+//     in the middle of a value is kept literally, which keeps round-tripping
+//     lossless. This is documented behavior.)
+//   - Blank / whitespace-only lines are ignored.
+//   - Whitespace around keys and values is trimmed.
+//   - Quoted values: if a (trimmed) value both begins and ends with a double
+//     quote, the surrounding quotes are stripped and the inner text is taken
+//     literally (no escape processing). stringify re-quotes a value only when
+//     it needs it (leading/trailing whitespace, or contains a quote), so the
+//     round trip stringify(parse(x)) re-parses equal.
+//   - Duplicate keys: last one wins (later assoc overwrites).
+//   - Both '\n' and '\r\n' line endings are accepted on parse.
+//
+//   parse("[db]\nhost=localhost\nport=5432\n; comment\n[web]\ndebug=true")
+//     == {:db {"host" "localhost", "port" "5432"}, :web {"debug" "true"}}
+
+let SEMICOLON = char-code(";")
+let HASH = char-code("#")
+let LBRACKET = char-code("[")
+let RBRACKET = char-code("]")
+let EQUALS = char-code("=")
+let COLON = char-code(":")
+let QUOTE = char-code("\"")
+let SPACE = char-code(" ")
+let TAB = char-code("\t")
+let CR = char-code("\r")
+let LF = char-code("\n")
+
+let DEFAULT_SECTION = :default
+
+// ---------------------------------------------------------------------------
+// Small string helpers (byte-based, ASCII whitespace)
+// ---------------------------------------------------------------------------
+
+fn ws?(c) {
+    c == SPACE || c == TAB || c == CR || c == LF
+}
+
+// Index of the first non-whitespace byte in s[start:end], or end if none.
+fn skip-ws-forward(s, start, end) {
+    let mut i = start
+    while i < end && ws?(char-code(s[i])) {
+        i = i + 1
+    }
+    i
+}
+
+// Index one past the last non-whitespace byte in s[start:end].
+// Returns `start` if the whole range is whitespace.
+fn trim-ws-backward(s, start, end) {
+    let mut i = end
+    while i > start && ws?(char-code(s[i - 1])) {
+        i = i - 1
+    }
+    i
+}
+
+// Trim ASCII whitespace from s[start:end] and return the substring.
+fn trim-range(s, start, end) {
+    let lo = skip-ws-forward(s, start, end)
+    let hi = trim-ws-backward(s, lo, end)
+    substring(s, lo, hi)
+}
+
+// ---------------------------------------------------------------------------
+// Parsing
+// ---------------------------------------------------------------------------
+
+// Strip a single pair of surrounding double quotes from an already-trimmed
+// value, returning the inner text. If not quoted, returns the value as-is.
+fn unquote-value(v) {
+    let n = length(v)
+    if n >= 2 && char-code(v[0]) == QUOTE && char-code(v[n - 1]) == QUOTE {
+        substring(v, 1, n - 1)
+    } else {
+        v
+    }
+}
+
+// Index of the first '=' or ':' in s[start:end], or -1 if neither occurs.
+fn find-separator(s, start, end) {
+    let mut i = start
+    let mut found = -1
+    while i < end && found == -1 {
+        let c = char-code(s[i])
+        if c == EQUALS || c == COLON {
+            found = i
+        }
+        i = i + 1
+    }
+    found
+}
+
+// Parse the full INI text into a map of section-keyword -> property map.
+fn parse(text) {
+    let n = length(text)
+    let mut result = {}
+    let mut current = DEFAULT_SECTION
+    // We only materialize the default section lazily, when a bare key is seen.
+    let mut line-start = 0
+    let mut i = 0
+
+    while i <= n {
+        // A logical line ends at LF, at end-of-input, or (handled below) at CR.
+        let at-end = i == n
+        let c = if at-end { LF } else { char-code(text[i]) }
+        if c == LF || c == CR {
+            let line-end = i
+            let res = parse-line(text, line-start, line-end, result, current)
+            result = res[0]
+            current = res[1]
+            // Consume CRLF as a single terminator.
+            if c == CR && i + 1 < n && char-code(text[i + 1]) == LF {
+                i = i + 2
+            } else {
+                i = i + 1
+            }
+            line-start = i
+        } else {
+            i = i + 1
+        }
+    }
+
+    result
+}
+
+// Process one raw line (text[start:end], no terminator). Returns
+// [updated-result, updated-current-section].
+fn parse-line(text, start, end, result, current) {
+    let lo = skip-ws-forward(text, start, end)
+    let hi = trim-ws-backward(text, lo, end)
+    if lo >= hi {
+        // Blank / whitespace-only line.
+        [result, current]
+    } else {
+        let first = char-code(text[lo])
+        if first == SEMICOLON || first == HASH {
+            // Full-line comment.
+            [result, current]
+        } else if first == LBRACKET && char-code(text[hi - 1]) == RBRACKET {
+            // Section header.
+            let name = trim-range(text, lo + 1, hi - 1)
+            let section-kw = string->keyword(name)
+            let new-result = if get(result, section-kw) == null {
+                assoc(result, section-kw, {})
+            } else {
+                result
+            }
+            [new-result, section-kw]
+        } else {
+            // Property line: key (= | :) value.
+            let sep = find-separator(text, lo, hi)
+            if sep == -1 {
+                // No separator — not a valid property; skip it.
+                [result, current]
+            } else {
+                let key = trim-range(text, lo, sep)
+                let raw-val = trim-range(text, sep + 1, hi)
+                let val = unquote-value(raw-val)
+                let section = if get(result, current) == null {
+                    {}
+                } else {
+                    get(result, current)
+                }
+                let new-section = assoc(section, key, val)
+                let new-result = assoc(result, current, new-section)
+                [new-result, current]
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Writing
+// ---------------------------------------------------------------------------
+
+// A value needs quoting on write if trimming it would change it (leading or
+// trailing whitespace) or if it contains a double quote. Quoting preserves
+// those values across a parse round-trip.
+fn value-needs-quoting?(s) {
+    let n = length(s)
+    if n == 0 {
+        false
+    } else {
+        let leading-ws = ws?(char-code(s[0]))
+        let trailing-ws = ws?(char-code(s[n - 1]))
+        if leading-ws || trailing-ws {
+            true
+        } else {
+            let mut i = 0
+            let mut has-quote = false
+            while i < n && has-quote == false {
+                if char-code(s[i]) == QUOTE {
+                    has-quote = true
+                }
+                i = i + 1
+            }
+            has-quote
+        }
+    }
+}
+
+fn write-value!(builder, s) {
+    if value-needs-quoting?(s) {
+        sb/append-byte!(builder, QUOTE)
+        sb/append!(builder, s)
+        sb/append-byte!(builder, QUOTE)
+    } else {
+        sb/append!(builder, s)
+    }
+    null
+}
+
+// Append all "key=value" lines for one section's property map.
+fn write-section-body!(builder, section) {
+    let ks = keys(section)
+    let kn = length(ks)
+    let mut i = 0
+    while i < kn {
+        let key = ks[i]
+        let val = get(section, key)
+        sb/append!(builder, to-string(key))
+        sb/append-byte!(builder, EQUALS)
+        write-value!(builder, to-string(val))
+        sb/append-byte!(builder, LF)
+        i = i + 1
+    }
+    null
+}
+
+// Serialize a parsed-shape map back into INI text. The :default section (if
+// present) is emitted first WITHOUT a header so its keys round-trip as
+// pre-section keys; all other sections get a [name] header. Uses '\n' line
+// endings and '=' as the separator.
+fn stringify(data) {
+    let builder = sb/new(256)
+    // Default section first, header-less.
+    let default-section = get(data, DEFAULT_SECTION)
+    if default-section != null {
+        write-section-body!(builder, default-section)
+    }
+    let section-keys = keys(data)
+    let sn = length(section-keys)
+    let mut i = 0
+    let mut wrote-any = default-section != null
+    while i < sn {
+        let skey = section-keys[i]
+        if skey == DEFAULT_SECTION {
+            // Already handled above.
+            i = i + 1
+        } else {
+            if wrote-any {
+                sb/append-byte!(builder, LF)
+            }
+            sb/append-byte!(builder, LBRACKET)
+            sb/append!(builder, keyword->string(skey))
+            sb/append-byte!(builder, RBRACKET)
+            sb/append-byte!(builder, LF)
+            write-section-body!(builder, get(data, skey))
+            wrote-any = true
+            i = i + 1
+        }
+    }
+    sb/to-string(builder)
+}

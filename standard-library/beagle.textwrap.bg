@@ -1,0 +1,364 @@
+namespace beagle.textwrap
+
+// beagle.textwrap — text wrapping / filling / (de)indenting utilities,
+// mirroring Python's `textwrap` module.
+//
+// PURE BEAGLE. Built on top of core string primitives (length, get/[],
+// substring, split, index-of, trim, ++) plus beagle.text for whitespace
+// helpers and beagle.string-builder for efficient accumulation.
+//
+// Public API:
+//   wrap(text, width)                 -> vector of lines (greedy word-wrap)
+//   fill(text, width)                 -> wrapped text joined with "\n"
+//   dedent(text)                      -> remove common leading whitespace
+//   indent(text, prefix)              -> prefix every non-empty line
+//   shorten(text, width, placeholder) -> truncate words to fit, add placeholder
+//
+// VECTORS (verified against Python textwrap):
+//   wrap("the quick brown fox", 9) == ["the quick", "brown fox"]
+//   fill round-trips: fill(text, w) == join(wrap(text, w), "\n")
+//   dedent("    a\n    b") == "a\nb"
+//   indent("a\nb", "> ") == "> a\n> b"
+
+use beagle.string-builder as sb
+
+// ---------------------------------------------------------------------------
+// Whitespace helpers (ASCII)
+// ---------------------------------------------------------------------------
+
+// char-code of s[i]
+fn code-at(s, i) {
+    char-code(s[i])
+}
+
+// Is the code point an ASCII whitespace character?
+fn ws-code?(c) {
+    c == 32 || c == 9 || c == 10 || c == 13 || c == 12 || c == 11
+}
+
+// Is the single-char string ch whitespace?
+fn ws-char?(ch) {
+    ws-code?(char-code(ch))
+}
+
+// ---------------------------------------------------------------------------
+// wrap
+// ---------------------------------------------------------------------------
+
+// Split text into whitespace-delimited words. Runs of whitespace are
+// collapsed; leading/trailing whitespace is dropped. Returns a vector of
+// non-empty word strings.
+fn split-words(text) {
+    let len = length(text)
+    let mut acc = []
+    let mut i = 0
+    let mut start = 0
+    let mut in-word = false
+    while i < len {
+        let is-ws = ws-char?(text[i])
+        if in-word {
+            if is-ws {
+                acc = push(acc, substring(text, start, i))
+                in-word = false
+            }
+        } else {
+            if is-ws == false {
+                start = i
+                in-word = true
+            }
+        }
+        i = i + 1
+    }
+    if in-word {
+        acc = push(acc, substring(text, start, len))
+    }
+    acc
+}
+
+/// Greedy word-wrap `text` to lines of at most `width` characters.
+///
+/// Words are kept whole and never split. A line packs as many words as fit
+/// (joined with single spaces). A single word longer than `width` gets its
+/// own line and is allowed to overflow (it is NOT broken). Leading/trailing
+/// whitespace is stripped and internal whitespace runs are collapsed.
+///
+/// Returns a vector of line strings (empty vector for empty/whitespace-only
+/// input). Throws on width <= 0.
+///
+/// Examples:
+///   (wrap "the quick brown fox" 9)  ; => ["the quick", "brown fox"]
+///   (wrap "supercalifragilistic" 9) ; => ["supercalifragilistic"]
+///   (wrap "" 9)                      ; => []
+fn wrap(text, width) {
+    if width <= 0 {
+        throw("wrap: width must be > 0")
+    } else {
+        let words = split-words(text)
+        let n = length(words)
+        let mut lines = []
+        let mut cur = ""
+        let mut cur-len = 0
+        let mut i = 0
+        while i < n {
+            let w = words[i]
+            let wlen = length(w)
+            if cur-len == 0 {
+                // First word on the line: always place it (may overflow if
+                // it is longer than width — single long word is allowed).
+                cur = w
+                cur-len = wlen
+            } else {
+                if cur-len + 1 + wlen <= width {
+                    cur = cur ++ " " ++ w
+                    cur-len = cur-len + 1 + wlen
+                } else {
+                    lines = push(lines, cur)
+                    cur = w
+                    cur-len = wlen
+                }
+            }
+            i = i + 1
+        }
+        if cur-len > 0 {
+            lines = push(lines, cur)
+        }
+        lines
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fill
+// ---------------------------------------------------------------------------
+
+/// Wrap `text` to `width` and join the resulting lines with newlines.
+///
+/// Equivalent to `join(wrap(text, width), "\n")`. Returns "" for empty input.
+///
+/// Examples:
+///   (fill "the quick brown fox" 9)  ; => "the quick\nbrown fox"
+fn fill(text, width) {
+    let lines = wrap(text, width)
+    join(lines, "\n")
+}
+
+// ---------------------------------------------------------------------------
+// dedent
+// ---------------------------------------------------------------------------
+
+// Split text into lines on "\n", preserving empty lines and any trailing
+// empty segment (so "a\n" -> ["a", ""]). This is line-faithful, unlike the
+// whitespace-collapsing split-words above.
+fn split-lines-keep(text) {
+    let len = length(text)
+    let mut acc = []
+    let mut start = 0
+    let mut i = 0
+    while i < len {
+        if text[i] == "\n" {
+            acc = push(acc, substring(text, start, i))
+            start = i + 1
+        }
+        i = i + 1
+    }
+    acc = push(acc, substring(text, start, len))
+    acc
+}
+
+// Length of the leading whitespace run of a line.
+fn leading-ws-len(line) {
+    let len = length(line)
+    let mut i = 0
+    while i < len && ws-char?(line[i]) {
+        i = i + 1
+    }
+    i
+}
+
+// Is the line entirely whitespace (or empty)?
+fn blank-line?(line) {
+    leading-ws-len(line) == length(line)
+}
+
+// Length of the common leading-whitespace prefix shared by two whitespace
+// strings (compared char by char).
+fn common-prefix-len(a, b) {
+    let la = length(a)
+    let lb = length(b)
+    let mut lim = la
+    if lb < la {
+        lim = lb
+    }
+    let mut i = 0
+    while i < lim && a[i] == b[i] {
+        i = i + 1
+    }
+    i
+}
+
+/// Remove the longest common leading-whitespace prefix from every line.
+///
+/// Lines that consist solely of whitespace are ignored when computing the
+/// common prefix (matching Python's textwrap.dedent) and are normalized to
+/// empty lines in the output. Mixed tabs/spaces are compared literally.
+///
+/// Examples:
+///   (dedent "    a\n    b")    ; => "a\nb"
+///   (dedent "  a\n   b\n  c")  ; => "a\n b\nc"
+///   (dedent "")                ; => ""
+fn dedent(text) {
+    let lines = split-lines-keep(text)
+    let n = length(lines)
+
+    // Find the common leading-whitespace prefix across all non-blank lines.
+    let mut prefix = null
+    let mut i = 0
+    while i < n {
+        let line = lines[i]
+        if blank-line?(line) == false {
+            let ws = substring(line, 0, leading-ws-len(line))
+            if prefix == null {
+                prefix = ws
+            } else {
+                prefix = substring(prefix, 0, common-prefix-len(prefix, ws))
+            }
+        }
+        i = i + 1
+    }
+
+    let plen = if prefix == null { 0 } else { length(prefix) }
+
+    // Strip the prefix from each line; blank lines become "".
+    let builder = sb/new(length(text))
+    let mut j = 0
+    while j < n {
+        if j > 0 {
+            sb/append!(builder, "\n")
+        }
+        let line = lines[j]
+        if blank-line?(line) {
+            // emit nothing for the line body (already a newline separator)
+        } else {
+            sb/append!(builder, substring(line, plen, length(line)))
+        }
+        j = j + 1
+    }
+    sb/to-string(builder)
+}
+
+// ---------------------------------------------------------------------------
+// indent
+// ---------------------------------------------------------------------------
+
+/// Add `prefix` to the start of every non-empty line in `text`.
+///
+/// Lines that are empty or whitespace-only are left untouched (matching
+/// Python's textwrap.indent default predicate). A trailing newline in the
+/// input is preserved.
+///
+/// Examples:
+///   (indent "a\nb" "> ")     ; => "> a\n> b"
+///   (indent "a\n\nb" "> ")   ; => "> a\n\n> b"
+///   (indent "a\nb\n" "> ")   ; => "> a\n> b\n"
+fn indent(text, prefix) {
+    let lines = split-lines-keep(text)
+    let n = length(lines)
+    let builder = sb/new(length(text) + length(prefix) * n)
+    let mut i = 0
+    while i < n {
+        if i > 0 {
+            sb/append!(builder, "\n")
+        }
+        let line = lines[i]
+        if blank-line?(line) {
+            sb/append!(builder, line)
+        } else {
+            sb/append!(builder, prefix)
+            sb/append!(builder, line)
+        }
+        i = i + 1
+    }
+    sb/to-string(builder)
+}
+
+// ---------------------------------------------------------------------------
+// shorten
+// ---------------------------------------------------------------------------
+
+/// Collapse whitespace in `text` and truncate it to fit in `width`,
+/// appending `placeholder` if any words were dropped.
+///
+/// Whitespace is collapsed (each run becomes a single space). If the
+/// collapsed text already fits within `width`, it is returned unchanged.
+/// Otherwise as many leading whole words as fit (together with the
+/// placeholder) are kept, and the placeholder is appended. If not even one
+/// word fits, the lstripped placeholder is returned (when it fits).
+///
+/// Throws on width <= 0, and (like Python's textwrap.shorten) when the
+/// placeholder itself is larger than `width`.
+///
+/// Examples:
+///   (shorten "Hello world this is long" 15 " [...]") ; => "Hello [...]"
+///   (shorten "Hello world" 20 " [...]")              ; => "Hello world"
+fn shorten(text, width, placeholder) {
+    if width <= 0 {
+        throw("shorten: width must be > 0")
+    } else {
+        let words = split-words(text)
+        let n = length(words)
+        let collapsed = join(words, " ")
+        if length(collapsed) <= width {
+            collapsed
+        } else {
+            // Need to drop words and append the placeholder. Greedily pack
+            // words such that (words + placeholder) fits in width.
+            let plen = length(placeholder)
+            let mut cur = ""
+            let mut cur-len = 0
+            let mut i = 0
+            let mut done = false
+            while i < n && done == false {
+                let w = words[i]
+                let wlen = length(w)
+                let candidate-len = if cur-len == 0 { wlen } else { cur-len + 1 + wlen }
+                // Reserve room for the placeholder after this candidate.
+                if candidate-len + plen <= width {
+                    if cur-len == 0 {
+                        cur = w
+                        cur-len = wlen
+                    } else {
+                        cur = cur ++ " " ++ w
+                        cur-len = cur-len + 1 + wlen
+                    }
+                    i = i + 1
+                } else {
+                    done = true
+                }
+            }
+            if cur-len == 0 {
+                // Not even one word fits with the placeholder. Python returns
+                // just the (lstripped) placeholder if it fits, and otherwise
+                // raises ValueError("placeholder too large for max width").
+                // Returning a truncated placeholder fragment ("[..") would be a
+                // silently-wrong result that no longer reads as an ellipsis.
+                let stripped = trim-left-ws(placeholder)
+                if length(stripped) <= width {
+                    stripped
+                } else {
+                    throw("shorten: placeholder too large for max width")
+                }
+            } else {
+                cur ++ placeholder
+            }
+        }
+    }
+}
+
+// Trim only leading whitespace from a string.
+fn trim-left-ws(s) {
+    let len = length(s)
+    let mut i = 0
+    while i < len && ws-char?(s[i]) {
+        i = i + 1
+    }
+    substring(s, i, len)
+}

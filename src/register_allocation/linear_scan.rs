@@ -150,10 +150,89 @@ impl LinearScan {
                 active.sort_by_key(|(_, end, _)| *end);
             }
         }
+        self.insert_safepoint_spills();
         self.replace_spilled_registers_with_spill();
         self.replace_virtual_with_allocated();
         // Frame size is determined by root slots — spills use root slot indices.
         self.stack_slot = self.next_root_slot;
+    }
+
+    /// GC correctness: the allocator's register pool is the CALLEE-SAVED set,
+    /// so a value kept in a register survives a call without being spilled —
+    /// but it's then invisible to the conservative frame-slot GC scan and goes
+    /// stale if a moving collection relocates the object (manifested as
+    /// nested-struct corruption like `op.field == op` on spawned threads under
+    /// --gc-always). For every register-resident value whose live range spans
+    /// a GC safepoint, save it to its root slot immediately BEFORE the
+    /// safepoint and reload it immediately AFTER (the GC scans+updates the root
+    /// slot, so the reload picks up the relocated pointer). Values already
+    /// spilled (in `location`) are memory-resident and need no help; argument
+    /// registers live at fixed ABI positions and are left alone. The
+    /// store/reload are single-operand `StoreLocal`/`LoadLocal`, so they don't
+    /// strain the backend's temporary-register budget.
+    fn insert_safepoint_spills(&mut self) {
+        let safepoints: Vec<usize> = self
+            .instructions
+            .iter()
+            .enumerate()
+            .filter(|(_, ins)| ins.is_gc_safepoint())
+            .map(|(i, _)| i)
+            .collect();
+        if safepoints.is_empty() {
+            return;
+        }
+
+        // For each safepoint index, the register-resident vregs live across it.
+        let mut per_safepoint: BTreeMap<usize, Vec<VirtualRegister>> = BTreeMap::new();
+        for (reg, (start, end)) in self.lifetimes.iter() {
+            if reg.argument.is_some() {
+                continue;
+            }
+            if !self.allocated_registers.contains_key(reg) {
+                continue; // spilled or unallocated — not register-resident
+            }
+            if self.location.contains_key(reg) {
+                continue; // already memory-resident
+            }
+            if !self.root_slots.contains_key(reg) {
+                continue;
+            }
+            for &s in &safepoints {
+                // Defined strictly before the safepoint and used strictly
+                // after it — i.e. it must survive the collection.
+                if *start < s && *end > s {
+                    per_safepoint.entry(s).or_default().push(*reg);
+                }
+            }
+        }
+        if per_safepoint.is_empty() {
+            return;
+        }
+
+        let mut new_instructions: Vec<Instruction> =
+            Vec::with_capacity(self.instructions.len() + per_safepoint.len() * 4);
+        for (idx, ins) in self.instructions.iter().enumerate() {
+            if let Some(regs) = per_safepoint.get(&idx) {
+                for r in regs {
+                    let root = *self.root_slots.get(r).unwrap();
+                    new_instructions.push(Instruction::StoreLocal(
+                        Value::Local(root),
+                        Value::Register(*r),
+                    ));
+                }
+                new_instructions.push(ins.clone());
+                for r in regs {
+                    let root = *self.root_slots.get(r).unwrap();
+                    new_instructions.push(Instruction::LoadLocal(
+                        Value::Register(*r),
+                        Value::Local(root),
+                    ));
+                }
+            } else {
+                new_instructions.push(ins.clone());
+            }
+        }
+        self.instructions = new_instructions;
     }
 
     fn expire_old_intervals(

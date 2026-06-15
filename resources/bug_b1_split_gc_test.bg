@@ -1,0 +1,20 @@
+namespace bug_b1_split_gc_test
+
+// gc-always
+
+// B1 regression: split/words/lines previously collapsed every element to the
+// LAST substring under moving GC (each result string was collected before the
+// next, so all array slots aliased one reused address). Under gc-always this
+// reproduced deterministically. create_string_array now pins every freshly
+// allocated string with its own handle root across the whole build.
+
+fn main() {
+    println(split("alpha,beta,gamma,delta", ","))
+    println(words("the quick brown fox"))
+    println(lines("a\nb\nc"))
+}
+
+// @beagle.core.snapshot
+// [ "alpha", "beta", "gamma", "delta" ]
+// [ "the", "quick", "brown", "fox" ]
+// [ "a", "b", "c" ]

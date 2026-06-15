@@ -1,0 +1,27 @@
+namespace stale_field_default_pruned_test
+
+// Regression: an instance created at an old layout version, then read AFTER
+// enough struct redefinitions that its old definition was pruned (the
+// "old_def is None" path in Runtime::property_access), must still yield a
+// late-added field's literal DEFAULT — not null and not an out-of-bounds read.
+// This is what makes adding a defaulted field to a live, already-instantiated
+// struct (e.g. live-coding `stamina` onto a running game's Player) Just Work.
+
+fn main() {
+    eval("struct W { a }")
+    eval("let hold = atom(W { a: 1 })")
+    eval("struct W { a, f2: 2.0 }")
+    eval("struct W { a, f2: 2.0, f3: 3.0 }")
+    eval("struct W { a, f2: 2.0, f3: 3.0, f4: 4.0 }")
+    eval("struct W { a, f2: 2.0, f3: 3.0, f4: 4.0, f5: 5.0 }")
+    eval("struct W { a, f2: 2.0, f3: 3.0, f4: 4.0, f5: 5.0, f6: 6.0 }")
+    eval("struct W { a, f2: 2.0, f3: 3.0, f4: 4.0, f5: 5.0, f6: 6.0, f7: 7.0 }")
+    println(to-string(eval("deref(hold).a")))
+    println(to-string(eval("deref(hold).f7")))
+    println("done")
+}
+
+// @beagle.core.snapshot
+// 1
+// 7.0
+// done

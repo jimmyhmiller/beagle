@@ -220,6 +220,7 @@ pub fn verify_clobber_safety(
     physical: &Coloring,
     cross_safepoint: &std::collections::HashSet<VReg>,
     layout: &PhysicalLayout,
+    non_pointer: &std::collections::HashSet<VReg>,
 ) -> Result<(), VReg> {
     let is_caller_saved = |phys: u32| {
         layout.allocator_gp[layout.callee_saved_gp as usize..].contains(&phys)
@@ -233,9 +234,23 @@ pub fn verify_clobber_safety(
             continue;
         };
         if phys == PHYSICAL_OVERFLOW {
+            // Spilled to a (GC-scanned) slot — safe in every sense.
             continue;
         }
         if is_caller_saved(phys) {
+            // Clobbered by the call — never safe.
+            return Err(v);
+        }
+        // Callee-saved register: survives the call, but the conservative GC
+        // scans only frame slots, NOT registers. A value that might be a
+        // relocatable heap pointer is therefore invisible here and goes stale
+        // if a moving collection runs at the safepoint. Bail to the legacy
+        // path (whose allocator spills live values to root slots across
+        // safepoints — GC-correct). Provably non-pointer values are exempt:
+        // the GC never relocates a tagged immediate. (mem2reg's I9 gate
+        // normally keeps maybe-pointer cross-safepoint values slotted, so this
+        // bail is rare — it catches the cases that would otherwise corrupt.)
+        if !non_pointer.contains(&v) {
             return Err(v);
         }
     }

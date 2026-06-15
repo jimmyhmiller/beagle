@@ -1,0 +1,88 @@
+namespace bot_dirty_card_test
+
+// Block Offset Table regression. `process_dirty_cards` uses the old generation's
+// BOT (mark_and_sweep.rs) to jump straight to the objects whose base falls in a
+// dirty card, instead of walking the entire old gen. This stresses that mapping:
+//
+//   * many long-lived (old) atoms spread across many cards,
+//   * a large long-lived array so the old gen contains multi-card object spans,
+//   * several rounds where every old atom receives a FRESH young struct (an
+//     old->young edge that must be card-marked and then re-found via the BOT at
+//     the next minor GC), with a full verification read after each round's GC.
+//
+// If the BOT fails to locate an object in a dirty card, that young struct is
+// dropped across a collection and a later read sees a corrupted tag -> bad
+// increments. Must be 0.
+//
+// NB: this test intentionally drives GC at the critical points with explicit
+// `gc()` and promotes in bulk to stay fast. It must NOT run in collect-on-every-
+// allocation mode (that would do tens of thousands of full collections and time
+// the suite out for no extra coverage); concurrent_card_table_barrier_test
+// already provides that coverage. (Avoid writing the stress-mode marker comment
+// here — the runner enables the mode for any file whose source contains it.)
+
+struct Tagged { tag, n }
+
+fn build(n) {
+    let mut xs = []
+    let mut i = 0
+    while i < n {
+        xs = push(xs, atom(Tagged { tag: 99, n: i }))
+        i = i + 1
+    }
+    // Promote the whole long-lived set to old gen at once.
+    gc()
+    gc()
+    gc()
+    xs
+}
+
+fn big_array(n) {
+    let mut a = []
+    let mut i = 0
+    while i < n {
+        a = push(a, i)
+        i = i + 1
+    }
+    a
+}
+
+fn round(atoms, r) {
+    let mut i = 0
+    let mut bad = 0
+    while i < length(atoms) {
+        // Fresh young object written into a long-lived old atom: old->young edge.
+        reset!(atoms[i], Tagged { tag: 99, n: r * 100000 + i })
+        i = i + 1
+    }
+    gc()
+    i = 0
+    while i < length(atoms) {
+        let t = deref(atoms[i])
+        if t.tag != 99 { bad = bad + 1 }
+        i = i + 1
+    }
+    bad
+}
+
+fn main() {
+    // A large long-lived structure so the old gen holds multi-card object spans.
+    let big = atom(big_array(20000))
+    gc()
+    gc()
+    let atoms = build(1000)
+    let mut total_bad = 0
+    let mut r = 0
+    while r < 6 {
+        total_bad = total_bad + round(atoms, r)
+        r = r + 1
+    }
+    // Keep `big` reachable so it isn't reclaimed; sanity-check it survived.
+    if length(deref(big)) != 20000 { total_bad = total_bad + 1 }
+    println("bad=" ++ to-string(total_bad))
+    println("done")
+}
+
+// @beagle.core.snapshot
+// bad=0
+// done

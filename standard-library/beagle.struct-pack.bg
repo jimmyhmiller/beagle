@@ -1,0 +1,533 @@
+namespace beagle.struct-pack
+
+// beagle.struct-pack — fixed-width integer binary serialization, mirroring a
+// useful subset of Python's `struct` module.
+//
+// Bytes are modeled as a Vec<Int>, each element in 0..255 (same convention as
+// beagle.hex / beagle.base64). All values stay within Beagle's 62-bit ints;
+// a u32 (max 0xFFFFFFFF) fits comfortably.
+//
+// Endianness: big-endian is the DEFAULT for the bare names (pack-u16, pack-u32,
+// pack-i16, pack-i32). Little-endian variants carry a `-le` suffix, and explicit
+// big-endian variants carry a `-be` suffix (identical to the bare name).
+//
+// Examples:
+//   pack-u16-be(0x0102)        == [1, 2]
+//   pack-u16-le(0x0102)        == [2, 1]
+//   pack-u32-be(0x01020304)    == [1, 2, 3, 4]
+//   unpack-u32-be([1,2,3,4],0) == 0x01020304   (16909060)
+//   pack-i16-be(-1)            == [255, 255]   (two's complement)
+//   pack(">HHB", [0x0102, 0x0304, 0x05]) == [1, 2, 3, 4, 5]
+//   unpack(">HHB", [1,2,3,4,5])           == [258, 772, 5]
+
+// ---------------------------------------------------------------------------
+// Masking helpers — keep everything in unsigned byte/word ranges.
+// ---------------------------------------------------------------------------
+
+// Range-check an unsigned pack value, mirroring Python struct.error. Returns
+// the value unchanged when in [0, hi]; otherwise throws a clear error instead
+// of silently masking it to the field width (which would corrupt the output).
+fn require-unsigned(value, hi, code) {
+    if value < 0 || value > hi {
+        throw("beagle.struct-pack: value " ++ to-string(value) ++ " out of range for unsigned '" ++ code ++ "' (0.." ++ to-string(hi) ++ ")")
+    } else {
+        value
+    }
+}
+
+// Range-check a signed pack value against [lo, hi].
+fn require-signed(value, lo, hi, code) {
+    if value < lo || value > hi {
+        throw("beagle.struct-pack: value " ++ to-string(value) ++ " out of range for signed '" ++ code ++ "' (" ++ to-string(lo) ++ ".." ++ to-string(hi) ++ ")")
+    } else {
+        value
+    }
+}
+
+// Mask a value to its low `bytes`*8 bits, interpreting it as unsigned. This is
+// how a signed negative value becomes its two's-complement representation:
+// e.g. (-1) masked to 16 bits => 0xFFFF.
+fn mask-bits(value, bits) {
+    if bits >= 62 {
+        value
+    } else {
+        let m = (1 << bits) - 1
+        value & m
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 8-bit
+// ---------------------------------------------------------------------------
+
+/// Pack an unsigned 8-bit value into a single-byte Vec<Int>.
+fn pack-u8(value) {
+    [require-unsigned(value, 0xFF, "B") & 0xFF]
+}
+
+/// Pack a signed 8-bit value (two's complement) into a single-byte Vec<Int>.
+fn pack-i8(value) {
+    [mask-bits(require-signed(value, -128, 0x7F, "b"), 8) & 0xFF]
+}
+
+/// Read an unsigned byte at `offset`.
+fn unpack-u8(bytes, offset) {
+    bytes[offset] & 0xFF
+}
+
+/// Read a signed byte (two's complement) at `offset`.
+fn unpack-i8(bytes, offset) {
+    let v = bytes[offset] & 0xFF
+    if v >= 0x80 {
+        v - 0x100
+    } else {
+        v
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 16-bit
+// ---------------------------------------------------------------------------
+
+/// Pack an unsigned 16-bit value as big-endian (high byte first).
+fn pack-u16-be(value) {
+    let v = require-unsigned(value, 0xFFFF, "H") & 0xFFFF
+    [(v >> 8) & 0xFF, v & 0xFF]
+}
+
+/// Pack an unsigned 16-bit value as little-endian (low byte first).
+fn pack-u16-le(value) {
+    let v = require-unsigned(value, 0xFFFF, "H") & 0xFFFF
+    [v & 0xFF, (v >> 8) & 0xFF]
+}
+
+/// Pack an unsigned 16-bit value (big-endian default).
+fn pack-u16(value) {
+    pack-u16-be(value)
+}
+
+/// Pack a signed 16-bit value (two's complement) as big-endian.
+fn pack-i16-be(value) {
+    pack-u16-be(mask-bits(require-signed(value, -32768, 0x7FFF, "h"), 16))
+}
+
+/// Pack a signed 16-bit value (two's complement) as little-endian.
+fn pack-i16-le(value) {
+    pack-u16-le(mask-bits(require-signed(value, -32768, 0x7FFF, "h"), 16))
+}
+
+/// Pack a signed 16-bit value (big-endian default).
+fn pack-i16(value) {
+    pack-i16-be(value)
+}
+
+/// Read an unsigned big-endian 16-bit value at `offset`.
+fn unpack-u16-be(bytes, offset) {
+    ((bytes[offset] & 0xFF) << 8) | (bytes[offset + 1] & 0xFF)
+}
+
+/// Read an unsigned little-endian 16-bit value at `offset`.
+fn unpack-u16-le(bytes, offset) {
+    (bytes[offset] & 0xFF) | ((bytes[offset + 1] & 0xFF) << 8)
+}
+
+/// Read an unsigned 16-bit value (big-endian default).
+fn unpack-u16(bytes, offset) {
+    unpack-u16-be(bytes, offset)
+}
+
+// Sign-extend an unsigned 16-bit value into a signed Int.
+fn sign16(v) {
+    if v >= 0x8000 {
+        v - 0x10000
+    } else {
+        v
+    }
+}
+
+/// Read a signed big-endian 16-bit value at `offset`.
+fn unpack-i16-be(bytes, offset) {
+    sign16(unpack-u16-be(bytes, offset))
+}
+
+/// Read a signed little-endian 16-bit value at `offset`.
+fn unpack-i16-le(bytes, offset) {
+    sign16(unpack-u16-le(bytes, offset))
+}
+
+/// Read a signed 16-bit value (big-endian default).
+fn unpack-i16(bytes, offset) {
+    unpack-i16-be(bytes, offset)
+}
+
+// ---------------------------------------------------------------------------
+// 32-bit
+// ---------------------------------------------------------------------------
+
+/// Pack an unsigned 32-bit value as big-endian (high byte first).
+fn pack-u32-be(value) {
+    let v = mask-bits(require-unsigned(value, 0xFFFFFFFF, "I"), 32)
+    [(v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF]
+}
+
+/// Pack an unsigned 32-bit value as little-endian (low byte first).
+fn pack-u32-le(value) {
+    let v = mask-bits(require-unsigned(value, 0xFFFFFFFF, "I"), 32)
+    [v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, (v >> 24) & 0xFF]
+}
+
+/// Pack an unsigned 32-bit value (big-endian default).
+fn pack-u32(value) {
+    pack-u32-be(value)
+}
+
+/// Pack a signed 32-bit value (two's complement) as big-endian.
+fn pack-i32-be(value) {
+    pack-u32-be(mask-bits(require-signed(value, -2147483648, 0x7FFFFFFF, "i"), 32))
+}
+
+/// Pack a signed 32-bit value (two's complement) as little-endian.
+fn pack-i32-le(value) {
+    pack-u32-le(mask-bits(require-signed(value, -2147483648, 0x7FFFFFFF, "i"), 32))
+}
+
+/// Pack a signed 32-bit value (big-endian default).
+fn pack-i32(value) {
+    pack-i32-be(value)
+}
+
+/// Read an unsigned big-endian 32-bit value at `offset`.
+fn unpack-u32-be(bytes, offset) {
+    ((bytes[offset] & 0xFF) << 24)
+        | ((bytes[offset + 1] & 0xFF) << 16)
+        | ((bytes[offset + 2] & 0xFF) << 8)
+        | (bytes[offset + 3] & 0xFF)
+}
+
+/// Read an unsigned little-endian 32-bit value at `offset`.
+fn unpack-u32-le(bytes, offset) {
+    (bytes[offset] & 0xFF)
+        | ((bytes[offset + 1] & 0xFF) << 8)
+        | ((bytes[offset + 2] & 0xFF) << 16)
+        | ((bytes[offset + 3] & 0xFF) << 24)
+}
+
+/// Read an unsigned 32-bit value (big-endian default).
+fn unpack-u32(bytes, offset) {
+    unpack-u32-be(bytes, offset)
+}
+
+// Sign-extend an unsigned 32-bit value into a signed Int.
+fn sign32(v) {
+    if v >= 0x80000000 {
+        v - 0x100000000
+    } else {
+        v
+    }
+}
+
+/// Read a signed big-endian 32-bit value at `offset`.
+fn unpack-i32-be(bytes, offset) {
+    sign32(unpack-u32-be(bytes, offset))
+}
+
+/// Read a signed little-endian 32-bit value at `offset`.
+fn unpack-i32-le(bytes, offset) {
+    sign32(unpack-u32-le(bytes, offset))
+}
+
+/// Read a signed 32-bit value (big-endian default).
+fn unpack-i32(bytes, offset) {
+    unpack-i32-be(bytes, offset)
+}
+
+// ---------------------------------------------------------------------------
+// Format-string driven pack / unpack
+//
+// A format string is an optional leading byte-order char followed by one or
+// more field codes:
+//
+//   byte order:  '>' big-endian (default)   '<' little-endian
+//   codes:       'b' i8   'B' u8
+//                'h' i16  'H' u16
+//                'i' i32  'I' u32
+//
+// Whitespace in the format string is ignored.
+// ---------------------------------------------------------------------------
+
+// Append every element of `src` (a Vec<Int>) onto `dst`, returning the new Vec.
+fn append-all(dst, src) {
+    let n = count(src)
+    let mut out = dst
+    let mut i = 0
+    while i < n {
+        out = push(out, src[i])
+        i = i + 1
+    }
+    out
+}
+
+// Decide whether a format char selects little-endian. `>` and `!` are big,
+// `<` is little, `=` is native (little-endian on all currently-supported
+// Beagle targets: arm64 and x86_64). Default (no order char) is big-endian,
+// matching this module's documented bare-name convention (NOT Python's, whose
+// no-prefix default is native — see pack/unpack docs).
+fn order-is-le(c) {
+    c == "<" || c == "="
+}
+
+// Number of bytes a field code occupies.
+fn code-width(c) {
+    if c == "b" || c == "B" {
+        1
+    } else {
+        if c == "h" || c == "H" {
+            2
+        } else {
+            if c == "i" || c == "I" {
+                4
+            } else {
+                throw("beagle.struct-pack: unknown format code '" ++ c ++ "'")
+            }
+        }
+    }
+}
+
+// Pack a single value for field code `c` with endianness `le`.
+fn pack-one(c, value, le) {
+    if c == "B" {
+        pack-u8(value)
+    } else {
+        if c == "b" {
+            pack-i8(value)
+        } else {
+            if c == "H" {
+                if le { pack-u16-le(value) } else { pack-u16-be(value) }
+            } else {
+                if c == "h" {
+                    if le { pack-i16-le(value) } else { pack-i16-be(value) }
+                } else {
+                    if c == "I" {
+                        if le { pack-u32-le(value) } else { pack-u32-be(value) }
+                    } else {
+                        if c == "i" {
+                            if le { pack-i32-le(value) } else { pack-i32-be(value) }
+                        } else {
+                            throw("beagle.struct-pack: unknown format code '" ++ c ++ "'")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Unpack a single value for field code `c` at `offset` with endianness `le`.
+fn unpack-one(c, bytes, offset, le) {
+    if c == "B" {
+        unpack-u8(bytes, offset)
+    } else {
+        if c == "b" {
+            unpack-i8(bytes, offset)
+        } else {
+            if c == "H" {
+                if le { unpack-u16-le(bytes, offset) } else { unpack-u16-be(bytes, offset) }
+            } else {
+                if c == "h" {
+                    if le { unpack-i16-le(bytes, offset) } else { unpack-i16-be(bytes, offset) }
+                } else {
+                    if c == "I" {
+                        if le { unpack-u32-le(bytes, offset) } else { unpack-u32-be(bytes, offset) }
+                    } else {
+                        if c == "i" {
+                            if le { unpack-i32-le(bytes, offset) } else { unpack-i32-be(bytes, offset) }
+                        } else {
+                            throw("beagle.struct-pack: unknown format code '" ++ c ++ "'")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Is this format char an endianness marker?
+fn is-order-char(c) {
+    c == ">" || c == "<" || c == "!" || c == "="
+}
+
+// Is this char whitespace to be skipped?
+fn is-skip-char(c) {
+    c == " " || c == "\t" || c == "\n" || c == "\r"
+}
+
+// Find the starting index of the field codes, and the endianness, by scanning a
+// leading order char. Returns the field-start index (0 or 1).
+fn format-body-start(format) {
+    if length(format) > 0 && is-order-char(format[0]) {
+        1
+    } else {
+        0
+    }
+}
+
+// Determine little-endian-ness from a format string's optional leading char.
+fn format-is-le(format) {
+    length(format) > 0 && order-is-le(format[0])
+}
+
+/// Pack a vector of `values` according to `format`, returning a Vec<Int> of
+/// bytes. Each field code consumes one value in order.
+///
+///   pack(">HHB", [0x0102, 0x0304, 0x05]) == [1, 2, 3, 4, 5]
+fn pack(format, values) {
+    let le = format-is-le(format)
+    let start = format-body-start(format)
+    let n = length(format)
+    let mut out = []
+    let mut i = start
+    let mut vi = 0
+    while i < n {
+        let c = format[i]
+        if is-skip-char(c) {
+            i = i + 1
+        } else {
+            if vi >= count(values) {
+                throw("beagle.struct-pack/pack: not enough values for format")
+            }
+            out = append-all(out, pack-one(c, values[vi], le))
+            vi = vi + 1
+            i = i + 1
+        }
+    }
+    out
+}
+
+/// Unpack `bytes` according to `format`, returning a Vec<Int> of values in
+/// field order.
+///
+///   unpack(">HHB", [1,2,3,4,5]) == [258, 772, 5]
+fn unpack(format, bytes) {
+    let le = format-is-le(format)
+    let start = format-body-start(format)
+    let n = length(format)
+    let mut out = []
+    let mut i = start
+    let mut offset = 0
+    while i < n {
+        let c = format[i]
+        if is-skip-char(c) {
+            i = i + 1
+        } else {
+            let w = code-width(c)
+            if offset + w > count(bytes) {
+                throw("beagle.struct-pack/unpack: not enough bytes for format")
+            }
+            out = push(out, unpack-one(c, bytes, offset, le))
+            offset = offset + w
+            i = i + 1
+        }
+    }
+    out
+}
+
+/// Compute the total byte size of a `format` string (like Python's calcsize).
+fn calcsize(format) {
+    let start = format-body-start(format)
+    let n = length(format)
+    let mut total = 0
+    let mut i = start
+    while i < n {
+        let c = format[i]
+        if is-skip-char(c) {
+            i = i + 1
+        } else {
+            total = total + code-width(c)
+            i = i + 1
+        }
+    }
+    total
+}
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+fn main() {
+    let acc = atom({:passed 0 :failed 0})
+    fn check(name, actual, expected) {
+        if equal(actual, expected) {
+            swap!(acc, fn(r) { assoc(r, :passed, get(r, :passed) + 1) })
+            println("ok   " ++ name)
+        } else {
+            swap!(acc, fn(r) { assoc(r, :failed, get(r, :failed) + 1) })
+            println("FAIL " ++ name ++ ": expected " ++ format(expected, 1) ++ " got " ++ format(actual, 1))
+        }
+        null
+    }
+
+    check("pack-u8(200)", pack-u8(200), [200])
+    check("pack-i8(-1)", pack-i8(-1), [255])
+    check("unpack-u8", unpack-u8([200], 0), 200)
+    check("unpack-i8(-1)", unpack-i8([255], 0), -1)
+
+    check("pack-u16-be(0x0102)", pack-u16-be(0x0102), [1, 2])
+    check("pack-u16-le(0x0102)", pack-u16-le(0x0102), [2, 1])
+    check("pack-u16(0x0102) default be", pack-u16(0x0102), [1, 2])
+    check("unpack-u16-be", unpack-u16-be([1, 2], 0), 0x0102)
+    check("unpack-u16-le", unpack-u16-le([2, 1], 0), 0x0102)
+
+    check("pack-i16-be(-1)", pack-i16-be(-1), [255, 255])
+    check("pack-i16-le(-1)", pack-i16-le(-1), [255, 255])
+    check("pack-i16-be(-2)", pack-i16-be(-2), [255, 254])
+    check("unpack-i16-be(-1)", unpack-i16-be([255, 255], 0), -1)
+    check("unpack-i16-be(-2)", unpack-i16-be([255, 254], 0), -2)
+    check("unpack-i16-be(258)", unpack-i16-be([1, 2], 0), 258)
+
+    check("pack-u32-be(0x01020304)", pack-u32-be(0x01020304), [1, 2, 3, 4])
+    check("pack-u32-le(0x01020304)", pack-u32-le(0x01020304), [4, 3, 2, 1])
+    check("unpack-u32-be", unpack-u32-be([1, 2, 3, 4], 0), 0x01020304)
+    check("unpack-u32-le", unpack-u32-le([4, 3, 2, 1], 0), 0x01020304)
+    check("unpack-u32-be == 16909060", unpack-u32-be([1, 2, 3, 4], 0), 16909060)
+
+    check("pack-i32-be(-1)", pack-i32-be(-1), [255, 255, 255, 255])
+    check("pack-i32-le(-1)", pack-i32-le(-1), [255, 255, 255, 255])
+    check("pack-i32-be(-2)", pack-i32-be(-2), [255, 255, 255, 254])
+    check("unpack-i32-be(-1)", unpack-i32-be([255, 255, 255, 255], 0), -1)
+    check("unpack-i32-be(-2)", unpack-i32-be([255, 255, 255, 254], 0), -2)
+
+    // u32 max fits in 62-bit ints
+    check("pack-u32-be(0xFFFFFFFF)", pack-u32-be(0xFFFFFFFF), [255, 255, 255, 255])
+    check("unpack-u32-be(max)", unpack-u32-be([255, 255, 255, 255], 0), 0xFFFFFFFF)
+
+    // round-trips
+    check("rt u16-be 0x0102", unpack-u16-be(pack-u16-be(0x0102), 0), 0x0102)
+    check("rt u16-le 0xABCD", unpack-u16-le(pack-u16-le(0xABCD), 0), 0xABCD)
+    check("rt u32-be 0xDEADBEEF", unpack-u32-be(pack-u32-be(0xDEADBEEF), 0), 0xDEADBEEF)
+    check("rt u32-le 0xDEADBEEF", unpack-u32-le(pack-u32-le(0xDEADBEEF), 0), 0xDEADBEEF)
+    check("rt i16-be -12345", unpack-i16-be(pack-i16-be(-12345), 0), -12345)
+    check("rt i32-le -1000000", unpack-i32-le(pack-i32-le(-1000000), 0), -1000000)
+
+    // format-string driven
+    check("pack(>HHB)", pack(">HHB", [0x0102, 0x0304, 0x05]), [1, 2, 3, 4, 5])
+    check("unpack(>HHB)", unpack(">HHB", [1, 2, 3, 4, 5]), [258, 772, 5])
+    check("pack(<H)", pack("<H", [0x0102]), [2, 1])
+    check("unpack(<H)", unpack("<H", [2, 1]), [258])
+    check("pack(default be HB)", pack("HB", [0x0102, 0x05]), [1, 2, 5])
+    check("pack(>hi -1 -2)", pack(">hi", [-1, -2]), [255, 255, 255, 255, 255, 254])
+    check("unpack(>hi)", unpack(">hi", [255, 255, 255, 255, 255, 254]), [-1, -2])
+    check("calcsize(>HHB)", calcsize(">HHB"), 5)
+    check("calcsize(<iiB)", calcsize("<iiB"), 9)
+    check("pack with whitespace", pack("> H H B", [0x0102, 0x0304, 0x05]), [1, 2, 3, 4, 5])
+
+    // full round-trip via format string
+    check("rt format >iHb", unpack(">iHb", pack(">iHb", [-1000000, 0xBEEF, -5])), [-1000000, 0xBEEF, -5])
+
+    let r = deref(acc)
+    println("")
+    println("passed=" ++ to-string(get(r, :passed)) ++ " failed=" ++ to-string(get(r, :failed)))
+    if get(r, :failed) > 0 {
+        throw("beagle.struct-pack self-test FAILED")
+    }
+    "ok"
+}

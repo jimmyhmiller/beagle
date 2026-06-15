@@ -1,0 +1,750 @@
+namespace beagle.http
+
+// beagle.http — a cooperative single-thread HTTP/1.1 server + a simple
+// plaintext HTTP client, implemented purely in Beagle on top of
+// beagle.socket and beagle.string-builder.
+//
+// DESIGN
+// ------
+// SERVER. `serve(host, port, handler)` runs an accept loop on ONE thread.
+// For each connection it reads and parses the request (request line, headers,
+// optional body via Content-Length), calls the user handler (Request ->
+// Response), writes the response, and closes the connection (Connection:
+// close — keep-alive is intentionally out of scope for v1). Because the whole
+// loop lives on a single thread (no thread()-per-connection), it is GC-safe.
+//
+// ROUTER. `router(routes, not-found)` builds a handler that dispatches on
+// method + path. A route is `route(method, path, handler)`. If the path
+// matches but no method does, a 405 (with an Allow header) is returned; if
+// nothing matches, the `not-found` handler (default 404) is used.
+//
+// CLIENT. `request(method, host, port, path, headers, body)` opens a
+// connection, writes a request, and parses the response into a Response. The
+// `host` MUST be a string literal (a runtime constraint of the socket connect
+// builtin — see the note on `request`). `parse-url` splits an
+// `http://host[:port]/path` URL into parts.
+//
+// Headers are stored in a PersistentMap keyed by LOWERCASE header name, so
+// lookups are case-insensitive. Use `header(req, name)` to read one.
+
+use beagle.socket as socket
+use beagle.string-builder as sb
+use beagle.core as core
+
+// ===========================================================================
+// Data types
+// ===========================================================================
+
+// A parsed HTTP request.
+//   method   — uppercase string ("GET", "POST", ...)
+//   path     — the path portion only (no query), percent-encoding preserved
+//   query    — the raw query string after '?' ("" if none)
+//   version  — "HTTP/1.1" etc.
+//   headers  — PersistentMap, keys lowercased
+//   body     — the request body string ("" if none)
+struct Request {
+    method
+    path
+    query
+    version
+    headers
+    body
+}
+
+// An HTTP response to be written (server) or that was parsed (client).
+//   status   — Int status code (200, 404, ...)
+//   reason   — reason phrase string
+//   headers  — PersistentMap, keys lowercased
+//   body     — body string
+struct Response {
+    status
+    reason
+    headers
+    body
+}
+
+// A single route for the router.
+struct Route {
+    method
+    path
+    handler
+}
+
+// ===========================================================================
+// Status reason phrases
+// ===========================================================================
+
+let reason-table = {
+    200 "OK",
+    201 "Created",
+    202 "Accepted",
+    204 "No Content",
+    301 "Moved Permanently",
+    302 "Found",
+    303 "See Other",
+    304 "Not Modified",
+    307 "Temporary Redirect",
+    308 "Permanent Redirect",
+    400 "Bad Request",
+    401 "Unauthorized",
+    403 "Forbidden",
+    404 "Not Found",
+    405 "Method Not Allowed",
+    406 "Not Acceptable",
+    408 "Request Timeout",
+    409 "Conflict",
+    413 "Payload Too Large",
+    414 "URI Too Long",
+    415 "Unsupported Media Type",
+    418 "I'm a teapot",
+    429 "Too Many Requests",
+    500 "Internal Server Error",
+    501 "Not Implemented",
+    502 "Bad Gateway",
+    503 "Service Unavailable",
+    504 "Gateway Timeout"
+}
+
+fn reason-phrase(status) {
+    let r = get(reason-table, status)
+    if r == null { "Unknown" } else { r }
+}
+
+// ===========================================================================
+// Header helpers (case-insensitive map keyed by lowercase name)
+// ===========================================================================
+
+// Look up a header by name, case-insensitively. Returns null if absent.
+fn header(req-or-resp, name) {
+    get(req-or-resp.headers, lowercase(name))
+}
+
+// Add/replace a header on a map (key lowercased), returns the new map.
+fn set-header(headers, name, value) {
+    assoc(headers, lowercase(name), value)
+}
+
+// Does a map contain a (case-insensitive) header?
+fn has-header?(headers, name) {
+    get(headers, lowercase(name)) != null
+}
+
+// ===========================================================================
+// Response builders
+// ===========================================================================
+
+// Build a Response with explicit status, headers map, and body. The reason
+// phrase is filled from the status table.
+fn make-response(status, headers, body) {
+    Response {
+        status: status,
+        reason: reason-phrase(status),
+        headers: headers,
+        body: body
+    }
+}
+
+// 200 OK with a text/plain body.
+fn ok(body) {
+    make-response(200, {"content-type" "text/plain; charset=utf-8"}, body)
+}
+
+// 200 OK with an explicit content type.
+fn ok-with(content-type, body) {
+    make-response(200, {"content-type" content-type}, body)
+}
+
+// 200 OK with a text/html body.
+fn html(body) {
+    make-response(200, {"content-type" "text/html; charset=utf-8"}, body)
+}
+
+// 200 OK with an application/json body. `json-string` must already be a
+// serialized JSON string.
+fn json(json-string) {
+    make-response(200, {"content-type" "application/json"}, json-string)
+}
+
+// 404 Not Found with a text/plain body.
+fn not-found(body) {
+    make-response(404, {"content-type" "text/plain; charset=utf-8"}, body)
+}
+
+// An arbitrary status with a text/plain body.
+fn status-response(status, body) {
+    make-response(status, {"content-type" "text/plain; charset=utf-8"}, body)
+}
+
+// A redirect (302 by default) to `location`.
+fn redirect(location) {
+    make-response(302, {"location" location}, "")
+}
+
+// ===========================================================================
+// Low-level socket line/byte reading
+// ===========================================================================
+//
+// socket/read(conn, n) returns up to n bytes as a string. All reading is done
+// in large chunks through a buffered connection wrapper (ConnBuf) so we never
+// pay one syscall per byte, and so we can correctly stop a line at its CRLF
+// while keeping any over-read bytes (which may belong to the next line, or to
+// the request body) for the following read. All progress is measured in BYTES,
+// not codepoints, so multi-byte UTF-8 bodies are read correctly.
+
+// Size of each socket/read chunk.
+let read-chunk-size = 4096
+
+// A buffered wrapper around a raw socket connection. `conn` is the raw socket;
+// `leftover` is an atom holding a string of bytes that were read from the
+// socket but not yet consumed (carried across read-line / read-n calls).
+struct ConnBuf {
+    conn
+    leftover
+}
+
+// Wrap a raw connection in a ConnBuf.
+fn conn-buf(conn) {
+    ConnBuf { conn: conn, leftover: atom("") }
+}
+
+// Slice string s by BYTE indices [start, end) and return the resulting string.
+fn byte-slice(s, start, end) {
+    if end <= start {
+        ""
+    } else {
+        let b = sb/new(end - start)
+        sb/append-range!(b, s, start, end)
+        sb/to-string(b)
+    }
+}
+
+// Pull one more chunk from the socket into `leftover`. Returns true if any
+// bytes were appended, false at EOF.
+fn cb-fill!(cb) {
+    let data = socket/read(cb.conn, read-chunk-size)
+    if data == null || data == "" {
+        false
+    } else {
+        reset!(cb.leftover, deref(cb.leftover) ++ data)
+        true
+    }
+}
+
+// Read one CRLF- or LF-terminated line from the connection. The terminator is
+// stripped. Returns null at EOF before any bytes (so the caller can detect a
+// closed connection). A bare "\r" preceding "\n" is dropped. Bytes following
+// the line terminator are kept in the buffer for the next read.
+fn read-line(cb) {
+    let mut done = false
+    let mut nl = -1
+    // Read chunks until we find a newline byte (10) in the buffer or hit EOF.
+    while done == false {
+        let buf = deref(cb.leftover)
+        nl = sb/index-byte(buf, 10, 0)
+        if nl >= 0 {
+            done = true
+        } else {
+            if cb-fill!(cb) == false {
+                done = true
+            }
+        }
+    }
+    let buf = deref(cb.leftover)
+    let total = byte-length(buf)
+    if nl < 0 {
+        // EOF without a newline: the remaining buffer is the final line.
+        if total == 0 {
+            null
+        } else {
+            reset!(cb.leftover, "")
+            strip-cr(buf)
+        }
+    } else {
+        let line = byte-slice(buf, 0, nl)
+        reset!(cb.leftover, byte-slice(buf, nl + 1, total))
+        strip-cr(line)
+    }
+}
+
+// Drop a trailing "\r" from a line (the CR of a CRLF terminator).
+fn strip-cr(line) {
+    let n = byte-length(line)
+    if n > 0 && sb/index-byte(line, 13, n - 1) == n - 1 {
+        byte-slice(line, 0, n - 1)
+    } else {
+        line
+    }
+}
+
+// Read exactly n bytes (or fewer at EOF) from the connection, returning a
+// string. Progress is measured in BYTES (not codepoints), so multi-byte UTF-8
+// bodies terminate correctly. Any bytes already in the buffer are consumed
+// first; over-read bytes are pushed back into the buffer.
+fn read-n(cb, n) {
+    let builder = sb/new(n)
+    let mut done = false
+    while sb/length(builder) < n && done == false {
+        let buf = deref(cb.leftover)
+        let have = byte-length(buf)
+        if have > 0 {
+            let need = n - sb/length(builder)
+            if have <= need {
+                // Consume the whole buffer.
+                sb/append!(builder, buf)
+                reset!(cb.leftover, "")
+            } else {
+                // Consume `need` bytes, keep the rest buffered.
+                sb/append-range!(builder, buf, 0, need)
+                reset!(cb.leftover, byte-slice(buf, need, have))
+            }
+        } else {
+            if cb-fill!(cb) == false {
+                done = true
+            }
+        }
+    }
+    sb/to-string(builder)
+}
+
+// ===========================================================================
+// Request parsing
+// ===========================================================================
+
+// Parse the request line: "METHOD PATH?QUERY HTTP/1.1".
+// Returns a vector [method, path, query, version], or null if malformed.
+fn parse-request-line(line) {
+    let sp1 = index-of(line, " ")
+    if sp1 < 0 {
+        null
+    } else {
+        let method = uppercase(substring(line, 0, sp1))
+        let rest = substring(line, sp1 + 1, length(line))
+        let sp2 = index-of(rest, " ")
+        if sp2 < 0 {
+            null
+        } else {
+            let target = substring(rest, 0, sp2)
+            let version = substring(rest, sp2 + 1, length(rest))
+            let q = index-of(target, "?")
+            let path = if q < 0 { target } else { substring(target, 0, q) }
+            let query = if q < 0 { "" } else { substring(target, q + 1, length(target)) }
+            [method, path, query, version]
+        }
+    }
+}
+
+// Parse a header line "Name: value" into [lowercase-name, trimmed-value], or
+// null if there is no colon.
+fn parse-header-line(line) {
+    let colon = index-of(line, ":")
+    if colon < 0 {
+        null
+    } else {
+        let name = lowercase(trim(substring(line, 0, colon)))
+        let value = trim(substring(line, colon + 1, length(line)))
+        [name, value]
+    }
+}
+
+// Read all header lines (until the blank line) into a PersistentMap. Stops at
+// EOF or the empty line that terminates the header block.
+fn read-headers(cb) {
+    let mut headers = {}
+    let mut done = false
+    while done == false {
+        let line = read-line(cb)
+        if line == null || line == "" {
+            done = true
+        } else {
+            let parsed = parse-header-line(line)
+            if parsed != null {
+                headers = assoc(headers, parsed[0], parsed[1])
+            }
+        }
+    }
+    headers
+}
+
+// Read and parse a full HTTP request from the connection. Returns a Request,
+// or null if the connection produced no request line (closed / empty).
+fn read-request(cb) {
+    let line = read-line(cb)
+    if line == null || line == "" {
+        null
+    } else {
+        let rl = parse-request-line(line)
+        if rl == null {
+            null
+        } else {
+            let headers = read-headers(cb)
+            let cl = get(headers, "content-length")
+            let body = if cl == null {
+                ""
+            } else {
+                let n = core/parse-int(cl)
+                if n == null || n <= 0 {
+                    ""
+                } else {
+                    read-n(cb, n)
+                }
+            }
+            Request {
+                method: rl[0],
+                path: rl[1],
+                query: rl[2],
+                version: rl[3],
+                headers: headers,
+                body: body
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// Response serialization
+// ===========================================================================
+
+// Serialize a Response into the full HTTP/1.1 byte string. Always sets
+// Content-Length (from the body) and Connection: close, and a Date-free
+// minimal header set. User headers are emitted as-is (their lowercase keys).
+fn serialize-response(resp) {
+    let builder = sb/new(256 + length(resp.body))
+    // Status line
+    sb/append!(builder, "HTTP/1.1 ")
+    sb/append-int!(builder, resp.status)
+    sb/append!(builder, " ")
+    sb/append!(builder, resp.reason)
+    sb/append!(builder, "\r\n")
+    // User headers, skipping content-length / connection which we control.
+    let ks = keys(resp.headers)
+    let n = length(ks)
+    let mut i = 0
+    while i < n {
+        let k = ks[i]
+        if k != "content-length" && k != "connection" {
+            sb/append!(builder, k)
+            sb/append!(builder, ": ")
+            sb/append!(builder, to-string(get(resp.headers, k)))
+            sb/append!(builder, "\r\n")
+        }
+        i = i + 1
+    }
+    // Content-Length (byte length of body) and Connection: close.
+    let body-len = byte-length(resp.body)
+    sb/append!(builder, "Content-Length: ")
+    sb/append-int!(builder, body-len)
+    sb/append!(builder, "\r\n")
+    sb/append!(builder, "Connection: close\r\n")
+    sb/append!(builder, "\r\n")
+    sb/append!(builder, resp.body)
+    sb/to-string(builder)
+}
+
+// Byte length of a string (UTF-8). We compute it via a string-builder so the
+// Content-Length is correct for non-ASCII bodies (codepoint count != bytes).
+fn byte-length(s) {
+    let b = sb/new(length(s))
+    sb/append!(b, s)
+    sb/length(b)
+}
+
+// ===========================================================================
+// Router
+// ===========================================================================
+
+// Build a Route.
+fn route(method, path, handler) {
+    Route { method: uppercase(method), path: path, handler: handler }
+}
+
+// Build a handler (Request -> Response) that dispatches `routes` (a vector of
+// Route) on method + path. On a path match with no method match, returns 405
+// with an Allow header listing the methods registered for that path. On no
+// match at all, calls `not-found-handler` (a Request -> Response).
+fn router(routes, not-found-handler) {
+    fn(req) {
+        let mut matched = null
+        let mut path-methods = []
+        let n = length(routes)
+        let mut i = 0
+        while i < n {
+            let r = routes[i]
+            if r.path == req.path {
+                path-methods = push(path-methods, r.method)
+                if r.method == req.method && matched == null {
+                    matched = r
+                }
+            }
+            i = i + 1
+        }
+        if matched != null {
+            matched.handler(req)
+        } else {
+            if length(path-methods) > 0 {
+                // Path exists but method not allowed -> 405 + Allow.
+                let allow = join(path-methods, ", ")
+                let resp = status-response(405, "Method Not Allowed")
+                Response {
+                    status: resp.status,
+                    reason: resp.reason,
+                    headers: set-header(resp.headers, "Allow", allow),
+                    body: resp.body
+                }
+            } else {
+                not-found-handler(req)
+            }
+        }
+    }
+}
+
+// A default 404 handler.
+fn default-not-found(req) {
+    not-found("Not Found: " ++ req.path)
+}
+
+// ===========================================================================
+// Server
+// ===========================================================================
+
+// Handle one connection: read a request, run the handler, write the response,
+// close. Errors in the handler are turned into a 500 so the loop survives.
+fn handle-connection(conn, handler) {
+    try {
+        let req = read-request(conn-buf(conn))
+        if req != null {
+            let resp = try {
+                handler(req)
+            } catch (e) {
+                status-response(500, "Internal Server Error: " ++ to-string(e))
+            }
+            socket/write(conn, serialize-response(resp))
+        }
+    } catch (e) {
+        null
+    }
+    try {
+        socket/close(conn)
+    } catch (e) {
+        null
+    }
+    null
+}
+
+// Run a cooperative single-thread HTTP server. `handler` is a Request ->
+// Response function. This blocks forever, accepting and serving one
+// connection at a time on the calling thread (GC-safe). Listens, then loops.
+fn serve(host, port, handler) {
+    let listener = socket/listen(host, port)
+    println("beagle.http serving on " ++ host ++ ":" ++ to-string(port))
+    let mut running = true
+    while running {
+        let conn = socket/accept(listener)
+        if conn == null {
+            running = false
+        } else {
+            handle-connection(conn, handler)
+        }
+    }
+    socket/close-listener(listener)
+    null
+}
+
+// Convenience: serve a vector of Route with the default 404.
+fn serve-routes(host, port, routes) {
+    serve(host, port, router(routes, default-not-found))
+}
+
+// ===========================================================================
+// Client
+// ===========================================================================
+
+// Read a full HTTP response from a connection into a Response. Reads the
+// status line, headers, then the body (by Content-Length if present, else
+// until EOF).
+fn read-response(cb) {
+    let status-line = read-line(cb)
+    if status-line == null {
+        null
+    } else {
+        let sp1 = index-of(status-line, " ")
+        if sp1 < 0 {
+            null
+        } else {
+            let rest = substring(status-line, sp1 + 1, length(status-line))
+            let sp2 = index-of(rest, " ")
+            let code-str = if sp2 < 0 { rest } else { substring(rest, 0, sp2) }
+            let reason = if sp2 < 0 { "" } else { substring(rest, sp2 + 1, length(rest)) }
+            let status = core/parse-int(code-str)
+            let headers = read-headers(cb)
+            let cl = get(headers, "content-length")
+            let body = if cl != null {
+                let nn = core/parse-int(cl)
+                if nn == null || nn <= 0 { "" } else { read-n(cb, nn) }
+            } else {
+                read-until-eof(cb)
+            }
+            Response {
+                status: status,
+                reason: reason,
+                headers: headers,
+                body: body
+            }
+        }
+    }
+}
+
+// Read everything remaining on a connection until EOF.
+fn read-until-eof(cb) {
+    let builder = sb/new(256)
+    // Drain anything already buffered first.
+    let buffered = deref(cb.leftover)
+    if buffered != "" {
+        sb/append!(builder, buffered)
+        reset!(cb.leftover, "")
+    }
+    let mut done = false
+    while done == false {
+        let data = socket/read(cb.conn, read-chunk-size)
+        if data == null || data == "" {
+            done = true
+        } else {
+            sb/append!(builder, data)
+        }
+    }
+    sb/to-string(builder)
+}
+
+// Perform an HTTP request and return the parsed Response.
+//   method  — "GET" / "POST" / ...
+//   host    — server host. IMPORTANT: must be a STRING LITERAL (see note below)
+//   port    — server port (Int)
+//   path    — request target, e.g. "/foo?x=1" (must start with "/")
+//   headers — PersistentMap of extra request headers (may be {})
+//   body    — request body string ("" for none)
+// Host and Content-Length headers are added automatically.
+//
+// RUNTIME NOTE: the underlying socket connect builtin (tcp_connect_async)
+// reads its host argument via get_string_literal — it accepts only a
+// compile-time interned STRING LITERAL, not a string computed at runtime
+// (substring/concat/etc.). Passing a computed host aborts the process. So
+// `host` here MUST be a literal you wrote in source. This is why get-url
+// (whose host is parsed out of a URL string) cannot connect; use `request`
+// with a literal host instead. Path/headers/body may be any strings.
+fn request(method, host, port, path, headers, body) {
+    let conn = socket/connect(host, port)
+    let builder = sb/new(256 + length(body))
+    sb/append!(builder, uppercase(method))
+    sb/append!(builder, " ")
+    sb/append!(builder, path)
+    sb/append!(builder, " HTTP/1.1\r\n")
+    sb/append!(builder, "Host: ")
+    sb/append!(builder, host)
+    sb/append!(builder, "\r\n")
+    // User headers (skip ones we control).
+    let ks = keys(headers)
+    let n = length(ks)
+    let mut i = 0
+    while i < n {
+        let k = ks[i]
+        let kl = lowercase(to-string(k))
+        if kl != "host" && kl != "content-length" && kl != "connection" {
+            sb/append!(builder, to-string(k))
+            sb/append!(builder, ": ")
+            sb/append!(builder, to-string(get(headers, k)))
+            sb/append!(builder, "\r\n")
+        }
+        i = i + 1
+    }
+    sb/append!(builder, "Content-Length: ")
+    sb/append-int!(builder, byte-length(body))
+    sb/append!(builder, "\r\n")
+    sb/append!(builder, "Connection: close\r\n")
+    sb/append!(builder, "\r\n")
+    sb/append!(builder, body)
+    socket/write(conn, sb/to-string(builder))
+    let resp = read-response(conn-buf(conn))
+    socket/close(conn)
+    resp
+}
+
+// Parse an "http://host[:port]/path" URL into [host, port, path].
+// Returns null if the URL is not plaintext http or is malformed.
+fn parse-url(url) {
+    let prefix = "http://"
+    if starts-with?(url, prefix) == false {
+        null
+    } else {
+        let rest = substring(url, length(prefix), length(url))
+        let slash = index-of(rest, "/")
+        let raw-authority = if slash < 0 { rest } else { substring(rest, 0, slash) }
+        let path = if slash < 0 { "/" } else { substring(rest, slash, length(rest)) }
+        // Strip an optional "userinfo@" prefix. Userinfo itself may contain ':'
+        // (user:pass), so split on the LAST '@' to leave only host[:port].
+        let at = last-index-of(raw-authority, "@")
+        let authority = if at < 0 {
+            raw-authority
+        } else {
+            substring(raw-authority, at + 1, length(raw-authority))
+        }
+        let colon = index-of(authority, ":")
+        let host = if colon < 0 { authority } else { substring(authority, 0, colon) }
+        let port = if colon < 0 {
+            80
+        } else {
+            let p = core/parse-int(substring(authority, colon + 1, length(authority)))
+            if p == null { 80 } else { p }
+        }
+        [host, port, path]
+    }
+}
+
+// GET an http:// URL and return the parsed Response.
+//
+// RUNTIME LIMITATION: this CANNOT be supported with the current socket
+// builtin. tcp_connect_async reads its host via get_string_literal, which only
+// accepts a compile-time string literal — but the host parsed out of `url` is
+// a computed substring, and passing it aborts the process. Rather than crash,
+// this throws a clear error directing you to `request` with a literal host.
+// `parse-url` itself works fine for inspecting a URL's parts.
+fn get-url(url) {
+    let parsed = parse-url(url)
+    if parsed == null {
+        throw("beagle.http/get-url: not a valid http:// URL: " ++ to-string(url))
+    } else {
+        // The socket connect builtin now accepts a computed (non-literal) host,
+        // so the host parsed out of the URL works directly.
+        request("GET", parsed[0], parsed[1], parsed[2], {}, "")
+    }
+}
+
+// ===========================================================================
+// Demo
+// ===========================================================================
+
+fn main() {
+    // Demonstrate response building + serialization without opening a socket.
+    let resp = ok("Hello, Beagle!")
+    println("status: " ++ to-string(resp.status) ++ " " ++ resp.reason)
+    println("--- serialized ---")
+    println(serialize-response(resp))
+
+    // Demonstrate request-line parsing.
+    let rl = parse-request-line("GET /users?id=7 HTTP/1.1")
+    println("method=" ++ rl[0] ++ " path=" ++ rl[1] ++ " query=" ++ rl[2])
+
+    // Demonstrate the router (405 path).
+    let h = router([
+        route("GET", "/", fn(req) { ok("home") }),
+        route("POST", "/submit", fn(req) { ok("submitted") })
+    ], default-not-found)
+    let r1 = h(Request { method: "GET", path: "/", query: "", version: "HTTP/1.1", headers: {}, body: "" })
+    println("GET / -> " ++ to-string(r1.status) ++ " " ++ r1.body)
+    let r2 = h(Request { method: "DELETE", path: "/submit", query: "", version: "HTTP/1.1", headers: {}, body: "" })
+    println("DELETE /submit -> " ++ to-string(r2.status) ++ " allow=" ++ to-string(get(r2.headers, "allow")))
+    let r3 = h(Request { method: "GET", path: "/nope", query: "", version: "HTTP/1.1", headers: {}, body: "" })
+    println("GET /nope -> " ++ to-string(r3.status))
+
+    // To actually serve:
+    //   serve-routes("127.0.0.1", 18080, [route("GET", "/hello", fn(req) { ok("hi") })])
+    "done"
+}

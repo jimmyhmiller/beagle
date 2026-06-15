@@ -1,0 +1,56 @@
+namespace stdlib_phase2_5_8_test
+
+// gc-always
+
+// Regression coverage for Phase 2 (os/path/time), Phase 5 (http helpers — pure,
+// non-socket parts; full server+client round-trip is verified manually with
+// curl since sockets+threads don't belong in the gc-always suite) and Phase 8
+// (template). Socket I/O itself is intentionally NOT exercised here.
+
+use beagle.os as os
+use beagle.path as path
+use beagle.time as time
+use beagle.http as http
+use beagle.template as tmpl
+
+fn main() {
+    // os
+    println(os/getpid() > 0)
+    // path
+    println(path/basename("/a/b/c.txt") == "c.txt")
+    println(path/dirname("/a/b/c.txt") == "/a/b")
+    println(path/normalize("/a/./b/../c") == "/a/c")
+    // time (exact RFC 1123 vector)
+    println(time/http-date(784111777) == "Sun, 06 Nov 1994 08:49:37 GMT")
+    // http helpers
+    println(http/reason-phrase(404) == "Not Found")
+    let r = http/ok("body-x")
+    println(r.status == 200)
+    println(r.body == "body-x")
+    // template
+    println(tmpl/render("Hi {{ name }}!", {:name "Bea"}) == "Hi Bea!")
+    println(tmpl/render("{% for x in items %}[{{ x }}]{% endfor %}", {:items ["a", "b"]}) == "[a][b]")
+    println(tmpl/render("{% if ok %}Y{% else %}N{% endif %}", {:ok false}) == "N")
+    println(tmpl/render("{{ v }}", {:v "<b>"}) == "&lt;b&gt;")
+    // template resolves string-keyed data (CSV rows / manual maps), not just
+    // keyword-keyed (JSON default) — keyword lookup falls back to string key.
+    println(tmpl/render("Hi {{ name }}!", assoc({}, "name", "Csv")) == "Hi Csv!")
+    let row = assoc(assoc({}, "user", assoc({}, "email", "a@b.c")), "x", 1)
+    println(tmpl/render("{{ user.email }}", row) == "a@b.c")
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true
+// true

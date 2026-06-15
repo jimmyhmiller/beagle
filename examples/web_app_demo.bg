@@ -1,0 +1,23 @@
+namespace app
+use beagle.http as http
+use beagle.json as json
+use beagle.template as tmpl
+use beagle.stats as stats
+use beagle.date as date
+
+let page = "<html><body><h1>{{ title }}</h1><ul>{% for u in users %}<li>{{ u }}</li>{% endfor %}</ul><p>generated {{ now }}</p></body></html>"
+
+fn home(req) {
+    let html = tmpl/render(page, {:title "Beagle Users", :users ["alice", "bob", "carol"], :now date/format-iso8601(date/from-epoch(date/to-epoch(date/now())))})
+    http/html(html)
+}
+fn api-stats(req) {
+    let data = [10, 20, 30, 40, 50]
+    let body = json/stringify({:count length(data), :mean stats/mean(data), :median stats/median(data)})
+    http/json(body)
+}
+fn main() {
+    let routes = [http/route("GET", "/", home), http/route("GET", "/api/stats", api-stats)]
+    println("app on 18099")
+    http/serve-routes("127.0.0.1", 18099, routes)
+}

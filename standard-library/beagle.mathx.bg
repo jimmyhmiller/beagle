@@ -1,0 +1,312 @@
+namespace beagle.mathx
+
+// Math extras for Beagle. PURE Beagle, built only on the global stdlib
+// (beagle.core) — no Rust, no extra modules. Integer division `/` in Beagle
+// truncates toward zero, so floor-div / floor-mod are provided explicitly.
+//
+// Examples
+//   gcd(12, 18)      // => 6
+//   lcm(4, 6)        // => 12
+//   clamp(5, 0, 3)   // => 3
+//   pow-int(2, 10)   // => 1024
+//   factorial(5)     // => 120
+//   floor-mod(-1, 3) // => 2
+//   floor-div(-1, 3) // => -1
+
+// --- constants ---------------------------------------------------------------
+
+/// Pi as a Float.
+fn pi() {
+    3.141592653589793
+}
+
+/// Euler's number e as a Float.
+fn e() {
+    2.718281828459045
+}
+
+// --- sign / abs --------------------------------------------------------------
+
+/// Absolute value of an Int.
+///
+///   abs-int(-5)  // => 5
+///   abs-int(5)   // => 5
+fn abs-int(n) {
+    if n < 0 {
+        0 - n
+    } else {
+        n
+    }
+}
+
+/// Sign of a number: -1, 0, or 1.
+///
+///   sign(-3)  // => -1
+///   sign(0)   // => 0
+///   sign(42)  // => 1
+fn sign(n) {
+    if n < 0 {
+        -1
+    } else {
+        if n > 0 {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+// --- gcd / lcm ---------------------------------------------------------------
+
+/// Greatest common divisor of two integers (always non-negative).
+/// Uses the Euclidean algorithm on absolute values.
+///
+///   gcd(12, 18)  // => 6
+///   gcd(0, 5)    // => 5
+fn gcd(a, b) {
+    let mut x = abs-int(a)
+    let mut y = abs-int(b)
+    while y != 0 {
+        let t = y
+        y = x - (x / y) * y
+        x = t
+    }
+    x
+}
+
+/// Least common multiple of two integers (always non-negative).
+/// lcm(0, n) == 0.
+///
+///   lcm(4, 6)  // => 12
+///   lcm(0, 5)  // => 0
+fn lcm(a, b) {
+    if a == 0 || b == 0 {
+        0
+    } else {
+        let g = gcd(a, b)
+        abs-int((a / g) * b)
+    }
+}
+
+// --- clamp / lerp ------------------------------------------------------------
+
+/// Clamp x into the inclusive range [lo, hi].
+///
+///   clamp(5, 0, 3)   // => 3
+///   clamp(-1, 0, 3)  // => 0
+///   clamp(2, 0, 3)   // => 2
+fn clamp(x, lo, hi) {
+    if x < lo {
+        lo
+    } else {
+        if x > hi {
+            hi
+        } else {
+            x
+        }
+    }
+}
+
+/// Linear interpolation between a and b by fraction t (Float result).
+/// t == 0 gives a, t == 1 gives b.
+///
+///   lerp(0, 10, 0.5)  // => 5.0
+fn lerp(a, b, t) {
+    (a * 1.0) + ((b * 1.0) - (a * 1.0)) * (t * 1.0)
+}
+
+// --- min / max over a collection --------------------------------------------
+
+/// Minimum element of a non-empty collection.
+/// Empty input is a hard error (the minimum is undefined).
+///
+///   min-of([3, 1, 4, 1, 5])  // => 1
+fn min-of(coll) {
+    let mut s = seq(coll)
+    if s == null {
+        throw("beagle.mathx/min-of: empty input — minimum is undefined for an empty collection")
+    } else {
+        let mut m = first(s)
+        s = next(s)
+        while s != null {
+            let v = first(s)
+            if v < m {
+                m = v
+            }
+            s = next(s)
+        }
+        m
+    }
+}
+
+/// Maximum element of a non-empty collection.
+/// Empty input is a hard error (the maximum is undefined).
+///
+///   max-of([3, 1, 4, 1, 5])  // => 5
+fn max-of(coll) {
+    let mut s = seq(coll)
+    if s == null {
+        throw("beagle.mathx/max-of: empty input — maximum is undefined for an empty collection")
+    } else {
+        let mut m = first(s)
+        s = next(s)
+        while s != null {
+            let v = first(s)
+            if v > m {
+                m = v
+            }
+            s = next(s)
+        }
+        m
+    }
+}
+
+// --- parity ------------------------------------------------------------------
+
+/// True if n is even.
+///
+///   is-even?(4)  // => true
+///   is-even?(3)  // => false
+fn is-even?(n) {
+    floor-mod(n, 2) == 0
+}
+
+/// True if n is odd.
+///
+///   is-odd?(3)  // => true
+///   is-odd?(4)  // => false
+fn is-odd?(n) {
+    floor-mod(n, 2) != 0
+}
+
+// --- factorial / pow ---------------------------------------------------------
+
+/// Factorial of a non-negative Int. Negative input is a hard error.
+///
+///   factorial(0)  // => 1
+///   factorial(5)  // => 120
+fn factorial(n) {
+    if n < 0 {
+        throw("beagle.mathx/factorial: negative input — factorial is undefined for negative integers")
+    } else {
+        let mut acc = 1
+        let mut i = 2
+        while i <= n {
+            // Beagle ints are 61-bit; `*` wraps silently on overflow. acc is
+            // always >= 1 here, so the division round-trip is exact iff no
+            // overflow occurred — fail loudly rather than return a wrapped
+            // value. factorial(21) is the first to overflow.
+            let next = acc * i
+            if next / i != acc {
+                throw("beagle.mathx/factorial: integer overflow computing " ++ to-string(n) ++ "! — exceeds the 61-bit integer range; use beagle.bigint for large factorials")
+            }
+            acc = next
+            i = i + 1
+        }
+        acc
+    }
+}
+
+/// Integer exponentiation: base raised to a non-negative integer exp.
+/// Returns an Int. Negative exponents are a hard error (would not be an Int).
+/// Uses exponentiation by squaring.
+///
+///   pow-int(2, 10)  // => 1024
+///   pow-int(3, 0)   // => 1
+///   pow-int(5, 3)   // => 125
+fn pow-int(base, exp) {
+    if exp < 0 {
+        throw("beagle.mathx/pow-int: negative exponent — result would not be an integer")
+    } else {
+        let mut result = 1
+        let mut b = base
+        let mut e = exp
+        while e > 0 {
+            if floor-mod(e, 2) == 1 {
+                // Detect 61-bit overflow on the accumulating multiply (b may be
+                // 0 for base 0, in which case the product is exactly 0 — guard
+                // the division check on b != 0).
+                let next = result * b
+                if b != 0 && next / b != result {
+                    throw("beagle.mathx/pow-int: integer overflow computing " ++ to-string(base) ++ "^" ++ to-string(exp) ++ " — exceeds the 61-bit integer range; use beagle.bigint for large powers")
+                }
+                result = next
+            }
+            e = e / 2
+            // Only square b when another iteration will consume it; squaring on
+            // the final step could overflow spuriously even when `result` fits.
+            if e > 0 {
+                let nb = b * b
+                if b != 0 && nb / b != b {
+                    throw("beagle.mathx/pow-int: integer overflow computing " ++ to-string(base) ++ "^" ++ to-string(exp) ++ " — exceeds the 61-bit integer range; use beagle.bigint for large powers")
+                }
+                b = nb
+            }
+        }
+        result
+    }
+}
+
+// --- angle conversion --------------------------------------------------------
+
+/// Convert degrees to radians (Float).
+///
+///   deg->rad(180)  // => 3.141592653589793
+fn deg->rad(d) {
+    (d * 1.0) * pi() / 180.0
+}
+
+/// Convert radians to degrees (Float).
+///
+///   rad->deg(pi())  // => 180.0
+fn rad->deg(r) {
+    (r * 1.0) * 180.0 / pi()
+}
+
+// --- floor division / modulo -------------------------------------------------
+//
+// Beagle's `/` truncates toward zero and `%`-style remainder follows it, so for
+// negative operands they disagree with mathematical floor division. These
+// implement true floor semantics: the result of floor-div rounds toward
+// negative infinity, and floor-mod always has the sign of the divisor.
+
+/// True floor division (rounds toward negative infinity).
+///
+///   floor-div(7, 3)    // => 2
+///   floor-div(-1, 3)   // => -1
+///   floor-div(-7, 3)   // => -3
+///   floor-div(7, -3)   // => -3
+fn floor-div(a, b) {
+    if b == 0 {
+        throw("beagle.mathx/floor-div: division by zero")
+    } else {
+        let q = a / b
+        let r = a - q * b
+        // Adjust toward negative infinity when remainder is nonzero and the
+        // signs of remainder and divisor differ.
+        if r != 0 && ((r < 0) != (b < 0)) {
+            q - 1
+        } else {
+            q
+        }
+    }
+}
+
+/// True floor modulo: result has the same sign as the divisor b.
+///
+///   floor-mod(7, 3)    // => 1
+///   floor-mod(-1, 3)   // => 2
+///   floor-mod(-7, 3)   // => 2
+///   floor-mod(7, -3)   // => -2
+fn floor-mod(a, b) {
+    if b == 0 {
+        throw("beagle.mathx/floor-mod: division by zero")
+    } else {
+        let r = a - (a / b) * b
+        if r != 0 && ((r < 0) != (b < 0)) {
+            r + b
+        } else {
+            r
+        }
+    }
+}

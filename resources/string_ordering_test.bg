@@ -1,0 +1,32 @@
+namespace string_ordering_test
+
+// Regression: ordered comparison (< <= > >=) on multi-char strings was by
+// pointer identity (heap allocation order), making it nondeterministic and
+// breaking sort. Now lexicographic. Build strings dynamically so allocation
+// order != lexicographic order.
+
+fn mk(s) { "" ++ s }
+
+fn main() {
+    println(mk("zzz") < mk("aaa"))
+    println(mk("aaa") < mk("zzz"))
+    println("app" < "apple")
+    println("apple" < "apply")
+    println("apple" <= "apple")
+    println("banana" > "apple")
+    println(sort(["delta", "alpha", "charlie", "bravo"]))
+    // numeric comparisons unaffected
+    println(1 < 2)
+    println(sort([3, 1, 2]))
+}
+
+// @beagle.core.snapshot
+// false
+// true
+// true
+// true
+// true
+// true
+// ["alpha", "bravo", "charlie", "delta"]
+// true
+// [1, 2, 3]

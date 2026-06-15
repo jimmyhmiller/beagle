@@ -1,0 +1,100 @@
+namespace beagle.hex
+
+use beagle.string-builder as sb
+
+// Hex codec. Bytes are modeled as a Vec<Int> with each element in 0..255.
+//
+//   encode(bytes-or-string) -> String   lowercase, exactly 2 chars per byte
+//   decode(string) -> Vec<Int>   parses pairs of hex digits, case-insensitive
+//
+// encode([255, 0, 16, 171]) == "ff0010ab"
+// encode("é")               == "c3a9"   (UTF-8 bytes of the input string)
+// decode("ff0010ab")        == [255, 0, 16, 171]
+
+// Convert the polymorphic input (String or Vec<Int>) into a Vec<Int> of bytes.
+// A String is converted to its UTF-8 bytes by appending it to a string-builder
+// (which stores the raw UTF-8 encoding) and reading the bytes back.
+fn to-bytes(input) {
+    if instance-of(input, String) {
+        let builder = sb/new(length(input) + 1)
+        sb/append!(builder, input)
+        let n = sb/length(builder)
+        let mut out = []
+        let mut i = 0
+        while i < n {
+            out = push(out, sb/byte-at(builder, i))
+            i = i + 1
+        }
+        out
+    } else {
+        input
+    }
+}
+
+// Map a nibble (0..15) to its lowercase hex character code.
+fn nibble-to-code(n) {
+    if n < 10 {
+        char-code("0") + n
+    } else {
+        char-code("a") + (n - 10)
+    }
+}
+
+// Map a hex digit character code to its value (0..15), or -1 if not a hex digit.
+fn code-to-nibble(c) {
+    if c >= char-code("0") && c <= char-code("9") {
+        c - char-code("0")
+    } else {
+        if c >= char-code("a") && c <= char-code("f") {
+            c - char-code("a") + 10
+        } else {
+            if c >= char-code("A") && c <= char-code("F") {
+                c - char-code("A") + 10
+            } else {
+                -1
+            }
+        }
+    }
+}
+
+// Encode a Vec<Int> of byte values (or a String, by its UTF-8 bytes) into a
+// lowercase hex string.
+fn encode(input) {
+    let bytes = to-bytes(input)
+    let n = count(bytes)
+    let builder = sb/new(n * 2)
+    let mut i = 0
+    while i < n {
+        let b = bytes[i] & 0xFF
+        let hi = (b >> 4) & 0xF
+        let lo = b & 0xF
+        sb/append-byte!(builder, nibble-to-code(hi))
+        sb/append-byte!(builder, nibble-to-code(lo))
+        i = i + 1
+    }
+    sb/to-string(builder)
+}
+
+// Decode a hex string into a Vec<Int> of byte values.
+// Errors out on odd length or on a non-hex character.
+fn decode(s) {
+    let n = length(s)
+    if n - (n / 2) * 2 != 0 {
+        throw("beagle.hex/decode: odd-length hex string")
+    }
+    let mut out = []
+    let mut i = 0
+    while i < n {
+        let hi = code-to-nibble(char-code(s[i]))
+        let lo = code-to-nibble(char-code(s[i + 1]))
+        if hi < 0 {
+            throw("beagle.hex/decode: invalid hex digit")
+        }
+        if lo < 0 {
+            throw("beagle.hex/decode: invalid hex digit")
+        }
+        out = push(out, hi * 16 + lo)
+        i = i + 2
+    }
+    out
+}

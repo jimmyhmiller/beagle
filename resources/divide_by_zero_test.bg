@@ -1,0 +1,24 @@
+namespace divide_by_zero_test
+
+// Regression: integer / and % by zero now throw a clear, catchable
+// "Division by zero" RuntimeError (previously a bogus TypeError claiming a
+// closure operand). Normal division/modulo unaffected.
+
+fn main() {
+    let r1 = try { 5 / 0 } catch (e) { "caught" }
+    println(r1 == "caught")
+    let r2 = try { 17 % 0 } catch (e) { "caught" }
+    println(r2 == "caught")
+    println(100 / 7 == 14)
+    println(100 % 7 == 2)
+    println(-10 / 3 == -3)
+    println(0 / 5 == 0)
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// true
+// true
+// true
+// true

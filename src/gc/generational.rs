@@ -31,7 +31,12 @@ const DEFAULT_PAGE_COUNT: usize = 1024;
 const MAX_PAGE_COUNT: usize = 1000000;
 
 /// Card size in bytes (512 = 2^9)
-const CARD_SIZE_LOG2: usize = 9;
+///
+/// `pub(crate)` because the old generation's Block Offset Table
+/// (`mark_and_sweep.rs`) must index by the **identical** card geometry as this
+/// card table — a dirty card index from `take_dirty_cards` is fed straight into
+/// the BOT, so the two must never drift.
+pub(crate) const CARD_SIZE_LOG2: usize = 9;
 const CARD_SIZE: usize = 1 << CARD_SIZE_LOG2;
 
 /// Card table for write barrier tracking.
@@ -41,18 +46,32 @@ const CARD_SIZE: usize = 1 << CARD_SIZE_LOG2;
 /// During minor GC, only dirty cards need to be scanned for old-to-young references.
 ///
 /// Card values: 0 = clean, non-zero = dirty
+/// Generational write-barrier card table.
+///
+/// The card byte array is the single source of truth and is marked **lock-free**,
+/// exactly like HotSpot/.NET: the barrier does one idempotent byte store
+/// (`card = DIRTY`). Concurrent marks of the same card from multiple mutator
+/// threads are benign — every writer stores the same value, so a "lost"/racing
+/// store still leaves the card dirty. We use a `Relaxed` atomic store so this is
+/// well-defined in Rust's memory model while still compiling to the same single
+/// store instruction the JIT's inline barrier emits through `biased_ptr`.
+///
+/// There is deliberately **no auxiliary dirty-list and no separate remembered
+/// set** (those were growable `Vec`s pushed on every barrier — a real data race
+/// under concurrency, and redundant): the dirty set is discovered by scanning
+/// the byte array at GC time, when the world is stopped.
 pub struct CardTable {
-    /// The card table memory
-    cards: Vec<u8>,
-    /// Start address of the heap region this table covers
+    /// The card table memory. `AtomicU8` so concurrent barrier marks are
+    /// race-free; layout is identical to `u8`, so the JIT's raw `biased_ptr`
+    /// byte store targets the same bytes (benign, same value).
+    cards: Vec<std::sync::atomic::AtomicU8>,
+    /// Start address of the heap region this table covers (old-gen start).
     heap_start: usize,
     /// Number of cards in the table
     card_count: usize,
     /// Biased pointer for fast card marking: cards.as_ptr() - (heap_start >> CARD_SIZE_LOG2)
     /// This allows codegen to compute: biased_ptr[addr >> 9] = 1
     biased_ptr: *mut u8,
-    /// Track which cards have been marked dirty (for efficient iteration)
-    dirty_card_indices: Vec<usize>,
 }
 
 unsafe impl Send for CardTable {}
@@ -62,53 +81,43 @@ impl CardTable {
     /// Create a new card table covering the given heap range.
     fn new(heap_start: usize, heap_size: usize) -> Self {
         let card_count = heap_size.div_ceil(CARD_SIZE);
-        let mut cards = vec![0u8; card_count];
-        let biased_ptr = unsafe { cards.as_mut_ptr().sub(heap_start >> CARD_SIZE_LOG2) };
+        let cards: Vec<std::sync::atomic::AtomicU8> =
+            (0..card_count).map(|_| std::sync::atomic::AtomicU8::new(0)).collect();
+        let biased_ptr = unsafe { (cards.as_ptr() as *mut u8).sub(heap_start >> CARD_SIZE_LOG2) };
         Self {
             cards,
             heap_start,
             card_count,
             biased_ptr,
-            dirty_card_indices: Vec::with_capacity(64),
         }
     }
 
-    /// Mark the card containing the given address as dirty.
-    /// This is the fast path used by generated code.
+    /// Mark the card containing the given address as dirty. Lock-free: a single
+    /// relaxed atomic store of `1`. Safe to call concurrently from any number of
+    /// mutator threads (idempotent same-value store). Visibility to the GC is
+    /// provided by the stop-the-world safepoint, not a per-barrier fence.
     #[inline]
-    pub fn mark_dirty(&mut self, addr: usize) {
+    pub fn mark_dirty(&self, addr: usize) {
         let card_index = (addr - self.heap_start) >> CARD_SIZE_LOG2;
         if card_index < self.card_count {
-            // Only add to dirty list if not already dirty
-            if self.cards[card_index] == 0 {
-                self.cards[card_index] = 1;
-                self.dirty_card_indices.push(card_index);
-            }
+            self.cards[card_index].store(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
-    /// Resize the card table to cover a larger heap.
-    /// Called when the old generation grows.
+    /// Resize the card table to cover a larger heap. Only called at GC time
+    /// (old gen grows during a stop-the-world collection), so no mutator is
+    /// marking concurrently with the reallocation.
     pub fn resize(&mut self, new_heap_size: usize) {
         let new_card_count = new_heap_size.div_ceil(CARD_SIZE);
         if new_card_count > self.card_count {
-            // Extend the card table with clean cards for the new region
-            self.cards.resize(new_card_count, 0);
+            self.cards.extend(
+                (self.card_count..new_card_count).map(|_| std::sync::atomic::AtomicU8::new(0)),
+            );
             self.card_count = new_card_count;
             // Recalculate biased pointer (the Vec may have reallocated)
-            self.biased_ptr = unsafe {
-                self.cards
-                    .as_mut_ptr()
-                    .sub(self.heap_start >> CARD_SIZE_LOG2)
-            };
+            self.biased_ptr =
+                unsafe { (self.cards.as_ptr() as *mut u8).sub(self.heap_start >> CARD_SIZE_LOG2) };
         }
-    }
-
-    /// Check if a card is dirty.
-    #[inline]
-    #[allow(unused)]
-    pub fn is_dirty(&self, card_index: usize) -> bool {
-        card_index < self.card_count && self.cards[card_index] != 0
     }
 
     /// Get the biased pointer for codegen.
@@ -117,34 +126,60 @@ impl CardTable {
         self.biased_ptr
     }
 
-    /// Get the start address of a card.
-    #[allow(unused)]
-    fn card_start(&self, card_index: usize) -> usize {
-        self.heap_start + (card_index << CARD_SIZE_LOG2)
-    }
+    /// Collect the indices of all dirty cards and clear them, scanning the byte
+    /// array **word-at-a-time**: eight card bytes are read as one `u64` and,
+    /// when that word is clean (the overwhelmingly common case), all eight are
+    /// skipped in a single compare instead of eight per-byte branches. This is
+    /// the standard card-table scan optimization (HotSpot Serial/Parallel): the
+    /// table is only 1/512 of the heap, and skipping clean runs in bulk keeps
+    /// the scan cost proportional to the number of *dirty* regions rather than
+    /// to total heap size.
+    ///
+    /// Called once per minor GC while the world is stopped, so plain (non-atomic)
+    /// access is sound: `&mut self` gives exclusive access to the card buffer
+    /// (the bulk equivalent of `AtomicU8::get_mut`), and no mutator can be
+    /// marking concurrently. Returns the dirty indices in **ascending order**
+    /// (the scan is sequential), so the caller can test membership with a binary
+    /// search instead of allocating a hash set every collection.
+    pub fn take_dirty_cards(&mut self) -> Vec<usize> {
+        let count = self.card_count;
+        // Reinterpret the `AtomicU8` buffer as plain bytes. `AtomicU8` has the
+        // same layout as `u8`; with a unique borrow and a stopped world this is
+        // the bulk equivalent of calling `get_mut` on every element.
+        let bytes: &mut [u8] =
+            unsafe { std::slice::from_raw_parts_mut(self.cards.as_mut_ptr() as *mut u8, count) };
 
-    /// Get the end address of a card (exclusive).
-    #[allow(unused)]
-    fn card_end(&self, card_index: usize) -> usize {
-        self.card_start(card_index) + CARD_SIZE
-    }
-
-    /// Get the list of dirty card indices (O(1) instead of scanning whole table).
-    pub fn dirty_card_indices(&self) -> &[usize] {
-        &self.dirty_card_indices
-    }
-
-    /// Clear all dirty cards and the tracking list.
-    pub fn clear(&mut self) {
-        for &card_index in &self.dirty_card_indices {
-            self.cards[card_index] = 0;
+        let mut dirty = Vec::new();
+        let word_end = count & !7; // largest multiple of 8 <= count
+        let mut base = 0;
+        while base < word_end {
+            // Read eight card bytes at once; skip the whole run if all clean.
+            let word = u64::from_ne_bytes(bytes[base..base + 8].try_into().unwrap());
+            if word != 0 {
+                for k in 0..8 {
+                    if bytes[base + k] != 0 {
+                        dirty.push(base + k);
+                        bytes[base + k] = 0;
+                    }
+                }
+            }
+            base += 8;
         }
-        self.dirty_card_indices.clear();
+        // Tail: fewer than eight trailing cards that don't fill a full word.
+        for (j, byte) in bytes.iter_mut().enumerate().take(count).skip(word_end) {
+            if *byte != 0 {
+                dirty.push(j);
+                *byte = 0;
+            }
+        }
+        dirty
     }
 
-    /// Check if there are any dirty cards.
+    /// Whether any card is dirty (scan; STW only).
     pub fn has_dirty_cards(&self) -> bool {
-        !self.dirty_card_indices.is_empty()
+        self.cards
+            .iter()
+            .any(|c| c.load(std::sync::atomic::Ordering::Relaxed) != 0)
     }
 }
 
@@ -337,10 +372,6 @@ pub struct GenerationalGC {
     full_gc_frequency: usize,
     atomic_pause: [u8; 8],
     options: AllocatorOptions,
-    /// Remembered set: old gen objects that contain pointers to young gen.
-    /// Each entry is a tagged pointer to an old gen object whose fields need scanning.
-    /// Note: This is used for Rust code write barriers. Card table is used for generated code.
-    remembered_set: Vec<usize>,
     /// Card table for tracking writes to old generation from generated code.
     /// Each 512-byte region ("card") of old gen has one byte in this table.
     card_table: CardTable,
@@ -522,7 +553,6 @@ impl Allocator for GenerationalGC {
             full_gc_frequency: 100,
             atomic_pause: [0; 8],
             options,
-            remembered_set: Vec::with_capacity(64),
             card_table,
             young_finalizable: Vec::new(),
             verify_roots: std::env::var("BEAGLE_GC_VERIFY_ROOTS").is_ok(),
@@ -598,7 +628,26 @@ impl Allocator for GenerationalGC {
             // Conservative: large objects go to old gen, can't cheaply check free list
             return false;
         }
-        self.young.can_allocate(Word::from_word(words))
+        // The JIT inline fast path bumps `MutatorState.alloc_ptr` WITHOUT
+        // updating `young.allocation_offset`, so checking only the inner
+        // offset can report room the fast path has already consumed.
+        // `ensure_space_for` would then skip GC, and the subsequent slow-path
+        // `allocate_no_gc` panics with "GC needed — ensure_space_for was not
+        // called or underestimated" once the inner offset syncs up to the
+        // fast-path frontier. Use the HIGHER of the two frontiers. Mirrors
+        // `CompactingHeap::can_allocate` (the same fix; generational was
+        // missed). Tight `handle { loop { perform } }` capture loops hit this.
+        let base = self.young.base_address();
+        let end = self.young.end_address();
+        let inner_off = self.young.allocation_offset;
+        let ms_alloc_ptr = unsafe { (*crate::runtime::current_mutator_state()).alloc_ptr };
+        let effective_off = if ms_alloc_ptr >= base && ms_alloc_ptr <= end {
+            inner_off.max(ms_alloc_ptr - base)
+        } else {
+            inner_off
+        };
+        let header_size = if words > Header::MAX_INLINE_SIZE { 16 } else { 8 };
+        effective_off + words * 8 + header_size <= self.young.byte_count()
     }
 
     fn allocator_frontier(&self) -> (usize, usize) {
@@ -648,18 +697,11 @@ impl Allocator for GenerationalGC {
             return;
         }
 
-        // Mark the card as dirty (for generated code compatibility)
+        // Lock-free card mark. The dirty card is the sole record of this
+        // old→young edge; the minor GC discovers it by scanning the card table
+        // at stop-the-world. (No separate remembered set — it was a racy,
+        // redundant per-barrier Vec push.)
         self.card_table.mark_dirty(object_untagged);
-
-        // Also add to remembered set (precise tracking for Rust code)
-        if !self.remembered_set.contains(&object_ptr) {
-            #[cfg(feature = "debug-gc")]
-            eprintln!(
-                "[GC DEBUG] write_barrier: adding old-gen object {:#x} to remembered set (points to young-gen {:#x})",
-                object_ptr, new_value
-            );
-            self.remembered_set.push(object_ptr);
-        }
     }
 
     fn get_card_table_biased_ptr(&self) -> *mut u8 {
@@ -831,6 +873,7 @@ impl GenerationalGC {
         let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
         let mut old_gen_objects: Vec<usize> = Vec::with_capacity(16);
 
+
         StackWalker::walk_stack_roots(gc_frame_top, |slot_addr, slot_value| {
             let untagged = BuiltInTypes::untag(slot_value);
             if untagged == 0 {
@@ -910,25 +953,10 @@ impl GenerationalGC {
             self.process_old_gen_object(old_root);
         }
 
-        // Process remembered set - old gen objects that were mutated to point to young gen.
-        // The write barrier recorded these when pointers were written.
-        // Take ownership of the remembered set so we can clear it after processing.
-        let remembered = std::mem::take(&mut self.remembered_set);
-        #[cfg(feature = "debug-gc")]
-        if !remembered.is_empty() {
-            eprintln!(
-                "[GC DEBUG] Processing {} remembered set entries",
-                remembered.len()
-            );
-        }
-        for old_object in remembered {
-            #[cfg(feature = "debug-gc")]
-            eprintln!("[GC DEBUG] Processing remembered object {:#x}", old_object);
-            self.process_old_gen_object(old_object);
-        }
-
-        // Process dirty cards - cards marked by generated code write barriers.
-        // We need to scan all objects in dirty cards for young gen references.
+        // Process dirty cards — old-gen objects mutated to point into young gen
+        // (recorded by the write barrier and the JIT's inline card mark). This
+        // is the sole old→young root source; scanning the card table subsumes
+        // what the old remembered-set did.
         self.process_dirty_cards();
 
         self.copy_remaining();
@@ -956,8 +984,8 @@ impl GenerationalGC {
 
         self.young.clear();
 
-        // Clear only the dirty cards (much faster than clearing entire table)
-        self.card_table.clear();
+        // Dirty cards were already collected-and-cleared by `take_dirty_cards`
+        // inside `process_dirty_cards`.
 
         usdt_probes::fire_gc_minor_end(self.gc_count);
         if self.options.print_stats {
@@ -991,43 +1019,27 @@ impl GenerationalGC {
     /// Process dirty cards from the card table.
     /// Scans all objects in old gen that are in dirty cards for young gen references.
     fn process_dirty_cards(&mut self) {
-        // Use the tracked dirty card indices (O(1) to get, no scanning)
-        if !self.card_table.has_dirty_cards() {
+        // Scan the card byte array (STW, so race-free) to collect the dirty
+        // cards and clear them in one pass. This is the real-GC approach: the
+        // card array is the dirty set; there's no per-barrier list to consult.
+        // `take_dirty_cards` returns the indices in ascending order, so we keep
+        // the plain `Vec` and probe it with `binary_search` below — no per-GC
+        // hash set allocation.
+        let dirty_cards: Vec<usize> = self.card_table.take_dirty_cards();
+        if dirty_cards.is_empty() {
             return;
         }
-
-        // Copy the dirty card indices to a HashSet for O(1) lookup
-        let dirty_cards: std::collections::HashSet<usize> = self
-            .card_table
-            .dirty_card_indices()
-            .iter()
-            .copied()
-            .collect();
 
         #[cfg(feature = "debug-gc")]
         eprintln!("[GC DEBUG] Processing {} dirty cards", dirty_cards.len());
 
-        // Collect objects in dirty cards
-        // We need to do this in two passes because we can't borrow old mutably
-        // while also borrowing card_table
-        let old_start = self.old.heap_start();
+        // Use the old gen's Block Offset Table to jump straight to the objects
+        // whose base falls in a dirty card — no longer a full old-gen walk. The
+        // collection is gathered first (two passes) because processing borrows
+        // `self.old` mutably while the gather borrows it shared.
         let mut objects_to_process: Vec<usize> = Vec::new();
-
-        self.old.walk_objects_mut(|obj_addr, heap_obj| {
-            let card_index = (obj_addr - old_start) >> CARD_SIZE_LOG2;
-            if dirty_cards.contains(&card_index) {
-                // Tag the object address for processing
-                let tagged = BuiltInTypes::HeapObject.tag(obj_addr as isize) as usize;
-                objects_to_process.push(tagged);
-
-                #[cfg(feature = "debug-gc")]
-                eprintln!(
-                    "[GC DEBUG] Object at {:#x} is in dirty card {}",
-                    obj_addr, card_index
-                );
-                let _ = heap_obj; // suppress unused warning
-            }
-        });
+        self.old
+            .collect_objects_in_dirty_cards(&dirty_cards, &mut objects_to_process);
 
         // Now process each object
         for old_object in objects_to_process {
@@ -1229,7 +1241,22 @@ impl GenerationalGC {
                         .structs
                         .migration_plan_for(struct_id, layout_version)
                     {
-                        self.copy_with_migration(&heap_object, &plan)
+                        // Resolve defaults for fields new to this layout to
+                        // GC-stable tagged values (no heap allocation).
+                        let def = runtime.get_struct_by_id(struct_id);
+                        let new_field_defaults: Vec<usize> = plan
+                            .field_map
+                            .iter()
+                            .enumerate()
+                            .map(|(new_idx, mapping)| match mapping {
+                                Some(_) => BuiltInTypes::null_value() as usize,
+                                None => def
+                                    .as_ref()
+                                    .map(|d| runtime.field_default_value_at(d, new_idx))
+                                    .unwrap_or(BuiltInTypes::null_value() as usize),
+                            })
+                            .collect();
+                        self.copy_with_migration(&heap_object, &plan, &new_field_defaults)
                     } else {
                         // Normal copy
                         let data = heap_object.get_full_object_data();
@@ -1267,6 +1294,7 @@ impl GenerationalGC {
         &mut self,
         old_object: &HeapObject,
         plan: &crate::runtime::MigrationPlan,
+        new_field_defaults: &[usize],
     ) -> *const u8 {
         // Build the new object data as a byte buffer and use copy_data_to_offset
         // struct_id stays the same (stable ID), only layout version changes
@@ -1287,12 +1315,14 @@ impl GenerationalGC {
         // Write header
         data[0..8].copy_from_slice(&new_header.to_usize().to_ne_bytes());
 
-        // Write fields
-        let null_val = BuiltInTypes::null_value() as usize;
+        // Write fields: copy existing, default-fill fields new to this layout.
         for (new_idx, mapping) in plan.field_map.iter().enumerate() {
             let value = match mapping {
                 Some(old_idx) => old_object.get_field(*old_idx),
-                None => null_val,
+                None => new_field_defaults
+                    .get(new_idx)
+                    .copied()
+                    .unwrap_or(BuiltInTypes::null_value() as usize),
             };
             let offset = (1 + new_idx) * 8;
             data[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());

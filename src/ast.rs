@@ -91,6 +91,23 @@ fn sanitize_test_name(name: &str) -> String {
         .collect()
 }
 
+/// Extract a compile-time-constant literal default from a struct field's default
+/// expression. Non-literal defaults (calls, identifiers, arithmetic, …) return
+/// None — they can't be reproduced at field-read time, so stale reads of such a
+/// field fall back to null.
+fn literal_default_from_ast(ast: &Ast) -> Option<crate::runtime::LiteralDefault> {
+    use crate::runtime::LiteralDefault;
+    match ast {
+        Ast::IntegerLiteral(n, _) => Some(LiteralDefault::Int(*n)),
+        Ast::FloatLiteral(s, _) => s.parse::<f64>().ok().map(LiteralDefault::Float),
+        Ast::String(s, _) => Some(LiteralDefault::Str(s.clone())),
+        Ast::True(_) => Some(LiteralDefault::Bool(true)),
+        Ast::False(_) => Some(LiteralDefault::Bool(false)),
+        Ast::Null(_) => Some(LiteralDefault::Null),
+        _ => None,
+    }
+}
+
 fn references_variable(body: &[Ast], name: &str) -> bool {
     fn check(ast: &Ast, name: &str) -> bool {
         match ast {
@@ -833,6 +850,13 @@ impl Ast {
                 ir.error_fn_pointer = ptr;
             }
         }
+        if let Some(error_fn) =
+            compiler.find_function("beagle.builtin/throw-type-error-operands")
+        {
+            if let Some(ptr) = compiler.get_function_pointer(error_fn) {
+                ir.error_operands_fn_pointer = ptr;
+            }
+        }
         let mut ast_compiler = AstCompiler {
             ast: self.clone(),
             file_name: file_name.to_string(),
@@ -1422,6 +1446,14 @@ impl AstCompiler<'_> {
                         new_ir.error_fn_pointer = ptr;
                     }
                 }
+                if let Some(error_fn) = self
+                    .compiler
+                    .find_function("beagle.builtin/throw-type-error-operands")
+                {
+                    if let Some(ptr) = self.compiler.get_function_pointer(error_fn) {
+                        new_ir.error_operands_fn_pointer = ptr;
+                    }
+                }
                 let old_ir = std::mem::replace(&mut self.ir, new_ir);
                 // Fresh OSR-loop accumulator for this function's body; the
                 // outer function's loops are restored after its compile.
@@ -1511,6 +1543,24 @@ impl AstCompiler<'_> {
                     let local = VariableLocation::Local(local);
                     self.register_arg_location(0, local.clone());
                     self.insert_variable(context_name.to_string(), local);
+                }
+                // The register allocator / frame layout currently miscompiles
+                // functions with more than 40 argument slots (they SIGSEGV at
+                // runtime). Reject them at compile time with a clear error rather
+                // than emitting crashing code. (Closures consume one slot for the
+                // captured-context argument.)
+                {
+                    const MAX_PARAM_SLOTS: usize = 40;
+                    let slots = if is_not_top_level { args.len() + 1 } else { args.len() };
+                    if slots > MAX_PARAM_SLOTS {
+                        return Err(CompileError::InternalError {
+                            message: format!(
+                                "function has too many parameters ({}); at most {} are currently supported",
+                                args.len(),
+                                if is_not_top_level { MAX_PARAM_SLOTS - 1 } else { MAX_PARAM_SLOTS }
+                            ),
+                        });
+                    }
                 }
                 for (index, arg_pattern) in args.iter().enumerate() {
                     let mut index = index;
@@ -3942,7 +3992,12 @@ impl AstCompiler<'_> {
                 self.ir.write_float_literal(float_pointer, n);
                 Ok(self.ir.tag(float_pointer, BuiltInTypes::Float.get_tag()))
             }
-            Ast::Identifier(name, _) => {
+            Ast::Identifier(name, pos) => {
+                // `total/n` written without spaces lexes as one qualified-name
+                // atom. If the alias isn't a real namespace, it was division.
+                if let Some(div) = self.try_qualified_name_as_division(&name, pos) {
+                    return self.call_compile(&div);
+                }
                 let reg = self.get_variable_alloc_free_variable(&name)?;
                 self.resolve_variable(&reg).map_err(|_| CompileError::UndefinedVariable {
                     name: name.clone(),
@@ -5718,6 +5773,58 @@ impl AstCompiler<'_> {
         }
     }
 
+    /// An atom like `total/n` is lexed as a single qualified-name token because
+    /// `/` is the namespace-qualified separator. But when the alias segment is
+    /// NOT a registered namespace alias (or there is more than one `/`, which a
+    /// real qualified name never has), the intent was division. This rebuilds
+    /// the atom as a left-associative chain of `Ast::Div` over its segments,
+    /// parsing numeric segments as literals. Returns `None` when the name is a
+    /// genuine namespace-qualified reference (exactly one `/`, alias is real),
+    /// in which case the caller resolves it normally.
+    fn try_qualified_name_as_division(
+        &self,
+        name: &str,
+        pos: TokenPosition,
+    ) -> Option<Ast> {
+        if !name.contains('/') {
+            return None;
+        }
+        let segments: Vec<&str> = name.split('/').collect();
+        // A real qualified name has exactly two segments and a registered
+        // alias. Anything else (multiple slashes, or unknown alias) is division.
+        if segments.len() == 2 && self.compiler.get_namespace_from_alias(segments[0]).is_some() {
+            return None;
+        }
+        // Any empty segment (e.g. trailing/leading `/`) can't be division.
+        if segments.iter().any(|s| s.is_empty()) {
+            return None;
+        }
+        let to_operand = |seg: &str| -> Ast {
+            let is_int = !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit());
+            if is_int {
+                if let Ok(n) = seg.parse::<i64>() {
+                    return Ast::IntegerLiteral(n, pos);
+                }
+            }
+            let is_float = seg.contains('.')
+                && seg.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+                && seg.parse::<f64>().is_ok();
+            if is_float {
+                return Ast::FloatLiteral(seg.to_string(), pos);
+            }
+            Ast::Identifier(seg.to_string(), pos)
+        };
+        let mut acc = to_operand(segments[0]);
+        for seg in &segments[1..] {
+            acc = Ast::Div {
+                left: Box::new(acc),
+                right: Box::new(to_operand(seg)),
+                token_range: TokenRange::new(pos, pos),
+            };
+        }
+        Some(acc)
+    }
+
     fn compile_closure_call(&mut self, function: VariableLocation, args: Vec<Value>) -> Value {
         // self.ir.breakpoint();
         let ret_register = self.ir.assign_new(Value::TaggedConstant(0));
@@ -6226,9 +6333,20 @@ impl AstCompiler<'_> {
                         alias: namespace_name.clone(),
                     })?;
 
+            // Top-level `let` bindings are keyed by short name in their
+            // namespace, but `fn` definitions key their binding by the FULL
+            // qualified name (e.g. "beagle.ansi/bold"). Try the short name
+            // first, then the fully-qualified name, so a qualified function
+            // reference (ansi/bold) resolves as a first-class VALUE — e.g.
+            // `let f = ansi/bold` or `map(text/upper, xs)` — not just in call
+            // position. Mirrors get_accessible_variable's same-namespace path.
             let slot = self
                 .compiler
                 .find_binding(namespace_id, &var_name)
+                .or_else(|| {
+                    let qualified = format!("{}/{}", namespace_name, var_name);
+                    self.compiler.find_binding(namespace_id, &qualified)
+                })
                 .ok_or_else(|| CompileError::BindingNotFound {
                     name: name.to_string(),
                 })?;
@@ -6460,6 +6578,7 @@ impl AstCompiler<'_> {
                 let mut field_names = Vec::new();
                 let mut mutable_fields = Vec::new();
                 let mut field_docstrings = Vec::new();
+                let mut field_defaults: Vec<Option<crate::runtime::LiteralDefault>> = Vec::new();
                 let mut defaults = Vec::new();
                 for (i, field) in fields.iter().enumerate() {
                     match field {
@@ -6473,6 +6592,11 @@ impl AstCompiler<'_> {
                             field_names.push(name.clone());
                             mutable_fields.push(*mutable);
                             field_docstrings.push(field_doc.clone());
+                            // Retain *literal* defaults on the runtime struct so a
+                            // field added by a live redefinition reads its default
+                            // (not null) on instances created before the field existed.
+                            field_defaults
+                                .push(default_value.as_deref().and_then(literal_default_from_ast));
                             if let Some(default_expr) = default_value {
                                 defaults.push((i, *default_expr.clone()));
                             }
@@ -6482,6 +6606,7 @@ impl AstCompiler<'_> {
                             field_names.push(name.clone());
                             mutable_fields.push(false);
                             field_docstrings.push(None);
+                            field_defaults.push(None);
                         }
                         _ => {
                             return Err(CompileError::InternalError {
@@ -6505,6 +6630,7 @@ impl AstCompiler<'_> {
                     name: full_name,
                     fields: field_names,
                     mutable_fields,
+                    field_defaults,
                     docstring: docstring.clone(),
                     field_docstrings,
                     source_text,
@@ -6587,6 +6713,7 @@ impl AstCompiler<'_> {
                 let field_docstrings = vec![None; variant_names.len()];
                 self.compiler.add_struct(Struct {
                     name: format!("{}/{}", namespace, enum_name),
+                    field_defaults: variant_names.iter().map(|_| None).collect(),
                     fields: variant_names,
                     mutable_fields,
                     docstring: None, // Enums don't have struct docstrings
@@ -6631,6 +6758,7 @@ impl AstCompiler<'_> {
                                 format!("{}/{}.{}", namespace, enum_name, variant_name);
                             self.compiler.add_struct(Struct {
                                 name: variant_struct_name.clone(),
+                                field_defaults: field_names.iter().map(|_| None).collect(),
                                 fields: field_names,
                                 mutable_fields,
                                 docstring: None,
@@ -6655,6 +6783,7 @@ impl AstCompiler<'_> {
                                 name: variant_struct_name.clone(),
                                 fields: vec![],
                                 mutable_fields: vec![],
+                                field_defaults: vec![],
                                 docstring: None,
                                 field_docstrings: vec![],
                                 source_text: None,

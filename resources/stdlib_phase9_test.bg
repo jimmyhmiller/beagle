@@ -1,0 +1,47 @@
+namespace stdlib_phase9_test
+
+// Phase 9 coverage: json, csv, bigint, date, and channel (concurrency).
+// NOT marked gc-always: the channel exercises multi-thread allocation, which
+// hits the known deep concurrent-GC race under gc-always (tracked separately —
+// same B3/B4 class). Under normal GC everything here is correct.
+
+use beagle.json as json
+use beagle.csv as csv
+use beagle.bigint as big
+use beagle.date as date
+use beagle.channel as chan
+
+fn produce(c, n, done) {
+    let mut i = 0
+    while i < n { chan/send!(c, i) i = i + 1 }
+    swap!(done, fn(x) { x + 1 })
+}
+
+fn main() {
+    // json round-trip
+    println(json/parse(json/stringify({:name "Jim", :age 42})) == {:name "Jim", :age 42})
+    // csv
+    println(csv/parse("a,b,c\n1,2,3") == [["a", "b", "c"], ["1", "2", "3"]])
+    // bigint (20-digit square, exact)
+    println(big/to-string(big/mul(big/from-string("99999999999999999999"), big/from-string("99999999999999999999"))) == "9999999999999999999800000000000000000001")
+    // date (exact ISO-8601 vector + leap years)
+    println(date/format-iso8601(date/from-epoch(784111777)) == "1994-11-06T08:49:37Z")
+    println(date/is-leap-year?(2000) && date/is-leap-year?(2024) && (date/is-leap-year?(1900) == false))
+    // channel: 4 producers x 50 ints, main consumes all, sum is exact (no loss)
+    let c = chan/make-channel()
+    let done = atom(0)
+    let mut p = 0
+    while p < 4 { thread(fn() { produce(c, 50, done) }) p = p + 1 }
+    let mut got = 0
+    let mut sum = 0
+    while got < 200 { sum = sum + chan/receive(c) got = got + 1 }
+    println(got == 200 && sum == 4900)
+}
+
+// @beagle.core.snapshot
+// true
+// true
+// true
+// true
+// true
+// true

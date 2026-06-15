@@ -418,7 +418,25 @@ impl CompactingHeap {
                         .structs
                         .migration_plan_for(struct_id, layout_version)
                 {
-                    let new_pointer = self.copy_with_migration(&heap_object, &plan);
+                    // Resolve the default value for each field NEW to this layout
+                    // (field_map == None) to a GC-stable tagged value — immediate
+                    // or eternal-region, never a fresh heap allocation — so a
+                    // migrated object gets its field defaults rather than null.
+                    let def = runtime.get_struct_by_id(struct_id);
+                    let new_field_defaults: Vec<usize> = plan
+                        .field_map
+                        .iter()
+                        .enumerate()
+                        .map(|(new_idx, mapping)| match mapping {
+                            Some(_) => BuiltInTypes::null_value() as usize,
+                            None => def
+                                .as_ref()
+                                .map(|d| runtime.field_default_value_at(d, new_idx))
+                                .unwrap_or(BuiltInTypes::null_value() as usize),
+                        })
+                        .collect();
+                    let new_pointer =
+                        self.copy_with_migration(&heap_object, &plan, &new_field_defaults);
                     debug_assert!(new_pointer % 8 == 0, "Pointer is not aligned");
                     let tagged_new = object_type.unwrap().tag(new_pointer) as usize;
                     unsafe { *pointer = Header::set_forwarding_bit(tagged_new) };
@@ -444,6 +462,7 @@ impl CompactingHeap {
         &mut self,
         old_object: &HeapObject,
         plan: &crate::runtime::MigrationPlan,
+        new_field_defaults: &[usize],
     ) -> isize {
         // Build new header with updated layout version and field count
         // struct_id stays the same (stable ID)
@@ -470,12 +489,16 @@ impl CompactingHeap {
             *header_ptr = new_header.to_usize();
         }
 
-        // Write fields: map old fields to new layout, null for missing fields
-        let null_val = BuiltInTypes::null_value() as usize;
+        // Write fields: map old fields to new layout; fields new to this layout
+        // get their declared default (resolved by the caller to a GC-stable
+        // tagged value), or null if they have none.
         for (new_idx, mapping) in plan.field_map.iter().enumerate() {
             let value = match mapping {
                 Some(old_idx) => old_object.get_field(*old_idx),
-                None => null_val,
+                None => new_field_defaults
+                    .get(new_idx)
+                    .copied()
+                    .unwrap_or(BuiltInTypes::null_value() as usize),
             };
             unsafe {
                 let field_ptr = (new_pointer as *mut usize).add(1 + new_idx);

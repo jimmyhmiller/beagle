@@ -2080,7 +2080,10 @@ fn find_any_file_for_namespace(runtime: &Runtime, namespace: &str) -> Option<Str
     {
         return b.disk_location.as_ref().map(|l| l.file.clone());
     }
-    None
+    // No loaded def carries a disk_location (e.g. the namespace's defs were
+    // compiled without file context). Fall back to resolving the namespace to
+    // its source file via the include paths so an append can still land.
+    runtime.resolve_namespace_file(namespace)
 }
 
 /// reflect/persist(namespace, text) - Persist one or more definitions
