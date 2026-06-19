@@ -15,10 +15,28 @@ pub unsafe extern "C" fn construct_struct_dynamic(
         .get(descriptor_id)
         .cloned()
     else {
-        return BuiltInTypes::null_value() as usize;
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "InternalError",
+                format!(
+                    "Missing struct allocation descriptor {} during dynamic struct construction",
+                    descriptor_id
+                ),
+            );
+        }
     };
     let Some(current_def) = runtime.get_struct_by_id(descriptor.struct_id) else {
-        return BuiltInTypes::null_value() as usize;
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "InternalError",
+                format!(
+                    "Missing struct id {} during dynamic struct construction",
+                    descriptor.struct_id
+                ),
+            );
+        }
     };
     let current_fields = current_def.fields.clone();
     let current_field_count = current_fields.len();
@@ -114,10 +132,28 @@ pub unsafe extern "C" fn patch_struct_dynamic(
         .get(descriptor_id)
         .cloned()
     else {
-        return object_pointer;
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "InternalError",
+                format!(
+                    "Missing struct allocation descriptor {} during dynamic struct patch",
+                    descriptor_id
+                ),
+            );
+        }
     };
     let Some(current_def) = runtime.get_struct_by_id(descriptor.struct_id) else {
-        return object_pointer;
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "InternalError",
+                format!(
+                    "Missing struct id {} during dynamic struct patch",
+                    descriptor.struct_id
+                ),
+            );
+        }
     };
     let current_fields = current_def.fields.clone();
     let object = HeapObject::from_tagged(object_pointer);
