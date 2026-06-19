@@ -120,6 +120,22 @@ impl Runtime {
             2,
         )?;
 
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/construct-struct-dynamic",
+            construct_struct_dynamic as *const u8,
+            true,
+            true,
+            5,
+        )?;
+
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/patch-struct-dynamic",
+            patch_struct_dynamic as *const u8,
+            true,
+            true,
+            6,
+        )?;
+
         // copy_object now takes (stack_pointer, frame_pointer, object_pointer)
         self.add_builtin_function_with_fp(
             "beagle.builtin/copy-object",
@@ -175,6 +191,14 @@ impl Runtime {
             property_access as *const u8,
             true,
             4,
+        )?;
+
+        self.add_builtin_function_with_fp(
+            "beagle.builtin/throw-not-a-function",
+            throw_not_a_function as *const u8,
+            true,
+            true,
+            3,
         )?;
 
         self.add_builtin_function(
@@ -1918,12 +1942,15 @@ impl Runtime {
             "Check if a string ends with a given suffix.\n\nExamples:\n  (ends-with? \"hello\" \"lo\")  ; => true",
         )?;
 
+        // Backing primitive for the polymorphic `contains?` protocol's String impl.
+        // The user-facing `contains?` is defined in std.bg as a protocol so it can
+        // dispatch across strings, maps, sets, and vectors.
         self.add_builtin_with_doc(
-            "beagle.core/contains?",
+            "beagle.core/string-contains?",
             string_contains as *const u8,
             true,
             &["string", "substr"],
-            "Check if a string contains a substring.\n\nExamples:\n  (contains? \"hello\" \"ell\")  ; => true",
+            "Check if a string contains a substring.\n\nExamples:\n  (string-contains? \"hello\" \"ell\")  ; => true",
         )?;
 
         self.add_builtin_with_doc(
@@ -2605,6 +2632,30 @@ impl Runtime {
             true,
             &["m"],
             "Return a vector of all keys in the map.\n\nExamples:\n  (map-keys {:a 1 :b 2})  ; => [:a :b]",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.collections/map-get-default",
+            rust_map_get_default as *const u8,
+            false,
+            &["m", "key", "default"],
+            "Get the value for key, returning default if the key is absent.\n\nUnlike map-get, distinguishes a stored null from a missing key.\n\nExamples:\n  (map-get-default {:a 1} :a 0)     ; => 1\n  (map-get-default {:a 1} :b 0)     ; => 0\n  (map-get-default {:a null} :a 0)  ; => null",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.collections/map-contains?",
+            rust_map_contains as *const u8,
+            false,
+            &["m", "key"],
+            "Return true if the map contains key (even if its value is null).\n\nExamples:\n  (map-contains? {:a 1} :a)     ; => true\n  (map-contains? {:a null} :a)  ; => true\n  (map-contains? {:a 1} :b)     ; => false",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle.collections/map-find",
+            rust_map_find as *const u8,
+            true,
+            &["m", "key"],
+            "Return the [key value] entry for key, or null if absent.\n\nExamples:\n  (map-find {:a 1} :a)  ; => [:a 1]\n  (map-find {:a 1} :b)  ; => null",
         )?;
 
         // ============================================================================

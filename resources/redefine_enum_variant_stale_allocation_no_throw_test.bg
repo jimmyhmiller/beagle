@@ -1,0 +1,34 @@
+namespace redefine_enum_variant_stale_allocation_no_throw_test
+
+// Regression: enum variant constructors are struct allocation sites too. After
+// redefining the enum's variant shape, old compiled constructors must allocate
+// the current layout via the generic fallback.
+
+enum E {
+    A { x, y }
+}
+
+fn make() {
+    E.A { x: 1, y: 2 }
+}
+
+fn main() {
+    let before = make()
+    eval("namespace redefine_enum_variant_stale_allocation_no_throw_test
+enum E {
+    A { x, y, z }
+}")
+    let after = make()
+    println(before.x)
+    println(after.x)
+    println(after.y)
+    println(after.z)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// 1
+// 1
+// 2
+// null
+// done

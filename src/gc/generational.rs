@@ -81,8 +81,9 @@ impl CardTable {
     /// Create a new card table covering the given heap range.
     fn new(heap_start: usize, heap_size: usize) -> Self {
         let card_count = heap_size.div_ceil(CARD_SIZE);
-        let cards: Vec<std::sync::atomic::AtomicU8> =
-            (0..card_count).map(|_| std::sync::atomic::AtomicU8::new(0)).collect();
+        let cards: Vec<std::sync::atomic::AtomicU8> = (0..card_count)
+            .map(|_| std::sync::atomic::AtomicU8::new(0))
+            .collect();
         let biased_ptr = unsafe { (cards.as_ptr() as *mut u8).sub(heap_start >> CARD_SIZE_LOG2) };
         Self {
             cards,
@@ -646,7 +647,11 @@ impl Allocator for GenerationalGC {
         } else {
             inner_off
         };
-        let header_size = if words > Header::MAX_INLINE_SIZE { 16 } else { 8 };
+        let header_size = if words > Header::MAX_INLINE_SIZE {
+            16
+        } else {
+            8
+        };
         effective_off + words * 8 + header_size <= self.young.byte_count()
     }
 
@@ -872,7 +877,6 @@ impl GenerationalGC {
     fn gather_stack_roots_inner(&self, gc_frame_top: usize) -> (Vec<(usize, usize)>, Vec<usize>) {
         let mut roots: Vec<(usize, usize)> = Vec::with_capacity(36);
         let mut old_gen_objects: Vec<usize> = Vec::with_capacity(16);
-
 
         StackWalker::walk_stack_roots(gc_frame_top, |slot_addr, slot_value| {
             let untagged = BuiltInTypes::untag(slot_value);

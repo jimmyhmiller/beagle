@@ -8,7 +8,13 @@
 //! - **PersistentMap** (2 fields): count, root
 //! - **BitmapIndexedNode** (2 fields): bitmap, children array (keys/values interleaved)
 //!   - Even indexes are keys, odd are values
-//!   - If key slot contains a node pointer and value is null, it's a child node
+//!   - Occupancy is determined by the bitmap, NOT by null.
+//!   - Branch vs leaf is discriminated by the KEY slot: if the key slot holds a
+//!     pointer to a HAMT node (bitmap/array/collision), the slot is a sub-node
+//!     (and the value slot is null, unused). Otherwise the slot is a leaf and the
+//!     VALUE slot may hold anything — including null. This is what lets a map
+//!     store null values (`assoc(m, k, null)`) the Clojure way. Null KEYS are
+//!     fine too: null is never a node pointer, so a (null, v) slot is just a leaf.
 //! - **ArrayNode** (2 fields): count, children array of 32 node slots
 //!   - Stores only child node pointers (no inline key/value)
 //!   - Empty slots are null
@@ -60,6 +66,24 @@ const BITMAP_TO_ARRAY_THRESHOLD: usize = 16;
 pub struct PersistentMap;
 
 impl PersistentMap {
+    /// Internal "key not present" sentinel returned by lookups.
+    ///
+    /// It is distinct from `null_value()` (`0b111`): it uses the Null tag (low
+    /// 3 bits `0b111`) with a nonzero payload, so `get_kind` classifies it as
+    /// `Null` and `is_heap_pointer` returns false — the GC never follows it.
+    /// User code cannot construct this value (it is not a valid tagged int/bool/
+    /// pointer), and it is never stored in the heap: it exists only as a Rust-side
+    /// return value so the builtin layer can tell "absent" apart from a stored
+    /// `null` and translate it to null / a default / false before anything
+    /// Beagle-visible happens.
+    pub const NOT_FOUND: usize = 0b1111;
+
+    /// True if `value` is the not-found sentinel returned by `get`.
+    #[inline]
+    pub fn is_not_found(value: usize) -> bool {
+        value == Self::NOT_FOUND
+    }
+
     /// Create a new empty persistent map.
     pub fn empty(runtime: &mut Runtime, stack_pointer: usize) -> Result<GcHandle, Box<dyn Error>> {
         let mut scope = HandleScope::new(runtime, stack_pointer);
@@ -83,12 +107,14 @@ impl PersistentMap {
 
     /// Get a value by key.
     ///
-    /// Returns the value if found, or null if not found.
+    /// Returns the stored value if found (which may itself be `null`), or the
+    /// `NOT_FOUND` sentinel if the key is absent. Callers in the builtin layer
+    /// translate `NOT_FOUND` into null / a default / false as appropriate.
     pub fn get(runtime: &Runtime, map: GcHandle, key: usize) -> usize {
         let root_ptr = map.get_field(FIELD_ROOT);
 
         if root_ptr == BuiltInTypes::null_value() as usize {
-            return BuiltInTypes::null_value() as usize;
+            return Self::NOT_FOUND;
         }
 
         let hash = runtime.hash_value(key);
@@ -108,6 +134,7 @@ impl PersistentMap {
         shift: usize,
     ) -> usize {
         let null_val = BuiltInTypes::null_value() as usize;
+        let not_found = Self::NOT_FOUND;
         let mut current_node = node;
         let mut current_shift = shift;
 
@@ -119,7 +146,7 @@ impl PersistentMap {
                 let bit = 1usize << ((hash >> current_shift) & BRANCH_MASK);
 
                 if (bitmap & bit) == 0 {
-                    return null_val;
+                    return not_found;
                 }
 
                 let children_ptr = current_node.get_field(BN_FIELD_CHILDREN);
@@ -129,16 +156,19 @@ impl PersistentMap {
                 let slot_key = children.get_field(index * 2);
                 let slot_value = children.get_field(index * 2 + 1);
 
-                // Fast path: if value is not null, it's a leaf entry
+                // Fast path: a sub-node always has a null value slot, so a
+                // non-null value slot unambiguously means this is a leaf entry.
                 if slot_value != null_val {
                     return if runtime.equal(slot_key, key) {
                         slot_value
                     } else {
-                        null_val
+                        not_found
                     };
                 }
 
-                // Value is null - check if it's a sub-node
+                // Value slot is null: this is either a sub-node (key slot holds a
+                // node pointer) or a leaf whose stored value is null. Discriminate
+                // by the KEY slot — never by the value being null.
                 if BuiltInTypes::is_heap_pointer(slot_key) {
                     let child = GcHandle::from_tagged(slot_key);
                     let child_type = child.get_type_id();
@@ -151,11 +181,12 @@ impl PersistentMap {
                     }
                 }
 
-                // Leaf with null value
+                // Leaf whose stored value is null — return the null value itself on
+                // a key match (a real stored null), not the not-found sentinel.
                 return if runtime.equal(slot_key, key) {
                     slot_value
                 } else {
-                    null_val
+                    not_found
                 };
             } else if type_id == TYPE_ID_ARRAY_NODE {
                 // ArrayNode stores only child nodes (no inline key/value)
@@ -166,7 +197,7 @@ impl PersistentMap {
                 let child_ptr = children.get_field(index);
 
                 if child_ptr == null_val {
-                    return null_val;
+                    return not_found;
                 }
 
                 // Child is always a node (BitmapNode, ArrayNode, or CollisionNode)
@@ -182,11 +213,11 @@ impl PersistentMap {
                 }
 
                 // Should not reach here - invalid child type
-                return null_val;
+                return not_found;
             } else if type_id == TYPE_ID_COLLISION_NODE {
                 return Self::find_in_collision_node(runtime, current_node, key);
             } else {
-                return null_val;
+                return not_found;
             }
         }
     }
@@ -200,11 +231,12 @@ impl PersistentMap {
         for i in 0..count {
             let stored_key = kv_array.get_field(i * 2);
             if runtime.equal(stored_key, key) {
+                // Return the stored value verbatim — it may legitimately be null.
                 return kv_array.get_field(i * 2 + 1);
             }
         }
 
-        BuiltInTypes::null_value() as usize
+        Self::NOT_FOUND
     }
 
     /// Associate a key with a value, returning a new map.
@@ -1490,21 +1522,34 @@ impl PersistentMap {
                 let key = children.get_field(i * 2);
                 let value = children.get_field(i * 2 + 1);
 
-                if value != BuiltInTypes::null_value() as usize {
-                    // Leaf entry - add key to vec
-                    let current_vec = GcHandle::from_tagged(vec_h.get());
-                    let new_vec =
-                        PersistentVec::push(scope.runtime(), stack_pointer, current_vec, key)?;
-                    // Update both the handle slot and the caller's reference
-                    let tg = unsafe { &mut *crate::runtime::cached_thread_global_ptr() };
-                    tg.handle_stack[vec_h.slot()] = new_vec.as_tagged();
-                } else if BuiltInTypes::is_heap_pointer(key) {
+                // Discriminate sub-node vs leaf by the KEY slot, never by the
+                // value being null. A leaf with a stored null value must still
+                // have its key collected (the previous value-based test dropped
+                // those entries or misrecursed into a non-node key).
+                let is_subnode = value == BuiltInTypes::null_value() as usize
+                    && BuiltInTypes::is_heap_pointer(key)
+                    && {
+                        let child_type = GcHandle::from_tagged(key).get_type_id();
+                        child_type == TYPE_ID_BITMAP_NODE
+                            || child_type == TYPE_ID_ARRAY_NODE
+                            || child_type == TYPE_ID_COLLISION_NODE
+                    };
+
+                if is_subnode {
                     // Child node - recurse with current vec from handle
                     let mut inner_vec = vec_h.get();
                     Self::collect_keys(scope.runtime(), stack_pointer, key, &mut inner_vec)?;
                     // Sync back to our handle
                     let tg = unsafe { &mut *crate::runtime::cached_thread_global_ptr() };
                     tg.handle_stack[vec_h.slot()] = inner_vec;
+                } else {
+                    // Leaf entry (value may be null) - add key to vec
+                    let current_vec = GcHandle::from_tagged(vec_h.get());
+                    let new_vec =
+                        PersistentVec::push(scope.runtime(), stack_pointer, current_vec, key)?;
+                    // Update both the handle slot and the caller's reference
+                    let tg = unsafe { &mut *crate::runtime::cached_thread_global_ptr() };
+                    tg.handle_stack[vec_h.slot()] = new_vec.as_tagged();
                 }
             }
         } else if type_id == TYPE_ID_ARRAY_NODE {

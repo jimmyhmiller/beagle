@@ -1,0 +1,58 @@
+namespace redefine_layout_version_wrap_sticky_bit_test
+
+// Regression: the header layout version is only 4 bits. After 16 structural
+// redefinitions it can equal an old allocation site's baked version again, so
+// allocation safety must use the sticky "struct ever redefined" bit instead.
+
+struct P { x, y }
+
+fn make() {
+    P { x: 1, y: 2 }
+}
+
+fn main() {
+    eval("namespace redefine_layout_version_wrap_sticky_bit_test
+struct P { x, y, a }")
+    eval("namespace redefine_layout_version_wrap_sticky_bit_test
+struct P { a, x, y }")
+    eval("namespace redefine_layout_version_wrap_sticky_bit_test
+struct P { x, a, y }")
+    eval("namespace redefine_layout_version_wrap_sticky_bit_test
+struct P { x, y, b }")
+    eval("namespace redefine_layout_version_wrap_sticky_bit_test
+struct P { b, x, y }")
+    eval("namespace redefine_layout_version_wrap_sticky_bit_test
+struct P { x, b, y }")
+    eval("namespace redefine_layout_version_wrap_sticky_bit_test
+struct P { x, y, c }")
+    eval("namespace redefine_layout_version_wrap_sticky_bit_test
+struct P { c, x, y }")
+    eval("namespace redefine_layout_version_wrap_sticky_bit_test
+struct P { x, c, y }")
+    eval("namespace redefine_layout_version_wrap_sticky_bit_test
+struct P { x, y, d }")
+    eval("namespace redefine_layout_version_wrap_sticky_bit_test
+struct P { d, x, y }")
+    eval("namespace redefine_layout_version_wrap_sticky_bit_test
+struct P { x, d, y }")
+    eval("namespace redefine_layout_version_wrap_sticky_bit_test
+struct P { x, y, e }")
+    eval("namespace redefine_layout_version_wrap_sticky_bit_test
+struct P { e, x, y }")
+    eval("namespace redefine_layout_version_wrap_sticky_bit_test
+struct P { x, e, y }")
+    eval("namespace redefine_layout_version_wrap_sticky_bit_test
+struct P { z, y, x }")
+
+    let after = make()
+    println(after.x)
+    println(after.y)
+    println(after.z)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// 1
+// 2
+// null
+// done

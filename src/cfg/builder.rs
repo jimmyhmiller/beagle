@@ -928,6 +928,10 @@ fn translate_op(
             offset: *off,
         }),
         I::GetFramePointer(Value::Register(d)) => Ok(Op::GetFramePointer { dst: v(d) }),
+        I::GetLocalAddress(Value::Register(d), local_index) => Ok(Op::GetLocalAddress {
+            dst: v(d),
+            local_index: *local_index,
+        }),
         I::CurrentStackPosition(Value::Register(d)) => Ok(Op::CurrentStackPosition { dst: v(d) }),
 
         // ---- Variadic plumbing -----------------------------------------
@@ -1114,6 +1118,7 @@ fn translate_op(
         | I::GetStackPointer(..)
         | I::GetStackPointerImm(..)
         | I::GetFramePointer(..)
+        | I::GetLocalAddress(..)
         | I::CurrentStackPosition(..)
         | I::ReadArgCount(..)
         | I::ExtendLifeTime(..)
@@ -2017,6 +2022,7 @@ fn def_class_of(inst: &Instruction) -> Vec<(u32, RegClass)> {
         | I::AtomicLoad(dst, _)
         | I::PopStack(dst)
         | I::GetFramePointer(dst)
+        | I::GetLocalAddress(dst, _)
         | I::CurrentStackPosition(dst)
         | I::GetStackPointer(dst, _)
         | I::GetStackPointerImm(dst, _)
@@ -2148,6 +2154,7 @@ fn instruction_name(inst: &Instruction) -> &'static str {
         Instruction::GetStackPointer(..) => "GetStackPointer",
         Instruction::GetStackPointerImm(..) => "GetStackPointerImm",
         Instruction::GetFramePointer(..) => "GetFramePointer",
+        Instruction::GetLocalAddress(..) => "GetLocalAddress",
         Instruction::GetTag(..) => "GetTag",
         Instruction::Untag(..) => "Untag",
         Instruction::HeapStoreOffset(..) => "HeapStoreOffset",

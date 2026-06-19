@@ -1,0 +1,27 @@
+namespace redefine_struct_spread_sticky_bit_test
+
+// Regression: struct spread copies to the current layout, but explicit override
+// writes must also use current field positions after a runtime redefinition.
+
+struct P { x, y }
+
+fn update(p) {
+    P { ...p, x: 9 }
+}
+
+fn main() {
+    let before = P { x: 1, y: 2 }
+    eval("namespace redefine_struct_spread_sticky_bit_test
+struct P { y, x, z }")
+    let after = update(before)
+    println(after.x)
+    println(after.y)
+    println(after.z)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// 9
+// 2
+// null
+// done

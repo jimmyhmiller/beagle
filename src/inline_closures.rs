@@ -510,6 +510,9 @@ fn for_each_child_ast(node: &Ast, f: &mut dyn FnMut(&Ast)) {
                 f(s);
             }
         }
+        Ast::EnumCreation { fields, .. } => {
+            fields.iter().for_each(|(_, e)| f(e));
+        }
         Ast::Function { body, .. } => body.iter().for_each(&mut *f),
         _ => {}
     }
@@ -581,6 +584,9 @@ fn for_each_child_ast_mut(node: &mut Ast, f: &mut dyn FnMut(&mut Ast)) {
             if let Some(s) = spread {
                 f(s);
             }
+        }
+        Ast::EnumCreation { fields, .. } => {
+            fields.iter_mut().for_each(|(_, e)| f(e));
         }
         Ast::Function { body, .. } => body.iter_mut().for_each(&mut *f),
         _ => {}

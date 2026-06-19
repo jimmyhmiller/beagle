@@ -71,7 +71,9 @@ pub mod embedded_stdlib {
             "beagle.template.bg" => Some(include_str!("../standard-library/beagle.template.bg")),
             "beagle.ws.bg" => Some(include_str!("../standard-library/beagle.ws.bg")),
             "beagle.iter.bg" => Some(include_str!("../standard-library/beagle.iter.bg")),
-            "beagle.containers.bg" => Some(include_str!("../standard-library/beagle.containers.bg")),
+            "beagle.containers.bg" => {
+                Some(include_str!("../standard-library/beagle.containers.bg"))
+            }
             "beagle.stats.bg" => Some(include_str!("../standard-library/beagle.stats.bg")),
             "beagle.random.bg" => Some(include_str!("../standard-library/beagle.random.bg")),
             "beagle.ip.bg" => Some(include_str!("../standard-library/beagle.ip.bg")),
@@ -80,18 +82,24 @@ pub mod embedded_stdlib {
             "beagle.bigint.bg" => Some(include_str!("../standard-library/beagle.bigint.bg")),
             "beagle.channel.bg" => Some(include_str!("../standard-library/beagle.channel.bg")),
             "beagle.date.bg" => Some(include_str!("../standard-library/beagle.date.bg")),
-            "beagle.regex-wrapper.bg" => Some(include_str!("../standard-library/beagle.regex-wrapper.bg")),
+            "beagle.regex-wrapper.bg" => {
+                Some(include_str!("../standard-library/beagle.regex-wrapper.bg"))
+            }
             "beagle.cli.bg" => Some(include_str!("../standard-library/beagle.cli.bg")),
             "beagle.log.bg" => Some(include_str!("../standard-library/beagle.log.bg")),
             "beagle.test.bg" => Some(include_str!("../standard-library/beagle.test.bg")),
             "beagle.mathx.bg" => Some(include_str!("../standard-library/beagle.mathx.bg")),
             "beagle.ini.bg" => Some(include_str!("../standard-library/beagle.ini.bg")),
-            "beagle.priorityqueue.bg" => Some(include_str!("../standard-library/beagle.priorityqueue.bg")),
+            "beagle.priorityqueue.bg" => {
+                Some(include_str!("../standard-library/beagle.priorityqueue.bg"))
+            }
             "beagle.semver.bg" => Some(include_str!("../standard-library/beagle.semver.bg")),
             "beagle.ansi.bg" => Some(include_str!("../standard-library/beagle.ansi.bg")),
             "beagle.glob.bg" => Some(include_str!("../standard-library/beagle.glob.bg")),
             "beagle.textwrap.bg" => Some(include_str!("../standard-library/beagle.textwrap.bg")),
-            "beagle.struct-pack.bg" => Some(include_str!("../standard-library/beagle.struct-pack.bg")),
+            "beagle.struct-pack.bg" => {
+                Some(include_str!("../standard-library/beagle.struct-pack.bg"))
+            }
             _ => None,
         }
     }
@@ -1025,6 +1033,37 @@ fn compile_x86_continuation_return_stub(runtime: &mut Runtime) {
             .unwrap();
         let function = runtime
             .get_function_by_name_mut("beagle.builtin/pop-top-tag-and-return")
+            .unwrap();
+        function.is_builtin = true;
+    }
+
+    // x86-64 boundary-natural-return shim — same RAX→RDI fixup, for the
+    // resumable-exception boundary natural-return teardown stub.
+    {
+        use crate::builtins::reset_shift::boundary_natural_return_stub_entry;
+        let mut lang = x86::LowLevelX86::new();
+        lang.instructions.push(X86Asm::MovRR {
+            dest: RDI,
+            src: RAX,
+        });
+        lang.instructions.push(X86Asm::SubRI { dest: RSP, imm: 8 });
+        let target = boundary_natural_return_stub_entry() as i64;
+        lang.instructions.push(X86Asm::MovRI {
+            dest: R11,
+            imm: target,
+        });
+        lang.instructions.push(X86Asm::JmpR { target: R11 });
+        let code = lang.compile_to_bytes();
+        runtime
+            .add_function_mark_executable(
+                "beagle.builtin/boundary-natural-return".to_string(),
+                &code,
+                0,
+                1,
+            )
+            .unwrap();
+        let function = runtime
+            .get_function_by_name_mut("beagle.builtin/boundary-natural-return")
             .unwrap();
         function.is_builtin = true;
     }
@@ -2665,6 +2704,25 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                 (passed, failed)
             };
 
+            // Register the main thread as a GC mutator for the duration of the
+            // test blocks, exactly as `run_main_once` does for `main()`. A test
+            // body may spawn threads (`thread(...)`); under gc-always a child
+            // thread initiates a stop-the-world that waits on
+            // `registered_thread_count`. If this (main) thread isn't counted, the
+            // collector proceeds without stopping/scanning it, so it mutates and
+            // holds roots concurrently with the collection — corrupting GC root
+            // scanning (stale young-gen pointers, SIGSEGV, assorted asserts).
+            // The program's own run already unregistered us, so re-register here.
+            {
+                let _guard = runtime.gc_lock.lock().unwrap();
+                let new_count = runtime
+                    .registered_thread_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Release)
+                    + 1;
+                gc::usdt_probes::fire_thread_register(new_count);
+                crate::runtime::mark_thread_registered();
+            }
+
             let (test_passed, mut test_failed) = run_blocks(runtime, "");
 
             // Second pass on tier-2 code (only if tier-1 was clean, so a
@@ -2677,6 +2735,41 @@ fn main_inner(mut args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
                 );
                 let (_p2, f2) = run_blocks(runtime, " [tier2]");
                 test_failed += f2;
+            }
+
+            // Unregister the main thread (mirror of the registration above; same
+            // dance as `run_main_once`): announce as c_calling so an in-progress
+            // GC counts us, wait for it to finish, then drop our registration.
+            {
+                let (lock, condvar) = &*runtime.thread_state.clone();
+                let mut state = lock.lock().unwrap();
+                state.register_c_call(0);
+                condvar.notify_one();
+            }
+            loop {
+                while runtime.is_paused() {
+                    std::thread::yield_now();
+                }
+                match runtime.gc_lock.try_lock() {
+                    Ok(_guard) => {
+                        {
+                            let (lock, condvar) = &*runtime.thread_state.clone();
+                            let mut state = lock.lock().unwrap();
+                            state.unregister_c_call();
+                            condvar.notify_one();
+                        }
+                        let new_count = runtime
+                            .registered_thread_count
+                            .fetch_sub(1, std::sync::atomic::Ordering::Release)
+                            - 1;
+                        gc::usdt_probes::fire_thread_unregister(new_count);
+                        crate::runtime::mark_thread_unregistered();
+                        break;
+                    }
+                    Err(_) => {
+                        std::thread::yield_now();
+                    }
+                }
             }
 
             if test_failed > 0 {

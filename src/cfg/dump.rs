@@ -389,6 +389,13 @@ fn write_op(out: &mut String, op: &Op) {
             write!(out, "{} = GetStackPointerImm +{}", fmt_vreg(*dst), offset).unwrap()
         }
         Op::GetFramePointer { dst } => write!(out, "{} = GetFramePointer", fmt_vreg(*dst)).unwrap(),
+        Op::GetLocalAddress { dst, local_index } => write!(
+            out,
+            "{} = GetLocalAddress local{}",
+            fmt_vreg(*dst),
+            local_index
+        )
+        .unwrap(),
         Op::CurrentStackPosition { dst } => {
             write!(out, "{} = CurrentStackPosition", fmt_vreg(*dst)).unwrap()
         }

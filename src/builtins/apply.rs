@@ -143,11 +143,7 @@ pub unsafe extern "C" fn divide_by_zero_error(stack_pointer: usize, frame_pointe
     }
 }
 
-unsafe fn throw_arith_type_error(
-    stack_pointer: usize,
-    frame_pointer: usize,
-    message: String,
-) -> ! {
+unsafe fn throw_arith_type_error(stack_pointer: usize, frame_pointer: usize, message: String) -> ! {
     let (kind_str, message_str, location_str) = {
         let runtime = get_runtime().get_mut();
         let kind: usize = runtime
@@ -168,11 +164,13 @@ unsafe fn throw_arith_type_error(
         let return_addr = get_saved_gc_return_addr();
         let loc_string: Option<String> = runtime
             .get_function_containing_pointer(return_addr as *const u8)
-            .map(|(function, _)| match (&function.source_file, function.source_line) {
-                (Some(file), Some(line)) => format!("{} at {}:{}", function.name, file, line),
-                (Some(file), None) => format!("{} at {}", function.name, file),
-                _ => function.name.clone(),
-            });
+            .map(
+                |(function, _)| match (&function.source_file, function.source_line) {
+                    (Some(file), Some(line)) => format!("{} at {}:{}", function.name, file, line),
+                    (Some(file), None) => format!("{} at {}", function.name, file),
+                    _ => function.name.clone(),
+                },
+            );
         let location: usize = match loc_string {
             Some(loc) => runtime
                 .allocate_string(stack_pointer, loc)
@@ -232,9 +230,15 @@ pub unsafe extern "C" fn throw_type_error_operands(
     let message = if a_null && b_null {
         format!("Arithmetic on null: both operands are null. {}", stale_hint)
     } else if a_null {
-        format!("Arithmetic on null: the left operand is null. {}", stale_hint)
+        format!(
+            "Arithmetic on null: the left operand is null. {}",
+            stale_hint
+        )
     } else if b_null {
-        format!("Arithmetic on null: the right operand is null. {}", stale_hint)
+        format!(
+            "Arithmetic on null: the right operand is null. {}",
+            stale_hint
+        )
     } else {
         // Not null, but at least one operand isn't numeric (ints and floats
         // mix fine via the slow path). Name the actual kinds so the cause is

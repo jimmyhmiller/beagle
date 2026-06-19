@@ -263,13 +263,120 @@ pub unsafe extern "C" fn rust_map_count(map_ptr: usize) -> usize {
 
 /// Get a value from a persistent map by key
 /// Signature: (map_ptr, key) -> tagged_value
+///
+/// Returns null when the key is absent OR when the stored value is null — the
+/// two are indistinguishable through this entry point, exactly like Clojure's
+/// 2-arg `get`. Use `map-contains?`, `map-find`, or 3-arg `map-get-default` to
+/// tell a stored null apart from a missing key.
 pub unsafe extern "C" fn rust_map_get(map_ptr: usize, key: usize) -> usize {
     if !BuiltInTypes::is_heap_pointer(map_ptr) {
         return BuiltInTypes::null_value() as usize;
     }
     let runtime = get_runtime().get();
     let map = GcHandle::from_tagged(map_ptr);
-    PersistentMap::get(runtime, map, key)
+    let result = PersistentMap::get(runtime, map, key);
+    if PersistentMap::is_not_found(result) {
+        BuiltInTypes::null_value() as usize
+    } else {
+        result
+    }
+}
+
+/// Get a value from a persistent map, falling back to a default when absent.
+/// Signature: (map_ptr, key, default) -> tagged_value
+///
+/// Unlike `map-get`, this distinguishes a stored null (returned as-is) from a
+/// missing key (returns `default`).
+pub unsafe extern "C" fn rust_map_get_default(map_ptr: usize, key: usize, default: usize) -> usize {
+    if !BuiltInTypes::is_heap_pointer(map_ptr) {
+        return default;
+    }
+    let runtime = get_runtime().get();
+    let map = GcHandle::from_tagged(map_ptr);
+    let result = PersistentMap::get(runtime, map, key);
+    if PersistentMap::is_not_found(result) {
+        default
+    } else {
+        result
+    }
+}
+
+/// Return true if the map contains the key (even if its value is null).
+/// Signature: (map_ptr, key) -> tagged_bool
+pub unsafe extern "C" fn rust_map_contains(map_ptr: usize, key: usize) -> usize {
+    if !BuiltInTypes::is_heap_pointer(map_ptr) {
+        return BuiltInTypes::false_value() as usize;
+    }
+    let runtime = get_runtime().get();
+    let map = GcHandle::from_tagged(map_ptr);
+    let result = PersistentMap::get(runtime, map, key);
+    if PersistentMap::is_not_found(result) {
+        BuiltInTypes::false_value() as usize
+    } else {
+        BuiltInTypes::true_value() as usize
+    }
+}
+
+/// Find the entry for a key, returning a `[key, value]` vector or null if absent.
+/// Signature: (stack_pointer, frame_pointer, map_ptr, key) -> tagged_ptr | null
+pub unsafe extern "C" fn rust_map_find(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    map_ptr: usize,
+    key: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    if !BuiltInTypes::is_heap_pointer(map_ptr) {
+        return BuiltInTypes::null_value() as usize;
+    }
+
+    let map = GcHandle::from_tagged(map_ptr);
+    let result = PersistentMap::get(runtime, map, key);
+    if PersistentMap::is_not_found(result) {
+        return BuiltInTypes::null_value() as usize;
+    }
+
+    // Build the [key, value] entry vector. Protect key/value across the
+    // allocations so a GC mid-build can't leave us holding stale pointers.
+    let mut scope = HandleScope::new(runtime, stack_pointer);
+    let key_h = scope.alloc(key);
+    let value_h = scope.alloc(result);
+
+    let entry = match PersistentVec::empty(scope.runtime(), stack_pointer) {
+        Ok(handle) => handle,
+        Err(e) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                format!("Failed to create entry vector in map-find: {}", e),
+            );
+        },
+    };
+    let entry_h = scope.alloc(entry.as_tagged());
+
+    for slot_handle in [&key_h, &value_h] {
+        let current = entry_h.to_gc_handle();
+        // Read the element fresh from its handle: a prior push may have GC'd and
+        // relocated it, in which case the handle slot was updated but a cached
+        // tagged value would be stale.
+        let value = slot_handle.get();
+        let pushed = match PersistentVec::push(scope.runtime(), stack_pointer, current, value) {
+            Ok(handle) => handle,
+            Err(e) => unsafe {
+                throw_runtime_error(
+                    stack_pointer,
+                    "AllocationError",
+                    format!("Failed to push entry in map-find: {}", e),
+                );
+            },
+        };
+        let tg = unsafe { &mut *crate::runtime::cached_thread_global_ptr() };
+        tg.handle_stack[entry_h.slot()] = pushed.as_tagged();
+    }
+
+    entry_h.get()
 }
 
 /// Associate a key-value pair in a persistent map

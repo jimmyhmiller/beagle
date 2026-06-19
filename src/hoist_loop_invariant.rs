@@ -195,6 +195,7 @@ fn try_hoist(condition: &Ast, wbody: &[Ast]) -> Option<(Vec<Ast>, Ast)> {
             },
             value: Box::new(expr),
             token_range: dummy_tr(),
+            once: false,
         })
         .collect();
     let new_while = Ast::While {

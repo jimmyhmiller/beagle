@@ -61,9 +61,11 @@ impl PersistentSet {
         }
 
         // We reuse PersistentMap's get logic by creating a temporary map handle
-        // The set's root is the same structure as a map's root
+        // The set's root is the same structure as a map's root. Membership is
+        // "the key is present" — i.e. get did not return the not-found sentinel.
+        // (Set values are always `true`, so they are never null anyway.)
         let result = Self::map_get(runtime, set, element);
-        result != BuiltInTypes::null_value() as usize
+        !PersistentMap::is_not_found(result)
     }
 
     /// Internal helper to get a value from the underlying map structure.

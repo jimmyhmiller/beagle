@@ -405,6 +405,10 @@ pub enum Op {
     GetFramePointer {
         dst: VReg,
     },
+    GetLocalAddress {
+        dst: VReg,
+        local_index: usize,
+    },
     CurrentStackPosition {
         dst: VReg,
     },
@@ -1086,6 +1090,7 @@ impl Op {
             | Op::GetStackPointer { .. }
             | Op::GetStackPointerImm { .. }
             | Op::GetFramePointer { .. }
+            | Op::GetLocalAddress { .. }
             | Op::CurrentStackPosition { .. }
             | Op::ReadArgCount { .. } => false,
 
@@ -1217,6 +1222,7 @@ impl Op {
             Op::GetStackPointer { dst, .. } => vec![*dst],
             Op::GetStackPointerImm { dst, .. } => vec![*dst],
             Op::GetFramePointer { dst } => vec![*dst],
+            Op::GetLocalAddress { dst, .. } => vec![*dst],
             Op::CurrentStackPosition { dst } => vec![*dst],
 
             Op::ReadArgCount { dst } => vec![*dst],
@@ -1313,6 +1319,7 @@ impl Op {
             Op::GetStackPointer { dst, .. } => apply(dst),
             Op::GetStackPointerImm { dst, .. } => apply(dst),
             Op::GetFramePointer { dst } => apply(dst),
+            Op::GetLocalAddress { dst, .. } => apply(dst),
             Op::CurrentStackPosition { dst } => apply(dst),
 
             Op::ReadArgCount { dst } => apply(dst),
@@ -1419,6 +1426,7 @@ impl Op {
             Op::GetStackPointer { offset, .. } => vec![*offset],
             Op::GetStackPointerImm { .. } => vec![],
             Op::GetFramePointer { .. } => vec![],
+            Op::GetLocalAddress { .. } => vec![],
             Op::CurrentStackPosition { .. } => vec![],
 
             Op::ReadArgCount { .. } => vec![],
@@ -1574,6 +1582,7 @@ impl Op {
             Op::GetStackPointer { offset, .. } => apply(offset),
             Op::GetStackPointerImm { .. }
             | Op::GetFramePointer { .. }
+            | Op::GetLocalAddress { .. }
             | Op::CurrentStackPosition { .. }
             | Op::ReadArgCount { .. } => {}
 

@@ -585,6 +585,9 @@ impl<'a, F: Fn(u32, RegClass) -> usize> Translator<'a, F> {
             Op::GetFramePointer { dst } => {
                 self.instructions.push(I::GetFramePointer(self.reg(*dst)))
             }
+            Op::GetLocalAddress { dst, local_index } => self
+                .instructions
+                .push(I::GetLocalAddress(self.reg(*dst), *local_index)),
             Op::CurrentStackPosition { dst } => self
                 .instructions
                 .push(I::CurrentStackPosition(self.reg(*dst))),
@@ -1311,6 +1314,7 @@ fn op_tag(op: &Op) -> &'static str {
         Op::GetStackPointer { .. } => "GetStackPointer",
         Op::GetStackPointerImm { .. } => "GetStackPointerImm",
         Op::GetFramePointer { .. } => "GetFramePointer",
+        Op::GetLocalAddress { .. } => "GetLocalAddress",
         Op::CurrentStackPosition { .. } => "CurrentStackPosition",
         Op::ReadArgCount { .. } => "ReadArgCount",
         Op::ExtendLifetime { .. } => "ExtendLifetime",

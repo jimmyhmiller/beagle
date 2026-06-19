@@ -171,6 +171,7 @@ pub enum Instruction {
     GetStackPointer(Value, Value),
     GetStackPointerImm(Value, isize),
     GetFramePointer(Value),
+    GetLocalAddress(Value, usize),
     GetTag(Value, Value),
     Untag(Value, Value),
     HeapStoreOffset(Value, Value, usize),
@@ -641,6 +642,9 @@ impl Instruction {
             Instruction::GetFramePointer(a) => {
                 get_register!(a)
             }
+            Instruction::GetLocalAddress(a, _) => {
+                get_register!(a)
+            }
             Instruction::GetTag(a, b) => {
                 get_registers!(a, b)
             }
@@ -796,6 +800,7 @@ impl Instruction {
             | Instruction::PopStack(value)
             | Instruction::GetStackPointerImm(value, _)
             | Instruction::GetFramePointer(value)
+            | Instruction::GetLocalAddress(value, _)
             | Instruction::CurrentStackPosition(value)
             | Instruction::ExtendLifeTime(value)
             | Instruction::ReadArgCount(value) => {
@@ -4128,6 +4133,22 @@ impl Ir {
                     backend.mov_reg(dest, backend.frame_pointer());
                     self.store_spill(dest, dest_spill, backend);
                 }
+                Instruction::GetLocalAddress(dest, local_index) => {
+                    let dest_spill = self.dest_spill(dest);
+                    let dest = self.value_to_register(dest, backend);
+                    let offset = backend.get_local_byte_offset(*local_index);
+                    debug_assert!(offset <= 0, "local slots are expected below FP");
+                    let byte_delta = -offset;
+                    if byte_delta <= 4095 {
+                        backend.sub_imm(dest, backend.frame_pointer(), byte_delta as i32);
+                    } else {
+                        let delta = backend.temporary_register();
+                        backend.mov_64(delta, byte_delta);
+                        backend.sub(dest, backend.frame_pointer(), delta);
+                        backend.free_temporary_register(delta);
+                    }
+                    self.store_spill(dest, dest_spill, backend);
+                }
                 Instruction::ReadArgCount(dest) => {
                     // Read the argument count register (X9 for ARM64, R10 for x86-64)
                     // Used by variadic functions to determine how many arguments were passed
@@ -5128,6 +5149,15 @@ impl Ir {
         &self.local_stack
     }
 
+    pub fn discard_local_stack_values(&mut self, count: usize) {
+        let new_len = self
+            .local_stack
+            .len()
+            .checked_sub(count)
+            .expect("discard_local_stack_values: not enough local stack values");
+        self.local_stack.truncate(new_len);
+    }
+
     /// Push to the real eval stack (not a local). Used only for closure free variables
     /// where `make_closure` needs a contiguous memory region accessed by pointer.
     pub fn push_to_eval_stack(&mut self, reg: Value) {
@@ -5169,6 +5199,13 @@ impl Ir {
     pub fn get_frame_pointer(&mut self) -> Value {
         let dest = self.volatile_register().into();
         self.instructions.push(Instruction::GetFramePointer(dest));
+        dest
+    }
+
+    pub fn get_local_address(&mut self, local_index: usize) -> Value {
+        let dest = self.volatile_register().into();
+        self.instructions
+            .push(Instruction::GetLocalAddress(dest, local_index));
         dest
     }
 

@@ -1,0 +1,85 @@
+namespace struct_structural_redefine_race_test
+
+// Regression for concurrent structural redefinition + GC layout-migration.
+// The historical hang was a layout-version alias after 16+ redefinitions: the
+// collector could migrate an object to version N, then classify the new copy as
+// still needing a migration keyed by that same wrapped version.
+// See docs/CONCURRENT_REDEFINE_OPEN_ISSUES.md (#7/#9).
+
+use beagle.core as core
+
+// Regression test for the structural-redefine GC stale-root crash (the deeper
+// bug found alongside the binding-clobber race in concurrent_redefine_race_test.bg).
+//
+// A long-lived Point instance is read field-by-field on two threads while this
+// thread STRUCTURALLY redefines Point (add a field, reorder, shrink) and forces
+// a collection after each redefine. GC layout-migration rewrites the live
+// instance to the new layout, which *moves* it; the collector must update every
+// reader's reference so a later field access never dereferences a forwarded/
+// freed corpse ("Struct not found … is_forwarding=true") or reads a heap
+// pointer where an int lives.
+//
+// This is a `main()` + snapshot test ON PURPOSE: it runs through the normal
+// `beagle.async/__main__` cooperative-scheduler entry. A `test {}` block that
+// spawns threads and calls `core/gc()` currently deadlocks in the test runner.
+//
+// It redefines by GROWING then SHRINKING (add field, then remove it) — the
+// add-field case is exactly the original crash. The number of rounds is high
+// enough to cross the old 4-bit layout-version wrap boundary.
+
+struct Point { x, y }
+
+let running = atom(true)
+let crashed = atom(0)
+let done1 = atom(0)
+let done2 = atom(0)
+
+fn reader(p) {
+    while deref(running) == true {
+        try { p.x } catch (e, resume) { swap!(crashed, fn(c) { c + 1 }) resume(0) }
+        try { p.y } catch (e, resume) { swap!(crashed, fn(c) { c + 1 }) resume(0) }
+    }
+}
+
+fn redefiner(rounds) {
+    let mut r = 0
+    while r < rounds {
+        eval("namespace struct_structural_redefine_race_test
+struct Point { x, y, z }")
+        core/gc()
+        eval("namespace struct_structural_redefine_race_test
+struct Point { x, y }")
+        core/gc()
+        r = r + 1
+    }
+    reset!(running, false)
+}
+
+fn wait_done(a, attempts) {
+    if deref(a) >= 1 {
+        true
+    } else if attempts > 2000000000 {
+        false
+    } else {
+        wait_done(a, attempts + 1)
+    }
+}
+
+fn main() {
+    let anchor = Point { x: 111, y: 222 }
+    thread(fn() { reader(anchor) swap!(done1, fn(x) { 1 }) })
+    thread(fn() { reader(anchor) swap!(done2, fn(x) { 1 }) })
+    redefiner(40)
+    wait_done(done1, 0)
+    wait_done(done2, 0)
+    println("crashed=" ++ to-string(deref(crashed)))
+    println(anchor.x)
+    println(anchor.y)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// crashed=0
+// 111
+// 222
+// done

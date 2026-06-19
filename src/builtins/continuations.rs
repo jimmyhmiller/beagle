@@ -68,7 +68,10 @@ pub unsafe extern "C" fn pop_prompt_tag_runtime(tag: usize) -> usize {
     // before comparing against the stored u64 key.
     let tag_raw = BuiltInTypes::untag(tag) as u64;
     let runtime = crate::get_runtime().get();
-    runtime.pop_prompt_tag(tag_raw);
+    // Tolerant pop: a throw unwinding past this reset (e.g. a resumable
+    // exception that resumed back into the body) may have already truncated the
+    // tag. This is extern "C" (nounwind), so a panic would abort the process.
+    runtime.try_pop_prompt_tag(tag_raw);
     BuiltInTypes::null_value() as usize
 }
 

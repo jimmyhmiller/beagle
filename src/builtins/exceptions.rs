@@ -202,6 +202,21 @@ pub unsafe extern "C" fn throw_exception(
             super::set_marks_count(handler.saved_marks_count);
             unsafe { super::restore_frame_marks(handler.frame_pointer, handler.saved_frame_marks) };
 
+            // Snapshot the handle scopes between the catch and the throw
+            // (the records `unwind_effect_state_to` is about to truncate) onto
+            // the continuation, so a resume back into the body re-establishes
+            // them. Without this, a `perform` in the resumed body misses its
+            // handler and falls through to an outer one. Must run BEFORE the
+            // unwind, while the effect-handler roots are still registered.
+            unsafe {
+                crate::builtins::reset_shift::snapshot_boundary_records_onto_cont(
+                    cont_ptr,
+                    stack_pointer,
+                    handler.saved_prompt_tags_len,
+                    handler.saved_effect_handlers_len,
+                );
+            }
+
             // Drop effect-handler / prompt-tag records belonging to the
             // abandoned frames (see `unwind_effect_state_to`).
             unwind_effect_state_to(&handler);
@@ -382,42 +397,50 @@ pub unsafe fn throw_runtime_error(stack_pointer: usize, kind: &str, message: Str
     // Get frame_pointer from thread-local (set by the builtin entry)
     let frame_pointer = get_saved_frame_pointer();
 
-    // Allocate strings with proper GC root protection
-    // kind_str must be rooted before allocating message_str since allocation can trigger GC
-    let (kind_str, message_str) = {
+    // The saved return address points just after the call that raised this
+    // error, so the function containing it is exactly where the error occurred.
+    // Use it to populate the error's `location` field instead of leaving null.
+    let resume_address = get_saved_gc_return_addr();
+    let location = crate::builtins::location_for_address(resume_address);
+
+    // Allocate strings with proper GC root protection. Each prior allocation is
+    // rooted before the next, since allocation can trigger GC (which moves them).
+    let (kind_str, message_str, location_str) = {
         let runtime = get_runtime().get_mut();
         let kind_str: usize = runtime
             .allocate_string(stack_pointer, kind.to_string())
             .expect("Failed to allocate kind string")
             .into();
-
-        // Register kind_str as a root before allocating message_str
         let kind_root_id = runtime.register_temporary_root(kind_str);
 
         let message_str: usize = runtime
             .allocate_string(stack_pointer, message)
             .expect("Failed to allocate message string")
             .into();
+        let message_root_id = runtime.register_temporary_root(message_str);
 
-        // Get the potentially updated kind_str after GC
+        let location_str: usize = match location {
+            Some(loc) => runtime
+                .allocate_string(stack_pointer, loc)
+                .expect("Failed to allocate location string")
+                .into(),
+            None => BuiltInTypes::Null.tag(0) as usize,
+        };
+
+        // Re-read the earlier pointers after the location allocation's possible GC.
+        let message_str = runtime.unregister_temporary_root(message_root_id);
         let kind_str = runtime.unregister_temporary_root(kind_root_id);
-        (kind_str, message_str)
+        (kind_str, message_str, location_str)
     };
     // Runtime borrow is dropped here
 
-    let null_location = BuiltInTypes::Null.tag(0) as usize;
-
-    // Create the Error struct and throw it
-    // Use the saved return address (the instruction after the builtin call in Beagle code)
-    // as the resume address, so that resuming from a caught runtime error works correctly.
-    let resume_address = get_saved_gc_return_addr();
     unsafe {
         let error = create_error(
             stack_pointer,
             frame_pointer,
             kind_str,
             message_str,
-            null_location,
+            location_str,
         );
         throw_exception(stack_pointer, frame_pointer, error, resume_address, 0);
     }

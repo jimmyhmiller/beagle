@@ -204,7 +204,6 @@ impl Header {
 
     /// Maximum size that fits in the inline size field (u16)
     pub const MAX_INLINE_SIZE: usize = 0xFFFF;
-
     pub fn to_usize(self) -> usize {
         let mut data: usize = 0;
         data |= (self.type_id as usize) << 56;

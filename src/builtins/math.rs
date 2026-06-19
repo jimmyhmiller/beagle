@@ -256,21 +256,10 @@ pub extern "C" fn max_builtin(
 
     // At least one is a float - convert both to float and compare
     unsafe {
-        let a_float = if a_kind == BuiltInTypes::Float {
-            let untagged = BuiltInTypes::untag(a);
-            let float_ptr = untagged as *const f64;
-            *float_ptr.add(1)
-        } else {
-            BuiltInTypes::untag_isize(a as isize) as f64
-        };
-
-        let b_float = if b_kind == BuiltInTypes::Float {
-            let untagged = BuiltInTypes::untag(b);
-            let float_ptr = untagged as *const f64;
-            *float_ptr.add(1)
-        } else {
-            BuiltInTypes::untag_isize(b as isize) as f64
-        };
+        // arg_as_f64 throws a clean TypeError on a non-number (e.g. a null field
+        // from a stale struct) rather than untagging it into a garbage float.
+        let a_float = arg_as_f64(a, stack_pointer);
+        let b_float = arg_as_f64(b, stack_pointer);
 
         let result = a_float.max(b_float);
 
@@ -315,21 +304,10 @@ pub extern "C" fn min_builtin(
 
     // At least one is a float - convert both to float and compare
     unsafe {
-        let a_float = if a_kind == BuiltInTypes::Float {
-            let untagged = BuiltInTypes::untag(a);
-            let float_ptr = untagged as *const f64;
-            *float_ptr.add(1)
-        } else {
-            BuiltInTypes::untag_isize(a as isize) as f64
-        };
-
-        let b_float = if b_kind == BuiltInTypes::Float {
-            let untagged = BuiltInTypes::untag(b);
-            let float_ptr = untagged as *const f64;
-            *float_ptr.add(1)
-        } else {
-            BuiltInTypes::untag_isize(b as isize) as f64
-        };
+        // arg_as_f64 throws a clean TypeError on a non-number (e.g. a null field
+        // from a stale struct) rather than untagging it into a garbage float.
+        let a_float = arg_as_f64(a, stack_pointer);
+        let b_float = arg_as_f64(b, stack_pointer);
 
         let result = a_float.min(b_float);
 
@@ -382,30 +360,13 @@ pub extern "C" fn clamp_builtin(
             return BuiltInTypes::construct_int(clamped) as usize;
         }
 
-        // Otherwise, convert to float and do float clamping
-        let value_float = if value_kind == BuiltInTypes::Int {
-            BuiltInTypes::untag_isize(value as isize) as f64
-        } else {
-            let untagged = BuiltInTypes::untag(value);
-            let float_ptr = untagged as *const f64;
-            *float_ptr.add(1)
-        };
-
-        let low_float = if low_kind == BuiltInTypes::Int {
-            BuiltInTypes::untag_isize(low as isize) as f64
-        } else {
-            let untagged = BuiltInTypes::untag(low);
-            let float_ptr = untagged as *const f64;
-            *float_ptr.add(1)
-        };
-
-        let high_float = if high_kind == BuiltInTypes::Int {
-            BuiltInTypes::untag_isize(high as isize) as f64
-        } else {
-            let untagged = BuiltInTypes::untag(high);
-            let float_ptr = untagged as *const f64;
-            *float_ptr.add(1)
-        };
+        // Otherwise, convert to float and do float clamping. arg_as_f64 throws a
+        // clean, resumable, located TypeError on a non-number — e.g. a null field
+        // from a stale struct instance after a live redefinition — instead of
+        // untagging it to 0 and dereferencing (which segfaulted at 0x8).
+        let value_float = arg_as_f64(value, stack_pointer);
+        let low_float = arg_as_f64(low, stack_pointer);
+        let high_float = arg_as_f64(high, stack_pointer);
 
         let result = value_float.max(low_float).min(high_float);
 
@@ -1048,17 +1009,16 @@ pub unsafe extern "C" fn parse_float_string_builtin(
         let s = runtime.get_string(stack_pointer, value);
         match s.trim().parse::<f64>() {
             Ok(float_value) => {
-                let new_float_ptr =
-                    match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
-                        Ok(ptr) => ptr,
-                        Err(_) => {
-                            throw_runtime_error(
-                                stack_pointer,
-                                "AllocationError",
-                                "Failed to allocate float result - out of memory".to_string(),
-                            );
-                        }
-                    };
+                let new_float_ptr = match runtime.allocate(1, stack_pointer, BuiltInTypes::Float) {
+                    Ok(ptr) => ptr,
+                    Err(_) => {
+                        throw_runtime_error(
+                            stack_pointer,
+                            "AllocationError",
+                            "Failed to allocate float result - out of memory".to_string(),
+                        );
+                    }
+                };
                 let untagged_result = BuiltInTypes::untag(new_float_ptr);
                 let result_ptr = untagged_result as *mut f64;
                 *result_ptr.add(1) = float_value;

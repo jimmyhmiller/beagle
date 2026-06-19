@@ -622,9 +622,10 @@ impl ContinuationObject {
 // Both vectors are stored in original push order (outermost first) so
 // re-pushing on invoke reproduces the original stack shape.
 
-const SIDE_STATE_HEADER_SLOTS: usize = 2;
+const SIDE_STATE_HEADER_SLOTS: usize = 3;
 const PROMPT_RECORD_SLOTS: usize = 5;
 const HANDLER_RECORD_SLOTS: usize = 3;
+const EXCEPTION_RECORD_SLOTS: usize = 13;
 
 struct SavedPromptRecord {
     tag: u64,
@@ -643,6 +644,31 @@ struct SavedHandlerRecord {
     /// collection and the side-state write (e.g., inside
     /// `ensure_space_for`).
     handler_root_id: usize,
+}
+
+/// A `try`/`catch` (exception) handler whose frame lies inside a captured
+/// continuation segment. Without saving these, a `try` that spans a
+/// cooperative park (`perform` that suspends and resumes later) is left
+/// on the live `exception_handlers` stack with an SP/FP pointing at the
+/// original — now relocated — segment. A subsequent `throw` longjmps into
+/// dead stack (EXC_BAD_ACCESS). Offsets are relative to the segment base;
+/// `rel_*` are the handler's saved effect/prompt depths rebased to the
+/// captured suffix so they survive being re-pushed under a different base.
+struct SavedExceptionRecord {
+    sp_offset: usize,
+    fp_offset: usize,
+    link_register: usize,
+    handler_address: usize,
+    result_local: isize,
+    handler_id: usize,
+    is_resumable: bool,
+    resume_local: isize,
+    saved_marks_count: usize,
+    /// 0 = None, 1 = Some(offset into segment), 2 = Some(absolute).
+    frame_marks_kind: usize,
+    frame_marks_val: usize,
+    rel_eff: usize,
+    rel_prompt: usize,
 }
 
 /// Collect the prompt-tag records whose `stack_pointer` lies inside
@@ -695,8 +721,60 @@ fn collect_captured_handler_records(tags: &[u64]) -> Vec<SavedHandlerRecord> {
     out
 }
 
-fn side_state_word_count(num_prompts: usize, num_handlers: usize) -> usize {
-    SIDE_STATE_HEADER_SLOTS
+/// Collect the `exception_handlers` (try/catch frames) whose
+/// `frame_pointer` lies inside `[capture_low, capture_high)`, in original
+/// push order. SP/FP/frame-marks are stored as offsets relative to
+/// `capture_low`; the saved effect/prompt depths are rebased relative to
+/// the captured suffix (`base_eff`/`base_prompt` are the live-stack depths
+/// that remain AFTER the captured records are dropped).
+fn collect_captured_exception_records(
+    capture_low: usize,
+    capture_high: usize,
+    base_eff: usize,
+    base_prompt: usize,
+) -> Vec<SavedExceptionRecord> {
+    let ptd = crate::runtime::per_thread_data();
+    let mut out = Vec::new();
+    for h in ptd.exception_handlers.iter() {
+        if h.frame_pointer >= capture_low && h.frame_pointer < capture_high {
+            let (frame_marks_kind, frame_marks_val) = match h.saved_frame_marks {
+                None => (0usize, 0usize),
+                Some(v) if v >= capture_low && v < capture_high => (1usize, v - capture_low),
+                Some(v) => (2usize, v),
+            };
+            out.push(SavedExceptionRecord {
+                sp_offset: h.stack_pointer.wrapping_sub(capture_low),
+                fp_offset: h.frame_pointer - capture_low,
+                link_register: h.link_register,
+                handler_address: h.handler_address,
+                result_local: h.result_local,
+                handler_id: h.handler_id,
+                is_resumable: h.is_resumable,
+                resume_local: h.resume_local,
+                saved_marks_count: h.saved_marks_count,
+                frame_marks_kind,
+                frame_marks_val,
+                rel_eff: h.saved_effect_handlers_len.saturating_sub(base_eff),
+                rel_prompt: h.saved_prompt_tags_len.saturating_sub(base_prompt),
+            });
+        }
+    }
+    out
+}
+
+/// Remove from the live per-thread exception-handler stack every entry
+/// whose `frame_pointer` lies in `[capture_low, capture_high)`. Paired
+/// with the capture above; must run AFTER the side-state object is
+/// populated. Exception handlers hold no GC roots, so nothing to release.
+fn drop_captured_exception_handlers(capture_low: usize, capture_high: usize) {
+    let ptd = crate::runtime::per_thread_data();
+    ptd.exception_handlers
+        .retain(|h| !(h.frame_pointer >= capture_low && h.frame_pointer < capture_high));
+}
+
+fn side_state_word_count(num_prompts: usize, num_handlers: usize, num_exceptions: usize) -> usize {
+    num_exceptions * EXCEPTION_RECORD_SLOTS
+        + SIDE_STATE_HEADER_SLOTS
         + num_prompts * PROMPT_RECORD_SLOTS
         + num_handlers * HANDLER_RECORD_SLOTS
 }
@@ -708,10 +786,12 @@ fn write_side_state_fields(
     side_state_ptr: usize,
     prompts: &[SavedPromptRecord],
     handlers: &[SavedHandlerRecord],
+    exceptions: &[SavedExceptionRecord],
 ) {
     let obj = HeapObject::from_tagged(side_state_ptr);
     obj.write_field(0, BuiltInTypes::Int.tag(prompts.len() as isize) as usize);
     obj.write_field(1, BuiltInTypes::Int.tag(handlers.len() as isize) as usize);
+    obj.write_field(2, BuiltInTypes::Int.tag(exceptions.len() as isize) as usize);
     let mut slot = SIDE_STATE_HEADER_SLOTS as i32;
     for p in prompts {
         obj.write_field(slot, BuiltInTypes::Int.tag(p.tag as isize) as usize);
@@ -746,6 +826,52 @@ fn write_side_state_fields(
         obj.write_field(slot + 1, BuiltInTypes::Int.tag(h.tag as isize) as usize);
         obj.write_field(slot + 2, handler_pointer);
         slot += HANDLER_RECORD_SLOTS as i32;
+    }
+    for e in exceptions {
+        obj.write_field(slot, BuiltInTypes::Int.tag(e.sp_offset as isize) as usize);
+        obj.write_field(
+            slot + 1,
+            BuiltInTypes::Int.tag(e.fp_offset as isize) as usize,
+        );
+        obj.write_field(
+            slot + 2,
+            BuiltInTypes::Int.tag(e.link_register as isize) as usize,
+        );
+        obj.write_field(
+            slot + 3,
+            BuiltInTypes::Int.tag(e.handler_address as isize) as usize,
+        );
+        obj.write_field(slot + 4, BuiltInTypes::Int.tag(e.result_local) as usize);
+        obj.write_field(
+            slot + 5,
+            BuiltInTypes::Int.tag(e.handler_id as isize) as usize,
+        );
+        obj.write_field(
+            slot + 6,
+            BuiltInTypes::Int.tag(e.is_resumable as isize) as usize,
+        );
+        obj.write_field(slot + 7, BuiltInTypes::Int.tag(e.resume_local) as usize);
+        obj.write_field(
+            slot + 8,
+            BuiltInTypes::Int.tag(e.saved_marks_count as isize) as usize,
+        );
+        obj.write_field(
+            slot + 9,
+            BuiltInTypes::Int.tag(e.frame_marks_kind as isize) as usize,
+        );
+        obj.write_field(
+            slot + 10,
+            BuiltInTypes::Int.tag(e.frame_marks_val as isize) as usize,
+        );
+        obj.write_field(
+            slot + 11,
+            BuiltInTypes::Int.tag(e.rel_eff as isize) as usize,
+        );
+        obj.write_field(
+            slot + 12,
+            BuiltInTypes::Int.tag(e.rel_prompt as isize) as usize,
+        );
+        slot += EXCEPTION_RECORD_SLOTS as i32;
     }
 }
 
@@ -803,6 +929,13 @@ unsafe fn restore_side_state_into_live_stacks(side_state_ptr: usize, dst: usize)
     let obj = HeapObject::from_tagged(side_state_ptr);
     let num_prompts = BuiltInTypes::untag(obj.get_field(0));
     let num_handlers = BuiltInTypes::untag(obj.get_field(1));
+    let num_exceptions = BuiltInTypes::untag(obj.get_field(2));
+
+    // Captured exception handlers store their saved effect/prompt depths
+    // RELATIVE to the captured suffix; rebase them against the live-stack
+    // depth that exists right now, before we re-push the captured records.
+    let base_eff_invoke = crate::runtime::per_thread_data().effect_handlers.len();
+    let base_prompt_invoke = crate::runtime::per_thread_data().prompt_tags.len();
 
     let mut slot: usize = SIDE_STATE_HEADER_SLOTS;
 
@@ -837,6 +970,343 @@ unsafe fn restore_side_state_into_live_stacks(side_state_ptr: usize, dst: usize)
                 tag,
             });
         slot += HANDLER_RECORD_SLOTS;
+    }
+
+    for _ in 0..num_exceptions {
+        let sp_offset = BuiltInTypes::untag(obj.get_field(slot));
+        let fp_offset = BuiltInTypes::untag(obj.get_field(slot + 1));
+        let link_register = BuiltInTypes::untag(obj.get_field(slot + 2));
+        let handler_address = BuiltInTypes::untag(obj.get_field(slot + 3));
+        let result_local = BuiltInTypes::untag_isize(obj.get_field(slot + 4) as isize);
+        let handler_id = BuiltInTypes::untag(obj.get_field(slot + 5));
+        let is_resumable = BuiltInTypes::untag(obj.get_field(slot + 6)) != 0;
+        let resume_local = BuiltInTypes::untag_isize(obj.get_field(slot + 7) as isize);
+        let saved_marks_count = BuiltInTypes::untag(obj.get_field(slot + 8));
+        let frame_marks_kind = BuiltInTypes::untag(obj.get_field(slot + 9));
+        let frame_marks_val = BuiltInTypes::untag(obj.get_field(slot + 10));
+        let rel_eff = BuiltInTypes::untag(obj.get_field(slot + 11));
+        let rel_prompt = BuiltInTypes::untag(obj.get_field(slot + 12));
+        let saved_frame_marks = match frame_marks_kind {
+            0 => None,
+            1 => Some(dst + frame_marks_val),
+            _ => Some(frame_marks_val),
+        };
+        let ptd = crate::runtime::per_thread_data();
+        ptd.exception_handlers
+            .push(crate::runtime::ExceptionHandler {
+                handler_address,
+                stack_pointer: dst + sp_offset,
+                frame_pointer: dst + fp_offset,
+                link_register,
+                result_local,
+                handler_id,
+                is_resumable,
+                resume_local,
+                saved_marks_count,
+                saved_frame_marks,
+                saved_effect_handlers_len: base_eff_invoke + rel_eff,
+                saved_prompt_tags_len: base_prompt_invoke + rel_prompt,
+            });
+        slot += EXCEPTION_RECORD_SLOTS;
+    }
+}
+
+// ============================================================================
+// §3c. Boundary handle records (resumable-exception resume)
+// ============================================================================
+//
+// A resumable exception thrown from inside one or more `handle` scopes,
+// caught OUTSIDE them, then resumed back into the body, used to lose those
+// handle scopes. `unwind_effect_state_to` truncates their prompt-tag /
+// effect-handler records (the records sit between the catch frame and the
+// throw — ABOVE the captured `__reset__` body, so the untagged capture, which
+// relocates only the body, never carries them). On resume the body's `perform`
+// then missed its handler and fell through to an outer one.
+//
+// These helpers snapshot exactly the records `unwind_effect_state_to` is about
+// to truncate (the top suffix `[saved_len..]`) onto the continuation at throw
+// time, and re-establish them around the resumed body at invoke time —
+// pointing every prompt record at the resume invoker (the boundary the body
+// returns to). Each re-pushed effect entry is recorded in the per-thread
+// `boundary_effects` registry; because a boundary handle has no setup frame to
+// run a `pop-handler`, the effect entry is dropped (via
+// `drop_boundary_effects_for_tag`) when its prompt record is abandoned — a
+// `perform` against it routes through `return_from_shift_tagged`, which
+// truncates the prompt and then drops the boundary effect. The records live in
+// the continuation's side-state slot and are distinguished from tagged
+// in-segment side-state by `cont.tag() == 0` (only the untagged resumable path
+// ever sets them).
+
+/// Snapshot the prompt-tag and effect-handler records in the top suffix
+/// `[saved_prompt_len..]` / `[saved_eff_len..]` into a fresh side-state heap
+/// object and attach it to the (untagged) continuation `cont_ptr`. Called
+/// from the resumable `throw` path AFTER capture and BEFORE unwind, so the
+/// effect-handler roots are still registered (their pointers are peeked at
+/// write time for the current, post-GC address). Returns true if anything
+/// was saved. `cont_ptr` is rooted across the allocation since GC may move it.
+pub unsafe fn snapshot_boundary_records_onto_cont(
+    cont_ptr: usize,
+    stack_pointer: usize,
+    saved_prompt_len: usize,
+    saved_eff_len: usize,
+) -> bool {
+    // Tags / root-ids are stable across GC; only handler POINTERS move, and
+    // those are re-peeked inside `write_side_state_fields`. So collect first.
+    let (saved_prompts, saved_handlers) = {
+        let ptd = crate::runtime::per_thread_data();
+        let prompts: Vec<SavedPromptRecord> = if ptd.prompt_tags.len() > saved_prompt_len {
+            ptd.prompt_tags[saved_prompt_len..]
+                .iter()
+                .map(|r| SavedPromptRecord {
+                    tag: r.tag,
+                    // SP/FP/LR/result-local are re-pointed at the invoker on
+                    // restore; only the tag matters for a boundary record.
+                    sp_offset: 0,
+                    fp_offset: 0,
+                    link_register: 0,
+                    result_local_offset: 0,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let handlers: Vec<SavedHandlerRecord> = if ptd.effect_handlers.len() > saved_eff_len {
+            ptd.effect_handlers[saved_eff_len..]
+                .iter()
+                .map(|e| SavedHandlerRecord {
+                    enum_type_id: e.enum_type_id,
+                    tag: e.tag,
+                    handler_root_id: e.handler_root_id,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        (prompts, handlers)
+    };
+
+    if saved_prompts.is_empty() && saved_handlers.is_empty() {
+        return false;
+    }
+
+    let words = side_state_word_count(saved_prompts.len(), saved_handlers.len(), 0);
+
+    // Root the continuation across the allocation: `ensure_space_for` may run
+    // a compacting GC that relocates it.
+    let runtime = crate::get_runtime().get_mut();
+    let cont_root = runtime.register_temporary_root(cont_ptr);
+    runtime.ensure_space_for(words + 6, stack_pointer);
+    let side_state_ptr = match runtime.allocate_no_gc(words, BuiltInTypes::HeapObject) {
+        Ok(ptr) => ptr,
+        Err(_) => {
+            runtime.unregister_temporary_root(cont_root);
+            return false;
+        }
+    };
+    write_side_state_fields(side_state_ptr, &saved_prompts, &saved_handlers, &[]);
+
+    let cont_ptr_now = runtime.peek_temporary_root(cont_root);
+    if let Some(mut cont) = ContinuationObject::from_tagged(cont_ptr_now) {
+        cont.set_side_state_with_barrier(runtime, side_state_ptr);
+    }
+    runtime.unregister_temporary_root(cont_root);
+    true
+}
+
+/// Re-establish boundary handle records around a resumed body. Re-pushes each
+/// saved prompt-tag record pointing at the resume invoker (`target_*`) — so a
+/// `perform` in the resumed body captures up to the invoker and a handler
+/// abort longjmps back there — and re-registers + re-pushes each effect-handler
+/// entry. Each re-pushed effect handler is recorded in the per-thread
+/// `boundary_effects` registry so the matching prompt-record drop (in
+/// `return_from_shift_tagged` when the body performs against this handle, or
+/// `drop_boundary_effects_for_tag` on other prompt-pop paths) also drops the
+/// dangling effect entry — there is no handle setup frame to run its
+/// `pop-handler`. Reads all side-state fields up front; no GC-heap allocation.
+unsafe fn restore_boundary_records_into_live_stacks(
+    side_state_ptr: usize,
+    target_sp: usize,
+    target_fp: usize,
+    target_lr: usize,
+) {
+    let obj = HeapObject::from_tagged(side_state_ptr);
+    let num_prompts = BuiltInTypes::untag(obj.get_field(0));
+    let num_handlers = BuiltInTypes::untag(obj.get_field(1));
+    // Field 2 (num_exceptions) is always 0 for boundary records.
+
+    let prompt_watermark = crate::runtime::per_thread_data().prompt_tags.len();
+    let mut remaining_tags: Vec<u64> = Vec::with_capacity(num_prompts);
+
+    let runtime = crate::get_runtime().get();
+    let mut slot = SIDE_STATE_HEADER_SLOTS;
+    for _ in 0..num_prompts {
+        let tag = BuiltInTypes::untag(obj.get_field(slot)) as u64;
+        // slot+1..slot+4 are zero placeholders — boundary prompts always
+        // point at the invoker boundary, so a `perform` in the resumed body
+        // captures up to the invoker and a handler abort longjmps back there.
+        runtime.push_prompt_tag(tag, target_sp, target_fp, target_lr, 0);
+        remaining_tags.push(tag);
+        slot += PROMPT_RECORD_SLOTS;
+    }
+
+    let runtime_mut = crate::get_runtime().get_mut();
+    for _ in 0..num_handlers {
+        let enum_type_id = BuiltInTypes::untag(obj.get_field(slot));
+        let tag = BuiltInTypes::untag(obj.get_field(slot + 1)) as u64;
+        let handler_pointer = obj.get_field(slot + 2);
+        let handler_root_id = runtime_mut.register_temporary_root(handler_pointer);
+        let ptd = crate::runtime::per_thread_data();
+        ptd.effect_handlers
+            .push(crate::runtime::HandlerRegistryEntry {
+                enum_type_id,
+                handler_root_id,
+                tag,
+            });
+        ptd.boundary_effects.push(crate::runtime::BoundaryEffect {
+            tag,
+            handler_root_id,
+        });
+        slot += HANDLER_RECORD_SLOTS;
+    }
+
+    crate::runtime::per_thread_data()
+        .boundary_resumes
+        .push(crate::runtime::BoundaryResume {
+            remaining_tags,
+            prompt_watermark,
+            target_sp,
+            target_fp,
+            target_lr,
+        });
+}
+
+/// Cross a boundary handle's tag off the active resume descriptor after its
+/// prompt record was abandoned by a `perform`/abort (in
+/// `return_from_shift_tagged`). When the topmost descriptor has no remaining
+/// boundary handles, it is popped — the body performed against every handle it
+/// re-established, so `boundary_natural_return_stub` has nothing left to do
+/// (and is in any case bypassed: the perform captured the body's outermost
+/// frame and its trampoline rewrote the stub redirect away).
+pub fn note_boundary_tag_cleaned(tag: u64) {
+    let ptd = crate::runtime::per_thread_data();
+    if let Some(top) = ptd.boundary_resumes.last_mut() {
+        if let Some(pos) = top.remaining_tags.iter().rposition(|t| *t == tag) {
+            top.remaining_tags.remove(pos);
+            if top.remaining_tags.is_empty() {
+                ptd.boundary_resumes.pop();
+            }
+        }
+    }
+}
+
+/// Entry address for the boundary natural-return stub. Mirrors
+/// `pop_top_tag_and_return_entry_address`: ARM64 uses the Rust stub directly;
+/// x86-64 routes through a JIT shim that moves the return value RAX→RDI.
+pub fn boundary_natural_return_entry_address() -> usize {
+    #[cfg(any(
+        feature = "backend-x86-64",
+        all(target_arch = "x86_64", not(feature = "backend-arm64"))
+    ))]
+    {
+        let runtime = crate::get_runtime().get();
+        let fn_entry = runtime
+            .get_function_by_name("beagle.builtin/boundary-natural-return")
+            .expect("boundary-natural-return shim not found");
+        let ptr: *const u8 = fn_entry.pointer.into();
+        ptr as usize
+    }
+    #[cfg(all(target_arch = "aarch64", not(feature = "backend-x86-64")))]
+    {
+        boundary_natural_return_stub as usize
+    }
+}
+
+/// Raw entry address for the boundary natural-return Rust stub. Used only by
+/// the x86-64 JIT shim to target its tail-jump; gated to match its caller.
+#[cfg(any(
+    feature = "backend-x86-64",
+    all(target_arch = "x86_64", not(feature = "backend-arm64"))
+))]
+pub fn boundary_natural_return_stub_entry() -> usize {
+    boundary_natural_return_stub as usize
+}
+
+/// Teardown for a resumed body that returned WITHOUT performing against some
+/// boundary handle it re-established. The trampoline rewrites the resumed
+/// body's outermost saved-LR slot to point here. Drops every still-remaining
+/// boundary handle (prompt records truncated to the resume's watermark; effect
+/// entries dropped via `drop_boundary_effects_for_tag`), then `return-jump`s to
+/// the resume invoker with the body's value in X0. (On the perform path the
+/// descriptor was already popped by `note_boundary_tag_cleaned` and this stub
+/// is bypassed — its redirect lives in a frame the perform's capture rewrote.)
+unsafe extern "C" fn boundary_natural_return_stub(value: usize) -> ! {
+    let resume = crate::runtime::per_thread_data()
+        .boundary_resumes
+        .pop()
+        .expect("boundary_natural_return_stub: no pending boundary resume");
+
+    for tag in &resume.remaining_tags {
+        drop_boundary_effects_for_tag(*tag);
+    }
+    {
+        let ptd = crate::runtime::per_thread_data();
+        if ptd.prompt_tags.len() > resume.prompt_watermark {
+            ptd.prompt_tags.truncate(resume.prompt_watermark);
+        }
+    }
+
+    let runtime = crate::get_runtime().get();
+    let return_jump_fn = runtime
+        .get_function_by_name("beagle.builtin/return-jump")
+        .expect("return-jump function not found");
+    let ptr: *const u8 = return_jump_fn.pointer.into();
+    let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
+        unsafe { std::mem::transmute(ptr) };
+    return_jump(
+        resume.target_sp,
+        resume.target_fp,
+        0,
+        resume.target_lr,
+        std::ptr::null(),
+        value,
+    );
+}
+
+/// Drop any boundary effect-handler entry registered for `tag`: remove its
+/// live `effect_handlers` entry (matched by the registered root id), free its
+/// pinned root, and clear it from the registry. Called from prompt-pop paths
+/// that abandon a boundary handle's prompt record — the handle has no setup
+/// frame whose `pop-handler` would otherwise drop the effect entry. A no-op
+/// when no boundary effect is registered for the tag (the common case).
+pub fn drop_boundary_effects_for_tag(tag: u64) {
+    let root_ids: Vec<usize> = {
+        let ptd = crate::runtime::per_thread_data();
+        if ptd.boundary_effects.is_empty() {
+            return;
+        }
+        let ids: Vec<usize> = ptd
+            .boundary_effects
+            .iter()
+            .filter(|b| b.tag == tag)
+            .map(|b| b.handler_root_id)
+            .collect();
+        ptd.boundary_effects.retain(|b| b.tag != tag);
+        ids
+    };
+    if root_ids.is_empty() {
+        return;
+    }
+    let runtime = crate::get_runtime().get_mut();
+    for id in &root_ids {
+        let ptd = crate::runtime::per_thread_data();
+        if let Some(pos) = ptd
+            .effect_handlers
+            .iter()
+            .rposition(|e| e.handler_root_id == *id)
+        {
+            ptd.effect_handlers.remove(pos);
+        }
+        runtime.unregister_temporary_root(*id);
     }
 }
 
@@ -1126,15 +1596,36 @@ pub unsafe extern "C" fn capture_continuation_tagged_runtime(
     let saved_prompts = collect_captured_prompt_records(stack_pointer, capture_top);
     let captured_tags: Vec<u64> = saved_prompts.iter().map(|p| p.tag).collect();
     let saved_handlers = collect_captured_handler_records(&captured_tags);
+    // Try/catch frames inside the captured segment must travel with the
+    // continuation too (see SavedExceptionRecord). Rebase their saved
+    // effect/prompt depths against the suffix being dropped here.
+    let (base_eff_cap, base_prompt_cap) = {
+        let ptd = crate::runtime::per_thread_data();
+        (
+            ptd.effect_handlers.len() - saved_handlers.len(),
+            ptd.prompt_tags.len() - saved_prompts.len(),
+        )
+    };
+    let saved_exceptions = collect_captured_exception_records(
+        stack_pointer,
+        capture_top,
+        base_eff_cap,
+        base_prompt_cap,
+    );
 
     let runtime = crate::get_runtime().get_mut();
     let cont_words = ContinuationObject::NUM_FIELDS;
     let segment_words = stack_size.div_ceil(8);
-    let side_state_words = if saved_prompts.is_empty() && saved_handlers.is_empty() {
-        0
-    } else {
-        side_state_word_count(saved_prompts.len(), saved_handlers.len())
-    };
+    let side_state_words =
+        if saved_prompts.is_empty() && saved_handlers.is_empty() && saved_exceptions.is_empty() {
+            0
+        } else {
+            side_state_word_count(
+                saved_prompts.len(),
+                saved_handlers.len(),
+                saved_exceptions.len(),
+            )
+        };
     // The +6 fudge matches the untagged path — slack for header words
     // across up-to-three heap-object allocations.
     runtime.ensure_space_for(
@@ -1201,7 +1692,7 @@ pub unsafe extern "C" fn capture_continuation_tagged_runtime(
     let side_state_ptr = if side_state_words > 0 {
         match runtime.allocate_no_gc(side_state_words, BuiltInTypes::HeapObject) {
             Ok(ptr) => {
-                write_side_state_fields(ptr, &saved_prompts, &saved_handlers);
+                write_side_state_fields(ptr, &saved_prompts, &saved_handlers, &saved_exceptions);
                 ptr
             }
             Err(_) => unsafe {
@@ -1238,6 +1729,9 @@ pub unsafe extern "C" fn capture_continuation_tagged_runtime(
     if !captured_tags.is_empty() {
         drop_captured_prompts(&captured_tags, stack_pointer, capture_top);
         drop_captured_handlers(&captured_tags);
+    }
+    if !saved_exceptions.is_empty() {
+        drop_captured_exception_handlers(stack_pointer, capture_top);
     }
 
     cont_ptr
@@ -1319,6 +1813,15 @@ pub unsafe extern "C" fn return_from_shift_tagged_runtime(
     for root_id in stale_roots {
         runtime.unregister_temporary_root(root_id);
     }
+
+    // If this tag belongs to a BOUNDARY handle re-established around a
+    // resumable-exception resume, its effect entry has no setup frame to run
+    // a `pop-handler` — the prompt truncation above abandoned its prompt
+    // record, so drop the dangling effect entry here too, and cross it off the
+    // active resume descriptor (so its natural-return stub, now bypassed, is
+    // retired once every re-established handle has been performed against).
+    drop_boundary_effects_for_tag(tag_u64);
+    note_boundary_tag_cleaned(tag_u64);
 
     // Truncate GC frame chain: longjmp abandons every frame between
     // here and the handle's enclosing function (whose FP is
@@ -1825,14 +2328,45 @@ unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target:
         unsafe { *saved_lr_slot = pop_top_tag_and_return_entry_address() };
     }
 
-    // Re-push side-state for nested handle scopes captured inside
-    // the segment — addresses relocated to `dst`. This must come
-    // AFTER the per-resume outer push so that nested records sit on
-    // top (mirroring the original push order: outer was installed
-    // first, nested later). Without this, a `perform` in the
-    // resumed body for a nested effect would miss its handler /
-    // read stale SP/FP from a dangling record.
-    unsafe { restore_side_state_into_live_stacks(side_state_ptr, dst) };
+    // An untagged continuation (`cont_tag == 0`) with side-state carries
+    // BOUNDARY records: the handle scopes between a resumable-exception's
+    // catch and its throw, which `unwind_effect_state_to` truncated. They
+    // sit ABOVE the captured segment, so they cannot be relocated by
+    // `dst + offset` — instead re-push each prompt pointing at the resume
+    // invoker boundary and re-register the effect handlers. Each effect entry
+    // is recorded in `boundary_effects` so it's dropped when its prompt record
+    // is abandoned (there is no handle setup frame to run its `pop-handler`):
+    // a `perform` against it goes through `return_from_shift_tagged`, which
+    // already truncates the prompt and now also drops the boundary effect.
+    // (Tail resumes never reach here: they require `cont_tag != 0`.)
+    let side_state_present = side_state_ptr != 0
+        && side_state_ptr != BuiltInTypes::null_value() as usize
+        && BuiltInTypes::is_heap_pointer(side_state_ptr);
+    if cont_tag == 0 && side_state_present {
+        unsafe {
+            restore_boundary_records_into_live_stacks(
+                side_state_ptr,
+                post_overlay_sp,
+                saved_caller_fp,
+                saved_caller_lr,
+            )
+        };
+        // Redirect the body's outermost-frame return to the natural-return
+        // stub so a body that returns WITHOUT performing against a
+        // re-established handle still tears those records down. (If the body
+        // DOES perform against them, that capture rewrites this slot in its
+        // own copy and `return_from_shift_tagged` does the teardown instead.)
+        unsafe { *saved_lr_slot = boundary_natural_return_entry_address() };
+    } else {
+        // Re-push side-state for nested handle scopes captured inside
+        // the segment — addresses relocated to `dst`. This must come
+        // AFTER the per-resume outer push so that nested records sit on
+        // top (mirroring the original push order: outer was installed
+        // first, nested later). Without this, a `perform` in the
+        // resumed body for a nested effect would miss its handler /
+        // read stale SP/FP from a dangling record.
+        unsafe { restore_side_state_into_live_stacks(side_state_ptr, dst) };
+    }
 
     let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
         unsafe { std::mem::transmute(return_jump_ptr) };

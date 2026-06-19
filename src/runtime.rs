@@ -529,6 +529,12 @@ pub struct Struct {
     pub disk_location: Option<DiskLocation>,
 }
 
+#[derive(Clone, Debug)]
+pub struct StructAllocationDescriptor {
+    pub struct_id: usize,
+    pub field_names: Vec<String>,
+}
+
 impl Struct {
     pub fn size(&self) -> usize {
         self.fields.len()
@@ -554,12 +560,25 @@ pub struct StructManager {
     revision: u64,
     /// Current layout version per struct_id (incremented on redefinition, wraps at 16)
     layout_versions: Vec<u8>,
+    /// Sticky per-struct bitset: once a struct has had a runtime structural
+    /// redefinition, allocation sites for that struct must always route through
+    /// the generic constructor. Each boxed atomic word stores bits for a chunk of
+    /// struct_ids, and generated code embeds the stable boxed-word address plus a
+    /// mask.
+    structurally_redefined_ever_chunks: Vec<Box<AtomicUsize>>,
     /// Old definitions per struct_id, keyed by layout version (for slow-path field resolution)
     previous_definitions: Vec<Vec<(u8, Struct)>>,
     /// Per struct_id, maps old_layout_version → plan to reach current layout
     migration_plans: Vec<HashMap<u8, MigrationPlan>>,
     /// Set of struct_ids with pending migrations (not yet GC'd)
     pending_migration_ids: HashSet<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StructInsertResult {
+    pub struct_id: usize,
+    pub is_redefinition: bool,
+    pub layout_changed: bool,
 }
 
 impl Default for StructManager {
@@ -575,15 +594,16 @@ impl StructManager {
             structs: Vec::new(),
             revision: 0,
             layout_versions: Vec::new(),
+            structurally_redefined_ever_chunks: Vec::new(),
             previous_definitions: Vec::new(),
             migration_plans: Vec::new(),
             pending_migration_ids: HashSet::new(),
         }
     }
 
-    /// Insert a struct definition. Returns (struct_id, is_redefinition).
+    /// Insert a struct definition.
     /// On redefinition, the struct_id stays the same (stable ID).
-    pub fn insert(&mut self, name: String, s: Struct) -> (usize, bool) {
+    pub fn insert(&mut self, name: String, s: Struct) -> StructInsertResult {
         self.revision = self.revision.wrapping_add(1);
         if let Some(&existing_id) = self.name_to_id.get(&name) {
             // Redefinition: keep the same struct_id, bump layout version
@@ -607,46 +627,81 @@ impl StructManager {
                 s.disk_location = old_def.disk_location.clone();
             }
 
-            // Save old definition
-            self.previous_definitions[existing_id].push((old_version, old_def));
+            // A redefinition only needs GC layout-migration when the field
+            // LAYOUT actually changes (field names or their order). Re-running
+            // an identical definition — the common case when reloading a whole
+            // file, and for enums — leaves every existing instance correctly
+            // laid out. Bumping the layout version + scheduling a migration in
+            // that case is wasted work and creates unnecessary old-layout state.
+            // So only bump the version, retain the old definition, and schedule
+            // migration when the layout genuinely changed.
+            let layout_changed = old_def.fields != s.fields;
 
-            // Increment layout version (wraps at 16)
-            let new_version = (old_version + 1) % 16;
-            self.layout_versions[existing_id] = new_version;
-
-            // Overwrite current definition
+            // Overwrite current definition (defaults / mutability / source text
+            // can differ even when the field layout is unchanged).
             self.structs[existing_id] = s;
 
-            // Compute migration plans from ALL previous versions to current
-            let mut plans = HashMap::new();
-            for &(prev_version, ref prev_def) in &self.previous_definitions[existing_id] {
-                let field_map = self.structs[existing_id]
-                    .fields
-                    .iter()
-                    .map(|new_field| prev_def.fields.iter().position(|f| f == new_field))
-                    .collect();
-                plans.insert(
-                    prev_version,
-                    MigrationPlan {
-                        new_field_count: self.structs[existing_id].fields.len(),
-                        new_layout_version: new_version,
-                        field_map,
-                    },
-                );
-            }
-            self.migration_plans[existing_id] = plans;
-            self.pending_migration_ids.insert(existing_id);
+            if layout_changed {
+                // Retain the old definition until the next full-live-set
+                // migration pass. After that pass, allocation sites for this
+                // struct will see the sticky "redefined ever" bit and route
+                // through the generic constructor, and all reachable old
+                // instances have been rewritten, so complete_pending_migrations
+                // can clear it.
+                self.previous_definitions[existing_id].push((old_version, old_def));
+                let (chunk_index, mask) = Self::redefinition_bit_location(existing_id);
+                self.structurally_redefined_ever_chunks[chunk_index]
+                    .fetch_or(mask, Ordering::Release);
 
-            (existing_id, true)
+                let new_version = (old_version + 1) % 16;
+                self.layout_versions[existing_id] = new_version;
+
+                // Schedule migration so existing instances are rewritten to the
+                // new layout on the next collection — this is what lets a
+                // newly-added field be WRITTEN on an instance created before the
+                // redefinition. The mutator-side eval path forces that
+                // collection after the compiler has set the struct's sticky
+                // "redefined ever" allocation bit, before the new code is
+                // executed.
+                let mut plans = HashMap::new();
+                for &(prev_version, ref prev_def) in &self.previous_definitions[existing_id] {
+                    let field_map = self.structs[existing_id]
+                        .fields
+                        .iter()
+                        .map(|new_field| prev_def.fields.iter().position(|f| f == new_field))
+                        .collect();
+                    plans.insert(
+                        prev_version,
+                        MigrationPlan {
+                            new_field_count: self.structs[existing_id].fields.len(),
+                            new_layout_version: new_version,
+                            field_map,
+                        },
+                    );
+                }
+                self.migration_plans[existing_id] = plans;
+                self.pending_migration_ids.insert(existing_id);
+            }
+
+            StructInsertResult {
+                struct_id: existing_id,
+                is_redefinition: true,
+                layout_changed,
+            }
         } else {
             // New struct: assign sequential ID
             let new_id = self.structs.len();
             self.name_to_id.insert(name, new_id);
             self.structs.push(s);
             self.layout_versions.push(0);
+            self.ensure_redefinition_bit_chunk(new_id);
             self.previous_definitions.push(Vec::new());
             self.migration_plans.push(HashMap::new());
-            (new_id, false)
+            StructInsertResult {
+                struct_id: new_id,
+                is_redefinition: false,
+                layout_changed: false,
+            }
         }
     }
 
@@ -664,10 +719,33 @@ impl StructManager {
         self.layout_versions.get(struct_id).copied().unwrap_or(0)
     }
 
+    fn redefinition_bit_location(struct_id: usize) -> (usize, usize) {
+        let bits_per_word = usize::BITS as usize;
+        let chunk_index = struct_id / bits_per_word;
+        let bit_index = struct_id % bits_per_word;
+        (chunk_index, 1usize << bit_index)
+    }
+
+    fn ensure_redefinition_bit_chunk(&mut self, struct_id: usize) {
+        let (chunk_index, _) = Self::redefinition_bit_location(struct_id);
+        while self.structurally_redefined_ever_chunks.len() <= chunk_index {
+            self.structurally_redefined_ever_chunks
+                .push(Box::new(AtomicUsize::new(0)));
+        }
+    }
+
+    pub fn structurally_redefined_ever_guard(&self, struct_id: usize) -> Option<(usize, usize)> {
+        let (chunk_index, mask) = Self::redefinition_bit_location(struct_id);
+        self.structurally_redefined_ever_chunks
+            .get(chunk_index)
+            .map(|flag| ((&**flag as *const AtomicUsize) as usize, mask))
+    }
+
     /// Get an old definition by struct_id and layout_version
     pub fn get_old_definition(&self, struct_id: usize, layout_version: u8) -> Option<&Struct> {
         self.previous_definitions.get(struct_id).and_then(|defs| {
             defs.iter()
+                .rev()
                 .find(|(v, _)| *v == layout_version)
                 .map(|(_, def)| def)
         })
@@ -764,7 +842,7 @@ impl StructRegistry {
         }
     }
 
-    pub fn insert(&self, name: String, s: Struct) -> (usize, bool) {
+    pub fn insert(&self, name: String, s: Struct) -> StructInsertResult {
         self.inner
             .write()
             .expect("struct registry poisoned")
@@ -792,6 +870,13 @@ impl StructRegistry {
             .read()
             .expect("struct registry poisoned")
             .get_current_layout_version(struct_id)
+    }
+
+    pub fn structurally_redefined_ever_guard(&self, struct_id: usize) -> Option<(usize, usize)> {
+        self.inner
+            .read()
+            .expect("struct registry poisoned")
+            .structurally_redefined_ever_guard(struct_id)
     }
 
     pub fn get_old_definition(&self, struct_id: usize, layout_version: u8) -> Option<Struct> {
@@ -903,16 +988,18 @@ mod struct_manager_tests {
     fn tracks_pending_migrations_stable_id() {
         let mut structs = StructManager::new();
 
-        let (id0, is_redefinition) =
-            structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a"]));
+        let result = structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a"]));
+        let id0 = result.struct_id;
+        let is_redefinition = result.is_redefinition;
         assert!(!is_redefinition);
         assert!(!structs.has_pending_migrations());
         assert_eq!(structs.get_current_layout_version(id0), 0);
         assert!(structs.migration_plan_for(id0, 0).is_none());
 
         // Redefinition: same struct_id, new layout version
-        let (id1, is_redefinition) =
-            structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a", "b"]));
+        let result = structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a", "b"]));
+        let id1 = result.struct_id;
+        let is_redefinition = result.is_redefinition;
         assert!(is_redefinition);
         assert_eq!(id1, id0); // stable ID!
         assert_eq!(structs.get_current_layout_version(id0), 1);
@@ -925,10 +1012,12 @@ mod struct_manager_tests {
         assert!(structs.migration_plan_for(id0, 1).is_none());
 
         // Another redefinition
-        let (id2, is_redefinition) = structs.insert(
+        let result = structs.insert(
             "user/Foo".to_string(),
             make_struct("user/Foo", &["b", "a", "c"]),
         );
+        let id2 = result.struct_id;
+        let is_redefinition = result.is_redefinition;
         assert!(is_redefinition);
         assert_eq!(id2, id0); // still same ID
         assert_eq!(structs.get_current_layout_version(id0), 2);
@@ -951,10 +1040,15 @@ mod struct_manager_tests {
     fn redefinition_only_marks_affected_struct_pending() {
         let mut structs = StructManager::new();
 
-        let (foo_id, _) = structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a"]));
-        let (bar_id, _) = structs.insert("user/Bar".to_string(), make_struct("user/Bar", &["x"]));
-        let (foo_id2, _) =
-            structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a", "b"]));
+        let foo_id = structs
+            .insert("user/Foo".to_string(), make_struct("user/Foo", &["a"]))
+            .struct_id;
+        let bar_id = structs
+            .insert("user/Bar".to_string(), make_struct("user/Bar", &["x"]))
+            .struct_id;
+        let foo_id2 = structs
+            .insert("user/Foo".to_string(), make_struct("user/Foo", &["a", "b"]))
+            .struct_id;
 
         assert_eq!(foo_id, foo_id2);
         assert!(structs.has_pending_migrations());
@@ -966,7 +1060,9 @@ mod struct_manager_tests {
     #[test]
     fn stale_migration_completion_does_not_clear_newer_redefinition() {
         let mut structs = StructManager::new();
-        let (foo_id, _) = structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a"]));
+        let foo_id = structs
+            .insert("user/Foo".to_string(), make_struct("user/Foo", &["a"]))
+            .struct_id;
         structs.insert("user/Foo".to_string(), make_struct("user/Foo", &["a", "b"]));
         let stale_revision = structs.pending_migration_revision().unwrap();
 
@@ -4451,6 +4547,41 @@ pub struct PerThreadData {
     /// Empty for programs that only use plain reset/shift (those use
     /// the FP-walker path and ignore this stack).
     pub prompt_tags: Vec<PromptTagRecord>,
+    /// Effect-handler entries that a resumable-exception continuation
+    /// re-established around its resumed body but that have no enclosing
+    /// handle setup frame to run their `pop-handler` (the frame was above
+    /// the captured segment and is not re-run). See
+    /// `restore_boundary_records_into_live_stacks`. When the matched handle's
+    /// prompt record is dropped by `return_from_shift_tagged` (the body
+    /// performed against this handle) or by the body's natural return, the
+    /// matching `(tag, root_id)` here is used to also drop the dangling
+    /// effect entry and free its pinned root.
+    pub boundary_effects: Vec<BoundaryEffect>,
+    /// Active boundary-resume descriptors (see `BoundaryResume`), one per
+    /// resumable-exception resume that re-established boundary handles. LIFO:
+    /// inner resumes complete before outer ones.
+    pub boundary_resumes: Vec<BoundaryResume>,
+}
+
+/// A boundary effect-handler entry awaiting teardown (see `boundary_effects`).
+pub struct BoundaryEffect {
+    pub tag: u64,
+    pub handler_root_id: usize,
+}
+
+/// One resumable-exception resume that re-established boundary handle records.
+/// Tracked so the two teardown paths coordinate: if the resumed body PERFORMS
+/// against a boundary handle, `return_from_shift_tagged` cleans that handle and
+/// crosses its tag off `remaining_tags` (popping the descriptor when empty); if
+/// the body returns WITHOUT performing against some handle, the body's
+/// outermost-frame return lands on `boundary_natural_return_stub`, which cleans
+/// every still-`remaining` handle and longjmps to the resume invoker.
+pub struct BoundaryResume {
+    pub remaining_tags: Vec<u64>,
+    pub prompt_watermark: usize,
+    pub target_sp: usize,
+    pub target_fp: usize,
+    pub target_lr: usize,
 }
 
 impl Default for PerThreadData {
@@ -4466,6 +4597,8 @@ impl PerThreadData {
             thread_exception_handler_fn: None,
             effect_handlers: Vec::new(),
             prompt_tags: Vec::new(),
+            boundary_effects: Vec::new(),
+            boundary_resumes: Vec::new(),
         }
     }
 }
@@ -4588,6 +4721,11 @@ pub struct Runtime {
     /// coordinator / GC can skip the mutex when nothing is staged.
     pub pending_installs: Mutex<Vec<PendingInstall>>,
     pub installs_ready: AtomicBool,
+    /// Set by the compiler thread after a structural struct redefinition. The
+    /// mutator that requested the compile consumes it and runs a stop-the-world
+    /// GC from a real Beagle frame before executing newly compiled code.
+    pub structural_redefinition_needs_gc: AtomicBool,
+    pub struct_allocation_descriptors: Vec<StructAllocationDescriptor>,
     /// Monotonic "world generation". Bumped by `revert_all_specializations`
     /// when a redefinition reverts tier-2 code, so a tier-2 install staged
     /// against the OLD world (tagged with the generation at staging time) is
@@ -4759,6 +4897,8 @@ impl Runtime {
             gc_lock: Mutex::new(()),
             pending_installs: Mutex::new(Vec::new()),
             installs_ready: AtomicBool::new(false),
+            structural_redefinition_needs_gc: AtomicBool::new(false),
+            struct_allocation_descriptors: Vec::new(),
             install_generation: AtomicU64::new(0),
             install_apply_lock: Mutex::new(()),
             thread_state: Arc::new((
@@ -5091,12 +5231,48 @@ impl Runtime {
         }
     }
 
-    pub fn compile_string(&mut self, _string: &str) -> Result<usize, Box<dyn Error>> {
+    /// Send a message to the compiler thread and block for its response while
+    /// registered as `c_calling`, so a concurrent stop-the-world (e.g. a
+    /// gc-always collection initiated by another mutator) counts this thread as
+    /// parked and proceeds instead of waiting forever for it to reach a Beagle
+    /// safepoint. Used by the mutator-reachable compile paths (`eval`,
+    /// `reflect/write-source`, …): redefinition on one thread otherwise
+    /// deadlocks against a GC triggered on another. Mirrors the c-call dance in
+    /// `builtins::threads` — including the careful unregister that stays parked
+    /// (frame unchanged, scanned via the c-call entry) until the world is
+    /// running again, so we never drop the coordinator's count below its target.
+    fn send_to_compiler_parked(&self, message: CompilerMessage) -> CompilerResponse {
+        let frame_pointer = crate::builtins::get_saved_frame_pointer();
+        {
+            let (lock, condvar) = &*self.thread_state;
+            let mut state = lock
+                .lock()
+                .expect("thread_state poisoned in send_to_compiler_parked");
+            state.register_c_call(frame_pointer);
+            condvar.notify_one();
+        }
         let response = self
             .compiler_channel
             .as_ref()
             .expect("Compiler channel not initialized - this is a fatal error")
-            .send(CompilerMessage::CompileString(_string.to_string()));
+            .send(message);
+        while self.is_paused() {
+            std::thread::yield_now();
+        }
+        {
+            let (lock, condvar) = &*self.thread_state;
+            let mut state = lock
+                .lock()
+                .expect("thread_state poisoned in send_to_compiler_parked");
+            state.unregister_c_call();
+            condvar.notify_one();
+        }
+        response
+    }
+
+    pub fn compile_string(&mut self, _string: &str) -> Result<usize, Box<dyn Error>> {
+        let response =
+            self.send_to_compiler_parked(CompilerMessage::CompileString(_string.to_string()));
         match response {
             CompilerResponse::FunctionPointer(pointer) => Ok(pointer),
             CompilerResponse::CompileError(msg) => Err(msg.into()),
@@ -5113,14 +5289,10 @@ impl Runtime {
         string: &str,
         namespace: &str,
     ) -> Result<(usize, String), Box<dyn Error>> {
-        let response = self
-            .compiler_channel
-            .as_ref()
-            .expect("Compiler channel not initialized - this is a fatal error")
-            .send(CompilerMessage::CompileStringInNamespace(
-                string.to_string(),
-                namespace.to_string(),
-            ));
+        let response = self.send_to_compiler_parked(CompilerMessage::CompileStringInNamespace(
+            string.to_string(),
+            namespace.to_string(),
+        ));
         match response {
             CompilerResponse::FunctionPointerInNamespace(pointer, ending_namespace) => {
                 Ok((pointer, ending_namespace))
@@ -5142,17 +5314,13 @@ impl Runtime {
         byte_offset: usize,
         line_offset: usize,
     ) -> Result<usize, Box<dyn Error>> {
-        let response = self
-            .compiler_channel
-            .as_ref()
-            .expect("Compiler channel not initialized - this is a fatal error")
-            .send(CompilerMessage::CompileStringWithFileContext(
-                string.to_string(),
-                namespace.to_string(),
-                file_name.to_string(),
-                byte_offset,
-                line_offset,
-            ));
+        let response = self.send_to_compiler_parked(CompilerMessage::CompileStringWithFileContext(
+            string.to_string(),
+            namespace.to_string(),
+            file_name.to_string(),
+            byte_offset,
+            line_offset,
+        ));
         match response {
             CompilerResponse::FunctionPointer(pointer) => Ok(pointer),
             CompilerResponse::CompileError(msg) => Err(msg.into()),
@@ -5460,7 +5628,9 @@ impl Runtime {
                 None => BuiltInTypes::null_value() as usize,
             };
             // Pin the value across the push (and the root bookkeeping).
-            let value_root = self.add_handle_root(value).ok_or("Failed to add value root")?;
+            let value_root = self
+                .add_handle_root(value)
+                .ok_or("Failed to add value root")?;
             let cur_vec = GcHandle::from_tagged(self.get_handle_root(vec_root));
             let cur_val = self.get_handle_root(value_root);
             let new_vec = PersistentVec::push(self, stack_pointer, cur_vec, cur_val)?;
@@ -5896,6 +6066,20 @@ impl Runtime {
                 )
             });
         ptd.prompt_tags.remove(pos)
+    }
+
+    /// Like `pop_prompt_tag` but a no-op if the tag is already gone. The
+    /// reset-body's normal-completion pop can race a throw that already
+    /// truncated the prompt-tag stack while unwinding past this reset (e.g. a
+    /// resumable exception resumed back into the body). The paired effect-handler
+    /// state was truncated together, so the stacks stay consistent — there is
+    /// simply nothing left to pop. Panicking here aborts (extern "C", nounwind),
+    /// so be tolerant instead.
+    pub fn try_pop_prompt_tag(&self, expected_tag: u64) {
+        let ptd = per_thread_data();
+        if let Some(pos) = ptd.prompt_tags.iter().rposition(|r| r.tag == expected_tag) {
+            ptd.prompt_tags.remove(pos);
+        }
     }
 
     /// Find the topmost prompt-tag record matching `tag`. Used by
@@ -7999,8 +8183,10 @@ impl Runtime {
     /// candidate order (folder form, dotted form, last segment).
     pub fn resolve_namespace_file(&self, namespace: &str) -> Option<String> {
         let parts: Vec<&str> = namespace.split('.').collect();
-        let mut candidates: Vec<String> =
-            vec![format!("{}.bg", parts.join("/")), format!("{}.bg", namespace)];
+        let mut candidates: Vec<String> = vec![
+            format!("{}.bg", parts.join("/")),
+            format!("{}.bg", namespace),
+        ];
         if let Some(last) = parts.last() {
             candidates.push(format!("{}.bg", last));
         }
@@ -8137,11 +8323,17 @@ impl Runtime {
                     Ok((self.field_default_value(&current_def, string), usize::MAX))
                 }
             } else {
-                // No old definition found (migrations completed?) — try current layout
-                if let Some(field_index) = current_def.fields.iter().position(|f| f == string) {
-                    Ok((heap_object.get_field(field_index), field_index))
-                } else {
-                    Ok((BuiltInTypes::null_value() as usize, usize::MAX))
+                // No old definition retained for this object's layout version.
+                // That can only be valid after a full migration pass; stay
+                // conservative anyway and never read past the physical fields
+                // this object actually has. Never memoize (`usize::MAX`).
+                let object_field_count = heap_object.get_fields().len();
+                match current_def.fields.iter().position(|f| f == string) {
+                    Some(field_index) if field_index < object_field_count => {
+                        Ok((heap_object.get_field(field_index), usize::MAX))
+                    }
+                    Some(_) => Ok((self.field_default_value(&current_def, string), usize::MAX)),
+                    None => Ok((BuiltInTypes::null_value() as usize, usize::MAX)),
                 }
             }
         }
@@ -9732,9 +9924,9 @@ impl Runtime {
         self.enums.patch_source_text(full_name, text)
     }
 
-    pub fn add_struct(&mut self, s: Struct) -> bool {
+    pub fn add_struct(&mut self, s: Struct) -> StructInsertResult {
         let name = s.name.clone();
-        let (_struct_id, is_redefinition) = self.structs.insert(name.clone(), s);
+        let insert_result = self.structs.insert(name.clone(), s);
 
         // With stable IDs, dispatch entries at struct_id already point to the right methods.
         // No need to copy dispatch entries on redefinition.
@@ -9743,16 +9935,40 @@ impl Runtime {
         let (_, simple_name) = name
             .split_once("/")
             .expect("Struct name must contain / separator - this is a fatal error");
-        self.add_binding(simple_name, 0);
+        // Reserve the binding slot with the language NULL sentinel (0b111), NOT a
+        // raw 0. `add_binding`'s "don't clobber a live value with a placeholder"
+        // guard only recognizes `null_value()`; a raw 0 is a *valid tagged
+        // integer* (the number 0, low-bits 0b000), so it would slip past the
+        // guard and overwrite a live struct/enum descriptor with what reads back
+        // as `Int(0)`. On REDEFINITION that left the type's binding cell holding
+        // 0x0 for the whole window until the recompiled body's `update-binding`
+        // restored the descriptor — and a concurrent reader doing `T.None` in
+        // that window threw "Cannot access property 'None' on Int".
+        self.add_binding(simple_name, BuiltInTypes::null_value() as usize);
 
-        is_redefinition
+        insert_result
+    }
+
+    pub fn add_struct_allocation_descriptor(
+        &mut self,
+        struct_id: usize,
+        field_names: Vec<String>,
+    ) -> usize {
+        let id = self.struct_allocation_descriptors.len();
+        self.struct_allocation_descriptors
+            .push(StructAllocationDescriptor {
+                struct_id,
+                field_names,
+            });
+        id
     }
 
     pub fn add_enum(&mut self, e: Enum) {
         let name = e.name.clone();
         self.enums.insert(e);
-        // See comment about structs above
-        self.add_binding(&name, 0);
+        // NULL sentinel, not raw 0 — see add_struct above. Passing 0 here was the
+        // root cause of the enum hot-reload data race (transiently zeroed `T`).
+        self.add_binding(&name, BuiltInTypes::null_value() as usize);
     }
 
     pub fn get_enum(&self, name: &str) -> Option<&Enum> {

@@ -355,6 +355,11 @@ pub enum Ast {
         pattern: Pattern,
         value: Box<Ast>,
         token_range: TokenRange,
+        /// `true` when written as `letonce` — at the top level, the value is
+        /// evaluated and bound only on first load; on a reload where the
+        /// binding already exists the existing value is kept (Clojure's
+        /// `defonce`). Always `false` for an ordinary `let`.
+        once: bool,
     },
     LetMut {
         pattern: Pattern,
@@ -850,9 +855,7 @@ impl Ast {
                 ir.error_fn_pointer = ptr;
             }
         }
-        if let Some(error_fn) =
-            compiler.find_function("beagle.builtin/throw-type-error-operands")
-        {
+        if let Some(error_fn) = compiler.find_function("beagle.builtin/throw-type-error-operands") {
             if let Some(ptr) = compiler.get_function_pointer(error_fn) {
                 ir.error_operands_fn_pointer = ptr;
             }
@@ -1245,6 +1248,13 @@ impl AstCompiler<'_> {
             }
             _ => Some(body.to_string()),
         }
+    }
+
+    fn is_synthetic_source_context(&self) -> bool {
+        self.source_text.is_empty()
+            && self.token_line_column_map.is_empty()
+            && self.token_byte_spans.is_empty()
+            && self.definition_byte_ranges.is_empty()
     }
 
     pub fn call_compile(&mut self, ast: &Ast) -> Result<Value, CompileError> {
@@ -1892,8 +1902,28 @@ impl AstCompiler<'_> {
 
                 // Extract original source text (with reattached docstring) so
                 // `reflect/source` can return it. Anonymous functions get None.
+                // Parsed named functions must always have source; if this fails,
+                // the parser/token-range source bookkeeping is broken. The only
+                // allowed no-source case is a compiler-synthetic AST compile,
+                // identified by having no source text and no parser maps at all.
                 let source_text = if name.is_some() {
-                    self.extract_source_text(token_range, docstring.as_deref())
+                    if self.is_synthetic_source_context() {
+                        None
+                    } else {
+                        match self.extract_source_text(token_range, docstring.as_deref()) {
+                            Some(source_text) => Some(source_text),
+                            None => {
+                                return Err(CompileError::InternalError {
+                                    message: format!(
+                                        "Missing source text for parsed named function {}",
+                                        full_function_name
+                                            .as_deref()
+                                            .unwrap_or("<unqualified>")
+                                    ),
+                                });
+                            }
+                        }
+                    }
                 } else {
                     None
                 };
@@ -2257,6 +2287,7 @@ impl AstCompiler<'_> {
                             token_range,
                         }),
                         token_range,
+                        once: false,
                     },
                 ];
 
@@ -3187,18 +3218,22 @@ impl AstCompiler<'_> {
                 let defined_fields = struct_type.fields.clone();
                 let size = struct_type.size();
 
-                // Compile field values
-                let mut field_results: Vec<Value> = Vec::new();
+                // Compile field values into GC-visible locals so the slow-path
+                // generic constructor can safely allocate after a redefinition.
+                let stack_start = self.ir.local_stack_indices().len();
                 for field in fields.iter() {
                     self.not_tail_position();
-                    field_results.push(self.call_compile(&field.1)?);
+                    let value = self.call_compile(&field.1)?;
+                    let reg = self.ir.assign_new(value);
+                    self.ir.push_to_stack(reg.into());
                 }
+                let field_value_locals = self.ir.local_stack_indices()[stack_start..].to_vec();
 
                 // Build a mapping from field name to its compiled value
-                let field_map: std::collections::HashMap<String, Value> = fields
+                let field_map: std::collections::HashMap<String, usize> = fields
                     .iter()
-                    .zip(field_results.iter())
-                    .map(|(field, result)| (field.0.clone(), *result))
+                    .zip(field_value_locals.iter())
+                    .map(|(field, local_index)| (field.0.clone(), *local_index))
                     .collect();
 
                 // Validate that all user-provided fields exist in the struct definition
@@ -3212,10 +3247,10 @@ impl AstCompiler<'_> {
                 }
 
                 // Reorder fields to match the struct definition
-                let mut ordered_field_results = Vec::new();
+                let mut ordered_field_locals = Vec::new();
                 for defined_field in defined_fields.iter() {
                     match field_map.get(defined_field) {
-                        Some(&result) => ordered_field_results.push(result),
+                        Some(&local_index) => ordered_field_locals.push(local_index),
                         None => {
                             return Err(CompileError::StructFieldNotDefined {
                                 struct_name: format!("{}.{}", name, variant),
@@ -3225,17 +3260,71 @@ impl AstCompiler<'_> {
                     }
                 }
 
-                let struct_ptr = self.ir.allocate_static(size as u32);
-
-                let struct_pointer = self.ir.untag(struct_ptr);
                 let layout_version = self.compiler.get_struct_layout_version(struct_id);
+                let descriptor_id = self.compiler.add_struct_allocation_descriptor(
+                    struct_id,
+                    fields.iter().map(|(field_name, _)| field_name.clone()).collect(),
+                );
+                let (redefined_flag_addr, redefined_flag_mask) = self
+                    .compiler
+                    .structurally_redefined_ever_guard(struct_id)
+                    .ok_or_else(|| CompileError::InternalError {
+                        message: format!(
+                            "Missing structural redefinition flag for enum variant {}.{}",
+                            name, variant
+                        ),
+                    })?;
+
+                let result_reg = self.ir.assign_new(Value::Null);
+                let fast_path = self.ir.label("enum_variant_alloc_fast");
+                let slow_path = self.ir.label("enum_variant_alloc_slow");
+                let done = self.ir.label("enum_variant_alloc_done");
+
+                let redefined_flag_ptr = self.ir.assign_new(Value::Pointer(redefined_flag_addr));
+                let redefined_flags = self.ir.load_from_memory(redefined_flag_ptr.into(), 0);
+                let redefined_ever = self.ir.and_imm(redefined_flags, redefined_flag_mask as u64);
+                self.ir.jump_if(
+                    fast_path,
+                    Condition::Equal,
+                    redefined_ever,
+                    Value::RawValue(0),
+                );
+                self.ir.jump(slow_path);
+
+                self.ir.write_label(fast_path);
+                let struct_ptr = self.ir.allocate_static(size as u32);
+                let struct_pointer = self.ir.untag(struct_ptr);
                 self.ir
                     .write_struct_id_with_version(struct_pointer, struct_id, layout_version);
-                self.ir.write_fields(struct_pointer, &ordered_field_results);
+                for (field_index, local_index) in ordered_field_locals.iter().enumerate() {
+                    let reg = self.ir.load_local(*local_index);
+                    self.ir.write_field(struct_pointer, field_index, reg);
+                }
+                let tagged_fast = self.ir.tag(struct_pointer, BuiltInTypes::HeapObject.get_tag());
+                self.ir.assign(result_reg, tagged_fast);
+                self.ir.jump(done);
 
-                Ok(self
-                    .ir
-                    .tag(struct_pointer, BuiltInTypes::HeapObject.get_tag()))
+                self.ir.write_label(slow_path);
+                let values_ptr = field_value_locals
+                    .first()
+                    .map(|local_index| self.ir.get_local_address(*local_index))
+                    .unwrap_or(Value::RawValue(0));
+                let slow_result =
+                    self.call_builtin(
+                        "beagle.builtin/construct-struct-dynamic",
+                        vec![
+                            Value::RawValue(descriptor_id),
+                            values_ptr,
+                            Value::RawValue(field_value_locals.len()),
+                        ],
+                    )?;
+                self.ir.assign(result_reg, slow_result);
+
+                self.ir.write_label(done);
+                self.ir
+                    .discard_local_stack_values(field_value_locals.len());
+
+                Ok(result_reg.into())
             }
             Ast::StructCreation {
                 name,
@@ -3354,7 +3443,8 @@ impl AstCompiler<'_> {
                 if let Some(spread_expr) = spread {
                     // Spread path: migrate source object to current layout, then patch explicit fields.
                     // copy_object_spread always produces an object with the current layout,
-                    // so the write_field indices (computed at compile time) are correct.
+                    // so write compile-time field indices only while this struct has never
+                    // been structurally redefined. After that, patch explicit fields by name.
                     self.not_tail_position();
                     let spread_val = self.call_compile(&spread_expr)?;
                     let spread_reg = self.ir.assign_new(spread_val);
@@ -3369,41 +3459,156 @@ impl AstCompiler<'_> {
                     let copy_ptr_reg = self.ir.assign_new(copy_ptr);
                     let copy_ptr_raw = self.ir.untag(copy_ptr_reg.into());
 
-                    for (i, (_field_name, field_expr)) in fields.iter().enumerate() {
-                        let field_index = field_order[i];
+                    let stack_start = self.ir.local_stack_indices().len();
+                    for (_field_name, field_expr) in fields.iter() {
                         self.not_tail_position();
                         let val = self.call_compile(field_expr)?;
                         let val_reg = self.ir.assign_new(val);
-                        self.ir.write_field(copy_ptr_raw, field_index, val_reg.into());
+                        self.ir.push_to_stack(val_reg.into());
                     }
+                    let field_value_locals =
+                        self.ir.local_stack_indices()[stack_start..].to_vec();
 
-                    Ok(self
-                        .ir
-                        .tag(copy_ptr_raw, BuiltInTypes::HeapObject.get_tag()))
+                    let descriptor_id = self.compiler.add_struct_allocation_descriptor(
+                        struct_id,
+                        fields.iter().map(|(field_name, _)| field_name.clone()).collect(),
+                    );
+                    let (redefined_flag_addr, redefined_flag_mask) = self
+                        .compiler
+                        .structurally_redefined_ever_guard(struct_id)
+                        .ok_or_else(|| CompileError::InternalError {
+                            message: format!(
+                                "Missing structural redefinition flag for struct {}",
+                                name
+                            ),
+                        })?;
+
+                    let result_reg = self.ir.assign_new(Value::Null);
+                    let fast_path = self.ir.label("struct_spread_alloc_fast");
+                    let slow_path = self.ir.label("struct_spread_alloc_slow");
+                    let done = self.ir.label("struct_spread_alloc_done");
+
+                    let redefined_flag_ptr = self.ir.assign_new(Value::Pointer(redefined_flag_addr));
+                    let redefined_flags = self.ir.load_from_memory(redefined_flag_ptr.into(), 0);
+                    let redefined_ever =
+                        self.ir.and_imm(redefined_flags, redefined_flag_mask as u64);
+                    self.ir.jump_if(
+                        fast_path,
+                        Condition::Equal,
+                        redefined_ever,
+                        Value::RawValue(0),
+                    );
+                    self.ir.jump(slow_path);
+
+                    self.ir.write_label(fast_path);
+                    for (field_index, local_index) in field_order.iter().zip(&field_value_locals) {
+                        let reg = self.ir.load_local(*local_index);
+                        self.ir.write_field(copy_ptr_raw, *field_index, reg);
+                    }
+                    let tagged_fast =
+                        self.ir.tag(copy_ptr_raw, BuiltInTypes::HeapObject.get_tag());
+                    self.ir.assign(result_reg, tagged_fast);
+                    self.ir.jump(done);
+
+                    self.ir.write_label(slow_path);
+                    let values_ptr = field_value_locals
+                        .first()
+                        .map(|local_index| self.ir.get_local_address(*local_index))
+                        .unwrap_or(Value::RawValue(0));
+                    let slow_result = self.call_builtin(
+                        "beagle.builtin/patch-struct-dynamic",
+                        vec![
+                            copy_ptr_reg.into(),
+                            Value::RawValue(descriptor_id),
+                            values_ptr,
+                            Value::RawValue(field_value_locals.len()),
+                        ],
+                    )?;
+                    self.ir.assign(result_reg, slow_result);
+
+                    self.ir.write_label(done);
+                    self.ir
+                        .discard_local_stack_values(field_value_locals.len());
+                    Ok(result_reg.into())
                 } else {
                     // Normal path: push field values on stack, allocate, write fields
+                    let stack_start = self.ir.local_stack_indices().len();
                     for field in fields.iter() {
                         self.not_tail_position();
                         let value = self.call_compile(&field.1)?;
                         let reg = self.ir.assign_new(value);
                         self.ir.push_to_stack(reg.into());
                     }
+                    let field_value_locals =
+                        self.ir.local_stack_indices()[stack_start..].to_vec();
 
-                    let struct_ptr = self.ir.allocate_static(struct_size as u32);
-
-                    let struct_pointer = self.ir.untag(struct_ptr);
                     let layout_version = self.compiler.get_struct_layout_version(struct_id);
+                    let descriptor_id = self.compiler.add_struct_allocation_descriptor(
+                        struct_id,
+                        fields.iter().map(|(field_name, _)| field_name.clone()).collect(),
+                    );
+                    let (redefined_flag_addr, redefined_flag_mask) = self
+                        .compiler
+                        .structurally_redefined_ever_guard(struct_id)
+                        .ok_or_else(|| CompileError::InternalError {
+                            message: format!(
+                                "Missing structural redefinition flag for struct {}",
+                                name
+                            ),
+                        })?;
+
+                    let result_reg = self.ir.assign_new(Value::Null);
+                    let fast_path = self.ir.label("struct_alloc_fast");
+                    let slow_path = self.ir.label("struct_alloc_slow");
+                    let done = self.ir.label("struct_alloc_done");
+
+                    let redefined_flag_ptr = self.ir.assign_new(Value::Pointer(redefined_flag_addr));
+                    let redefined_flags = self.ir.load_from_memory(redefined_flag_ptr.into(), 0);
+                    let redefined_ever =
+                        self.ir.and_imm(redefined_flags, redefined_flag_mask as u64);
+                    self.ir.jump_if(
+                        fast_path,
+                        Condition::Equal,
+                        redefined_ever,
+                        Value::RawValue(0),
+                    );
+                    self.ir.jump(slow_path);
+
+                    self.ir.write_label(fast_path);
+                    let struct_ptr = self.ir.allocate_static(struct_size as u32);
+                    let struct_pointer = self.ir.untag(struct_ptr);
                     self.ir
                         .write_struct_id_with_version(struct_pointer, struct_id, layout_version);
 
-                    for field in field_order.iter().rev() {
-                        let reg = self.ir.pop_from_stack();
-                        self.ir.write_field(struct_pointer, *field, reg);
+                    for (field_index, local_index) in field_order.iter().zip(&field_value_locals) {
+                        let reg = self.ir.load_local(*local_index);
+                        self.ir.write_field(struct_pointer, *field_index, reg);
                     }
+                    let tagged_fast =
+                        self.ir.tag(struct_pointer, BuiltInTypes::HeapObject.get_tag());
+                    self.ir.assign(result_reg, tagged_fast);
+                    self.ir.jump(done);
 
-                    Ok(self
-                        .ir
-                        .tag(struct_pointer, BuiltInTypes::HeapObject.get_tag()))
+                    self.ir.write_label(slow_path);
+                    let values_ptr = field_value_locals
+                        .first()
+                        .map(|local_index| self.ir.get_local_address(*local_index))
+                        .unwrap_or(Value::RawValue(0));
+                    let slow_result =
+                        self.call_builtin(
+                            "beagle.builtin/construct-struct-dynamic",
+                            vec![
+                                Value::RawValue(descriptor_id),
+                                values_ptr,
+                                Value::RawValue(field_value_locals.len()),
+                            ],
+                        )?;
+                    self.ir.assign(result_reg, slow_result);
+
+                    self.ir.write_label(done);
+                    self.ir
+                        .discard_local_stack_values(field_value_locals.len());
+                    Ok(result_reg.into())
                 }
             }
             Ast::Array {
@@ -4010,6 +4215,7 @@ impl AstCompiler<'_> {
                     .map(|m| m.needs_to_be_boxed)
                     .unwrap_or(false);
                 let is_mutable = matches!(ast, Ast::LetMut { .. });
+                let once = matches!(ast, Ast::Let { once: true, .. });
 
                 // Handle simple identifier pattern (most common case)
                 if let Some(name) = pattern.as_identifier() {
@@ -4030,12 +4236,45 @@ impl AstCompiler<'_> {
                         let binding_disk_location = self.make_disk_location(let_token_range);
                         let binding_full_name =
                             format!("{}/{}", self.compiler.current_namespace_name(), name);
+                        let namespace_id = self.compiler.current_namespace_id();
+
+                        // `letonce`: if this binding already exists from an
+                        // earlier load, keep the existing value and skip
+                        // re-evaluating the initializer (Clojure's defonce).
+                        // The binding cell is reserved during the main compile
+                        // pass (first_pass leaves top-level `let` alone), so a
+                        // hit here means a *previous* load already created it.
+                        if once {
+                            if let Some(existing_slot) =
+                                self.compiler.find_binding(namespace_id, name)
+                            {
+                                self.insert_variable(
+                                    name.to_string(),
+                                    VariableLocation::NamespaceVariable(
+                                        namespace_id,
+                                        existing_slot,
+                                    ),
+                                );
+                                self.compiler.upsert_binding_metadata(
+                                    &binding_full_name,
+                                    binding_source_text,
+                                    binding_disk_location,
+                                );
+                                let val = self
+                                    .resolve_variable(&VariableLocation::NamespaceVariable(
+                                        namespace_id,
+                                        existing_slot,
+                                    ))
+                                    .unwrap();
+                                let reg = self.ir.assign_new(val);
+                                return Ok(reg.into());
+                            }
+                        }
 
                         self.not_tail_position();
                         let value = self.call_compile(&value)?;
                         self.not_tail_position();
                         let reg = self.ir.assign_new(value);
-                        let namespace_id = self.compiler.current_namespace_id();
                         let reserved_namespace_slot = self.compiler.reserve_namespace_slot(name);
                         self.store_namespaced_variable(
                             Value::TaggedConstant(reserved_namespace_slot as isize),
@@ -4229,8 +4468,6 @@ impl AstCompiler<'_> {
                     let value_reg = self.ir.assign_new(value_val);
 
                     let object_reg = self.ir.assign_new(object_val);
-                    let untagged_object = self.ir.untag(object_reg.into());
-                    let struct_id_versioned = self.ir.read_struct_id_versioned(untagged_object);
                     // Writes also consume one feedback entry to keep the
                     // cursor aligned; we don't yet specialize them so
                     // the entry is discarded.
@@ -4242,6 +4479,22 @@ impl AstCompiler<'_> {
 
                     let exit_property_access = self.ir.label("exit_property_access");
                     let slow_property_path = self.ir.label("slow_property_path");
+
+                    // Only heap objects carry a struct id — route scalars/strings/
+                    // null to the slow path (clean error) instead of dereferencing
+                    // the raw value as a pointer (segfault).
+                    let object_tag = self.ir.get_tag(object_reg.into());
+                    let heap_object_tag =
+                        Value::RawValue(BuiltInTypes::HeapObject.get_tag() as usize);
+                    self.ir.jump_if(
+                        slow_property_path,
+                        Condition::NotEqual,
+                        object_tag,
+                        heap_object_tag,
+                    );
+
+                    let untagged_object = self.ir.untag(object_reg.into());
+                    let struct_id_versioned = self.ir.read_struct_id_versioned(untagged_object);
 
                     // Check if cached struct_id+version matches
                     self.ir.jump_if(
@@ -4617,10 +4870,30 @@ impl AstCompiler<'_> {
                     ],
                 )?;
 
-                // Call the returned fn_ptr with all args
-                let fn_val = self.ir.function(slow_fn_ptr);
+                // protocol_dispatch returns a tagged Function pointer to call.
+                // BUT if dispatch found no impl it throws a *resumable* error;
+                // resuming substitutes the resume value here, which is NOT a
+                // function. So: if it's Function-tagged, call it; otherwise use
+                // the value directly as the method's result (the resumed value).
+                // Without this, `resume`-ing past e.g. `length(42)` calls the raw
+                // value as a code pointer and segfaults.
+                let dispatch_is_fn = self.ir.label("dispatch_is_fn");
+                let dispatch_done = self.ir.label("dispatch_done");
+                let slow_fn_reg = self.ir.assign_new(slow_fn_ptr);
+                let slow_tag = self.ir.get_tag(slow_fn_reg.into());
+                let function_tag_val =
+                    Value::RawValue(BuiltInTypes::Function.get_tag() as usize);
+                self.ir
+                    .jump_if(dispatch_is_fn, Condition::Equal, slow_tag, function_tag_val);
+                // resumed value (not a function) — use it as the result directly
+                self.ir.assign(result_reg, Value::Register(slow_fn_reg));
+                self.ir.jump(dispatch_done);
+
+                self.ir.write_label(dispatch_is_fn);
+                let fn_val = self.ir.function(Value::Register(slow_fn_reg));
                 let slow_call_result = self.ir.call(fn_val, call_args);
                 self.ir.assign(result_reg, slow_call_result);
+                self.ir.write_label(dispatch_done);
 
                 // 10. Exit
                 self.ir.write_label(exit_label);
@@ -5781,18 +6054,19 @@ impl AstCompiler<'_> {
     /// parsing numeric segments as literals. Returns `None` when the name is a
     /// genuine namespace-qualified reference (exactly one `/`, alias is real),
     /// in which case the caller resolves it normally.
-    fn try_qualified_name_as_division(
-        &self,
-        name: &str,
-        pos: TokenPosition,
-    ) -> Option<Ast> {
+    fn try_qualified_name_as_division(&self, name: &str, pos: TokenPosition) -> Option<Ast> {
         if !name.contains('/') {
             return None;
         }
         let segments: Vec<&str> = name.split('/').collect();
         // A real qualified name has exactly two segments and a registered
         // alias. Anything else (multiple slashes, or unknown alias) is division.
-        if segments.len() == 2 && self.compiler.get_namespace_from_alias(segments[0]).is_some() {
+        if segments.len() == 2
+            && self
+                .compiler
+                .get_namespace_from_alias(segments[0])
+                .is_some()
+        {
             return None;
         }
         // Any empty segment (e.g. trailing/leading `/`) can't be division.
@@ -5860,6 +6134,7 @@ impl AstCompiler<'_> {
         let call_closure = self.ir.label("call_closure");
         let call_multi_arity = self.ir.label("call_multi_arity");
         let call_function = self.ir.label("call_function");
+        let not_callable = self.ir.label("not_callable");
         let exit_closure_call = self.ir.label("exit_closure_call");
 
         // Check for Closure tag
@@ -5878,6 +6153,14 @@ impl AstCompiler<'_> {
             heap_object_tag_val,
         );
 
+        // Anything that isn't a Closure or multi-arity HeapObject must be a
+        // Function-tagged pointer to be callable. Otherwise (Int/Float/Bool/
+        // String/null) throw a clean error instead of calling the raw value as
+        // a code pointer (segfault).
+        let function_tag_val = Value::RawValue(BuiltInTypes::Function.get_tag() as usize);
+        self.ir
+            .jump_if(not_callable, Condition::NotEqual, tag_reg, function_tag_val);
+
         // Fall through to direct function call
         self.ir.write_label(call_function);
 
@@ -5891,6 +6174,26 @@ impl AstCompiler<'_> {
             .collect();
         let result = self.ir.call(saved_fn.into(), reloaded_args);
         self.ir.assign(ret_register, result);
+        self.ir.jump(exit_closure_call);
+
+        // Not-callable path: the value was neither a Closure, a multi-arity
+        // HeapObject, nor a Function — throw a clean error.
+        self.ir.write_label(not_callable);
+        {
+            let throw_fn = self
+                .compiler
+                .find_function("beagle.builtin/throw-not-a-function")
+                .expect("throw-not-a-function builtin not found");
+            let throw_fn_ptr = self.compiler.get_function_pointer(throw_fn).unwrap();
+            let throw_fn_val = self.ir.assign_new(throw_fn_ptr);
+            let sp = self.ir.get_stack_pointer_imm(0);
+            let fp = self.ir.get_frame_pointer();
+            let func_obj = self.ir.load_local(saved_func_local);
+            let r = self
+                .ir
+                .call_builtin(throw_fn_val.into(), vec![sp, fp, func_obj]);
+            self.ir.assign(ret_register, r);
+        }
         self.ir.jump(exit_closure_call);
 
         // Multi-arity function call path
@@ -6004,6 +6307,7 @@ impl AstCompiler<'_> {
         let call_closure = self.ir.label("call_closure");
         let call_multi_arity = self.ir.label("call_multi_arity");
         let call_function = self.ir.label("call_function");
+        let not_callable = self.ir.label("not_callable");
         let exit_closure_call = self.ir.label("exit_closure_call");
 
         // Check for Closure tag
@@ -6022,6 +6326,14 @@ impl AstCompiler<'_> {
             heap_object_tag_val,
         );
 
+        // Anything that isn't a Closure or multi-arity HeapObject must be a
+        // Function-tagged pointer to be callable. Otherwise (Int/Float/Bool/
+        // String/null) throw a clean error instead of calling the raw value as
+        // a code pointer (segfault).
+        let function_tag_val = Value::RawValue(BuiltInTypes::Function.get_tag() as usize);
+        self.ir
+            .jump_if(not_callable, Condition::NotEqual, tag_reg, function_tag_val);
+
         // Fall through to direct function call
         self.ir.write_label(call_function);
 
@@ -6033,6 +6345,26 @@ impl AstCompiler<'_> {
             .collect();
         let result = self.ir.call(saved_fn.into(), reloaded_args);
         self.ir.assign(ret_register, result);
+        self.ir.jump(exit_closure_call);
+
+        // Not-callable path: the value was neither a Closure, a multi-arity
+        // HeapObject, nor a Function — throw a clean error.
+        self.ir.write_label(not_callable);
+        {
+            let throw_fn = self
+                .compiler
+                .find_function("beagle.builtin/throw-not-a-function")
+                .expect("throw-not-a-function builtin not found");
+            let throw_fn_ptr = self.compiler.get_function_pointer(throw_fn).unwrap();
+            let throw_fn_val = self.ir.assign_new(throw_fn_ptr);
+            let sp = self.ir.get_stack_pointer_imm(0);
+            let fp = self.ir.get_frame_pointer();
+            let func_obj = self.ir.load_local(saved_func_local);
+            let r = self
+                .ir
+                .call_builtin(throw_fn_val.into(), vec![sp, fp, func_obj]);
+            self.ir.assign(ret_register, r);
+        }
         self.ir.jump(exit_closure_call);
 
         // Multi-arity function call path
@@ -6444,13 +6776,18 @@ impl AstCompiler<'_> {
         let exit_property_access = self.ir.label("exit_property_access");
         let slow_property_path = self.ir.label("slow_property_path");
 
-        // Check for null before untagging - go to slow path for nice error
-        let object_value: Value = object.into();
+        // Only heap objects carry a struct id. Scalars (Int/Float/Bool/null) and
+        // strings are NOT HeapObject-tagged; sending them through untag +
+        // read_struct_id would dereference the raw value as a pointer (segfault).
+        // Route them to the slow path, which throws a clean "cannot access
+        // property on X" error.
+        let object_tag = self.ir.get_tag(object.into());
+        let heap_object_tag = Value::RawValue(BuiltInTypes::HeapObject.get_tag() as usize);
         self.ir.jump_if(
             slow_property_path,
-            Condition::Equal,
-            object_value,
-            Value::Null,
+            Condition::NotEqual,
+            object_tag,
+            heap_object_tag,
         );
 
         let untagged_object = self.ir.untag(object.into());
@@ -7126,6 +7463,7 @@ impl AstCompiler<'_> {
                 pattern,
                 value,
                 token_range: _,
+                once: _,
             } => {
                 // Add all binding names from the pattern
                 for binding_name in pattern.binding_names() {
@@ -7618,9 +7956,18 @@ impl AstCompiler<'_> {
                 variant_name,
                 ..
             } => {
-                // First check if the value is null - null can't match any enum variant
-                self.ir
-                    .jump_if(no_match_label, Condition::Equal, value_reg, Value::Null);
+                // Only heap objects can match an enum-variant pattern. Scalars
+                // (Int/Float/String/Bool/null) are NOT HeapObject-tagged; letting
+                // them through would untag + read_struct_id, dereferencing the raw
+                // value as a pointer (segfault). Fall through to no_match instead.
+                let value_tag = self.ir.get_tag(value_reg);
+                let heap_object_tag = Value::RawValue(BuiltInTypes::HeapObject.get_tag() as usize);
+                self.ir.jump_if(
+                    no_match_label,
+                    Condition::NotEqual,
+                    value_tag,
+                    heap_object_tag,
+                );
 
                 // Get the family_id for this enum variant
                 let full_enum_name = self.get_full_enum_name(enum_name);
@@ -7658,9 +8005,18 @@ impl AstCompiler<'_> {
                 Ok(())
             }
             Pattern::Struct { name, .. } => {
-                // First check if the value is null - null can't match any struct pattern
-                self.ir
-                    .jump_if(no_match_label, Condition::Equal, value_reg, Value::Null);
+                // Only heap objects can match a struct pattern. Scalars
+                // (Int/Float/String/Bool/null) are NOT HeapObject-tagged; letting
+                // them through would untag + read_struct_id, dereferencing the raw
+                // value as a pointer (segfault). Fall through to no_match instead.
+                let value_tag = self.ir.get_tag(value_reg);
+                let heap_object_tag = Value::RawValue(BuiltInTypes::HeapObject.get_tag() as usize);
+                self.ir.jump_if(
+                    no_match_label,
+                    Condition::NotEqual,
+                    value_tag,
+                    heap_object_tag,
+                );
 
                 // Check if the value belongs to the expected struct family
                 let full_struct_name = self.get_full_struct_name(name);
@@ -7960,12 +8316,13 @@ impl AstCompiler<'_> {
 
                 // Bind rest if present (e.g., [a, b, ...rest])
                 if let Some(rest_pattern) = rest {
-                    // Generate AST for: drop(array_temp_name, elements.len())
+                    // Generate AST for: drop(elements.len(), array_temp_name)
+                    // (core/drop is function/count-first: drop(n, coll))
                     let drop_call = Ast::Call {
                         name: "beagle.core/drop".to_string(),
                         args: vec![
-                            Ast::Identifier(array_temp_name.clone(), token_range.start),
                             Ast::IntegerLiteral(elements.len() as i64, token_range.start),
+                            Ast::Identifier(array_temp_name.clone(), token_range.start),
                         ],
                         token_range: *token_range,
                     };

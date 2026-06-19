@@ -851,13 +851,13 @@ impl MarkAndSweep {
         let Some(migration_revision) = runtime.structs.pending_migration_revision() else {
             return;
         };
-
         // Phase 1: Find all objects that need migration, allocate new copies
         let mut forwarding_map: Vec<(usize, usize, usize)> = Vec::new();
+        let scan_highmark = self.space.highmark;
 
         let mut offset = 0;
         loop {
-            if offset > self.space.highmark {
+            if offset > scan_highmark {
                 break;
             }
             if let Some(entry) = self.free_list.find_entry_contains(offset) {

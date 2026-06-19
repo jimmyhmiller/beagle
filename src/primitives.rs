@@ -269,7 +269,11 @@ impl AstCompiler<'_> {
             "beagle.primitive/read-struct-id" => {
                 let pointer = args[0];
                 let pointer = self.ir.untag(pointer);
-                self.ir.read_struct_id(pointer)
+                let struct_id = self.ir.read_struct_id(pointer);
+                // Tag as Int — callers compare it against tagged ints (e.g.
+                // `instance-of`'s `== type.id`). Returning a raw value feeds an
+                // untagged int into `equal`, which derefs it as a pointer (crash).
+                self.ir.tag(struct_id, BuiltInTypes::Int.get_tag())
             }
             "beagle.primitive/write-field" => {
                 let pointer = args[0];

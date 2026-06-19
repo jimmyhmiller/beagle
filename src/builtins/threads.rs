@@ -435,6 +435,12 @@ pub extern "C" fn eval(stack_pointer: usize, frame_pointer: usize, code: usize) 
             throw_runtime_error(stack_pointer, "CompileError", format!("{}", e));
         },
     };
+    if runtime
+        .structural_redefinition_needs_gc
+        .swap(false, std::sync::atomic::Ordering::AcqRel)
+    {
+        runtime.gc_impl(frame_pointer);
+    }
     mem::forget(code);
     if result == 0 {
         return BuiltInTypes::null_value() as usize;

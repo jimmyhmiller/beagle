@@ -1,0 +1,31 @@
+namespace redefine_stale_allocation_no_throw_test
+
+// Regression: after a structural redefinition, an old compiled allocation site
+// must not keep producing the old physical layout or be replaced by throwing
+// code. It should fall back to generic construction and produce a current-layout
+// object.
+
+struct P { x, y }
+
+fn make() {
+    P { x: 1, y: 2 }
+}
+
+fn main() {
+    let before = make()
+    eval("namespace redefine_stale_allocation_no_throw_test
+struct P { x, y, z }")
+    let after = make()
+    println(before.x)
+    println(after.x)
+    println(after.y)
+    println(after.z)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// 1
+// 1
+// 2
+// null
+// done

@@ -436,6 +436,26 @@ fn print_stack(_stack_pointer: usize) {
     }
 }
 
+/// Find the Beagle function whose compiled code contains `addr` and return a
+/// human-readable location string ("function (file:line)"). `addr` is typically
+/// a saved return address pointing just after the call that raised an error, so
+/// the function found is exactly where the error occurred. `line` is the
+/// function's definition line (Beagle has no per-instruction line table yet).
+pub(crate) fn location_for_address(addr: usize) -> Option<String> {
+    let runtime = get_runtime().get();
+    for function in runtime.functions.iter() {
+        let start = usize::from(function.pointer);
+        if (start..start + function.size).contains(&addr) {
+            return Some(match (&function.source_file, function.source_line) {
+                (Some(file), Some(line)) => format!("{} ({}:{})", function.name, file, line),
+                (Some(file), None) => format!("{} ({})", function.name, file),
+                _ => function.name.clone(),
+            });
+        }
+    }
+    None
+}
+
 pub unsafe extern "C" fn gc(stack_pointer: usize, frame_pointer: usize) -> usize {
     // Save the GC context including the return address
     save_gc_context!(stack_pointer, frame_pointer);

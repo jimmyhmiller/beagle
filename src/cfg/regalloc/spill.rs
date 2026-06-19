@@ -773,6 +773,10 @@ fn remat_op_for(op: &Op, dst: VReg) -> Option<Op> {
         Op::ConstFalse { .. } => Some(Op::ConstFalse { dst }),
         Op::ConstNull { .. } => Some(Op::ConstNull { dst }),
         Op::GetFramePointer { .. } => Some(Op::GetFramePointer { dst }),
+        Op::GetLocalAddress { local_index, .. } => Some(Op::GetLocalAddress {
+            dst,
+            local_index: *local_index,
+        }),
         _ => None,
     }
 }

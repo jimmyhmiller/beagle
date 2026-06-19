@@ -1994,14 +1994,34 @@ impl Compiler {
 
     // TODO: All of this seems bad
     pub fn add_struct(&mut self, s: Struct) {
-        let is_redefinition = {
+        let insert_result = {
             let runtime = get_runtime().get_mut();
             runtime.add_struct(s)
         };
-        if is_redefinition {
+        if insert_result.is_redefinition {
             self.invalidate_all_property_caches();
             self.revert_all_specializations();
         }
+        if insert_result.layout_changed {
+            let runtime = get_runtime().get();
+            runtime
+                .structural_redefinition_needs_gc
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    pub fn structurally_redefined_ever_guard(&self, struct_id: usize) -> Option<(usize, usize)> {
+        let runtime = get_runtime().get();
+        runtime.structs.structurally_redefined_ever_guard(struct_id)
+    }
+
+    pub fn add_struct_allocation_descriptor(
+        &mut self,
+        struct_id: usize,
+        field_names: Vec<String>,
+    ) -> usize {
+        let runtime = get_runtime().get_mut();
+        runtime.add_struct_allocation_descriptor(struct_id, field_names)
     }
 
     /// Revert every specialized function to its retained tier-1 code (swap the

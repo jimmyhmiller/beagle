@@ -1,6 +1,139 @@
 use super::*;
 use crate::save_gc_context;
 
+pub unsafe extern "C" fn construct_struct_dynamic(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    descriptor_id: usize,
+    values_ptr: usize,
+    value_count: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let Some(descriptor) = runtime
+        .struct_allocation_descriptors
+        .get(descriptor_id)
+        .cloned()
+    else {
+        return BuiltInTypes::null_value() as usize;
+    };
+    let Some(current_def) = runtime.get_struct_by_id(descriptor.struct_id) else {
+        return BuiltInTypes::null_value() as usize;
+    };
+    let current_fields = current_def.fields.clone();
+    let current_field_count = current_fields.len();
+    let current_version = runtime
+        .structs
+        .get_current_layout_version(descriptor.struct_id);
+
+    let mut roots = Vec::with_capacity(descriptor.field_names.len());
+    let values_ptr = values_ptr as *const usize;
+    let available_values = descriptor.field_names.len().min(value_count);
+    for old_idx in 0..available_values {
+        // Local slots are contiguous, but increasing local indices move toward
+        // lower addresses in the native frame.
+        let value = unsafe { *values_ptr.sub(old_idx) };
+        match runtime.add_handle_root(value) {
+            Some(root) => roots.push(root),
+            None => {
+                for root in roots {
+                    runtime.remove_handle_root(root);
+                }
+                unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "AllocationError",
+                        "Failed to root dynamic struct constructor values".to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    let object_pointer =
+        match runtime.allocate(current_field_count, stack_pointer, BuiltInTypes::HeapObject) {
+            Ok(ptr) => ptr,
+            Err(_) => {
+                for root in roots {
+                    runtime.remove_handle_root(root);
+                }
+                unsafe {
+                    throw_runtime_error(
+                        stack_pointer,
+                        "AllocationError",
+                        "Failed to allocate struct - out of memory".to_string(),
+                    );
+                }
+            }
+        };
+
+    let mut object = HeapObject::from_tagged(object_pointer);
+    object.writer_header_direct(crate::types::Header {
+        type_id: 0,
+        type_data: descriptor.struct_id as u32,
+        size: current_field_count as u16,
+        opaque: false,
+        marked: false,
+        large: false,
+        type_flags: current_version,
+    });
+
+    let current_def = runtime
+        .get_struct_by_id(descriptor.struct_id)
+        .expect("struct disappeared during dynamic construction")
+        .clone();
+    for (new_idx, field_name) in current_fields.iter().enumerate() {
+        let value = descriptor
+            .field_names
+            .iter()
+            .position(|name| name == field_name)
+            .and_then(|old_idx| roots.get(old_idx).copied())
+            .map(|root| runtime.get_handle_root(root))
+            .unwrap_or_else(|| runtime.field_default_value_at(&current_def, new_idx));
+        object.write_field(new_idx as i32, value);
+    }
+
+    for root in roots {
+        runtime.remove_handle_root(root);
+    }
+    object_pointer
+}
+
+pub unsafe extern "C" fn patch_struct_dynamic(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    object_pointer: usize,
+    descriptor_id: usize,
+    values_ptr: usize,
+    value_count: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let Some(descriptor) = runtime
+        .struct_allocation_descriptors
+        .get(descriptor_id)
+        .cloned()
+    else {
+        return object_pointer;
+    };
+    let Some(current_def) = runtime.get_struct_by_id(descriptor.struct_id) else {
+        return object_pointer;
+    };
+    let current_fields = current_def.fields.clone();
+    let object = HeapObject::from_tagged(object_pointer);
+    let values_ptr = values_ptr as *const usize;
+
+    for (old_idx, field_name) in descriptor.field_names.iter().take(value_count).enumerate() {
+        if let Some(new_idx) = current_fields.iter().position(|name| name == field_name) {
+            // See construct_struct_dynamic: local slots are laid out downward.
+            let value = unsafe { *values_ptr.sub(old_idx) };
+            object.write_field(new_idx as i32, value);
+        }
+    }
+
+    object_pointer
+}
+
 pub extern "C" fn fill_object_fields(object_pointer: usize, value: usize) -> usize {
     print_call_builtin(get_runtime().get(), "fill_object_fields");
     let mut object = HeapObject::from_tagged(object_pointer);
@@ -176,6 +309,31 @@ pub extern "C" fn check_struct_family(tagged_shape_id: usize, tagged_family_id: 
     }
 }
 
+/// Thrown by the dynamic-call dispatch when a non-callable value (Int, Float,
+/// Bool, String, null, ...) is invoked as a function — instead of dereferencing
+/// the raw value as a code pointer (which segfaults).
+pub unsafe extern "C" fn throw_not_a_function(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    value: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let repr = {
+        let runtime = get_runtime().get_mut();
+        runtime
+            .get_repr(value, 0)
+            .unwrap_or_else(|| "<value>".to_string())
+    };
+    let kind = BuiltInTypes::get_kind(value);
+    unsafe {
+        throw_runtime_error(
+            stack_pointer,
+            "TypeError",
+            format!("Cannot call a {:?} value as a function: {}", kind, repr),
+        );
+    }
+}
+
 pub extern "C" fn property_access(
     stack_pointer: usize,
     frame_pointer: usize,
@@ -195,6 +353,22 @@ pub extern "C" fn property_access(
                 stack_pointer,
                 "TypeError",
                 format!("Cannot access property '{}' on null", property_name),
+            );
+        }
+    }
+
+    // A non-null scalar (Int/Float/Bool/String) has no fields. Report it clearly
+    // rather than falling through to a confusing "Not aligned"/"on Function".
+    if !BuiltInTypes::is_heap_pointer(struct_pointer) {
+        let runtime = get_runtime().get_mut();
+        let str_constant_idx: usize = BuiltInTypes::untag(str_constant_ptr);
+        let property_name = runtime.string_constants[str_constant_idx].str.clone();
+        let kind = BuiltInTypes::get_kind(struct_pointer);
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                format!("Cannot access property '{}' on {:?}", property_name, kind),
             );
         }
     }

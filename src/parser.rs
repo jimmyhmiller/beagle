@@ -209,6 +209,7 @@ pub enum Token {
     BitWiseXor,
     Or,
     Let,
+    Letonce,
     Dynamic,
     Binding,
     Struct,
@@ -335,6 +336,7 @@ impl Token {
             Token::If => Ok("if".to_string()),
             Token::Else => Ok("else".to_string()),
             Token::Let => Ok("let".to_string()),
+            Token::Letonce => Ok("letonce".to_string()),
             Token::Dynamic => Ok("dynamic".to_string()),
             Token::Binding => Ok("binding".to_string()),
             Token::Mut => Ok("mut".to_string()),
@@ -867,6 +869,7 @@ impl Tokenizer {
             b"null" => Token::Null,
             b"infinity" => Token::Infinity,
             b"let" => Token::Let,
+            b"letonce" => Token::Letonce,
             b"dynamic" => Token::Dynamic,
             b"binding" => Token::Binding,
             b"mut" => Token::Mut,
@@ -1460,11 +1463,17 @@ impl Parser {
                 (90, Associativity::Left)
             }
 
-            // Dot, index, and struct creation should have very high precedence.
-            // Note: OpenParen is NOT included here - function calls on identifiers are handled
-            // specially in parse_atom, and we don't want "value(next_key)" to be parsed as
-            // a function call in contexts like map literals {key1 value1 (key2) value2}.
-            Token::Dot | Token::OpenBracket | Token::OpenCurly => (100, Associativity::Left),
+            // Dot, index, struct creation, and call all bind tightest.
+            // OpenParen is a call postfix on a non-identifier callee, e.g.
+            // `(expr)(args)` or `arr[i](args)`. (Identifier calls `foo(x)` are
+            // handled directly in parse_atom.) It is suppressed in
+            // space-separated collection-value context — `{k v (next_key) ...}`
+            // / `#{a (b) ...}` — via the `allow_call_postfix` flag threaded into
+            // `parse_expression_impl`, so a following `(` there stays the next
+            // key/element rather than turning the value into a call.
+            Token::Dot | Token::OpenBracket | Token::OpenCurly | Token::OpenParen => {
+                (100, Associativity::Left)
+            }
             // Default for unrecognized tokens.
             _ => (0, Associativity::Left),
         }
@@ -1477,6 +1486,20 @@ impl Parser {
         min_precedence: usize,
         should_skip: bool,
         struct_creation_allowed: bool,
+    ) -> ParseResult<Option<Ast>> {
+        // Default: a parenthesized/indexed callee may be CALLED — `(f)(x)`,
+        // `arr[i](x)`. Space-separated collection values call the `_impl` form
+        // with `allow_call_postfix = false` so a following `(` is the next
+        // key/element, not a call.
+        self.parse_expression_impl(min_precedence, should_skip, struct_creation_allowed, true)
+    }
+
+    fn parse_expression_impl(
+        &mut self,
+        min_precedence: usize,
+        should_skip: bool,
+        struct_creation_allowed: bool,
+        allow_call_postfix: bool,
     ) -> ParseResult<Option<Ast>> {
         let mut min_precedence = min_precedence;
         if should_skip {
@@ -1496,6 +1519,12 @@ impl Parser {
         while self.is_postfix(&lhs, struct_creation_allowed)
             && self.get_precedence().0 > min_precedence
         {
+            // A call postfix `(args)` on a non-identifier callee is suppressed
+            // in collection-value context: there a following `(` opens the next
+            // key/element, not a call.
+            if !allow_call_postfix && matches!(self.current_token(), Token::OpenParen) {
+                break;
+            }
             let (precedence, associativity) = self.get_precedence();
             let next_min_precedence = if matches!(associativity, Associativity::Left) {
                 precedence + 1
@@ -2008,6 +2037,33 @@ impl Parser {
                     pattern,
                     value: Box::new(value),
                     token_range,
+                    once: false,
+                }))
+            }
+            Token::Letonce => {
+                // `letonce name = expr` — top-level once-binding (Clojure's
+                // `defonce`). Parsed like a plain `let`, but flagged so the
+                // compiler keeps an existing value across reloads.
+                let start_position = self.position;
+                self.consume();
+                self.move_to_next_non_whitespace();
+                let pattern = self.parse_binding_pattern()?;
+                self.skip_whitespace();
+                self.expect_equal()?;
+                self.move_to_next_non_whitespace();
+                let value = self.parse_expression(0, true, true)?.ok_or_else(|| {
+                    ParseError::UnexpectedEof {
+                        expected: "value after '='".to_string(),
+                    }
+                })?;
+                let end_position = self.position;
+                let token_range = TokenRange::new(start_position, end_position);
+                self.record_definition_byte_range(token_range);
+                Ok(Some(Ast::Let {
+                    pattern,
+                    value: Box::new(value),
+                    token_range,
+                    once: true,
                 }))
             }
             Token::Binding => {
@@ -5294,11 +5350,11 @@ impl Parser {
             // the key. Without this, `{:a [1,2]}` parsed as `(:a)[1` and failed
             // with "Expected close bracket ']'". Keys are keywords/strings/atoms,
             // which parse fine at this precedence.
-            let key =
-                self.parse_expression(100, true, true)?
-                    .ok_or_else(|| ParseError::UnexpectedEof {
-                        expected: "key expression in map literal".to_string(),
-                    })?;
+            let key = self.parse_expression(100, true, true)?.ok_or_else(|| {
+                ParseError::UnexpectedEof {
+                    expected: "key expression in map literal".to_string(),
+                }
+            })?;
 
             self.skip_whitespace();
 
@@ -5322,12 +5378,13 @@ impl Parser {
                 }
             }
 
-            // Parse value (any expression)
-            let value =
-                self.parse_expression(0, true, true)?
-                    .ok_or_else(|| ParseError::UnexpectedEof {
-                        expected: "value expression in map literal".to_string(),
-                    })?;
+            // Parse value (any expression). Suppress call-postfix so a value
+            // followed by `(next_key)` is two pairs, not a call: `{k v (k2) v2}`.
+            let value = self
+                .parse_expression_impl(0, true, true, false)?
+                .ok_or_else(|| ParseError::UnexpectedEof {
+                    expected: "value expression in map literal".to_string(),
+                })?;
 
             pairs.push((key, value));
 
@@ -5370,12 +5427,14 @@ impl Parser {
         // Parse elements
         let mut elements = Vec::new();
         loop {
-            // Parse element (any expression)
-            let element =
-                self.parse_expression(0, true, true)?
-                    .ok_or_else(|| ParseError::UnexpectedEof {
-                        expected: "element expression in set literal".to_string(),
-                    })?;
+            // Parse element (any expression). Suppress call-postfix: set
+            // elements are space-separated, so `#{a (b) c}` is three elements,
+            // not `a(b)`.
+            let element = self
+                .parse_expression_impl(0, true, true, false)?
+                .ok_or_else(|| ParseError::UnexpectedEof {
+                    expected: "element expression in set literal".to_string(),
+                })?;
 
             elements.push(element);
 

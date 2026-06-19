@@ -307,6 +307,7 @@ pub fn scalar_replace_structs(body: &mut Vec<Ast>) {
                             pattern,
                             value,
                             token_range: dummy_tr(),
+                            once: false,
                         }
                     }
                 })

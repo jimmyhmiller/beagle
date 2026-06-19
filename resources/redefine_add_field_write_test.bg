@@ -1,0 +1,46 @@
+namespace redefine_add_field_write_test
+
+use beagle.core as core
+
+// Regression test: adding a field via redefinition and then WRITING that field
+// on an instance created BEFORE the redefinition must work. GC layout-migration
+// grows the pre-existing instance to the new layout on the next collection, so
+// the new field has a slot. (This capability was briefly removed while fixing
+// the concurrent-redefine GC races; this test guards it.)
+
+struct ThingWrite { mut a, mut b }
+struct ThingDefault { mut a, mut b }
+
+test "write a newly-added field on a pre-existing instance" {
+    let t = ThingWrite { a: 1, b: 2 }
+
+    // Old fields read back as written.
+    assert-eq!(t.a, 1)
+    assert-eq!(t.b, 2)
+
+    // Add a field, then migrate the live instance by collecting.
+eval("namespace redefine_add_field_write_test
+struct ThingWrite { mut a, mut b, mut c }")
+    core/gc()
+
+    // The newly-added field is writable on the pre-existing instance...
+    t.c = 30
+    assert-eq!(t.c, 30)
+
+    // ...and the original fields are intact and still writable.
+    assert-eq!(t.a, 1)
+    assert-eq!(t.b, 2)
+    t.a = 100
+    assert-eq!(t.a, 100)
+}
+
+test "newly-added field defaults before being written" {
+    let t = ThingDefault { a: 5, b: 6 }
+    eval("namespace redefine_add_field_write_test
+struct ThingDefault { mut a, mut b, mut d }")
+    // Read of the new field on the old instance yields null until written.
+    assert-eq!(t.d, null)
+    core/gc()
+    t.d = 7
+    assert-eq!(t.d, 7)
+}
