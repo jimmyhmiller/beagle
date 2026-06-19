@@ -1,8 +1,8 @@
 # Concurrent redefinition: fixed bugs and open issues
 
 This documents the cluster of bugs around redefining structs/enums while other
-threads read them, found and (mostly) fixed in June 2026, plus the issues that
-remain open. Companion to `docs/GC_REDEFINE_RACE_INVESTIGATION.md`.
+threads read them, found and fixed in June 2026. Companion to
+`docs/GC_REDEFINE_RACE_INVESTIGATION.md`.
 
 ## TL;DR
 
@@ -15,7 +15,7 @@ remain open. Companion to `docs/GC_REDEFINE_RACE_INVESTIGATION.md`.
 | 5 | `eval`/compile blocked on the compiler thread without registering `c_calling` → deadlock vs a concurrent stop-the-world | **FIXED** |
 | 6 | Writing a newly-added field on a pre-existing instance | **FIXED** (was briefly broken; restored) |
 | 7 | **Concurrent structural redefinition + migration required stale allocation-site invalidation plus a real STW migration before running redefined code** | **FIXED** |
-| 8 | A `test {}` block that spawns threads *and* calls `core/gc()` deadlocks in the test runner | **OPEN** |
+| 8 | A `test {}` block that spawns threads *and* calls `core/gc()` deadlocked in the test runner | **FIXED** |
 | 9 | 4-bit `layout_version` wraparound aliasing after stale old-layout allocations kept happening post-migration | **FIXED** |
 
 ## Fixed (1–6)
@@ -87,92 +87,51 @@ The proper fix is:
   sticky redefined bit has been set.
 
 Regressions:
-- `resources/struct_structural_redefine_race_test.bg` is enabled again.
+- `resources/struct_structural_redefine_race_test.bg` is enabled again as a
+  `test {}` block.
 - `resources/redefine_stale_allocation_no_throw_test.bg`
 - `resources/redefine_enum_variant_stale_allocation_no_throw_test.bg`
 - `resources/redefine_layout_version_wrap_sticky_bit_test.bg`
 - `resources/redefine_struct_spread_sticky_bit_test.bg`
 - `resources/redefine_large_struct_dynamic_fallback_test.bg`
 
-Historical manifestations:
+The final concurrent failure was in GC coordination/root handling, not in
+layout-version width:
 
-- **mark-and-sweep**: even a grow/shrink workload (`{x,y}`↔`{x,y,z}`) concurrent
-  with readers hangs or crashes (signal 6 / forwarded-corpse). Generational runs
-  the same workload clean (12/12).
-- **generational**: grow/shrink is clean, but a field-**reorder** redefine
-  (`{x,y}`→`{z,y,x}`) concurrent with readers hangs the collector.
+- Function entry already polled the stop-the-world flag, but tight reader loops
+  could run through atom loads and inline field-cache reads without calling back
+  into the runtime. Loop headers now emit the same `__pause` poll, giving those
+  loops a real safepoint where live registers are spilled and relocated roots can
+  be reloaded after GC.
+- `gc_impl` used to subtract one from `registered_thread_count` unconditionally.
+  That was only correct when the GC coordinator was itself a registered mutator.
+  The main/test thread is not counted there, so a main-thread `core/gc()` with
+  two spawned readers waited for only one reader and let the other run during
+  migration. The coordinator is now subtracted only when it is registered.
+- Minor GC now validates young-generation roots against object starts during
+  multi-mutator collections. The stack maps are conservative over frame slots, so
+  a dead heap-looking slot must not be promoted from the middle of an object.
+  This strict object-start index is rebuilt only for multi-frame STW collections;
+  the single-thread path keeps the cheap plausibility check to avoid regressing
+  allocation-heavy benchmarks.
+- Field read/write slow paths follow forwarding pointers defensively before
+  consulting struct metadata, caches, or the write barrier. In a correct STW this
+  should be rare, but it prevents a stale from-space object header from being
+  interpreted as a normal struct header.
 
-Single-threaded migration (any of these) is fine; the hazard is concurrency.
 `resources/struct_structural_redefine_race_test.bg` is the enabled regression.
+It now cycles `{x,y}` → `{x,y,z}` → `{z,y,x}` → `{x,y}` while reader threads
+continuously access `x` and `y`, and it passes in normal and forced-GC modes.
 
-### reorder repro (generational)
+## Fixed #8 — `test {}` block that spawns threads AND calls `core/gc()`
 
-**Repro** (`run` it; hangs ~forever, exit 124 under timeout):
-
-```
-namespace r
-use beagle.core as core
-struct Point { x, y }
-letonce running = atom(true)
-letonce d1 = atom(0) letonce d2 = atom(0)
-fn reader(p) { while deref(running) == true { p.x  p.y } }
-fn wait(a,k){ if deref(a)>=1 {true} else if k>2000000000 {false} else {wait(a,k+1)} }
-fn main() {
-  let anchor = Point { x: 111, y: 222 }
-  thread(fn(){ reader(anchor) swap!(d1, fn(x){1}) })
-  thread(fn(){ reader(anchor) swap!(d2, fn(x){1}) })
-  let mut r = 0
-  while r < 40 {
-    eval("namespace r
-struct Point { z, y, x }")          // <-- REORDER: existing fields change index
-    core/gc()
-    eval("namespace r
-struct Point { x, y }")
-    core/gc()
-    r = r + 1
-  }
-  reset!(running, false)
-  wait(d1,0) wait(d2,0) println("done")
-}
-```
-
-**What's known (from `sample` on the hung process):**
-- The GC coordinator (the redefining thread, inside `core/gc()` →
-  `gc_impl` → `full_gc` → `mark_and_sweep` migration) is stuck spinning in the
-  migration walk (`Runtime::get_struct_by_id` + an internal `Mutex`/RwLock).
-- Both reader threads are correctly **parked** at `__pause` (the world is
-  stopped). So this is NOT a reader-vs-migration race; the coordinator itself
-  fails to make progress inside the migration.
-- It is **specific to reorder**: the identical harness with grow/shrink
-  redefinitions (`{x,y}`↔`{x,y,z}`) completes in ~0.2 s (8/8). Adding a single
-  reorder redefine (`{z,y,x}`) makes it hang (3/3).
-- It is **concurrency-specific**: the same reorder redefinitions + `core/gc()`
-  **single-threaded** complete fine (`reorder_single.bg`: prints `1 2 1 done`).
-
-**Likely area:** the mark-and-sweep / generational `migrate_outdated_structs` /
-`copy_with_migration` path when existing field *indices* change AND reader-thread
-stacks are present as roots. Suspect a lock-ordering or non-terminating loop that
-only manifests when (a) a field moves index and (b) there are other (parked)
-mutator stacks/roots to process. Start by instrumenting the migration loop to log
-per-object progress and which lock `get_struct_by_id` is blocked on, and check
-whether the migrated reorder object is repeatedly re-classified as old-layout.
-
-**Impact before the fix:** reordering struct fields in a running multi-threaded
-program could hang once stale allocation sites and version aliasing lined up;
-mark-and-sweep could also hang/crash on grow/shrink workloads.
-
-## OPEN #8 — `test {}` block that spawns threads AND calls `core/gc()` deadlocks
-
-A `test {}` block (run via the test runner's bare-trampoline invocation) that
-both spawns `thread()` readers and calls `core/gc()` deadlocks, even though the
-*identical* code as `main()` + snapshot runs fine. That's why
-`struct_structural_redefine_race_test.bg` is a `main()`+snapshot test, not a
-`test {}` block. The bare-trampoline test invocation differs from the
-`beagle.async/__main__` entry `main()` uses; wrapping the test thunk in
-`run-cooperative` was tried and did NOT fix it (and is currently removed because
-plain registration (#4) fixes the gc-always corruption on its own). Root cause
-not yet isolated — likely the same area as #7 since both involve `core/gc()` +
-parked readers + migration.
+The race regression now runs as a real `test {}` block:
+`resources/struct_structural_redefine_race_test.bg`. The test runner registers
+the main test thread as a GC mutator while test blocks execute, then unregisters
+it with the same `c_calling` dance used by `main()`. The regression passes both
+as `beag run --test ...` and through `beag test ...`; the forced-GC path passes
+via `beag run --test ... --gc-always`, so the old `main()`+snapshot workaround
+is no longer needed.
 
 ## Fixed #9 — no stale post-migration allocations
 

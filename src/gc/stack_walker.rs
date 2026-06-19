@@ -162,6 +162,13 @@ impl StackWalker {
                 let frame_pointer = header_addr + 8;
                 let return_addr = unsafe { *((frame_pointer + 8) as *const usize) };
                 let saved_fp = unsafe { *(frame_pointer as *const usize) };
+                // Some outermost Beagle frames have no native caller FP. If
+                // their prev slot contains a tagged sentinel instead of zero,
+                // there is no older Beagle frame to recover, so terminate the
+                // chain. Non-outer frames still panic below.
+                if saved_fp == 0 {
+                    break;
+                }
                 let slot_preview = (0..6usize)
                     .map(|i| {
                         let slot_addr = header_addr - 16 - (i * 8);

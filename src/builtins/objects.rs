@@ -373,7 +373,7 @@ pub unsafe extern "C" fn throw_not_a_function(
 pub extern "C" fn property_access(
     stack_pointer: usize,
     frame_pointer: usize,
-    struct_pointer: usize,
+    mut struct_pointer: usize,
     str_constant_ptr: usize,
     property_cache_location: usize,
 ) -> usize {
@@ -408,6 +408,8 @@ pub extern "C" fn property_access(
             );
         }
     }
+
+    struct_pointer = Runtime::follow_forwarding_pointer(struct_pointer);
 
     let runtime = get_runtime().get_mut();
     #[cfg(debug_assertions)]
@@ -555,12 +557,13 @@ pub extern "C" fn compare_values(a: usize, b: usize) -> usize {
 pub extern "C" fn write_field(
     stack_pointer: usize,
     frame_pointer: usize,
-    struct_pointer: usize,
+    mut struct_pointer: usize,
     str_constant_ptr: usize,
     property_cache_location: usize,
     value: usize,
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
+    struct_pointer = Runtime::follow_forwarding_pointer(struct_pointer);
     let runtime = get_runtime().get_mut();
     // write_field checks mutability and throws if not mutable
     let index = runtime.write_field(stack_pointer, struct_pointer, str_constant_ptr, value);

@@ -1357,6 +1357,44 @@ impl AstCompiler<'_> {
         }
     }
 
+    /// Poll the stop-the-world flag and park at a real GC safepoint when a
+    /// collection/redefinition is in progress. Function entry already had this
+    /// shape; loop headers need it too because a pure loop can otherwise run
+    /// through atom loads and inline field-cache reads without ever calling into
+    /// the runtime. The `__pause` call is a normal `Call`, so linear scan spills
+    /// live register roots around it and reloads relocated pointers after GC.
+    fn emit_gc_poll(&mut self) {
+        let pause_atom = self.compiler.get_pause_atom();
+        if pause_atom == 0 {
+            return;
+        }
+
+        let pause_atom = self.ir.assign_new(Value::RawValue(pause_atom));
+        let atomic_value = self.ir.volatile_register();
+        let should_pause = self.ir.atomic_load(atomic_value.into(), pause_atom.into());
+        let skip_pause = self.ir.label("skip_gc_pause");
+        self.ir.jump_if(
+            skip_pause,
+            Condition::Equal,
+            should_pause,
+            Value::RawValue(0),
+        );
+        let stack_pointer = self.ir.get_stack_pointer_imm(0);
+        let frame_pointer = self.ir.get_frame_pointer();
+        let pause_function = self
+            .compiler
+            .get_function_by_name("beagle.builtin/__pause")
+            .unwrap();
+        let pause_function = self
+            .compiler
+            .get_function_pointer(pause_function.clone())
+            .unwrap();
+        let pause_function = self.ir.assign_new(pause_function);
+        self.ir
+            .call_builtin(pause_function.into(), vec![stack_pointer, frame_pointer]);
+        self.ir.write_label(skip_pause);
+    }
+
     pub fn compile(&mut self) -> Result<Ir, CompileError> {
         // Scalar-replace non-escaping struct allocations (escape analysis):
         // `let v = Struct{...}` used only as `v.field` reads becomes plain
@@ -1671,37 +1709,7 @@ impl AstCompiler<'_> {
                     self.insert_variable(rest_name.clone(), local);
                 }
 
-                let should_pause_atom = self.compiler.get_pause_atom();
-
-                // TODO: This isn't working with atomicbool. Need to figure it out
-                if should_pause_atom != 0 {
-                    let should_pause_atom = self.ir.assign_new(Value::RawValue(should_pause_atom));
-                    let atomic_value = self.ir.volatile_register();
-                    let should_pause_atom = self
-                        .ir
-                        .atomic_load(atomic_value.into(), should_pause_atom.into());
-                    let skip_pause = self.ir.label("pause");
-                    self.ir.jump_if(
-                        skip_pause,
-                        Condition::Equal,
-                        should_pause_atom,
-                        Value::RawValue(0),
-                    );
-                    let stack_pointer = self.ir.get_stack_pointer_imm(0);
-                    let frame_pointer = self.ir.get_frame_pointer();
-                    let pause_function = self
-                        .compiler
-                        .get_function_by_name("beagle.builtin/__pause")
-                        .unwrap();
-                    let pause_function = self
-                        .compiler
-                        .get_function_pointer(pause_function.clone())
-                        .unwrap();
-                    let pause_function = self.ir.assign_new(pause_function);
-                    self.ir
-                        .call_builtin(pause_function.into(), vec![stack_pointer, frame_pointer]);
-                    self.ir.write_label(skip_pause);
-                }
+                self.emit_gc_poll();
 
                 // Tier-up entry-counter check. Only emit on the first
                 // compile (no inbound feedback bits); recompiled
@@ -2089,6 +2097,7 @@ impl AstCompiler<'_> {
                     .push((loop_exit, result_reg, loop_start));
 
                 self.ir.write_label(loop_start);
+                self.emit_gc_poll();
                 for ast in body.iter() {
                     self.call_compile(ast)?;
                 }
@@ -2115,6 +2124,7 @@ impl AstCompiler<'_> {
                     .push((loop_exit, result_reg, loop_start));
 
                 self.ir.write_label(loop_start);
+                self.emit_gc_poll();
 
                 // Check condition
                 let cond_value = self.call_compile(&condition)?;

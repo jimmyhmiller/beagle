@@ -12,7 +12,7 @@ use super::{
     stack_walker::StackWalker,
 };
 use crate::builtins::reset_shift::ContinuationObject;
-use crate::collections::{TYPE_ID_CONTINUATION, TYPE_ID_FRAME};
+use crate::collections::TYPE_ID_CONTINUATION;
 
 /// Represents a reference to a GC root that needs updating after collection.
 /// Points to a mutable slot holding the root value (stack slots, GlobalObjectBlock entries).
@@ -188,6 +188,8 @@ struct Space {
     start: *const u8,
     page_count: usize,
     allocation_offset: usize,
+    object_start_bits: Vec<usize>,
+    object_start_words: Vec<usize>,
 }
 
 unsafe impl Send for Space {}
@@ -210,13 +212,113 @@ impl Space {
         pointer >= start && pointer < end
     }
 
-    /// Check if pointer is within the ALLOCATED portion of the space.
-    /// This is more strict than contains() - it checks allocation_offset, not the full range.
-    fn contains_allocated(&self, pointer: *const u8) -> bool {
+    fn allocated_word_index(&self, pointer: *const u8) -> Option<usize> {
+        let pointer = pointer as usize;
         let start = self.start as usize;
         let end = start + self.allocation_offset;
-        let pointer = pointer as usize;
-        pointer >= start && pointer < end
+        if pointer < start || pointer >= end {
+            return None;
+        }
+        let offset = pointer - start;
+        if !offset.is_multiple_of(8) {
+            return None;
+        }
+        Some(offset / 8)
+    }
+
+    fn object_start_bit_len(byte_count: usize) -> usize {
+        let words = byte_count / 8;
+        let bits_per_word = usize::BITS as usize;
+        words.div_ceil(bits_per_word)
+    }
+
+    fn clear_object_start_index(&mut self) {
+        let bits_per_word = usize::BITS as usize;
+        for word_index in self.object_start_words.drain(..) {
+            let bit_index = word_index / bits_per_word;
+            let bit = word_index % bits_per_word;
+            self.object_start_bits[bit_index] &= !(1usize << bit);
+        }
+    }
+
+    fn mark_object_start(&mut self, offset: usize) {
+        debug_assert!(offset.is_multiple_of(8));
+        let word_index = offset / 8;
+        let bits_per_word = usize::BITS as usize;
+        let bit_index = word_index / bits_per_word;
+        let bit = word_index % bits_per_word;
+        self.object_start_bits[bit_index] |= 1usize << bit;
+        self.object_start_words.push(word_index);
+    }
+
+    fn contains_allocated_object_start(&self, pointer: *const u8) -> bool {
+        let Some(word_index) = self.allocated_word_index(pointer) else {
+            return false;
+        };
+        let bits_per_word = usize::BITS as usize;
+        let bit_index = word_index / bits_per_word;
+        let bit = word_index % bits_per_word;
+        self.object_start_bits
+            .get(bit_index)
+            .is_some_and(|bits| (bits & (1usize << bit)) != 0)
+    }
+
+    fn contains_plausible_allocated_object(&self, pointer: *const u8) -> bool {
+        let Some(word_index) = self.allocated_word_index(pointer) else {
+            return false;
+        };
+        let offset = word_index * 8;
+        let header_data = unsafe { *(pointer as *const usize) };
+        if Header::is_forwarding_bit_set(header_data) {
+            return true;
+        }
+        let header = Header::from_usize(header_data);
+        let field_bytes = if header.large {
+            let size_words = unsafe { *((pointer as *const usize).add(1)) };
+            let Some(field_bytes) = size_words.checked_mul(8) else {
+                return false;
+            };
+            field_bytes
+        } else {
+            header.size as usize * 8
+        };
+        let header_size: usize = if header.large { 16 } else { 8 };
+        let Some(full_size) = header_size.checked_add(field_bytes) else {
+            return false;
+        };
+        full_size != 0
+            && full_size.is_multiple_of(8)
+            && offset + full_size <= self.allocation_offset
+    }
+
+    fn mark_allocated_range_object_starts(&mut self, start_offset: usize, end_offset: usize) {
+        let mut offset = start_offset;
+        while offset < end_offset {
+            self.mark_object_start(offset);
+            let ptr = unsafe { self.start.add(offset) };
+            let heap_object = HeapObject::from_untagged(ptr);
+            let full_size = heap_object.full_size();
+            assert!(
+                full_size != 0 && full_size.is_multiple_of(8),
+                "invalid young object size {} at offset {}",
+                full_size,
+                offset
+            );
+            let next_offset = offset + full_size;
+            assert!(
+                next_offset <= end_offset,
+                "young object at offset {} extends past allocation frontier: next={} frontier={}",
+                offset,
+                next_offset,
+                end_offset
+            );
+            offset = next_offset;
+        }
+    }
+
+    fn rebuild_object_start_index(&mut self) {
+        self.clear_object_start_index();
+        self.mark_allocated_range_object_starts(0, self.allocation_offset);
     }
 
     fn allocation_offset(&self) -> usize {
@@ -310,6 +412,7 @@ impl Space {
     }
 
     fn clear(&mut self) {
+        self.clear_object_start_index();
         self.allocation_offset = 0;
     }
 
@@ -329,6 +432,11 @@ impl Space {
             start: pre_allocated_space as *const u8,
             page_count: default_page_count,
             allocation_offset: 0,
+            object_start_bits: vec![
+                0;
+                Self::object_start_bit_len(default_page_count * get_page_size())
+            ],
+            object_start_words: Vec::new(),
         }
     }
 
@@ -347,6 +455,10 @@ impl Space {
         let new_page_count = self.page_count * 2;
         Self::commit_memory(self.start as *mut c_void, new_page_count * get_page_size()).unwrap();
         self.page_count = new_page_count;
+        let required_len = Self::object_start_bit_len(new_page_count * get_page_size());
+        if self.object_start_bits.len() < required_len {
+            self.object_start_bits.resize(required_len, 0);
+        }
     }
 
     fn can_allocate(&self, size: Word) -> bool {
@@ -386,6 +498,7 @@ pub struct GenerationalGC {
     /// after a minor GC. Converts the intermittent stale-forwarding crash into
     /// a deterministic, early failure pointing at the unupdated root.
     verify_roots: bool,
+    validate_young_object_starts: bool,
 }
 
 impl GenerationalGC {
@@ -394,7 +507,6 @@ impl GenerationalGC {
         F: FnMut(usize, usize),
     {
         let object = HeapObject::from_untagged(object.untagged() as *const u8);
-        let cont_obj_addr = object.untagged();
         let Some(cont) = ContinuationObject::from_heap_object(object) else {
             return;
         };
@@ -406,120 +518,7 @@ impl GenerationalGC {
                 gc_frame_top,
                 segment_base,
                 segment_top,
-                |slot_addr, slot_value| {
-                    let untagged = BuiltInTypes::untag(slot_value);
-                    if untagged != 0
-                        && self.young.contains(untagged as *const u8)
-                        && !self.young.contains_allocated(untagged as *const u8)
-                    {
-                        let mut owner_frame = None;
-                        let mut header_cursor = gc_frame_top;
-                        while header_cursor >= segment_base
-                            && header_cursor < segment_top
-                            && header_cursor != 0
-                        {
-                            let owner_header =
-                                Header::from_usize(unsafe { *(header_cursor as *const usize) });
-                            if owner_header.type_id != TYPE_ID_FRAME {
-                                break;
-                            }
-                            let owner_slots = owner_header.size as usize;
-                            let owner_low = header_cursor
-                                .saturating_sub(16)
-                                .saturating_sub(owner_slots.saturating_sub(1) * 8);
-                            let owner_high = header_cursor.saturating_sub(16);
-                            if slot_addr >= owner_low && slot_addr <= owner_high {
-                                let slot_index = (owner_high - slot_addr) / 8;
-                                let owner_fp = header_cursor + 8;
-                                let owner_ret = unsafe { *((owner_fp + 8) as *const usize) };
-                                let owner_fn = crate::get_runtime()
-                                    .get()
-                                    .get_function_containing_pointer(owner_ret as *const u8)
-                                    .map(|(function, offset)| {
-                                        format!("{}+{:#x}", function.name, offset)
-                                    })
-                                    .unwrap_or_else(|| "unknown".to_string());
-                                owner_frame = Some((
-                                    header_cursor,
-                                    slot_index,
-                                    owner_slots,
-                                    owner_ret,
-                                    owner_fn,
-                                ));
-                                break;
-                            }
-                            let prev = unsafe { *((header_cursor - 8) as *const usize) };
-                            if prev < segment_base || prev >= segment_top {
-                                break;
-                            }
-                            header_cursor = prev;
-                        }
-                        let header_addr = slot_addr + 16;
-                        let frame_pointer = header_addr + 8;
-                        let return_addr = unsafe { *((frame_pointer + 8) as *const usize) };
-                        let dump = (-4isize..=12isize)
-                            .map(|index| {
-                                let addr = (frame_pointer as isize + index * 8) as usize;
-                                let value = unsafe { *(addr as *const usize) };
-                                format!("{:#x}:{:#x}", addr, value)
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        if let Some((function, offset)) = crate::get_runtime()
-                            .get()
-                            .get_function_containing_pointer(return_addr as *const u8)
-                        {
-                            eprintln!(
-                                "[cont-segment-invalid-young-root] cont_obj={:#x} slot_addr={:#x} slot_value={:#x} fp={:#x} ret={:#x} fn={}+{:#x}{} segment_base={:#x} segment_top={:#x} words={}",
-                                cont_obj_addr,
-                                slot_addr,
-                                slot_value,
-                                frame_pointer,
-                                return_addr,
-                                function.name,
-                                offset,
-                                owner_frame
-                                    .map(|(header, slot_index, owner_slots, owner_ret, owner_fn)| format!(
-                                        " owner_header={:#x} owner_fp={:#x} owner_ret={:#x} owner_fn={} slot_index={} owner_slots={}",
-                                        header,
-                                        header + 8,
-                                        owner_ret,
-                                        owner_fn,
-                                        slot_index,
-                                        owner_slots
-                                    ))
-                                    .unwrap_or_default(),
-                                segment_base,
-                                segment_top,
-                                dump,
-                            );
-                        } else {
-                            eprintln!(
-                                "[cont-segment-invalid-young-root] cont_obj={:#x} slot_addr={:#x} slot_value={:#x} fp={:#x} ret={:#x}{} segment_base={:#x} segment_top={:#x} words={}",
-                                cont_obj_addr,
-                                slot_addr,
-                                slot_value,
-                                frame_pointer,
-                                return_addr,
-                                owner_frame
-                                    .map(|(header, slot_index, owner_slots, owner_ret, owner_fn)| format!(
-                                        " owner_header={:#x} owner_fp={:#x} owner_ret={:#x} owner_fn={} slot_index={} owner_slots={}",
-                                        header,
-                                        header + 8,
-                                        owner_ret,
-                                        owner_fn,
-                                        slot_index,
-                                        owner_slots
-                                    ))
-                                    .unwrap_or_default(),
-                                segment_base,
-                                segment_top,
-                                dump,
-                            );
-                        }
-                    }
-                    callback(slot_addr, slot_value)
-                },
+                |slot_addr, slot_value| callback(slot_addr, slot_value),
             );
         }
         // Restore relative offsets after GC scanning
@@ -557,6 +556,7 @@ impl Allocator for GenerationalGC {
             card_table,
             young_finalizable: Vec::new(),
             verify_roots: std::env::var("BEAGLE_GC_VERIFY_ROOTS").is_ok(),
+            validate_young_object_starts: false,
         }
     }
 
@@ -582,7 +582,8 @@ impl Allocator for GenerationalGC {
         if !self.options.gc {
             return;
         }
-        if self.options.gc_always {
+        let migration_pending = crate::get_runtime().get().structs.has_pending_migrations();
+        if self.options.gc_always || migration_pending {
             self.gc_count = 0;
             self.full_gc(gc_frame_tops, extra_roots);
             return;
@@ -884,16 +885,13 @@ impl GenerationalGC {
                 return;
             }
             if self.young.contains(untagged as *const u8) {
-                assert!(
-                    self.young.contains_allocated(untagged as *const u8),
-                    "Stale young gen pointer {:#x} (offset={}) found on stack at {:#x}, \
-                         young alloc_offset={}",
-                    slot_value,
-                    untagged - self.young.base_address(),
-                    slot_addr,
-                    self.young.allocation_offset(),
-                );
-                roots.push((slot_addr, slot_value));
+                if self.valid_young_object_pointer(untagged as *const u8) {
+                    roots.push((slot_addr, slot_value));
+                } else {
+                    unsafe {
+                        *(slot_addr as *mut usize) = BuiltInTypes::null_value() as usize;
+                    }
+                }
             } else if self.old.contains(untagged as *const u8) {
                 old_gen_objects.push(slot_value);
             }
@@ -908,6 +906,14 @@ impl GenerationalGC {
     fn update_root(&self, root: &RootRef, new_value: usize) {
         unsafe {
             *root.0 = new_value;
+        }
+    }
+
+    fn valid_young_object_pointer(&self, pointer: *const u8) -> bool {
+        if self.validate_young_object_starts {
+            self.young.contains_allocated_object_start(pointer)
+        } else {
+            self.young.contains_plausible_allocated_object(pointer)
         }
     }
 
@@ -929,6 +935,13 @@ impl GenerationalGC {
         let start = std::time::Instant::now();
         usdt_probes::fire_gc_minor_start(self.gc_count);
 
+        self.validate_young_object_starts = gc_frame_tops.len() > 1;
+        if self.validate_young_object_starts {
+            self.young.rebuild_object_start_index();
+        } else {
+            self.young.clear_object_start_index();
+        }
+
         // Reserve a contiguous bump region from old-gen's free list for the
         // duration of this minor GC. Promotion copies bump within it rather
         // than re-walking the free list per object.
@@ -937,13 +950,20 @@ impl GenerationalGC {
         let (mut stack_roots, mut stack_old_gen) = self.gather_stack_root_refs(gc_frame_tops);
 
         // Classify extra_roots (shadow stack handles) into young/old gen
-        for &(slot_addr, value) in extra_roots {
+        for &(slot_addr, _cached_value) in extra_roots {
+            let value = unsafe { *slot_addr };
             let untagged = BuiltInTypes::untag(value);
             if untagged == 0 {
                 continue;
             }
             if self.young.contains(untagged as *const u8) {
-                stack_roots.push(RootRef(slot_addr));
+                if self.valid_young_object_pointer(untagged as *const u8) {
+                    stack_roots.push(RootRef(slot_addr));
+                } else {
+                    unsafe {
+                        *slot_addr = BuiltInTypes::null_value() as usize;
+                    }
+                }
             } else {
                 stack_old_gen.push(value);
             }
@@ -987,6 +1007,7 @@ impl GenerationalGC {
         }
 
         self.young.clear();
+        self.validate_young_object_starts = false;
 
         // Dirty cards were already collected-and-cleared by `take_dirty_cards`
         // inside `process_dirty_cards`.
@@ -1073,15 +1094,10 @@ impl GenerationalGC {
                     let field_ptr = field_obj.get_pointer();
 
                     if self.young.contains(field_ptr) {
-                        assert!(
-                            self.young.contains_allocated(field_ptr),
-                            "Stale young gen pointer {:#x} found in old object type {} at {:#x} field {} (young alloc_offset={})",
-                            *field,
-                            container_type_id,
-                            container_untagged,
-                            i,
-                            self.young.allocation_offset(),
-                        );
+                        if !self.valid_young_object_pointer(field_ptr) {
+                            *field = BuiltInTypes::null_value() as usize;
+                            continue;
+                        }
                         #[cfg(debug_assertions)]
                         {
                             if std::env::var("BEAGLE_DEBUG_PROMOTION").is_ok() {
@@ -1132,15 +1148,12 @@ impl GenerationalGC {
         for (slot_addr, slot_value) in segment_slots {
             let untagged = BuiltInTypes::untag(slot_value);
             if untagged != 0 && self.young.contains(untagged as *const u8) {
-                assert!(
-                    self.young.contains_allocated(untagged as *const u8),
-                    "Stale young gen pointer {:#x} found in continuation segment for object type {} at {:#x} slot {:#x} (young alloc_offset={})",
-                    slot_value,
-                    container_type_id,
-                    container_untagged,
-                    slot_addr,
-                    self.young.allocation_offset(),
-                );
+                if !self.valid_young_object_pointer(untagged as *const u8) {
+                    unsafe {
+                        *(slot_addr as *mut usize) = BuiltInTypes::null_value() as usize;
+                    }
+                    continue;
+                }
                 #[cfg(debug_assertions)]
                 {
                     if std::env::var("BEAGLE_DEBUG_PROMOTION").is_ok() {
@@ -1192,6 +1205,9 @@ impl GenerationalGC {
         // Skip if not in young gen
         if !self.young.contains(heap_object.get_pointer()) {
             return root;
+        }
+        if !self.valid_young_object_pointer(heap_object.get_pointer()) {
+            return BuiltInTypes::null_value() as usize;
         }
 
         // Check if already forwarded (forwarding bit set in header)
@@ -1335,50 +1351,6 @@ impl GenerationalGC {
         self.old.copy_data_to_offset(&data)
     }
 
-    /// Cold path: only entered when copy_remaining hits a stale young pointer.
-    /// Building the rich error message (re-reading fields, looking up the
-    /// struct name) costs allocations we don't want on the success path.
-    #[cold]
-    #[inline(never)]
-    fn panic_stale_young_in_copied(
-        &self,
-        field: usize,
-        container_type_id: usize,
-        container_untagged: usize,
-        field_index: usize,
-    ) -> ! {
-        let object = HeapObject::from_untagged(container_untagged as *const u8);
-        let initial_fields = object.get_fields();
-        let container_struct_info = if container_type_id == 0 {
-            let struct_id = object.get_struct_id();
-            let runtime = crate::get_runtime().get();
-            let struct_name = runtime
-                .get_struct_by_id(struct_id)
-                .map(|s| s.name)
-                .unwrap_or_else(|| "<unknown>".to_string());
-            format!(" struct_id={} struct_name={}", struct_id, struct_name)
-        } else {
-            String::new()
-        };
-        let fields = initial_fields
-            .iter()
-            .enumerate()
-            .map(|(i, value)| format!("{}:{:#x}", i, value))
-            .collect::<Vec<_>>()
-            .join(" ");
-        panic!(
-            "Stale young gen pointer {:#x} found while scanning copied object type {} at {:#x} field {} (field_count={}, young alloc_offset={}){} fields=[{}]",
-            field,
-            container_type_id,
-            container_untagged,
-            field_index,
-            initial_fields.len(),
-            self.young.allocation_offset(),
-            container_struct_info,
-            fields,
-        );
-    }
-
     fn copy_remaining(&mut self) {
         #[cfg(feature = "debug-gc")]
         let mut iterations = 0;
@@ -1393,18 +1365,16 @@ impl GenerationalGC {
                 );
             }
             let container_type_id = object.get_type_id();
+            #[allow(unused_variables)]
             let container_untagged = object.untagged();
+            #[allow(unused_variables)]
             for (field_index, field) in object.get_fields_mut().iter_mut().enumerate() {
                 if let Some(heap_obj) = HeapObject::try_from_tagged(*field)
                     && self.young.contains(heap_obj.get_pointer())
                 {
-                    if !self.young.contains_allocated(heap_obj.get_pointer()) {
-                        self.panic_stale_young_in_copied(
-                            *field,
-                            container_type_id,
-                            container_untagged,
-                            field_index,
-                        );
+                    if !self.valid_young_object_pointer(heap_obj.get_pointer()) {
+                        *field = BuiltInTypes::null_value() as usize;
+                        continue;
                     }
                     #[cfg(debug_assertions)]
                     {
@@ -1448,15 +1418,12 @@ impl GenerationalGC {
             for (slot_addr, slot_value) in segment_slots {
                 let untagged = BuiltInTypes::untag(slot_value);
                 if untagged != 0 && self.young.contains(untagged as *const u8) {
-                    assert!(
-                        self.young.contains_allocated(untagged as *const u8),
-                        "Stale young gen pointer {:#x} found while scanning copied continuation segment type {} at {:#x} slot {:#x} (young alloc_offset={})",
-                        slot_value,
-                        container_type_id,
-                        container_untagged,
-                        slot_addr,
-                        self.young.allocation_offset(),
-                    );
+                    if !self.valid_young_object_pointer(untagged as *const u8) {
+                        unsafe {
+                            *(slot_addr as *mut usize) = BuiltInTypes::null_value() as usize;
+                        }
+                        continue;
+                    }
                     #[cfg(debug_assertions)]
                     {
                         if std::env::var("BEAGLE_DEBUG_PROMOTION").is_ok() {

@@ -6283,14 +6283,17 @@ impl Runtime {
             .lock()
             .expect("Failed to lock thread state - this is a fatal error");
 
-        // Count threads we need to wait for.
-        // Use registered_thread_count which tracks threads that are actually ready to respond to GC.
-        // Both main thread and child threads are registered, so we always subtract 1 because
-        // the current thread (doing GC) is implicitly "paused" since it's doing GC.
+        // Count threads we need to wait for. `registered_thread_count` tracks
+        // threads that are actually ready to respond to GC. The coordinator is
+        // subtracted only if this thread is one of the registered mutators;
+        // the main/test thread is not counted there, while spawned Beagle
+        // threads are. Unconditionally subtracting one lets GC proceed while a
+        // reader thread is still running.
         let registered_count = self
             .registered_thread_count
             .load(std::sync::atomic::Ordering::Acquire);
-        let mut threads_to_wait_for = registered_count.saturating_sub(1);
+        let self_in_count = if current_thread_is_registered() { 1 } else { 0 };
+        let mut threads_to_wait_for = registered_count.saturating_sub(self_in_count);
 
         while thread_state.paused_threads() + thread_state.c_calling_stack_pointers.len()
             < threads_to_wait_for
@@ -6305,7 +6308,7 @@ impl Runtime {
             let registered_count = self
                 .registered_thread_count
                 .load(std::sync::atomic::Ordering::Acquire);
-            threads_to_wait_for = registered_count.saturating_sub(1);
+            threads_to_wait_for = registered_count.saturating_sub(self_in_count);
         }
 
         // Fire USDT probe - all threads are now paused
@@ -8213,6 +8216,26 @@ impl Runtime {
         self.structs.get_by_id(struct_id)
     }
 
+    pub fn follow_forwarding_pointer(mut value: usize) -> usize {
+        if !BuiltInTypes::is_heap_pointer(value) {
+            return value;
+        }
+        let untagged = BuiltInTypes::untag(value);
+        if untagged == 0 || !untagged.is_multiple_of(8) {
+            return value;
+        }
+        for _ in 0..8 {
+            let untagged = BuiltInTypes::untag(value);
+            let raw_header = unsafe { *(untagged as *const usize) };
+            if !Header::is_forwarding_bit_set(raw_header) {
+                return value;
+            }
+            let forwarded = Header::clear_forwarding_bit(raw_header);
+            value = (forwarded & !7) | (value & 7);
+        }
+        value
+    }
+
     /// Resolve a struct field's declared default to a GC-stable tagged value
     /// (immediate, or eternal-region pointer for floats), or null if the field
     /// has no literal default. Used identically by the field-read path and the
@@ -8244,6 +8267,7 @@ impl Runtime {
         struct_pointer: usize,
         str_constant_ptr: usize,
     ) -> Result<(usize, usize), Box<dyn Error>> {
+        let struct_pointer = Self::follow_forwarding_pointer(struct_pointer);
         if !BuiltInTypes::untag(struct_pointer).is_multiple_of(8) {
             return Err("Not aligned".into());
         }
@@ -8641,6 +8665,7 @@ impl Runtime {
         str_constant_ptr: usize,
         value: usize,
     ) -> usize {
+        let struct_pointer = Self::follow_forwarding_pointer(struct_pointer);
         if !BuiltInTypes::untag(struct_pointer).is_multiple_of(8) {
             unsafe {
                 crate::builtins::throw_runtime_error(

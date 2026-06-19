@@ -19,33 +19,27 @@ use beagle.core as core
 // freed corpse ("Struct not found … is_forwarding=true") or reads a heap
 // pointer where an int lives.
 //
-// This is a `main()` + snapshot test ON PURPOSE: it runs through the normal
-// `beagle.async/__main__` cooperative-scheduler entry. A `test {}` block that
-// spawns threads and calls `core/gc()` currently deadlocks in the test runner.
-//
-// It redefines by GROWING then SHRINKING (add field, then remove it) — the
-// add-field case is exactly the original crash. The number of rounds is high
+// It redefines by GROWING, REORDERING, then SHRINKING (add a field, move
+// existing fields, then remove the extra field). The number of rounds is high
 // enough to cross the old 4-bit layout-version wrap boundary.
 
 struct Point { x, y }
 
-let running = atom(true)
-let crashed = atom(0)
-let done1 = atom(0)
-let done2 = atom(0)
-
-fn reader(p) {
+fn reader(p, running, crashed) {
     while deref(running) == true {
         try { p.x } catch (e, resume) { swap!(crashed, fn(c) { c + 1 }) resume(0) }
         try { p.y } catch (e, resume) { swap!(crashed, fn(c) { c + 1 }) resume(0) }
     }
 }
 
-fn redefiner(rounds) {
+fn redefiner(rounds, running) {
     let mut r = 0
     while r < rounds {
         eval("namespace struct_structural_redefine_race_test
 struct Point { x, y, z }")
+        core/gc()
+        eval("namespace struct_structural_redefine_race_test
+struct Point { z, y, x }")
         core/gc()
         eval("namespace struct_structural_redefine_race_test
 struct Point { x, y }")
@@ -65,21 +59,18 @@ fn wait_done(a, attempts) {
     }
 }
 
-fn main() {
+test "concurrent structural redefine migrates live readers" {
+    let running = atom(true)
+    let crashed = atom(0)
+    let done1 = atom(0)
+    let done2 = atom(0)
     let anchor = Point { x: 111, y: 222 }
-    thread(fn() { reader(anchor) swap!(done1, fn(x) { 1 }) })
-    thread(fn() { reader(anchor) swap!(done2, fn(x) { 1 }) })
-    redefiner(40)
+    thread(fn() { reader(anchor, running, crashed) swap!(done1, fn(x) { 1 }) })
+    thread(fn() { reader(anchor, running, crashed) swap!(done2, fn(x) { 1 }) })
+    redefiner(40, running)
     wait_done(done1, 0)
     wait_done(done2, 0)
-    println("crashed=" ++ to-string(deref(crashed)))
-    println(anchor.x)
-    println(anchor.y)
-    println("done")
+    assert-eq!(deref(crashed), 0)
+    assert-eq!(anchor.x, 111)
+    assert-eq!(anchor.y, 222)
 }
-
-// @beagle.core.snapshot
-// crashed=0
-// 111
-// 222
-// done
