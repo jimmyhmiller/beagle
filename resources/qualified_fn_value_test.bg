@@ -17,7 +17,7 @@ fn main() {
     println(cap("hello") == "Hello")
 
     // qualified fn passed as an argument to a higher-order function
-    println(map(["ab", "cd"], text/capitalize) == ["Ab", "Cd"])
+    println(map(text/capitalize, ["ab", "cd"]) == ["Ab", "Cd"])
 
     // qualified fns stored in a vector and consumed by another module fn
     let styles = [ansi/bold, ansi/red]

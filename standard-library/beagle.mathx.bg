@@ -280,16 +280,28 @@ fn floor-div(a, b) {
     if b == 0 {
         throw("beagle.mathx/floor-div: division by zero")
     } else {
-        let q = a / b
-        let r = a - q * b
-        // Adjust toward negative infinity when remainder is nonzero and the
-        // signs of remainder and divisor differ.
-        if r != 0 && ((r < 0) != (b < 0)) {
-            q - 1
+        if mathx-float?(a) || mathx-float?(b) {
+            // Float `/` is true division, so floor it directly.
+            floor(a / b)
         } else {
-            q
+            // Int `/` truncates toward zero; adjust toward negative infinity
+            // when the remainder is nonzero and its sign differs from b.
+            let q = a / b
+            let r = a - q * b
+            if r != 0 && ((r < 0) != (b < 0)) {
+                q - 1
+            } else {
+                q
+            }
         }
     }
+}
+
+// True when x is a float (compared against the type of a known float literal,
+// so it needs no cross-namespace type token). Floor-div/floor-mod use it
+// because int `/` truncates toward zero while float `/` is true division.
+fn mathx-float?(x) {
+    equal(type-of(x), type-of(1.0))
 }
 
 /// True floor modulo: result has the same sign as the divisor b.
@@ -302,11 +314,16 @@ fn floor-mod(a, b) {
     if b == 0 {
         throw("beagle.mathx/floor-mod: division by zero")
     } else {
-        let r = a - (a / b) * b
-        if r != 0 && ((r < 0) != (b < 0)) {
-            r + b
+        if mathx-float?(a) || mathx-float?(b) {
+            // r = a - floor(a/b)*b — valid for floats (true division).
+            a - floor(a / b) * b
         } else {
-            r
+            let r = a - (a / b) * b
+            if r != 0 && ((r < 0) != (b < 0)) {
+                r + b
+            } else {
+                r
+            }
         }
     }
 }

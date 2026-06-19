@@ -246,6 +246,15 @@ struct TcpSocket {
     socket_id
 }
 
+// Sentinel returned (NOT thrown) by decode-tcp-result for a failed async TCP op.
+// Under the cooperative scheduler the result is decoded inside poll-tasks (the
+// scheduler stack), so throwing there would escape the scheduler instead of the
+// awaiting code. Returning a sentinel lets tcp-result-or-throw re-raise the
+// error inside the resumed continuation, where the caller's try/catch lives.
+struct TcpIoError {
+    message
+}
+
 enum IOAction {
     // TCP operations
     TcpListen { host, port },
@@ -322,10 +331,7 @@ enum Async {
 
     // Spawning
     Spawn { thunk },
-    SpawnWithToken { thunk, token },
-
-    // Cooperative scheduling
-    CoopSpawn { thunk }
+    SpawnWithToken { thunk, token }
 }
 
 // ============================================================================
@@ -745,13 +751,6 @@ extend BlockingAsyncHandler with effect/Handler(Async) {
             },
             Async.SpawnWithToken { thunk, token } => {
                 handle-spawn-with-token-blocking(thunk, token)
-            },
-            Async.CoopSpawn { thunk } => {
-                // No cooperative scheduler — just run synchronously under a handler
-                handle effect/Handler(Async) with self {
-                    thunk()
-                }
-                null
             }
         }
         effect/resume-tail(resume, result)
@@ -1504,10 +1503,6 @@ fn sleep(ms) {
 // Future/Async API Functions
 // ============================================================================
 
-// Create a future from a thunk - starts execution immediately (eager)
-fn async(thunk) {
-    perform Async.Spawn { thunk: thunk }
-}
 
 /// Wait for a future to complete and return its value.
 ///
@@ -1522,18 +1517,67 @@ fn await(future) {
 
 /// Wait for all futures to complete and return their values as a vector.
 ///
+/// Cooperative: awaits each future in turn. The futures were all spawned up
+/// front, so they make progress concurrently on the scheduler while we collect
+/// their results in order.
+///
 /// Examples:
 ///   (let fs [(spawn fn() { 1 }) (spawn fn() { 2 })])
 ///   (await-all fs)  ; => [1 2]
 fn await-all(futures) {
-    perform Async.AwaitAll { futures: futures }
+    let mut results = []
+    let mut s = seq(futures)
+    while s != null {
+        results = push(results, await(first(s)))
+        s = next(s)
+    }
+    results
 }
 
-/// Wait for the first future to complete and return its result.
+/// Wait for the first future to complete and return its result as a RaceResult.
 ///
-/// Returns a RaceResult indicating which future completed first.
+/// Cooperative: polls the futures, yielding to the scheduler (via a 0ms sleep)
+/// between rounds so the spawned tasks can run, until one resolves or all fail.
 fn await-first(futures) {
-    perform Async.AwaitFirst { futures: futures }
+    loop {
+        let mut s = seq(futures)
+        let mut index = 0
+        let mut pending = 0
+        let mut result = null
+        while s != null {
+            match future-state(first(s)) {
+                FutureState.Resolved { value } => {
+                    if result == null {
+                        result = RaceResult.Ok { value: value, index: index }
+                    }
+                },
+                FutureState.Rejected { error } => {},
+                FutureState.Cancelled {} => {},
+                _ => { pending = pending + 1 }
+            }
+            index = index + 1
+            s = next(s)
+        }
+        if result != null {
+            break(result)
+        } else if pending == 0 {
+            // none pending and none resolved => everything failed
+            let mut errors = []
+            let mut s2 = seq(futures)
+            while s2 != null {
+                match future-state(first(s2)) {
+                    FutureState.Rejected { error } => { errors = push(errors, error) },
+                    FutureState.Cancelled {} => { errors = push(errors, "Cancelled") },
+                    _ => {}
+                }
+                s2 = next(s2)
+            }
+            break(RaceResult.AllFailed { errors: errors })
+        } else {
+            // yield to the scheduler so spawned tasks can make progress
+            sleep(0)
+        }
+    }
 }
 
 /// Wait for a future with a timeout in milliseconds.
@@ -1632,8 +1676,8 @@ fn async-with-timeout(ms, thunk) {
 
 // Create an async sleep - returns a future that resolves after ms milliseconds
 fn async-sleep(ms) {
-    async(fn() {
-        core/sleep(ms)
+    spawn(fn() {
+        sleep(ms)
         null
     })
 }
@@ -1648,22 +1692,18 @@ fn time-now() {
     core/time-now()
 }
 
-/// Spawn an async task and return a future.
+/// Spawn a cooperative task and return a future.
 ///
-/// The task runs concurrently. Use await to get the result.
+/// The task runs concurrently with the caller — but on the SAME thread, via
+/// the cooperative scheduler. It makes progress whenever the caller (or any
+/// other task) parks on an async op. `spawn` never starts an OS thread; use
+/// `thread()` for real parallelism. `await` the future to get the result.
 ///
 /// Examples:
-///   (let f (spawn fn() { expensive-computation() }))
-///   (await f)  ; => result of computation
+///   (let f (spawn fn() { compute() }))
+///   (await f)  ; => result of compute()
 fn spawn(thunk) {
     perform Async.Spawn { thunk: thunk }
-}
-
-/// Spawn a cooperative task. Under CooperativeHandler this stays
-/// single-threaded. Under the ambient implicit handler it falls back
-/// to a normal background thread.
-fn cooperative-spawn(thunk) {
-    perform Async.CoopSpawn { thunk: thunk }
 }
 
 // ============================================================================
@@ -1837,25 +1877,25 @@ fn await-any(thunks) {
 }
 
 fn map-results(results, f) {
-    map(results, fn(r) {
+    map(fn(r) {
         match r {
             Result.Ok { value } => ok(f(value)),
             Result.Err { error } => r
         }
-    })
+    }, results)
 }
 
 fn filter-ok(results) {
-    filter(results, fn(r) { async-ok?(r) })
+    filter(fn(r) { async-ok?(r) }, results)
 }
 
 fn unwrap-all(results) {
-    map(filter-ok(results), fn(r) {
+    map(fn(r) {
         match r {
             Result.Ok { value } => value,
             Result.Err { error } => null
         }
-    })
+    }, filter-ok(results))
 }
 
 // ============================================================================
@@ -1891,15 +1931,29 @@ fn decode-tcp-result(result_type, loop_id, op_id) {
     } else if result_type == TCP_WRITE_OK {
         core/tcp-result-value-for-op-id(loop_id, op_id)
     } else if result_type == TCP_CONNECT_ERR {
-        throw("Connect failed: " ++ core/tcp-result-data-for-op-id(loop_id, op_id))
+        TcpIoError { message: "Connect failed: " ++ core/tcp-result-data-for-op-id(loop_id, op_id) }
     } else if result_type == TCP_ACCEPT_ERR {
-        throw("Accept failed: " ++ core/tcp-result-data-for-op-id(loop_id, op_id))
+        TcpIoError { message: "Accept failed: " ++ core/tcp-result-data-for-op-id(loop_id, op_id) }
     } else if result_type == TCP_READ_ERR {
-        throw("Read failed: " ++ core/tcp-result-data-for-op-id(loop_id, op_id))
+        TcpIoError { message: "Read failed: " ++ core/tcp-result-data-for-op-id(loop_id, op_id) }
     } else if result_type == TCP_WRITE_ERR {
-        throw("Write failed: " ++ core/tcp-result-data-for-op-id(loop_id, op_id))
+        TcpIoError { message: "Write failed: " ++ core/tcp-result-data-for-op-id(loop_id, op_id) }
     } else {
-        throw("Unknown TCP result type: " ++ to-string(result_type))
+        TcpIoError { message: "Unknown TCP result type: " ++ to-string(result_type) }
+    }
+}
+
+// Re-raise a TCP result if it is a deferred error sentinel, otherwise pass it
+// through. Socket ops call this so the throw happens in the caller's stack
+// (inside their try/catch), matching the blocking handler's semantics, rather
+// than in the cooperative scheduler where decode-tcp-result actually ran.
+fn tcp-result-or-throw(result) {
+    // `result` is frequently a bare scalar (read-data string, bytes-written int),
+    // so this must tolerate non-struct values — instance-of handles that.
+    if instance-of(result, TcpIoError) {
+        throw(result.message)
+    } else {
+        result
     }
 }
 
@@ -1942,9 +1996,35 @@ fn stash-task(tasks_atom, op, resume) {
     null
 }
 
+// Spawn `thunk` as a COOPERATIVE task on the current scheduler thread (NO OS
+// thread) and return a future for it. The scheduler runs the task interleaved
+// with everything else; `await` on the returned future suspends the caller
+// until it resolves. This is what `spawn`/`future` mean under the cooperative
+// default — concurrency without threads. Real parallelism is `thread()`.
+fn spawn-cooperative-task(tasks_atom, thunk) {
+    let future = make-future(FutureState.Running {})
+    let state_atom = future.state_atom
+    stash-task(
+        tasks_atom,
+        PendingOp.NewTask {
+            thunk: fn() {
+                try {
+                    reset!(state_atom, FutureState.Resolved { value: thunk() })
+                } catch (e) {
+                    reset!(state_atom, FutureState.Rejected { error: e })
+                }
+            }
+        },
+        null
+    )
+    future
+}
+
 extend CooperativeHandler with effect/Handler(Async) {
     fn handle(self, op, resume) {
-        let loop_id = self.loop_id
+        // Resolve the shared I/O loop lazily: pure programs that never touch
+        // async IO never pay for spawning an event-loop thread.
+        let loop_id = get-io-loop()
         match op {
             Async.IO { action } => {
                 match action {
@@ -2103,8 +2183,8 @@ extend CooperativeHandler with effect/Handler(Async) {
 
             // Threaded spawn — spawn thread immediately, resume with future
             Async.Spawn { thunk } => {
-                let future = handle-spawn-threaded(thunk)
-                resume(future)
+                // Cooperative, awaitable, single-threaded — NOT an OS thread.
+                resume(spawn-cooperative-task(self.tasks, thunk))
             },
             Async.SpawnWithToken { thunk, token } => {
                 let future = handle-spawn-with-token-threaded(thunk, token)
@@ -2129,14 +2209,6 @@ extend CooperativeHandler with effect/Handler(Async) {
             },
             Async.Cancel { future } => {
                 resume(handle-cancel(future))
-            },
-
-            // Cooperative spawn — stash thunk for deferred execution, resume caller immediately
-            Async.CoopSpawn { thunk } => {
-                swap!(self.tasks, fn(t) {
-                    push(t, SchedulerTask { op: PendingOp.NewTask { thunk: thunk }, resume: null })
-                })
-                resume(null)
             }
         }
     }
@@ -2357,10 +2429,6 @@ extend ImplicitAsyncHandler with effect/Handler(Async) {
             },
             Async.SpawnWithToken { thunk, token } => {
                 handle-spawn-with-token-threaded(thunk, token)
-            },
-            Async.CoopSpawn { thunk } => {
-                handle-spawn-threaded(thunk)
-                null
             }
         }
         effect/resume-tail(resume, result)
@@ -2438,27 +2506,56 @@ fn scheduler-loop(handler) {
             break(null)
         }
 
-        // Poll the event loop with a short timeout (1ms)
-        core/event-loop-run-once(handler.loop_id, 1)
+        // The I/O loop is created lazily on the first async op. If it doesn't
+        // exist yet, no task can be blocked on IO/timers.
+        let loop_id = deref(__io_loop_atom)
 
-        let result = poll-tasks(deref(handler.tasks), handler.loop_id)
+        let result = poll-tasks(tasks, loop_id)
         let ready = result[0]
         let remaining = result[1]
         reset!(handler.tasks, remaining)
 
-        for item in ready {
-            if item.resume == null {
-                // New task — run the thunk (result is the thunk)
-                handle effect/Handler(Async) with handler {
-                    item.result()
-                }
+        if length(ready) == 0 {
+            // Nothing is runnable yet — wait for an IO/timer/future completion
+            // instead of busy-spinning. Drive the event loop if it exists,
+            // otherwise just yield briefly (e.g. waiting on a threaded future).
+            if loop_id != null {
+                core/event-loop-run-once(loop_id, 1)
             } else {
-                handle effect/Handler(Async) with handler {
-                    item.resume(item.result)
+                core/sleep(1)
+            }
+        } else {
+            for item in ready {
+                if item.resume == null {
+                    // New task — run the thunk (result is the thunk)
+                    handle effect/Handler(Async) with handler {
+                        item.result()
+                    }
+                } else {
+                    handle effect/Handler(Async) with handler {
+                        item.resume(item.result)
+                    }
                 }
             }
         }
     }
+}
+
+// Run a thunk under the cooperative scheduler and return its value.
+//
+// The thunk is enqueued as the root task; when it suspends on an async op the
+// continuation is parked and the scheduler runs other ready work, so a single
+// thread multiplexes many logical flows while each flow stays sequential.
+fn run-cooperative(thunk) {
+    let handler = CooperativeHandler { tasks: atom([]), loop_id: null }
+    let result_box = atom(null)
+    stash-task(
+        handler.tasks,
+        PendingOp.NewTask { thunk: fn() { reset!(result_box, thunk()) } },
+        null
+    )
+    scheduler-loop(handler)
+    deref(result_box)
 }
 
 // ============================================================================
@@ -2467,24 +2564,23 @@ fn scheduler-loop(handler) {
 // This function is called by the runtime to provide the ambient async handler
 // for main(). It takes the main function pointer and optional args.
 fn __main__(main_fn, args) {
-    handle effect/Handler(Async) with ImplicitAsyncHandler {} {
-        if args == null {
-            main_fn()
-        } else {
-            main_fn(args)
-        }
+    // Default ambient context is the single-threaded cooperative scheduler:
+    // straight-line code stays sequential, but blocking-looking async ops
+    // (sleep, socket read/write, file IO) park their continuation so other
+    // logical flows progress on the same thread.
+    if args == null {
+        run-cooperative(main_fn)
+    } else {
+        run-cooperative(fn() { main_fn(args) })
     }
 }
 
-// Thread wrapper — gives each thread the same ambient async handler as main.
+// Thread wrapper — gives each thread its own cooperative scheduler, matching main.
 fn __run_thread_start() {
     let thread-obj = primitive/__get-my-thread-obj();
     let f = thread-obj.closure;
-    let handler = ImplicitAsyncHandler {}
     try {
-        handle effect/Handler(Async) with handler {
-            f()
-        }
+        run-cooperative(f)
     } catch (e) {
         println("Uncaught exception in thread:")
         println(e)

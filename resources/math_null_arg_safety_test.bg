@@ -1,0 +1,25 @@
+namespace math_null_arg_safety_test
+
+// Regression: clamp/max/min on a non-number (e.g. a null field from a stale
+// struct instance after a live redefinition) used to SEGFAULT (clamp) or return
+// a garbage float (max/min). They must throw a clean, catchable TypeError.
+
+test "clamp on null throws instead of segfaulting" {
+    assert-throws!(fn() { clamp(50.0, 0.0, null) })
+    assert-throws!(fn() { clamp(null, 0.0, 100.0) })
+    assert-throws!(fn() { clamp(50.0, null, 100.0) })
+}
+
+test "max/min on null throw instead of returning garbage" {
+    assert-throws!(fn() { max(1.0, null) })
+    assert-throws!(fn() { min(null, 2.0) })
+}
+
+test "valid clamp/max/min still work" {
+    assert-eq!(clamp(150.0, 0.0, 100.0), 100.0)
+    assert-eq!(clamp(0 - 5.0, 0.0, 100.0), 0.0)
+    assert-eq!(clamp(42.0, 0.0, 100.0), 42.0)
+    assert-eq!(max(3.0, 7.0), 7.0)
+    assert-eq!(min(3.0, 7.0), 3.0)
+    assert-eq!(clamp(5, 0, 10), 5)
+}

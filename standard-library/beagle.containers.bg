@@ -188,12 +188,14 @@ fn dm-new(default) {
 }
 
 /// Look up a key, returning the default if the key is absent.
+///
+/// Uses contains? (not v == null) so a key explicitly stored with a null value
+/// reads back as null, distinct from an absent key returning the default.
 fn dm-get(dm, key) {
-    let v = get(dm.table, key)
-    if v == null {
-        dm.default
+    if contains?(dm.table, key) {
+        get(dm.table, key)
     } else {
-        v
+        dm.default
     }
 }
 

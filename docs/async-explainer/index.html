@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beagle async, explained &amp; runnable</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#161922; --panel2:#1d212c; --ink:#e6e9ef; --dim:#9aa3b2;
+    --accent:#7cc4ff; --green:#5ad17a; --red:#ff6b6b; --amber:#f7c948; --border:#2a2f3a;
+    --mono:"SF Mono",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  .wrap { max-width:920px; margin:0 auto; padding:40px 20px 120px; }
+  h1 { font-size:30px; margin:0 0 6px; letter-spacing:-.4px; }
+  h2 { font-size:22px; margin:48px 0 8px; letter-spacing:-.3px; }
+  h3 { font-size:16px; margin:0 0 4px; }
+  .sub { color:var(--dim); margin:0 0 8px; }
+  a { color:var(--accent); }
+  code { font-family:var(--mono); background:var(--panel2); padding:1px 5px; border-radius:4px; font-size:.92em; }
+  p { color:#cdd3de; }
+  .lead { font-size:17px; }
+  .pill { display:inline-block; font-size:12px; color:var(--dim); border:1px solid var(--border);
+    border-radius:999px; padding:2px 10px; margin-right:6px; }
+  .note { background:var(--panel); border:1px solid var(--border); border-left:3px solid var(--amber);
+    border-radius:8px; padding:12px 16px; margin:16px 0; color:#cdd3de; font-size:14px; }
+  .principles { display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; margin:18px 0; }
+  .principle { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px; }
+  .principle .k { color:var(--accent); font-weight:600; font-size:14px; }
+  .principle p { margin:6px 0 0; font-size:13.5px; color:var(--dim); }
+  @media (max-width:720px){ .principles{ grid-template-columns:1fr; } }
+  .diagram { background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:16px; font-family:var(--mono); font-size:12.5px; color:#cdd3de; white-space:pre; overflow-x:auto; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    margin:18px 0; overflow:hidden; }
+  .card .hd { padding:16px 18px 8px; }
+  .card .hd .tag { font-size:12px; color:var(--accent); text-transform:uppercase; letter-spacing:.6px; }
+  .card .hd p { margin:6px 0 0; font-size:14px; color:#cdd3de; }
+  .editor { border-top:1px solid var(--border); border-bottom:1px solid var(--border); }
+  textarea.code { width:100%; border:0; resize:vertical; background:#0c0e13; color:#e6e9ef;
+    font-family:var(--mono); font-size:13px; line-height:1.5; padding:14px 16px; display:block; min-height:120px; }
+  textarea.code:focus { outline:none; }
+  .bar { display:flex; align-items:center; gap:12px; padding:10px 16px; }
+  button.run { background:var(--accent); color:#06243b; border:0; border-radius:7px; font-weight:650;
+    font-size:13.5px; padding:8px 16px; cursor:pointer; }
+  button.run:disabled { opacity:.55; cursor:default; }
+  .badge { font-family:var(--mono); font-size:12px; padding:2px 8px; border-radius:6px; }
+  .badge.ok { background:rgba(90,209,122,.15); color:var(--green); }
+  .badge.err { background:rgba(255,107,107,.15); color:var(--red); }
+  .badge.run { background:rgba(247,201,72,.15); color:var(--amber); }
+  .ms { color:var(--dim); font-size:12px; font-family:var(--mono); }
+  pre.out { margin:0; padding:0 16px 14px; font-family:var(--mono); font-size:12.5px;
+    color:#cdd3de; white-space:pre-wrap; max-height:340px; overflow:auto; }
+  pre.out:empty { display:none; }
+  .takeaway { margin-top:10px; font-size:13.5px; color:var(--green); }
+  footer { margin-top:60px; color:var(--dim); font-size:13px; border-top:1px solid var(--border); padding-top:18px; }
+  .kbd { font-family:var(--mono); font-size:12px; background:var(--panel2); border:1px solid var(--border);
+    border-radius:5px; padding:1px 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Beagle async, explained &amp; runnable</h1>
+  <p class="lead sub">You write straight-line, sequential code. The runtime keeps it non-blocking under the hood. You opt <em>into</em> concurrency with <code>future</code>.</p>
+  <p><span class="pill">cooperative scheduler = default</span><span class="pill">single thread, many flows</span><span class="pill">native macOS</span></p>
+
+  <div class="note">
+    This page is backed by a tiny local server that compiles &amp; runs each snippet with the real
+    <code>target/release/beag</code> binary — Beagle is native code, there's no browser runtime.
+    Start it with <span class="kbd">python3 docs/async-explainer/server.py</span> and open
+    <span class="kbd">http://127.0.0.1:8787</span>. Every <strong>Run</strong> button below executes for real. Edit the code and re-run.
+  </div>
+
+  <h2>The mental model</h2>
+  <div class="principles">
+    <div class="principle"><div class="k">1 · Sequential by default</div>
+      <p>No callbacks, no <code>async</code> keyword. Code runs top to bottom. A <code>read</code> returns the bytes; the next line uses them.</p></div>
+    <div class="principle"><div class="k">2 · Non-blocking, not blocking</div>
+      <p>“Sequential” ≠ “blocking”. When a flow hits <code>sleep</code> / a socket read, its continuation is <em>parked</em> so other flows run on the same thread.</p></div>
+    <div class="principle"><div class="k">3 · <code>future</code> to go concurrent</div>
+      <p>To break out of program order <em>within</em> a flow, wrap work in <code>spawn</code>/<code>future</code> and <code>await</code> it later.</p></div>
+  </div>
+
+  <h2>How it actually works</h2>
+  <p>The runtime installs a <strong>cooperative scheduler</strong> as the ambient async handler for <code>main()</code> and every <code>thread()</code>. An async op (sleep, socket/file IO) is an algebraic effect: the handler <em>captures the continuation and parks it</em> instead of blocking the OS thread, then the scheduler resumes it when the IO completes. Many logical flows (e.g. many client connections) interleave on one thread — each flow still reads as plain sequential code.</p>
+
+  <div class="diagram">one OS thread, cooperative scheduler
+┌──────────────────────────────────────────────────────────┐
+│  accept-loop ──park(accept)──┐                             │
+│  conn A handler ─park(read)─┐│   event loop (epoll/kqueue) │
+│  conn B handler ─park(read)┐││         ▲     │             │
+│                           ↓↓↓         │     ▼ ready        │
+│            scheduler: resume whichever IO completed first  │
+└──────────────────────────────────────────────────────────┘
+   sequential INSIDE a flow   ·   concurrent ACROSS flows
+</div>
+
+  <p class="sub" style="margin-top:10px">There are three handlers. <strong>Cooperative</strong> (default) parks continuations on one thread. <strong>Blocking</strong> (opt-in, deterministic tests) runs everything inline. The <code>spawn</code>/<code>future</code> path uses real OS threads for genuine parallelism. The scenarios below prove each behavior.</p>
+
+  <h2>Scenarios — run them</h2>
+
+  <!-- 1 -->
+  <div class="card" data-scenario>
+    <div class="hd"><div class="tag">Scenario 1 · sequential by default</div>
+      <h3>Plain top-to-bottom code</h3>
+      <p>No futures, no callbacks. Three steps run in order — this is what “you don’t have to think about async” means.</p></div>
+    <div class="editor"><textarea class="code" spellcheck="false"></textarea></div>
+    <div class="bar"><button class="run">▶ Run</button><span class="status"></span><span class="ms"></span></div>
+    <pre class="out"></pre>
+    <div class="hd" style="padding-top:0"><p class="takeaway">Expect: A, B, C strictly in order.</p></div>
+  </div>
+
+  <!-- 2 -->
+  <div class="card" data-scenario>
+    <div class="hd"><div class="tag">Scenario 2 · future = opt-in concurrency</div>
+      <h3>The same two sleeps, sequential vs. wrapped in <code>future</code></h3>
+      <p>Written sequentially, two 200 ms sleeps take ~400 ms. Wrap each in <code>spawn</code> and they overlap to ~200 ms — concurrency is something you ask for.</p></div>
+    <div class="editor"><textarea class="code" spellcheck="false"></textarea></div>
+    <div class="bar"><button class="run">▶ Run</button><span class="status"></span><span class="ms"></span></div>
+    <pre class="out"></pre>
+    <div class="hd" style="padding-top:0"><p class="takeaway">Expect: sequential ≈ 400 ms, future-wrapped ≈ 200 ms.</p></div>
+  </div>
+
+  <!-- 3 -->
+  <div class="card" data-scenario>
+    <div class="hd"><div class="tag">Scenario 3 · many clients, one thread</div>
+      <h3>A server whose handler is plain sequential code</h3>
+      <p>Each connection handler is a simple <code>loop { read; write }</code>. Two clients are served <em>concurrently on a single thread</em> — client A is parked mid-read while B connects and is served. The thread ids prove it.</p></div>
+    <div class="editor"><textarea class="code" spellcheck="false"></textarea></div>
+    <div class="bar"><button class="run">▶ Run</button><span class="status"></span><span class="ms"></span></div>
+    <pre class="out"></pre>
+    <div class="hd" style="padding-top:0"><p class="takeaway">Expect: both clients echoed; all three thread ids equal.</p></div>
+  </div>
+
+  <!-- 4 -->
+  <div class="card" data-scenario>
+    <div class="hd"><div class="tag">Scenario 4 · error isolation</div>
+      <h3>One connection fails; the server keeps serving</h3>
+      <p>A handler’s <code>try/catch</code> works <em>even though</em> <code>read</code>/<code>write</code> park the continuation in between. One client triggers a thrown error; the next client is still served. (This is the bug class that used to crash the server — now fixed.)</p></div>
+    <div class="editor"><textarea class="code" spellcheck="false"></textarea></div>
+    <div class="bar"><button class="run">▶ Run</button><span class="status"></span><span class="ms"></span></div>
+    <pre class="out"></pre>
+    <div class="hd" style="padding-top:0"><p class="takeaway">Expect: the error is caught server-side; client 2 gets <code>ok:hello</code>.</p></div>
+  </div>
+
+  <!-- 5 -->
+  <div class="card" data-scenario>
+    <div class="hd"><div class="tag">Scenario 5 · why the default matters</div>
+      <h3>Cooperative (default) vs. the blocking handler</h3>
+      <p>Run the identical workload under the default cooperative handler and under the explicit <code>run-blocking</code> handler. The blocking one runs <code>spawn</code>’d work inline, so it serializes — proving the default is what gives you overlap.</p></div>
+    <div class="editor"><textarea class="code" spellcheck="false"></textarea></div>
+    <div class="bar"><button class="run">▶ Run</button><span class="status"></span><span class="ms"></span></div>
+    <pre class="out"></pre>
+    <div class="hd" style="padding-top:0"><p class="takeaway">Expect: default ≈ 200 ms, blocking ≈ 400 ms.</p></div>
+  </div>
+
+  <h2>Playground — test your own scenario</h2>
+  <p>Edit freely (it must have a <code>namespace</code> and <code>fn main()</code>). Server programs should be self-terminating — accept a bounded number of connections, or the run will time out.</p>
+  <div class="card" data-scenario>
+    <div class="editor"><textarea class="code" spellcheck="false"></textarea></div>
+    <div class="bar"><button class="run">▶ Run</button><span class="status"></span><span class="ms"></span></div>
+    <pre class="out"></pre>
+  </div>
+
+  <footer>
+    Beagle’s cooperative async became the default ambient handler in June 2026. The enabling runtime fix:
+    <em>exception handlers travel with continuations</em> (so <code>try</code> across a park survives relocation).
+    All scenarios on this page are run live against the compiler. See <code>standard-library/beagle.async.bg</code>,
+    <code>beagle.socket.bg</code>, and <code>src/builtins/reset_shift.rs</code>.
+  </footer>
+</div>
+
+<!-- ===== scenario sources (raw text; JS fills the editors) ===== -->
+<script type="text/plain" id="src-0">namespace s1_sequential
+use beagle.async as async
+
+fn step(name, ms) {
+    println("start ${name}")
+    async/sleep(ms)
+    println("done ${name}")
+    name
+}
+
+fn main() {
+    // No futures, no callbacks — plain top-to-bottom code.
+    step("A", 30)
+    step("B", 30)
+    step("C", 30)
+    println("finished in program order")
+}
+</script>
+
+<script type="text/plain" id="src-1">namespace s2_future_optin
+use beagle.async as async
+use beagle.core as core
+
+fn ms() { core/time-now() / 1000000 }
+fn work() { async/sleep(200) 1 }
+
+fn main() {
+    // Sequential: two 200ms sleeps, one after the other.
+    let t0 = ms()
+    work()
+    work()
+    let seq = ms() - t0
+
+    // Concurrent: wrap each in a future, then await both.
+    let t1 = ms()
+    let fa = async/spawn(fn() { work() })
+    let fb = async/spawn(fn() { work() })
+    async/await(fa)
+    async/await(fb)
+    let conc = ms() - t1
+
+    println("two 200ms sleeps, written sequentially : ${seq} ms")
+    println("the same two wrapped in future/spawn    : ${conc} ms")
+    if conc < seq - 80 {
+        println("=> future opted OUT of sequential order: the two overlapped")
+    } else {
+        println("=> no overlap")
+    }
+}
+</script>
+
+<script type="text/plain" id="src-2">namespace s3_one_thread_server
+use beagle.core as core
+use beagle.socket as socket
+use beagle.async as async
+
+// Accept exactly `n` connections, each handled as a cooperative task. After the
+// nth accept the loop ends and the scheduler drains the in-flight handlers, so
+// this terminates (unlike socket/on-connection's forever-loop).
+fn serve_n(listener, n, handler) {
+    let mut i = 0
+    while i < n {
+        let conn = socket/accept(listener)
+        async/cooperative-spawn(fn() { handler(conn) })
+        i = i + 1
+    }
+}
+
+fn main() {
+    let port = 20000 + core/random-int(40000)
+    let ready = atom(false)
+    let server_tid = atom(-1)
+    let a_tid = atom(-1)
+    let b_tid = atom(-1)
+
+    thread(fn() {
+        reset!(server_tid, core/thread-id())
+        let listener = socket/listen("127.0.0.1", port)
+        reset!(ready, true)
+        serve_n(listener, 2, fn(conn) {
+            loop {
+                let data = socket/read(conn, 4096)
+                if data == "" || data == null {
+                    socket/close(conn)
+                    break(null)
+                } else {
+                    if data == "from-A" { reset!(a_tid, core/thread-id()) }
+                    if data == "from-B" { reset!(b_tid, core/thread-id()) }
+                    socket/write(conn, data)   // echo (sequential per connection)
+                }
+            }
+        })
+    })
+
+    loop { if deref(ready) { break(null) } async/sleep(2) }
+    async/sleep(20)
+
+    // Client A connects and STAYS OPEN while B connects and is served.
+    let a = socket/connect("127.0.0.1", port)
+    socket/write(a, "from-A")
+    let ra = socket/read(a, 4096)
+    let b = socket/connect("127.0.0.1", port)
+    socket/write(b, "from-B")
+    let rb = socket/read(b, 4096)
+
+    println("client A got back: ${ra}")
+    println("client B got back: ${rb}")
+    println("server accept thread = ${deref(server_tid)}")
+    println("A handler thread     = ${deref(a_tid)}")
+    println("B handler thread     = ${deref(b_tid)}")
+    if deref(a_tid) == deref(server_tid) && deref(b_tid) == deref(server_tid) {
+        println("=> both clients served on ONE thread, concurrently, via parking")
+    }
+
+    socket/close(a)
+    socket/close(b)
+}
+</script>
+
+<script type="text/plain" id="src-3">namespace s4_error_isolation
+use beagle.core as core
+use beagle.socket as socket
+use beagle.async as async
+
+fn serve_n(listener, n, handler) {
+    let mut i = 0
+    while i < n {
+        let conn = socket/accept(listener)
+        async/cooperative-spawn(fn() { handler(conn) })
+        i = i + 1
+    }
+}
+
+fn main() {
+    let port = 20000 + core/random-int(40000)
+    let ready = atom(false)
+    let log = atom([])
+
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        reset!(ready, true)
+        serve_n(listener, 2, fn(conn) {
+            // The catch runs even though read/write parked in between.
+            try {
+                let data = socket/read(conn, 4096)
+                if data == "boom" {
+                    throw("handler blew up on bad input")
+                }
+                socket/write(conn, "ok:" ++ data)
+            } catch (e) {
+                reset!(log, push(deref(log), "caught: " ++ e))
+            }
+            socket/close(conn)
+        })
+    })
+
+    loop { if deref(ready) { break(null) } async/sleep(2) }
+    async/sleep(20)
+
+    // Client 1 triggers a handler error.
+    let c1 = socket/connect("127.0.0.1", port)
+    socket/write(c1, "boom")
+    socket/close(c1)
+    async/sleep(20)
+
+    // Client 2 connects AFTER the error — the server must still be alive.
+    let c2 = socket/connect("127.0.0.1", port)
+    socket/write(c2, "hello")
+    let r2 = socket/read(c2, 4096)
+    socket/close(c2)
+
+    async/sleep(20)
+    println("server-side log: ${deref(log)}")
+    println("client 2 (after the error) got: ${r2}")
+    if r2 == "ok:hello" {
+        println("=> one connection's failure was isolated; server kept serving")
+    }
+}
+</script>
+
+<script type="text/plain" id="src-4">namespace s5_blocking_contrast
+use beagle.async as async
+use beagle.core as core
+
+fn ms() { core/time-now() / 1000000 }
+
+fn workload() {
+    let fa = async/spawn(fn() { async/sleep(200) 1 })
+    let fb = async/spawn(fn() { async/sleep(200) 2 })
+    async/await(fa)
+    async/await(fb)
+}
+
+fn main() {
+    // Default (cooperative) ambient handler — spawn runs concurrently.
+    let t0 = ms()
+    workload()
+    let def = ms() - t0
+
+    // Opt into the BLOCKING handler — spawn runs the thunk inline, so the two
+    // 200ms sleeps serialize.
+    let t1 = ms()
+    async/run-blocking(fn() { workload() })
+    let blk = ms() - t1
+
+    println("default cooperative handler : ${def} ms")
+    println("explicit blocking handler   : ${blk} ms")
+    if def < 320 && blk >= 380 {
+        println("=> the default overlaps (~200ms); blocking serializes (~400ms)")
+    }
+}
+</script>
+
+<script type="text/plain" id="src-5">namespace playground
+use beagle.async as async
+use beagle.core as core
+
+fn main() {
+    // Your scenario here. Try sleeping, spawning, awaiting...
+    let f = async/spawn(fn() { async/sleep(100) "from the future" })
+    println("doing other work while it runs")
+    println(async/await(f))
+}
+</script>
+
+<script>
+(function () {
+  const cards = [...document.querySelectorAll('[data-scenario]')];
+  cards.forEach((card, i) => {
+    const src = document.getElementById('src-' + i);
+    const ed = card.querySelector('textarea.code');
+    if (src) ed.value = src.textContent.replace(/^\n/, '').replace(/\s+$/, '\n');
+    // size to content
+    ed.style.height = Math.min(560, Math.max(140, ed.value.split('\n').length * 20 + 28)) + 'px';
+
+    const btn = card.querySelector('button.run');
+    const status = card.querySelector('.status');
+    const ms = card.querySelector('.ms');
+    const out = card.querySelector('pre.out');
+
+    async function run() {
+      btn.disabled = true;
+      status.className = 'status badge run'; status.textContent = 'running…';
+      ms.textContent = ''; out.textContent = '';
+      const started = performance.now();
+      try {
+        const res = await fetch('/run', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ code: ed.value })
+        });
+        const data = await res.json();
+        if (data.error) {
+          status.className = 'status badge err'; status.textContent = 'error';
+          out.textContent = data.error;
+        } else {
+          const ok = data.exit === 0;
+          status.className = 'status badge ' + (ok ? 'ok' : 'err');
+          status.textContent = ok ? 'exit 0' : 'exit ' + data.exit;
+          ms.textContent = data.ms + ' ms';
+          out.textContent = data.output || '(no output)';
+        }
+      } catch (e) {
+        status.className = 'status badge err'; status.textContent = 'server down?';
+        out.textContent = 'Could not reach the run server.\nStart it:  python3 docs/async-explainer/server.py';
+      } finally {
+        btn.disabled = false;
+      }
+    }
+    btn.addEventListener('click', run);
+    // Cmd/Ctrl-Enter to run from the editor
+    ed.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); run(); }
+    });
+  });
+})();
+</script>
+</body>
+</html>

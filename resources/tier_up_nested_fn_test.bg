@@ -43,7 +43,7 @@ fn warm(f, iters) {
 // outer .y reads feedback for the wrong site entirely.
 
 fn lambda_with_prop_access(v, pts) {
-    let _ = sort-by(pts, fn(p) { p.x })
+    let _ = sort-by(fn(p) { p.x }, pts)
     v.x + v.y * 2.0
 }
 
@@ -60,7 +60,7 @@ test "lambda accesses property — outer reads stay correct after tier-up" {
 // Long sequence so a shift produces obviously-wrong sums.
 
 fn many_reads_after_lambda(a, b, c, pts) {
-    let _ = sort-by(pts, fn(p) { p.x })
+    let _ = sort-by(fn(p) { p.x }, pts)
     a.x + a.y + b.x + b.y + c.x + c.y
 }
 
@@ -83,7 +83,7 @@ test "many property reads after lambda — all aligned" {
 // but we can at least confirm correctness end-to-end.
 
 fn lambda_field_sort(pts) {
-    sort-by(pts, fn(p) { p.x })
+    sort-by(fn(p) { p.x }, pts)
 }
 
 test "lambda's own property access correct after tier-up" {
@@ -105,10 +105,10 @@ test "lambda's own property access correct after tier-up" {
 // the outermost fn's transitive range.
 
 fn double_nested(v, pts) {
-    let _ = sort-by(pts, fn(outer_p) {
-        let inner = sort-by([outer_p], fn(inner_p) { inner_p.y })
+    let _ = sort-by(fn(outer_p) {
+        let inner = sort-by(fn(inner_p) { inner_p.y }, [outer_p])
         inner[0].x
-    })
+    }, pts)
     v.x + v.y
 }
 
@@ -125,9 +125,9 @@ test "doubly-nested lambda — outer reads still aligned" {
 // errors compound across the outer body.
 
 fn multiple_lambdas(v, pts) {
-    let _ = sort-by(pts, fn(p) { p.x })
+    let _ = sort-by(fn(p) { p.x }, pts)
     let mid = v.x
-    let _ = sort-by(pts, fn(p) { p.y })
+    let _ = sort-by(fn(p) { p.y }, pts)
     let end = v.y
     mid + end
 }
@@ -145,7 +145,7 @@ test "multiple lambdas with property access — outer reads aligned" {
 // site bakes its OWN struct_id, not one pulled from a neighbor.
 
 fn mixed_shapes(v2, p3, pts) {
-    let _ = sort-by(pts, fn(p) { p.x })
+    let _ = sort-by(fn(p) { p.x }, pts)
     v2.x + p3.x + v2.y + p3.y + p3.z
 }
 
@@ -163,7 +163,7 @@ test "mixed struct shapes around lambda — each site bakes its own shape" {
 // Symmetric correctness check for the arith-feedback range fix.
 
 fn arith_around_lambda(x, y, pts) {
-    let _ = sort-by(pts, fn(p) { p.x * 2.0 })
+    let _ = sort-by(fn(p) { p.x * 2.0 }, pts)
     x * y + x - y
 }
 
@@ -182,7 +182,7 @@ test "arith after lambda — result matches tier-1" {
 struct Hit { angle, hit }
 
 fn zelda_shape(hits) {
-    let sorted = sort-by(hits, fn(h) { h.angle })
+    let sorted = sort-by(fn(h) { h.angle }, hits)
     let mut sum = 0.0
     let mut i = 0
     while i < length(sorted) {

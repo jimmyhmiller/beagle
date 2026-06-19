@@ -9,7 +9,7 @@ use beagle.core as core
 // Events are captured in an atom and checked at the end.
 
 fn has-event?(events, name) {
-    any?(events, fn(e) { e == name })
+    any?(fn(e) { e == name }, events)
 }
 
 fn main() {
@@ -101,7 +101,7 @@ fn main() {
         "multi-sleep-ok"
     ]
 
-    let all_passed = all?(expected, fn(name) { has-event?(collected, name) })
+    let all_passed = all?(fn(name) { has-event?(collected, name) }, expected)
     println("All events captured:", all_passed)
 
     // Print count for debugging

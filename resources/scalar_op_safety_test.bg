@@ -1,0 +1,34 @@
+namespace scalar_op_safety_test
+
+// Regression: operations that dereference a value used to SEGFAULT when given a
+// scalar (Int/Float/Bool/String/null) — the live-coding "stale struct field is
+// null" class. They must throw a clean, catchable error instead.
+// Found by the beagle-zelda live-coding hunter (smoke/zelda_livecode_hunt.py).
+
+struct S { x }
+
+test "property access on a scalar throws, doesn't segfault" {
+    assert-throws!(fn() { let v = 42   v.foo })
+    assert-throws!(fn() { let v = true v.foo })
+    assert-throws!(fn() { let v = "s"  v.foo })
+    assert-throws!(fn() { let v = null v.foo })
+}
+
+test "real struct property access still works" {
+    let s = S { x: 9 }
+    assert-eq!(s.x, 9)
+}
+
+test "calling a non-function throws, doesn't segfault" {
+    assert-throws!(fn() { let f = 42   f() })
+    assert-throws!(fn() { let f = null f() })
+    assert-throws!(fn() { let f = true f() })
+    assert-throws!(fn() { let f = "s"  f() })
+}
+
+test "calling real functions and closures still works" {
+    let c = fn() { 7 }
+    assert-eq!(c(), 7)
+    let add = fn(a, b) { a + b }
+    assert-eq!(add(2, 3), 5)
+}

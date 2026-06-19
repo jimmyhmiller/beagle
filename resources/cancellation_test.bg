@@ -32,7 +32,7 @@ fn main() {
 
     // Test 4: Cancel future directly
     handle effect/Handler(async/Async) with handler {
-        let future = async/async(fn() {
+        let future = async/spawn(fn() {
             "completed"
         })
 

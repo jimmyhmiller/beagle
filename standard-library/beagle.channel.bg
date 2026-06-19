@@ -92,7 +92,7 @@ fn try-receive-loop(ch) {
         {:none true}
     } else {
         let head = get(q, 0)
-        let tail = drop(q, 1)
+        let tail = drop(1, q)
         // Install the tail iff the queue is still exactly the q we read.
         // If a concurrent send! or receive changed it, retry from the top.
         let ok = compare-and-swap!(ch.queue, q, tail)

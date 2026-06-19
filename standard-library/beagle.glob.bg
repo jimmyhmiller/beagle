@@ -117,7 +117,21 @@ fn class-match(pattern, open-idx, target-code) {
 
 fn is-double-star(pattern, pi) {
     let plen = length(pattern)
-    pi + 1 < plen && code-at(pattern, pi) == 42 && code-at(pattern, pi + 1) == 42
+    if pi + 1 < plen && code-at(pattern, pi) == 42 && code-at(pattern, pi + 1) == 42 {
+        // Only a WHOLE path segment counts as `**` (the documented model): the
+        // char before the run is start-of-pattern or '/', and the char after the
+        // full run of '*' is end-of-pattern or '/'. Otherwise it's a plain
+        // wildcard run that collapses to a single '*' (47 = '/', 42 = '*').
+        let before-ok = pi == 0 || code-at(pattern, pi - 1) == 47
+        let mut np = pi
+        while np < plen && code-at(pattern, np) == 42 {
+            np = np + 1
+        }
+        let after-ok = np >= plen || code-at(pattern, np) == 47
+        before-ok && after-ok
+    } else {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------

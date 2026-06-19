@@ -321,7 +321,7 @@ fn normalize(p) {
                     let slen = length(stack)
                     if slen > 0 && stack[slen - 1] != ".." {
                         // pop the previous real component
-                        stack = take(stack, slen - 1)
+                        stack = take(slen - 1, stack)
                     } else {
                         if absolute {
                             // ".." above root is just root — drop it

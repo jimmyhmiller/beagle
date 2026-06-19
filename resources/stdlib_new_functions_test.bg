@@ -15,9 +15,9 @@ fn main() {
     // not-every? tests
     // ========================================
     println("--- not-every? ---")
-    println("some fail:", not-every?([1, 2, 3], fn(x) { x < 3 }))
-    println("all pass:", not-every?([1, 2, 3], fn(x) { x < 10 }))
-    println("empty:", not-every?([], fn(x) { x > 0 }))
+    println("some fail:", not-every?(fn(x) { x < 3 }, [1, 2, 3]))
+    println("all pass:", not-every?(fn(x) { x < 10 }, [1, 2, 3]))
+    println("empty:", not-every?(fn(x) { x > 0 }, []))
 
     // ========================================
     // zipmap tests (verify values, not order)
@@ -39,10 +39,10 @@ fn main() {
     // partition-by tests
     // ========================================
     println("--- partition-by ---")
-    println("by even:", partition-by([1, 1, 2, 2, 3, 3], fn(x) { even?(x) }))
-    println("ascending:", partition-by([1, 2, 2, 3, 1, 1], fn(x) { x }))
-    println("empty:", partition-by([], fn(x) { x }))
-    println("single:", partition-by([1], fn(x) { x }))
+    println("by even:", partition-by(fn(x) { even?(x) }, [1, 1, 2, 2, 3, 3]))
+    println("ascending:", partition-by(fn(x) { x }, [1, 2, 2, 3, 1, 1]))
+    println("empty:", partition-by(fn(x) { x }, []))
+    println("single:", partition-by(fn(x) { x }, [1]))
 
     // ========================================
     // dedupe tests

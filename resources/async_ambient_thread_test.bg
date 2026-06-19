@@ -27,7 +27,7 @@ fn main() {
             Result.Err { error } => reset!(read_value, "err")
         }
 
-        let future = async/async(fn() { 40 + 2 })
+        let future = async/spawn(fn() { 40 + 2 })
         reset!(future_value, async/await(future))
 
         let sleep_result = async/sleep(1)

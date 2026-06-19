@@ -1,0 +1,37 @@
+namespace letonce_test
+
+// `letonce` is Beagle's `defonce`: at the top level the initializer runs and
+// binds the name only on the FIRST load. Re-evaluating the same `letonce`
+// form (a reload) keeps the existing value instead of re-running the
+// initializer — the whole point of live-coding stateful atoms. A plain `let`,
+// by contrast, re-runs its initializer on every (re)eval.
+
+letonce counter = atom(100)
+let plain = atom(100)
+
+fn main() {
+    // First load already bound `counter` to a fresh atom(100).
+    println(deref(counter))           // 100
+    swap!(counter, fn(n) { n + 1 })
+    println(deref(counter))           // 101
+
+    // Reload the SAME letonce form: the value is preserved, NOT reset.
+    eval("namespace letonce_test
+letonce counter = atom(100)")
+    println(deref(counter))           // 101  (preserved across reload)
+
+    // Contrast with a plain `let`: re-eval re-runs the initializer.
+    swap!(plain, fn(n) { n + 1 })
+    println(deref(plain))             // 101
+    eval("namespace letonce_test
+let plain = atom(100)")
+    println(deref(plain))             // 100  (reset on reload)
+    0
+}
+
+// @beagle.core.snapshot
+// 100
+// 101
+// 101
+// 101
+// 100

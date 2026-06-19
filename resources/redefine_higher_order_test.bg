@@ -9,12 +9,12 @@ fn add-one(x) {
 }
 
 fn apply-to-list(lst, f) {
-    map(lst, f)
+    map(f, lst)
 }
 
 fn main() {
     // Pass function to map
-    let result = map([1, 2, 3], double)
+    let result = map(double, [1, 2, 3])
     println(result)
 
     // Pass function to higher-order helper
@@ -25,13 +25,13 @@ fn main() {
     eval("fn double(x) { x * x }")
 
     // map with direct reference picks up new definition
-    let result3 = map([2, 3, 4], double)
+    let result3 = map(double, [2, 3, 4])
     println(result3)
 
     // Redefine apply-to-list to also print
     eval("
         fn apply-to-list(lst, f) {
-            let result = map(lst, f)
+            let result = map(f, lst)
             println(\"applied!\")
             result
         }
@@ -46,7 +46,7 @@ fn main() {
     ")
 
     eval("
-        let result5 = filter([5, 15, 3, 20, 8], is-big)
+        let result5 = filter(is-big, [5, 15, 3, 20, 8])
         println(result5)
     ")
 
@@ -54,7 +54,7 @@ fn main() {
     eval("fn is-big(x) { x > 18 }")
 
     eval("
-        let result6 = filter([5, 15, 3, 20, 8], is-big)
+        let result6 = filter(is-big, [5, 15, 3, 20, 8])
         println(result6)
     ")
 }

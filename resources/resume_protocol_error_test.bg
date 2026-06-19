@@ -1,0 +1,31 @@
+namespace resume_protocol_error_test
+
+// Regression: resuming past a protocol-method error (length/first/get on a wrong
+// type) used to segfault — the resume substituted a value where the dispatch
+// expected a function pointer, then called it. Resuming must work cleanly.
+// Found by the live-coding hunter (smoke/zelda_livecode_hunt.py).
+
+test "resume past length on a non-seqable returns the resumed value" {
+    let r = try {
+        length(42) + 100
+    } catch (e, resume) {
+        resume(5)
+    }
+    assert-eq!(r, 105)
+}
+
+test "resume past first on a non-seqable" {
+    let r = try {
+        first(42)
+    } catch (e, resume) {
+        resume("recovered")
+    }
+    assert-eq!(r, "recovered")
+}
+
+test "real protocol dispatch still works (no resume)" {
+    assert-eq!(length([1, 2, 3]), 3)
+    assert-eq!(length("abc"), 3)
+    assert-eq!(nth([9, 8], 0), 9)
+    assert-eq!(get({:a 1}, :a), 1)
+}

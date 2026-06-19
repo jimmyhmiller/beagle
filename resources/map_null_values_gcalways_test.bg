@@ -1,0 +1,46 @@
+namespace map_null_values_gcalways_test
+
+// gc-always
+// Stress the null-value HAMT paths under a collection on every allocation.
+// Maps back the compiler's symbol tables, so a rooting/liveness bug in the
+// null-value encoding would corrupt here first.
+
+fn build(n, m) {
+    if n <= 0 {
+        m
+    } else {
+        // alternate null and non-null values, plus a null key
+        let v = if n % 2 == 0 { null } else { n }
+        build(n - 1, assoc(m, n, v))
+    }
+}
+
+fn check-all(n, m) {
+    if n <= 0 {
+        true
+    } else {
+        let present = contains?(m, n)
+        let expected = if n % 2 == 0 { null } else { n }
+        let got = get(m, n, "MISSING")
+        if present == false {
+            throw("missing key ${n}")
+        }
+        if got != expected {
+            throw("wrong value for ${n}: got ${got}")
+        }
+        check-all(n - 1, m)
+    }
+}
+
+test "null values survive gc-always across many ops" {
+    let m = build(60, {})
+    assert-eq!(length(m), 60)
+    assert!(check-all(60, m))
+    // keys() must recover all 60 even though half have null values
+    assert-eq!(length(keys(m)), 60)
+    // a null key with a null value, under churn
+    let m2 = assoc(m, null, null)
+    assert!(contains?(m2, null))
+    assert-eq!(get(m2, null, "MISSING"), null)
+    assert-eq!(length(m2), 61)
+}

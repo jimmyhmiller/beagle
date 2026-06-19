@@ -27,7 +27,7 @@ fn as-vector(coll) {
     if instance-of(coll, PersistentVector) {
         coll
     } else {
-        reduce(coll, [], fn(acc, x) { push(acc, x) })
+        reduce(fn(acc, x) { push(acc, x) }, [], coll)
     }
 }
 
@@ -53,7 +53,7 @@ fn require-non-empty(v, who) {
 ///
 ///   sum([1, 2, 3, 4])  // => 10
 fn sum(coll) {
-    reduce(coll, 0, fn(acc, x) { acc + x })
+    reduce(fn(acc, x) { acc + x }, 0, coll)
 }
 
 /// Arithmetic mean (average) as a Float.
@@ -158,10 +158,10 @@ fn mode(coll) {
 // Shared core: sum of squared deviations from the mean (always a Float).
 fn sum-squared-deviations(v) {
     let m = mean(v)
-    reduce(v, 0.0, fn(acc, x) {
+    reduce(fn(acc, x) {
         let d = to-float(x) - m
         acc + d * d
-    })
+    }, 0.0, v)
 }
 
 /// Population variance: average squared deviation from the mean (divides by n).

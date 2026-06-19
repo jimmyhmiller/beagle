@@ -76,7 +76,7 @@ Fix B1–B11 (see table). Deliverables ordered by leverage: B1 (split, repairs 3
 
 ### Phase 1 — Text & Data
 **Goal:** Python-grade text + collection completeness on the now-safe primitives.
-- `beagle.text` (beagle): printf/format-spec (width/precision/decimals/hex-oct-bin/zero-pad/thousands), capitalize/title/case-insensitive-compare, string-repeat, trim-charset, split-with-limit, splitlines-keepends, `parse-float`.
+- `beagle.text` (beagle): number formatting WITHOUT printf — `${...}` interpolation + composable `fixed`/`round-to`/`commas`/`pad-left`/`pad-right`/`int->hex` (DONE; printf-style `format` deliberately removed — see NEXT_STEPS §3), capitalize/title/case-insensitive-compare, string-repeat, trim-charset, split-with-limit, splitlines-keepends, `parse-float`.
 - itertools/functools (beagle): mapcat, reductions, take-nth, partition-all, cycle, keep, remove, split-at/with, reduce-kv, count-by, combinations/permutations/product, sum, product; deque/default-map/ordered-map; map-entry iteration.
 - Regex ergonomics (beagle, after B1-class fix to regex result-builders): replace-with-fn, named-group access.
 - JSON (rust+beagle): keyword-key option + pretty-printer (Beagle post-process of existing decode).
@@ -187,7 +187,7 @@ Fix B1–B11 (see table). Deliverables ordered by leverage: B1 (split, repairs 3
 ### Phase 1 — Text & Data
 **Goal:** Python-grade text and collection completeness on the now-safe primitives. Pure Beagle, no new Rust.
 
-- beagle.text (beagle): printf/format-spec (width/precision/decimals, hex/oct/bin, zero-pad, thousands), capitalize/title/case-insensitive-compare, string-repeat, trim-charset, split-with-limit, splitlines-keepends, parse-float.
+- beagle.text (beagle): number formatting WITHOUT printf — `${...}` + `fixed`/`round-to`/`commas`/`pad-left`/`pad-right`/`int->hex` (DONE; printf-style `format` removed — see NEXT_STEPS §3), capitalize/title/case-insensitive-compare, string-repeat, trim-charset, split-with-limit, splitlines-keepends, parse-float.
 - itertools/functools (beagle): mapcat, reductions, take-nth, partition-all, cycle, keep, remove, split-at, split-with, reduce-kv, count-by, combinations, permutations, product, sum, product.
 - convenience structures (beagle): deque, default-map, ordered-map, map-entry iteration (entries/pairs).
 - regex ergonomics (beagle, after B1-class fix to regex.rs result-builders): replace-with-fn, named-group access.
@@ -312,9 +312,17 @@ Phase 0 through Phase 9 implemented. All modules are pure Beagle on a thin libc/
 
 ---
 
-## TURNKEY FIX DESIGN: maps cannot store `null` (the #1 remaining data bug)
+## ✅ DONE — maps can now store `null` (was the #1 remaining data bug)
 
-**Symptom:** `assoc(m, k, null)` is a silent no-op; `{:a null}` drops `:a`; JSON round-trip drops null-valued fields.
+**Implemented** exactly as designed below (key-type discrimination, not
+`value == null`). Added an internal not-found sentinel
+(`PersistentMap::NOT_FOUND`) so lookups distinguish absent from stored-null,
+plus `map-contains?` / `map-get-default` / `map-find` builtins and the std
+wrappers `contains?` (now a polymorphic `Contains` protocol), 3-arg `get`, and
+`find-entry`. Null **keys** work too. Regression:
+`resources/map_null_values_test.bg` + `_gcalways_test.bg`. See `NEXT_STEPS.md` §1.
+
+**Symptom (historical):** `assoc(m, k, null)` is a silent no-op; `{:a null}` drops `:a`; JSON round-trip drops null-valued fields.
 
 **Root cause** (`src/collections/persistent_map.rs`): in a BitmapIndexedNode the children array is interleaved `[key0,val0,key1,val1,...]`, and a slot is interpreted as a **child node** when its *value* slot `== null` (the key slot then holds the sub-node pointer). So a leaf with a genuine null value is indistinguishable from a child-node slot, and `assoc` refuses to store it.
 

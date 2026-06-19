@@ -53,7 +53,7 @@ fn main() {
     println(set-subset?(a, sub))
 
     // Test iteration with for-in (using reduce)
-    let sum = reduce(s1, 0, fn(acc, x) { acc + x })
+    let sum = reduce(fn(acc, x) { acc + x }, 0, s1)
     println(sum)
 
     // Test into-set

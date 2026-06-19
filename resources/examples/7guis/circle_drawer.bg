@@ -156,7 +156,7 @@ fn game-loop(state) {
         // Handle interactions
         let new_state = if undo_clicked && can_undo {
             let prev = state.undo_stack[length(state.undo_stack) - 1]
-            let new_undo = take(state.undo_stack, length(state.undo_stack) - 1)
+            let new_undo = take(length(state.undo_stack) - 1, state.undo_stack)
             let new_redo = push(state.redo_stack, copy-circles(state.circles))
             AppState {
                 circles: prev,
@@ -167,7 +167,7 @@ fn game-loop(state) {
             }
         } else if redo_clicked && can_redo {
             let next_state = state.redo_stack[length(state.redo_stack) - 1]
-            let new_redo = take(state.redo_stack, length(state.redo_stack) - 1)
+            let new_redo = take(length(state.redo_stack) - 1, state.redo_stack)
             let new_undo = push(state.undo_stack, copy-circles(state.circles))
             AppState {
                 circles: next_state,

@@ -1,0 +1,16 @@
+namespace livecode_loop
+use beagle.core as core
+
+struct State { tick, acc }
+
+fn hot_fn(state) { state.acc + 1 }
+
+fn loop_body(state) {
+    let v = hot_fn(state)
+    core/sleep(16)
+    loop_body(State { tick: state.tick + 1, acc: v })
+}
+
+fn main() {
+    loop_body(State { tick: 0, acc: 0 })
+}

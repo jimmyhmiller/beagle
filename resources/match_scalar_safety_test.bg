@@ -1,0 +1,49 @@
+namespace match_scalar_safety_test
+
+// Regression: matching a struct/enum pattern against a scalar scrutinee used to
+// dereference the raw value as a pointer (SIGSEGV). And instance-of on a struct
+// instance crashed because primitive/read-struct-id returned an untagged value.
+
+struct S { x }
+struct T { y }
+enum E { A { v }, B {} }
+
+test "match struct pattern against scalars falls through (no crash)" {
+    assert-eq!(match 42 { S { x } => x, _ => -1 }, -1)
+    assert-eq!(match "hi" { S { x } => x, _ => -1 }, -1)
+    assert-eq!(match 3.5 { S { x } => x, _ => -1 }, -1)
+    assert-eq!(match null { S { x } => x, _ => -1 }, -1)
+}
+
+test "match enum pattern against scalars falls through (no crash)" {
+    assert-eq!(match 7 { E.A { v } => v, E.B {} => 0, _ => -1 }, -1)
+    assert-eq!(match "x" { E.A { v } => v, _ => -1 }, -1)
+}
+
+test "match positive struct/enum still binds" {
+    let s = S { x: 9 }
+    assert-eq!(match s { S { x } => x, _ => -1 }, 9)
+    let ea = E.A { v: 5 }
+    assert-eq!(match ea { E.A { v } => v, E.B {} => 0, _ => -1 }, 5)
+    let eb = E.B {}
+    assert-eq!(match eb { E.A { v } => v, E.B {} => 99, _ => -1 }, 99)
+}
+
+test "mixed scalar + struct arms in one match" {
+    assert-eq!(match 3 { S { x } => x, E.A { v } => v, _ => 7 }, 7)
+}
+
+test "instance-of on struct instance, wrong struct, and scalars" {
+    let s = S { x: 1 }
+    assert!(instance-of(s, S))
+    assert!(instance-of(s, T) == false)
+    assert!(instance-of(42, S) == false)
+    assert!(instance-of("hi", S) == false)
+}
+
+test "instance-of primitives" {
+    assert!(instance-of("hi", String))
+    assert!(instance-of(42, Int))
+    assert!(instance-of(3.5, Float))
+    assert!(instance-of([1, 2], PersistentVector))
+}

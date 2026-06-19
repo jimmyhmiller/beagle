@@ -73,35 +73,45 @@ fn repeat-string(s, n) {
 ///
 /// If s is already at least `width` chars, returns s unchanged. The pad
 /// string is repeated and clipped so the result is exactly `width` chars.
+/// The 2-arg form pads with spaces.
 ///
 /// Examples:
+///   (pad-left "42" 5)        ; => "   42"
 ///   (pad-left "42" 5 "0")    ; => "00042"
 ///   (pad-left "42" 6 "ab")   ; => "abab42"
 ///   (pad-left "hello" 3 "x") ; => "hello"
-fn pad-left(s, width, pad) {
-    let len = length(s)
-    if len >= width || length(pad) == 0 {
-        s
-    } else {
-        let needed = width - len
-        let fill = clip-fill(pad, needed)
-        fill ++ s
+fn pad-left {
+    (s, width) => pad-left(s, width, " ")
+    (s, width, pad) => {
+        let len = length(s)
+        if len >= width || length(pad) == 0 {
+            s
+        } else {
+            let needed = width - len
+            let fill = clip-fill(pad, needed)
+            fill ++ s
+        }
     }
 }
 
 /// Pad s on the RIGHT with `pad` (a string) until total length >= width.
+/// The 2-arg form pads with spaces.
 ///
 /// Examples:
+///   (pad-right "42" 5)       ; => "42   "
 ///   (pad-right "42" 5 ".")   ; => "42..."
 ///   (pad-right "ab" 6 "12")  ; => "ab1212"
-fn pad-right(s, width, pad) {
-    let len = length(s)
-    if len >= width || length(pad) == 0 {
-        s
-    } else {
-        let needed = width - len
-        let fill = clip-fill(pad, needed)
-        s ++ fill
+fn pad-right {
+    (s, width) => pad-right(s, width, " ")
+    (s, width, pad) => {
+        let len = length(s)
+        if len >= width || length(pad) == 0 {
+            s
+        } else {
+            let needed = width - len
+            let fill = clip-fill(pad, needed)
+            s ++ fill
+        }
     }
 }
 
@@ -294,7 +304,7 @@ fn split-with-limit(s, delim, limit) {
 ///   (starts-with-any? "http://x" ["http://", "https://"])  ; => true
 ///   (starts-with-any? "ftp://x"  ["http://", "https://"])  ; => false
 fn starts-with-any?(s, prefixes) {
-    any?(prefixes, fn(p) { starts-with?(s, p) })
+    any?(fn(p) { starts-with?(s, p) }, prefixes)
 }
 
 /// True if s ends with ANY of the given suffix strings.
@@ -302,7 +312,7 @@ fn starts-with-any?(s, prefixes) {
 /// Examples:
 ///   (ends-with-any? "a.png" [".png", ".jpg"])  ; => true
 fn ends-with-any?(s, suffixes) {
-    any?(suffixes, fn(p) { ends-with?(s, p) })
+    any?(fn(p) { ends-with?(s, p) }, suffixes)
 }
 
 /// True if s contains ANY of the given substrings.
@@ -311,7 +321,7 @@ fn ends-with-any?(s, suffixes) {
 ///   (contains-any? "hello world" ["xyz", "wor"])  ; => true
 ///   (contains-any? "hello" ["a", "b"])            ; => false
 fn contains-any?(s, subs) {
-    any?(subs, fn(sub) { contains?(s, sub) })
+    any?(fn(sub) { contains?(s, sub) }, subs)
 }
 
 // ---------------------------------------------------------------------------
@@ -466,26 +476,22 @@ fn int->hex(n, upper) {
 }
 
 // ---------------------------------------------------------------------------
-// Float -> fixed-decimal rendering (helper for %f / %.Nf)
+// Number formatting (no printf — plain composable functions for ${...})
 // ---------------------------------------------------------------------------
-//
-// Renders a float with EXACTLY `prec` fractional digits, rounded HALF-UP.
-// Implemented in pure Beagle:
-//   - sign is split off and applied at the end
-//   - the integer part comes from to-int (truncates toward zero; on the
-//     non-negative magnitude that is floor)
-//   - the fraction is scaled by 10^prec, rounded half-up via to-int(x + 0.5)
-//   - when the rounded fraction reaches 10^prec (e.g. 9.999 -> 10.00) the
-//     overflow carries into the integer part and the fraction resets to 0
-//   - the fraction is zero-padded on the LEFT to exactly `prec` digits
-//
-// Examples:
-//   (float->fixed 3.14159 2)   ; => "3.14"
-//   (float->fixed 3.14159 6)   ; => "3.141590"
-//   (float->fixed 9.999 2)     ; => "10.00"
-//   (float->fixed (- 0.0 9.999) 2) ; => "-10.00"
-//   (float->fixed 3.0 0)       ; => "3"
-fn float->fixed(x, prec) {
+
+/// Render a number with EXACTLY `decimals` fractional digits, rounded HALF-UP.
+///
+/// Sign is split off and reapplied; the fraction is zero-padded on the left to
+/// exactly `decimals` digits; rounding that reaches a whole unit carries into
+/// the integer part (e.g. 9.999 -> "10.00"). Works on ints and floats.
+///
+/// Examples:
+///   (fixed 3.14159 2)        ; => "3.14"
+///   (fixed 3.14159 6)        ; => "3.141590"
+///   (fixed 9.999 2)          ; => "10.00"
+///   (fixed (- 0.0 9.999) 2)  ; => "-10.00"
+///   (fixed 3.0 0)            ; => "3"
+fn fixed(x, decimals) {
     // Coerce ints OR floats to a float. NOTE: `x + 0.0` is used rather than
     // to-float(x) because to-float currently mishandles an already-float arg;
     // adding 0.0 promotes an Int and is the identity on a Float, both safely.
@@ -493,10 +499,10 @@ fn float->fixed(x, prec) {
     let negative = xf < 0.0
     let ax = if negative { 0.0 - xf } else { xf }
 
-    // 10^prec as a float (for scaling) — prec is small in practice.
+    // 10^decimals as a float (for scaling) — decimals is small in practice.
     let mut scale = 1.0
     let mut k = 0
-    while k < prec {
+    while k < decimals {
         scale = scale * 10.0
         k = k + 1
     }
@@ -506,209 +512,62 @@ fn float->fixed(x, prec) {
     let mut frac-int = to-int(frac * scale + 0.5)   // round half-up
 
     // Carry: rounding pushed the fraction up to a whole unit.
-    let scale-int = to-int(scale)             // 10^prec as an Int
+    let scale-int = to-int(scale)             // 10^decimals as an Int
     if frac-int >= scale-int {
         frac-int = frac-int - scale-int
         int-part = int-part + 1
     }
 
     let sign = if negative { "-" } else { "" }
-    if prec <= 0 {
+    if decimals <= 0 {
         sign ++ to-string(int-part)
     } else {
-        // Zero-pad the fraction to exactly `prec` digits.
-        let frac-str = pad-left(to-string(frac-int), prec, "0")
+        // Zero-pad the fraction to exactly `decimals` digits.
+        let frac-str = pad-left(to-string(frac-int), decimals, "0")
         sign ++ to-string(int-part) ++ "." ++ frac-str
     }
 }
 
-// ---------------------------------------------------------------------------
-// format (printf-style)
-// ---------------------------------------------------------------------------
-//
-// STYLE: printf-style placeholders consumed positionally from `args`
-// (a vector). Supported conversions:
-//
-//   %s   string  — value rendered via to-string
-//   %d   integer — value rendered as a decimal integer
-//   %x   integer — lowercase hexadecimal
-//   %X   integer — uppercase hexadecimal
-//   %f   float   — fixed-decimal; default precision 6, or N from %.Nf
-//   %%   a literal percent sign (consumes no argument)
-//
-// Each conversion (except %%) may carry optional flags, a width, and a
-// precision, in printf order:  %[flags][width][.precision]conv
-//
-//   %5d      right-justify in a field at least 5 wide, space-padded
-//   %05d     right-justify, zero-padded (sign-aware: '-' stays in front)
-//   %-5s     left-justify in a field at least 5 wide, space-padded
-//   %+d      always show a sign ('+' for non-negatives)
-//   %.2f     two fractional digits, rounded half-up
-//   %8.2f    width 8, two fractional digits, space-padded
-//   %08.2f   width 8, two fractional digits, zero-padded (sign-aware)
-//   %+.2f    forced sign, two fractional digits
-//
-// Flags accepted before the width: '-' (left-align), '0' (zero-pad),
-// '+' (force sign). The '.precision' (only meaningful for %f) follows the
-// width. Default %f precision is 6.
-//
-// Throws a clear error if there are fewer args than conversions, or on an
-// unknown conversion letter.
-
-/// Format a string with printf-style placeholders.
+/// Round a number to `n` decimal places, returning a NUMBER (not a string).
 ///
-/// See the module comment for the full conversion table. `args` is a vector
-/// of values consumed left to right by the non-%% conversions.
+/// Use this when you need the rounded value for further math; use `fixed` when
+/// you want a string with a guaranteed number of decimals.
 ///
 /// Examples:
-///   (format "%s is %d" ["age", 42])        ; => "age is 42"
-///   (format "[%5d]" [7])                    ; => "[    7]"
-///   (format "[%05d]" [7])                   ; => "[00007]"
-///   (format "[%-5s]" ["hi"])               ; => "[hi   ]"
-///   (format "%x %X" [255, 255])            ; => "ff FF"
-///   (format "100%%" [])                     ; => "100%"
-fn format(fmt, args) {
-    let flen = length(fmt)
-    let builder = sb/new(flen + 16)
+///   (round-to 3.14159 2)  ; => 3.14
+///   (round-to 2.5 0)      ; => 3.0
+fn round-to(x, n) {
+    let mut scale = 1.0
+    let mut k = 0
+    while k < n {
+        scale = scale * 10.0
+        k = k + 1
+    }
+    round((x + 0.0) * scale) / scale
+}
+
+/// Insert thousands separators into an integer, returning a string.
+///
+/// Examples:
+///   (commas 1234567)  ; => "1,234,567"
+///   (commas -1000)    ; => "-1,000"
+///   (commas 42)       ; => "42"
+fn commas(n) {
+    let negative = n < 0
+    let digits = to-string(if negative { 0 - n } else { n })
+    let len = length(digits)
+    let mut result = ""
     let mut i = 0
-    let mut arg-idx = 0
-    while i < flen {
-        let ch = fmt[i]
-        if ch == "%" {
-            if i + 1 >= flen {
-                throw("format: dangling '%' at end of format string")
-            } else {
-                // Parse flags (any order/combination of '-', '0', '+').
-                let mut j = i + 1
-                let mut left-align = false
-                let mut zero-pad = false
-                let mut force-sign = false
-                let mut scanning-flags = true
-                while scanning-flags && j < flen {
-                    if fmt[j] == "-" {
-                        left-align = true
-                        j = j + 1
-                    } else {
-                        if fmt[j] == "0" {
-                            zero-pad = true
-                            j = j + 1
-                        } else {
-                            if fmt[j] == "+" {
-                                force-sign = true
-                                j = j + 1
-                            } else {
-                                scanning-flags = false
-                            }
-                        }
-                    }
-                }
-                // Width.
-                let mut width = 0
-                while j < flen && digit-code?(code-at(fmt, j)) {
-                    width = width * 10 + (code-at(fmt, j) - 48)
-                    j = j + 1
-                }
-                // Optional precision: '.' followed by digits (default 0 after
-                // the dot, e.g. "%.f" -> precision 0). -1 means "unspecified".
-                let mut precision = 0 - 1
-                if j < flen && fmt[j] == "." {
-                    j = j + 1
-                    precision = 0
-                    while j < flen && digit-code?(code-at(fmt, j)) {
-                        precision = precision * 10 + (code-at(fmt, j) - 48)
-                        j = j + 1
-                    }
-                }
-                if j >= flen {
-                    throw("format: incomplete conversion specifier")
-                } else {
-                    let conv = fmt[j]
-                    if conv == "%" {
-                        sb/append!(builder, "%")
-                    } else {
-                        if arg-idx >= length(args) {
-                            throw("format: not enough arguments for format string")
-                        } else {
-                            let arg = args[arg-idx]
-                            arg-idx = arg-idx + 1
-                            let rendered = format-one(conv, arg, precision, force-sign)
-                            let padded = apply-pad(rendered, width, left-align, zero-pad)
-                            sb/append!(builder, padded)
-                        }
-                    }
-                    i = j + 1
-                }
-            }
-        } else {
-            sb/append!(builder, ch)
-            i = i + 1
+    while i < len {
+        // A separator precedes every group of 3 digits counted from the right,
+        // except at the very start of the number.
+        if i > 0 && (len - i) % 3 == 0 {
+            result = result ++ ","
         }
+        result = result ++ substring(digits, i, i + 1)
+        i = i + 1
     }
-    sb/to-string(builder)
-}
-
-// Prefix a '+' on non-negative rendered numbers when force-sign is set.
-// (A value already rendered with a leading '-' is left untouched.)
-fn maybe-force-sign(rendered, force-sign) {
-    if force-sign && length(rendered) > 0 && rendered[0] != "-" {
-        "+" ++ rendered
-    } else {
-        rendered
-    }
-}
-
-// Render a single argument according to a conversion letter.
-//
-// `precision` is the parsed precision (-1 when unspecified); `force-sign`
-// is the '+' flag. Both only affect the numeric conversions.
-fn format-one(conv, arg, precision, force-sign) {
-    if conv == "s" {
-        to-string(arg)
-    } else {
-        if conv == "d" {
-            maybe-force-sign(to-string(arg), force-sign)
-        } else {
-            if conv == "f" {
-                let prec = if precision < 0 { 6 } else { precision }
-                maybe-force-sign(float->fixed(arg, prec), force-sign)
-            } else {
-                if conv == "x" {
-                    int->hex(arg, false)
-                } else {
-                    if conv == "X" {
-                        int->hex(arg, true)
-                    } else {
-                        throw("format: unknown conversion '%" ++ conv ++ "'")
-                    }
-                }
-            }
-        }
-    }
-}
-
-// Pad `rendered` to `width`. zero-pad only takes effect for right-aligned
-// fields (matching printf). A leading '-' (negative number) keeps its sign
-// at the front when zero-padding.
-fn apply-pad(rendered, width, left-align, zero-pad) {
-    let len = length(rendered)
-    if len >= width {
-        rendered
-    } else {
-        if left-align {
-            pad-right(rendered, width, " ")
-        } else {
-            if zero-pad {
-                if len > 0 && (rendered[0] == "-" || rendered[0] == "+") {
-                    let sign = substring(rendered, 0, 1)
-                    sign ++ pad-left(substring(rendered, 1, len), width - 1, "0")
-                } else {
-                    pad-left(rendered, width, "0")
-                }
-            } else {
-                pad-left(rendered, width, " ")
-            }
-        }
-    }
+    if negative { "-" ++ result } else { result }
 }
 
 // ---------------------------------------------------------------------------

@@ -19,30 +19,30 @@ fn listen(host, port) {
 
 // Connect to a TCP server
 fn connect(host, port) {
-    perform async/Async.IO {
+    async/tcp-result-or-throw(perform async/Async.IO {
         action: async/IOAction.TcpConnect { host: host, port: port }
-    }
+    })
 }
 
 // Accept a connection on a TCP listener (blocking)
 fn accept(listener) {
-    perform async/Async.IO {
+    async/tcp-result-or-throw(perform async/Async.IO {
         action: async/IOAction.TcpAccept { listener: listener }
-    }
+    })
 }
 
 // Read up to n bytes from a TCP socket (blocking)
 fn read(socket, n) {
-    perform async/Async.IO {
+    async/tcp-result-or-throw(perform async/Async.IO {
         action: async/IOAction.TcpRead { socket: socket, n: n }
-    }
+    })
 }
 
 // Write data to a TCP socket (blocking)
 fn write(socket, data) {
-    perform async/Async.IO {
+    async/tcp-result-or-throw(perform async/Async.IO {
         action: async/IOAction.TcpWrite { socket: socket, data: data }
-    }
+    })
 }
 
 // Close a TCP socket
@@ -62,17 +62,13 @@ fn close-listener(listener) {
 // ============================================================================
 // Connection Server Helper
 // ============================================================================
-// on-connection uses async/cooperative-spawn. Under CooperativeHandler this
-// multiplexes many connections on one thread. Under the ambient implicit
-// handler it falls back to a normal background thread per connection.
-
-// Accept connections and handle each one cooperatively on a single thread.
-// The callback receives a connection and can use socket/read, socket/write, etc.
-// Multiple clients are multiplexed via the event loop and continuations when
-// a cooperative handler is installed.
+// Accept connections forever, handling each one as a cooperative task on a
+// single thread. The callback receives a connection and can use socket/read,
+// socket/write, etc. as plain sequential code; many clients are multiplexed
+// via the event loop and continuation parking.
 fn on-connection(listener, callback) {
     loop {
         let conn = accept(listener)
-        async/cooperative-spawn(fn() { callback(conn) })
+        async/spawn(fn() { callback(conn) })
     }
 }

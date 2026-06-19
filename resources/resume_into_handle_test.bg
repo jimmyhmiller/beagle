@@ -1,0 +1,245 @@
+namespace resume_into_handle_test
+
+use beagle.effect as effect
+
+// Regression: a RESUMABLE exception thrown from inside a `handle` block,
+// caught OUTSIDE that handle, then resumed back into the body, must keep the
+// handle's effect handler in scope. The throw's `unwind_effect_state_to`
+// truncates the inner handle's prompt-tag + effect-handler records (they sit
+// between the catch frame and the throw, above the captured `__reset__` body),
+// and the untagged capture relocates only the body — so before the fix a
+// `perform` in the resumed body missed its handler and fell through to an
+// OUTER handler (or, with no outer handler, crashed). The capture now
+// snapshots those boundary records onto the continuation and re-establishes
+// them around the resumed body, pointing at the resume invoker, with a
+// teardown stub that drops them when the body returns.
+
+enum Ping { Ask {} }
+
+struct InnerHandler {}
+struct OuterHandler {}
+
+extend InnerHandler with effect/Handler(Ping) {
+    fn handle(self, op, resume) {
+        match op { Ping.Ask {} => resume("INNER") }
+    }
+}
+extend OuterHandler with effect/Handler(Ping) {
+    fn handle(self, op, resume) {
+        match op { Ping.Ask {} => resume("OUTER") }
+    }
+}
+
+fn body_inner_only() {
+    handle effect/Handler(Ping) with InnerHandler {} {
+        // Throw is delivered to the resumable catch OUTSIDE this handle.
+        // Resuming returns control here, still inside the handle scope.
+        let x = throw("boom")
+        let p = perform Ping.Ask {}
+        "${x}:${p}"
+    }
+}
+
+test "resume back into a handle keeps its handler in scope" {
+    // No outer handler: before the fix this lost the handler entirely.
+    let result = try {
+        body_inner_only()
+    } catch (e, resume) {
+        resume(42)
+    }
+    assert-eq!(result, "42:INNER")
+}
+
+fn body_with_outer() {
+    handle effect/Handler(Ping) with InnerHandler {} {
+        let x = throw("boom")
+        let p = perform Ping.Ask {}
+        "${x}:${p}"
+    }
+}
+
+test "resumed perform reaches the INNER handler, not an outer one" {
+    // Outer handler present: before the fix the resumed perform fell through
+    // to OUTER. It must reach INNER (the lexically enclosing handle).
+    let result = handle effect/Handler(Ping) with OuterHandler {} {
+        try {
+            body_with_outer()
+        } catch (e, resume) {
+            resume(7)
+        }
+    }
+    assert-eq!(result, "7:INNER")
+}
+
+test "boundary records are torn down: a later perform uses the outer handler" {
+    // After the resumed body completes, the re-established InnerHandler scope
+    // must be gone. A perform made AFTER the resume (still under OuterHandler,
+    // but outside the inner handle) must reach OUTER — proving no stale
+    // InnerHandler record leaked onto the live stacks.
+    let result = handle effect/Handler(Ping) with OuterHandler {} {
+        let resumed = try {
+            body_with_outer()
+        } catch (e, resume) {
+            resume(1)
+        }
+        let after = perform Ping.Ask {}
+        "${resumed}|${after}"
+    }
+    assert-eq!(result, "1:INNER|OUTER")
+}
+
+fn body_no_perform() {
+    handle effect/Handler(Ping) with InnerHandler {} {
+        let x = throw("boom")
+        "x=${x}"
+    }
+}
+
+test "resumed body that does NOT perform tears its handle down on return" {
+    // The resumed body re-enters the InnerHandler scope but never performs,
+    // then returns. The boundary records must be torn down on the natural
+    // return so a later perform reaches OUTER (before the fix this leaked and
+    // crashed in the continuation trampoline).
+    let result = handle effect/Handler(Ping) with OuterHandler {} {
+        let resumed = try {
+            body_no_perform()
+        } catch (e, resume) {
+            resume(99)
+        }
+        let after = perform Ping.Ask {}
+        "${resumed}|${after}"
+    }
+    assert-eq!(result, "x=99|OUTER")
+}
+
+// gc-always
+test "resume into handle survives GC stress" {
+    let mut i = 0
+    while i < 20 {
+        let result = handle effect/Handler(Ping) with OuterHandler {} {
+            try {
+                body_with_outer()
+            } catch (e, resume) {
+                resume(i)
+            }
+        }
+        assert-eq!(result, "${i}:INNER")
+        i = i + 1
+    }
+}
+
+// A SECOND effect type so we can nest two boundary handles.
+enum Pong { Ring {} }
+struct InnerPong {}
+extend InnerPong with effect/Handler(Pong) {
+    fn handle(self, op, resume) { match op { Pong.Ring {} => resume("PONG") } }
+}
+
+fn body_two_handles() {
+    handle effect/Handler(Ping) with InnerHandler {} {
+        handle effect/Handler(Pong) with InnerPong {} {
+            let x = throw("boom")
+            let a = perform Pong.Ring {}
+            let b = perform Ping.Ask {}
+            "${x}:${a}:${b}"
+        }
+    }
+}
+
+test "two nested boundary handles both survive resume" {
+    let result = handle effect/Handler(Ping) with OuterHandler {} {
+        try {
+            body_two_handles()
+        } catch (e, resume) {
+            resume(3)
+        }
+    }
+    // Both inner handlers must be reached (not the outer Ping handler).
+    assert-eq!(result, "3:PONG:INNER")
+}
+
+fn body_aborting() {
+    handle effect/Handler(Ping) with AbortingHandler {} {
+        let x = throw("boom")
+        let p = perform Ping.Ask {}
+        "${x}:${p}"
+    }
+}
+
+struct AbortingHandler {}
+extend AbortingHandler with effect/Handler(Ping) {
+    // Does NOT resume — aborts the handle with a value.
+    fn handle(self, op, resume) { match op { Ping.Ask {} => "ABORTED" } }
+}
+
+test "boundary handler that aborts (no resume) tears down cleanly" {
+    let result = handle effect/Handler(Ping) with OuterHandler {} {
+        let resumed = try {
+            body_aborting()
+        } catch (e, resume) {
+            resume(5)
+        }
+        let after = perform Ping.Ask {}
+        "${resumed}|${after}"
+    }
+    assert-eq!(result, "ABORTED|OUTER")
+}
+
+fn body_inner_try() {
+    handle effect/Handler(Ping) with InnerHandler {} {
+        let x = throw("outer-boom")
+        // After resume: an inner try/catch (rethrow caught locally), then perform.
+        let caught = try { throw("inner-boom") } catch (e2) { "inner-caught" }
+        let p = perform Ping.Ask {}
+        "${x}:${caught}:${p}"
+    }
+}
+
+test "inner try/catch in the resumed body's gap works" {
+    let result = handle effect/Handler(Ping) with OuterHandler {} {
+        let resumed = try {
+            body_inner_try()
+        } catch (e, resume) {
+            resume(7)
+        }
+        let after = perform Ping.Ask {}
+        "${resumed}|${after}"
+    }
+    assert-eq!(result, "7:inner-caught:INNER|OUTER")
+}
+
+fn body_perform_loop() {
+    handle effect/Handler(Ping) with CountingHandler {} {
+        let start = throw("boom")
+        let mut total = start
+        let mut i = 0
+        while i < 50 {
+            // 50 performs against the re-established boundary handle stress the
+            // descriptor/registry reentrancy.
+            total = total + perform Ping.Ask {}
+            i = i + 1
+        }
+        total
+    }
+}
+
+struct CountingHandler {}
+extend CountingHandler with effect/Handler(Ping) {
+    fn handle(self, op, resume) { match op { Ping.Ask {} => resume(1) } }
+}
+
+test "deep perform loop against a boundary handle then clean teardown" {
+    let result = handle effect/Handler(Ping) with OuterHandler {} {
+        let resumed = try {
+            body_perform_loop()
+        } catch (e, resume) {
+            resume(0)
+        }
+        // After 50 inner performs, the boundary handle is torn down: this
+        // perform must reach OUTER ("OUTER" is not a number, so compare the
+        // assembled string).
+        let after = perform Ping.Ask {}
+        "${resumed}|${after}"
+    }
+    assert-eq!(result, "50|OUTER")
+}

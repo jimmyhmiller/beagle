@@ -1,0 +1,85 @@
+namespace concurrent_redefine_race_test
+
+// Regression test for the enum/struct hot-reload data race.
+//
+// One OS thread reads a type's variant in a tight loop (`T.None`) — the way a
+// running game loop reads `Transition.None` every frame — while the main thread
+// re-runs the `enum`/`struct` definition underneath it (what a full-file `load`
+// does to a live program).
+//
+// The bug: type registration reserved the binding slot with a RAW 0 instead of
+// the language NULL sentinel (0b111). A raw 0 is a valid tagged integer, so it
+// slipped past `add_binding`'s "don't clobber a live value" guard and stomped
+// the type's binding cell to 0x0 for the whole recompile window. A concurrent
+// reader observed 0x0 (low bits 0b000 => Int) and threw
+// "Cannot access property 'None' on Int".
+//
+// With the fix, redefinition is a single atomic descriptor pointer-swap and a
+// concurrent reader always sees a valid descriptor. Expect ZERO errors.
+
+enum T { None, Out }
+
+struct S { x }
+
+letonce stop = atom(false)
+letonce enum_errors = atom(0)
+letonce struct_errors = atom(0)
+letonce enum_done = atom(false)
+letonce struct_done = atom(false)
+
+fn spin_enum() {
+    while !deref(stop) {
+        try {
+            T.None
+        } catch (e, resume) {
+            swap!(enum_errors, fn(x) { x + 1 })
+            resume(null)
+        }
+    }
+    reset!(enum_done, true)
+}
+
+fn spin_struct() {
+    while !deref(stop) {
+        try {
+            // Read a field off the live struct descriptor's binding.
+            let v = S { x: 1 }
+            v.x
+        } catch (e, resume) {
+            swap!(struct_errors, fn(x) { x + 1 })
+            resume(null)
+        }
+    }
+    reset!(struct_done, true)
+}
+
+test "concurrent enum + struct reload races no torn binding" {
+    reset!(stop, false)
+    reset!(enum_errors, 0)
+    reset!(struct_errors, 0)
+    reset!(enum_done, false)
+    reset!(struct_done, false)
+
+    thread(fn() { spin_enum() })
+    thread(fn() { spin_struct() })
+
+    let mut i = 0
+    while i < 600 {
+        eval("namespace concurrent_redefine_race_test
+enum T { None, Out }")
+        eval("namespace concurrent_redefine_race_test
+struct S { x }")
+        i = i + 1
+    }
+
+    reset!(stop, true)
+
+    // Spin-wait for both readers to observe `stop` and exit.
+    let mut w = 0
+    while (!deref(enum_done) || !deref(struct_done)) && w < 200000000 {
+        w = w + 1
+    }
+
+    assert-eq!(deref(enum_errors), 0)
+    assert-eq!(deref(struct_errors), 0)
+}

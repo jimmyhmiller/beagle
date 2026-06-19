@@ -69,12 +69,16 @@ fn from-int(n) {
         zero()
     } else {
         let sign = if n < 0 { -1 } else { 1 }
-        // Work with a non-negative magnitude. Beagle ints are 62-bit, so
-        // negating any representable n is safe (no two's-complement overflow).
-        let mut m = if n < 0 { 0 - n } else { n }
+        // Extract base-BASE limbs of |n| by iterating on n DIRECTLY (which may
+        // be negative). We never form the positive magnitude `0 - n`, because
+        // that overflows for the most-negative representable int (its negation
+        // is not representable and wraps back to itself). Each truncated
+        // remainder carries the sign of n, so take its magnitude with abs.
+        let mut m = n
         let mut limbs = []
-        while m > 0 {
-            limbs = push(limbs, m - (m / BASE) * BASE)
+        while m != 0 {
+            let digit = m - (m / BASE) * BASE
+            limbs = push(limbs, abs(digit))
             m = m / BASE
         }
         make(sign, limbs)

@@ -9,10 +9,10 @@ use beagle.textwrap as tw
 use beagle.struct-pack as sp
 
 fn main() {
-    // text/format float precision + sign
-    println(text/format("%.2f", [3.14159]) == "3.14")
-    println(text/format("%f", [3.14159]) == "3.141590")
-    println(text/format("%+d", [5]) == "+5")
+    // number formatting (no printf): fixed decimals + thousands separators
+    println(text/fixed(3.14159, 2) == "3.14")
+    println(text/fixed(3.14159, 6) == "3.141590")
+    println(text/commas(1234567) == "1,234,567")
     // iter combinatorics
     println(iter/combinations([1, 2, 3], 2) == [[1, 2], [1, 3], [2, 3]])
     println(length(iter/permutations([1, 2, 3])) == 6)

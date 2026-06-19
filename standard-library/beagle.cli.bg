@@ -78,22 +78,22 @@ fn add-positional(spec, name, help, required) {
 
 // Find a flag entry by its long name. Returns the entry map or null.
 fn find-flag-by-name(spec, name) {
-    find(get(spec, :flags), fn(e) { get(e, :name) == name })
+    find(fn(e) { get(e, :name) == name }, get(spec, :flags))
 }
 
 // Find an option entry by its long name. Returns the entry map or null.
 fn find-option-by-name(spec, name) {
-    find(get(spec, :options), fn(e) { get(e, :name) == name })
+    find(fn(e) { get(e, :name) == name }, get(spec, :options))
 }
 
 // Find a flag entry by its single-character short name. Returns entry or null.
 fn find-flag-by-short(spec, short) {
-    find(get(spec, :flags), fn(e) { get(e, :short) == short })
+    find(fn(e) { get(e, :short) == short }, get(spec, :flags))
 }
 
 // Find an option entry by its single-character short name. Returns entry or null.
 fn find-option-by-short(spec, short) {
-    find(get(spec, :options), fn(e) { get(e, :short) == short })
+    find(fn(e) { get(e, :short) == short }, get(spec, :options))
 }
 
 // ----------------------------------------------------------------------------
@@ -103,12 +103,12 @@ fn find-option-by-short(spec, short) {
 // Seed the result options map: every flag defaults to false, every option to
 // its declared :default (or null), and :help to false.
 fn seed-defaults(spec) {
-    let with-flags = reduce(get(spec, :flags), {:help false}, fn(acc, e) {
+    let with-flags = reduce(fn(acc, e) {
         assoc(acc, get(e, :name), false)
-    })
-    reduce(get(spec, :options), with-flags, fn(acc, e) {
+    }, {:help false}, get(spec, :flags))
+    reduce(fn(acc, e) {
         assoc(acc, get(e, :name), get(e, :default))
-    })
+    }, with-flags, get(spec, :options))
 }
 
 // ----------------------------------------------------------------------------
@@ -385,14 +385,14 @@ fn build-usage-line(spec) {
     } else {
         base
     }
-    reduce(get(spec, :positionals), with-opts, fn(acc, e) {
+    reduce(fn(acc, e) {
         let name = get(e, :name)
         if get(e, :required) {
             acc ++ " <" ++ name ++ ">"
         } else {
             acc ++ " [" ++ name ++ "]"
         }
-    })
+    }, with-opts, get(spec, :positionals))
 }
 
 fn build-positionals-section(spec) {
@@ -400,9 +400,9 @@ fn build-positionals-section(spec) {
     if length(ps) == 0 {
         ""
     } else {
-        reduce(ps, "\n\nArguments:", fn(acc, e) {
+        reduce(fn(acc, e) {
             acc ++ "\n  " ++ pad-right(get(e, :name), 18, " ") ++ get(e, :help)
-        })
+        }, "\n\nArguments:", ps)
     }
 }
 
@@ -411,7 +411,7 @@ fn build-options-section(spec) {
     if length(os) == 0 {
         ""
     } else {
-        reduce(os, "\n\nOptions:", fn(acc, e) {
+        reduce(fn(acc, e) {
             let name = get(e, :name)
             let short = get(e, :short)
             let names = if short == null {
@@ -421,7 +421,7 @@ fn build-options-section(spec) {
             }
             let req = if get(e, :required) { " (required)" } else { "" }
             acc ++ "\n  " ++ pad-right(names, 26, " ") ++ get(e, :help) ++ req
-        })
+        }, "\n\nOptions:", os)
     }
 }
 
@@ -431,7 +431,7 @@ fn build-flags-section(spec) {
     if length(fs) == 0 {
         "\n\nFlags:" ++ help-line
     } else {
-        let body = reduce(fs, "\n\nFlags:", fn(acc, e) {
+        let body = reduce(fn(acc, e) {
             let name = get(e, :name)
             let short = get(e, :short)
             let names = if short == null {
@@ -440,7 +440,7 @@ fn build-flags-section(spec) {
                 "-" ++ short ++ ", --" ++ name
             }
             acc ++ "\n  " ++ pad-right(names, 26, " ") ++ get(e, :help)
-        })
+        }, "\n\nFlags:", fs)
         body ++ help-line
     }
 }

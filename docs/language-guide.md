@@ -113,6 +113,18 @@ let literal  = "Price: \$100"     // prints: Price: $100
 
 Arbitrary expressions are allowed inside `${...}` — including function calls, arithmetic, `if`, `match`, struct field access, etc.
 
+Beagle has **no printf / format-string mini-language**. To control number
+presentation, combine `${...}` with the plain helpers in `beagle.text`:
+`fixed(x, decimals)` (string with exactly N decimals), `round-to(x, n)` (rounded
+number), `commas(n)` (thousands separators), and `pad-left` / `pad-right`:
+
+```beagle
+use beagle.text as text
+"Total: \$${text/commas(1234567)}"        // "Total: $1,234,567"
+"π ≈ ${text/fixed(3.14159, 2)}"           // "π ≈ 3.14"
+"[${text/pad-left(to-string(7), 4)}]"     // "[   7]"
+```
+
 ### 2.5 Booleans and null
 
 ```beagle
@@ -290,12 +302,15 @@ Beagle has **two** pipe operators. Do not confuse them.
 20 |>> subtract(5)                 // subtract(5, 20) = -15
 
 [1,2,3,4,5]
-    |> map(fn(x) { x * 2 })
-    |> filter(fn(x) { x > 4 })
-    |> reduce(0, fn(acc, x) { acc + x })
+    |>> map(fn(x) { x * 2 })
+    |>> filter(fn(x) { x > 4 })
+    |>> reduce(fn(acc, x) { acc + x }, 0)
 ```
 
-Most stdlib collection functions put the collection first, so `|>` chains naturally.
+Higher-order sequence functions (`map`, `filter`, `reduce`, …) take the
+function/predicate FIRST and the collection LAST (Clojure convention), so they
+chain with `|>>` (last-arg pipe). Collection-update functions (`assoc`, `get`,
+`conj`, `update`, `dissoc`) keep the collection first and chain with `|>`.
 
 ---
 
@@ -1036,35 +1051,38 @@ empty?(coll)
 
 ### 16.2 Transformation / filtering
 
+Higher-order sequence functions take the function/predicate (or count) FIRST
+and the collection LAST — Clojure convention, so they chain with `|>>`.
+
 ```beagle
-map([1,2,3], fn(x) { x * 2 })                   // [2,4,6]
-filter([1,2,3,4], fn(x) { x > 2 })              // [3,4]
-reduce([1,2,3], 0, fn(acc, x) { acc + x })      // 6
-reduce-right(coll, init, f)
-flat-map(coll, f)
-take(coll, n)          drop(coll, n)
-take-while(coll, pred) drop-while(coll, pred)
-slice(coll, start, end)                          // end exclusive
-remove-at(coll, idx)
+map(fn(x) { x * 2 }, [1,2,3])                   // [2,4,6]
+filter(fn(x) { x > 2 }, [1,2,3,4])              // [3,4]
+reduce(fn(acc, x) { acc + x }, 0, [1,2,3])      // 6
+reduce-right(f, init, coll)
+flat-map(f, coll)
+take(n, coll)          drop(n, coll)
+take-while(pred, coll) drop-while(pred, coll)
+slice(coll, start, end)                          // coll-first; end exclusive
+remove-at(coll, idx)                             // coll-first (idx, not a fn)
 ```
 
 ### 16.3 Predicates / search
 
 ```beagle
-any?(coll, pred)        all?(coll, pred)
-none?(coll, pred)       not-every?(coll, pred)
-find(coll, pred)        find-index(coll, pred)
+any?(pred, coll)        all?(pred, coll)
+none?(pred, coll)       not-every?(pred, coll)
+find(pred, coll)        find-index(pred, coll)
 ```
 
 ### 16.4 Aggregation / ordering
 
 ```beagle
 min-of(coll)    max-of(coll)
-min-by(coll, keyfn)     max-by(coll, keyfn)
-sort(coll)              sort-by(coll, keyfn)
+min-by(keyfn, coll)     max-by(keyfn, coll)
+sort(coll)              sort-by(keyfn, coll)
 reverse(coll)
 distinct(coll)          dedupe(coll)              // consecutive dups
-frequencies(coll)       group-by(coll, keyfn)
+frequencies(coll)       group-by(keyfn, coll)
 ```
 
 ### 16.5 Combining
@@ -1111,6 +1129,7 @@ nil?(x)     some?(x)
 get(m, key)        get(m, key, default)
 keys(m)            vals(m)
 assoc(m, k, v)     dissoc(m, k)
+contains?(m, key)  find-entry(m, key)
 merge(m1, m2)      merge-with(f, m1, m2)
 select-keys(m, [:a :b])
 update(m, k, fn)
@@ -1124,6 +1143,24 @@ get-in(m, [:a :b :c])
 assoc-in(m, [:a :b :c], value)
 update-in(m, [:a :b :c], fn)
 ```
+
+Maps can store `null` **values** (and `null` **keys**), the Clojure way.
+Because `get(m, k)` returns `null` both for "key absent" and "value is null",
+use one of these to tell them apart:
+
+```beagle
+let m = assoc({}, :a, null)
+get(m, :a)              // null   (present-with-null is indistinguishable here)
+get(m, :a, :missing)    // null   (3-arg returns the stored null, not the default)
+get(m, :z, :missing)    // :missing
+contains?(m, :a)        // true   (key present, even though value is null)
+contains?(m, :z)        // false
+find-entry(m, :a)       // [:a null]   (or null when the key is absent)
+```
+
+`contains?` is polymorphic (a protocol): on a map it tests key presence, on a
+set membership, on a vector whether an index is in range, and on a string
+whether a substring occurs.
 
 ---
 
@@ -1157,7 +1194,7 @@ uppercase(s)   lowercase(s)
 trim(s)   trim-left(s)   trim-right(s)
 starts-with?(s, prefix)
 ends-with?(s, suffix)
-contains?(s, sub)
+contains?(s, sub)                 // substring test (contains? is polymorphic — see §17)
 index-of(s, sub)        last-index-of(s, sub)
 replace(s, old, new)
 replace-first(s, old, new)
@@ -1470,7 +1507,7 @@ Quick hit-list — skim before writing code.
 2. **`let mut` is function-local only.** At top level use `atom(...)` for mutable state.
 3. **Struct "update" uses spread**: `Point { ...p, x: 15 }`. Not `p.with(x=15)`.
 4. **`break(value)` and `continue()` are function-call syntax**, not bare keywords.
-5. **Two pipes, opposite directions**: `|>` = pipe-first (x becomes first arg); `|>>` = pipe-last (x becomes last arg).
+5. **Two pipes, opposite directions**: `|>` = pipe-first (x becomes first arg); `|>>` = pipe-last (x becomes last arg). Seq HOFs are function-first (#17) so they chain with `|>>`; collection-update fns (`assoc`/`update`/`conj`) chain with `|>`.
 6. **Map literals use spaces between key and value**: `{:a 1 :b 2}` (commas optional).
 7. **Set literals are `#{...}`**, not `{...}`.
 8. **Multi-arity functions use `fn name { () => ..., (x) => ..., ... }`** — no `body` keyword after the name.
@@ -1482,6 +1519,9 @@ Quick hit-list — skim before writing code.
 14. **Tail calls are optimized.** Deep recursion is fine, but idiomatic code uses `for`, `while`, or `loop` for iteration.
 15. **The GC is real and precise.** Don't hold raw FFI pointers in Beagle values across arbitrary operations — prefer `ffi/Cell`, `ffi/Buffer` which are GC-managed.
 16. **Runtime errors are catchable AND resumable.** Prefer `Result` at API boundaries; use `try`/`catch` for true exceptional paths.
+17. **Seq HOFs are FUNCTION-FIRST** (Clojure order): `map(f, coll)`, `filter(pred, coll)`, `reduce(f, init, coll)`, `find(pred, coll)`, `sort-by(keyfn, coll)`, `group-by`, `take-while`, etc. `take`/`drop`/`partition`/`interpose` are count/sep-first (`take(n, coll)`). Collection-update fns stay collection-first (`assoc`/`get`/`update`/`dissoc`/`nth`). See §16.
+18. **No printf / format strings.** There is no `%f`/`format("%d", ...)`. Use `${...}` interpolation plus `beagle.text` helpers `fixed(x, n)`, `round-to(x, n)`, `commas(n)`, `pad-left`/`pad-right`. See §2.4.
+19. **Maps store `null` values and keys.** `get(m, k)` can't tell absent from null-valued; use `contains?(m, k)`, 3-arg `get(m, k, default)`, or `find-entry(m, k)`. `contains?` is polymorphic (map key / set member / vector index / string substring). See §17.
 
 ---
 
@@ -1510,9 +1550,9 @@ fn word-count(path) {
 fn main() {
     let counts = word-count("/tmp/example.txt")
     let top = counts
-        |> into([])              // {kw -> n} -> [[kw, n], ...]
-        |> sort-by(fn([_, n]) { 0 - n })
-        |> take(10)
+        |>> into([])             // {kw -> n} -> [[kw, n], ...]
+        |>> sort-by(fn([_, n]) { 0 - n })
+        |>> take(10)
 
     for [word, n] in top {
         println("${word}: ${n}")

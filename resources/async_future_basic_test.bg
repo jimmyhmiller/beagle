@@ -13,29 +13,29 @@ fn main() {
     let result = handle effect/Handler(async/Async) with handler {
         // Test 1: Basic async/await
         println("Test 1: Basic async/await")
-        let f1 = async/async(fn() { 42 })
+        let f1 = async/spawn(fn() { 42 })
         let v1 = async/await(f1)
         println("Result:", v1)
 
         // Test 2: Multiple futures
         println("Test 2: Multiple futures")
-        let f2 = async/async(fn() { "hello" })
-        let f3 = async/async(fn() { "world" })
+        let f2 = async/spawn(fn() { "hello" })
+        let f3 = async/spawn(fn() { "world" })
         let v2 = async/await(f2)
         let v3 = async/await(f3)
         println("Results:", v2, v3)
 
         // Test 3: await-all
         println("Test 3: await-all")
-        let fa = async/async(fn() { 1 })
-        let fb = async/async(fn() { 2 })
-        let fc = async/async(fn() { 3 })
+        let fa = async/spawn(fn() { 1 })
+        let fb = async/spawn(fn() { 2 })
+        let fc = async/spawn(fn() { 3 })
         let results = async/await-all([fa, fb, fc])
         println("All results:", results)
 
         // Test 4: Nested computation in async
         println("Test 4: Nested computation")
-        let f4 = async/async(fn() {
+        let f4 = async/spawn(fn() {
             let x = 10
             let y = 20
             x + y
@@ -45,7 +45,7 @@ fn main() {
 
         // Test 5: Future state check
         println("Test 5: Future state")
-        let f5 = async/async(fn() { "done" })
+        let f5 = async/spawn(fn() { "done" })
         let state5 = async/future-state(f5)
         match state5 {
             async/FutureState.Resolved { value } => {

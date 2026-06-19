@@ -57,20 +57,20 @@ fn main() {
     println(result9)
 
     // Test with map, filter, reduce
-    // map(coll, f), filter(coll, pred), reduce(coll, init, f) all take collection first
-    // so |> works great for chaining
+    // map(f, coll), filter(pred, coll), reduce(f, init, coll) all take collection LAST
+    // so |>> (last-arg pipe) is what chains them
 
-    let doubled = [1, 2, 3, 4, 5] |> map(fn(x) { x * 2 })
+    let doubled = [1, 2, 3, 4, 5] |>> map(fn(x) { x * 2 })
     println(doubled)
 
-    let evens = [1, 2, 3, 4, 5, 6] |> filter(fn(x) { x % 2 == 0 })
+    let evens = [1, 2, 3, 4, 5, 6] |>> filter(fn(x) { x % 2 == 0 })
     println(evens)
 
-    let sum = [1, 2, 3, 4, 5] |> reduce(0, fn(acc, x) { acc + x })
+    let sum = [1, 2, 3, 4, 5] |>> reduce(fn(acc, x) { acc + x }, 0)
     println(sum)
 
     // Chain them together: double all numbers, filter > 4, sum them
-    let chained = [1, 2, 3, 4, 5] |> map(fn(x) { x * 2 }) |> filter(fn(x) { x > 4 }) |> reduce(0, fn(acc, x) { acc + x })
+    let chained = [1, 2, 3, 4, 5] |>> map(fn(x) { x * 2 }) |>> filter(fn(x) { x > 4 }) |>> reduce(fn(acc, x) { acc + x }, 0)
     println(chained)
 
     "done"

@@ -1,0 +1,87 @@
+namespace gaphunt_round6_fixes_test
+
+// Regression tests for defects found by the round-6 gap-hunt (probe vs Python
+// ground truth). Each test pins a fix so the bug can't silently return.
+
+use beagle.bigint as big
+use beagle.containers as c
+use beagle.mathx as m
+use beagle.glob as g
+use beagle.date as date
+use beagle.stream as s
+
+test "bigint from-int handles the most-negative tagged int (no overflow-to-0)" {
+    let min = -1152921504606846976
+    assert-eq!(big/to-string(big/from-int(min)), "-1152921504606846976")
+    // neighbors still fine
+    assert-eq!(big/to-string(big/from-int(min + 1)), "-1152921504606846975")
+    assert-eq!(big/to-string(big/from-int(0)), "0")
+    assert-eq!(big/to-string(big/from-int(42)), "42")
+    assert-eq!(big/to-string(big/from-int(0 - 42)), "-42")
+}
+
+test "DefaultMap distinguishes stored-null from absent" {
+    let dm = c/dm-assoc(c/dm-new(99), :a, null)
+    assert-eq!(c/dm-get(dm, :a), null)   // stored null, NOT the default
+    assert-eq!(c/dm-get(dm, :b), 99)     // absent -> default
+    // false is also a real stored value, not absence
+    let dm2 = c/dm-assoc(c/dm-new(99), :x, false)
+    assert-eq!(c/dm-get(dm2, :x), false)
+}
+
+test "mathx floor-div/floor-mod are correct for floats (Python semantics)" {
+    assert-eq!(m/floor-div(7.5, 2.0), 3.0)
+    assert-eq!(m/floor-div(0.0 - 7.5, 2.0), 0.0 - 4.0)
+    assert-eq!(m/floor-mod(7.5, 2.0), 1.5)
+    assert-eq!(m/floor-mod(0.0 - 7.5, 2.0), 0.5)
+    // ints still correct (floor toward -inf)
+    assert-eq!(m/floor-div(-7, 3), -3)
+    assert-eq!(m/floor-mod(-7, 3), 2)
+    assert-eq!(m/floor-div(7, 3), 2)
+}
+
+test "mathx parity correct for float inputs" {
+    assert!(m/is-odd?(3.0))
+    assert!(m/is-even?(4.0))
+    assert!(m/is-even?(3.0) == false)
+    assert!(m/is-odd?(4.0) == false)
+    // ints unaffected
+    assert!(m/is-even?(4))
+    assert!(m/is-odd?(3))
+}
+
+test "glob ** only crosses / as a whole path segment" {
+    // non-segment ** must NOT cross '/' (collapses to single *)
+    assert!(g/match?("a**b", "ax/yzb") == false)
+    assert!(g/match?("a**b", "axyzb"))           // within a segment, like *
+    // whole-segment ** does cross
+    assert!(g/match?("src/**/x", "src/a/b/x"))
+    assert!(g/match?("src/**/x", "src/x"))        // zero segments
+    // single-* never crosses '/'
+    assert!(g/match?("*", "a/b") == false)
+}
+
+test "date format-iso8601 emits signed, fixed-width years" {
+    let dt = date/DateTime { year: 0 - 44, month: 3, day: 15, hour: 12, minute: 0, second: 0 }
+    assert-eq!(date/format-iso8601(dt), "-0044-03-15T12:00:00Z")
+    let dt0 = date/DateTime { year: 0, month: 1, day: 1, hour: 0, minute: 0, second: 0 }
+    assert-eq!(date/format-iso8601(dt0), "0000-01-01T00:00:00Z")
+    let dt2 = date/DateTime { year: 2024, month: 6, day: 1, hour: 9, minute: 5, second: 7 }
+    assert-eq!(date/format-iso8601(dt2), "2024-06-01T09:05:07Z")
+}
+
+test "stream merge interleaves (round-robin), not concatenates" {
+    let merged = s/merge(s/from-vector([1, 2, 3]), s/from-vector([10, 20]))
+    assert-eq!(s/collect(merged), [1, 10, 2, 20, 3])
+}
+
+test "stream buffered does not crash on non-empty streams" {
+    let b = s/buffered(s/from-vector([10, 20, 30]), 2)
+    assert-eq!(s/collect(b), [10, 20, 30])
+    // buffer larger than stream
+    let b2 = s/buffered(s/from-vector([1]), 8)
+    assert-eq!(s/collect(b2), [1])
+    // empty stream
+    let b3 = s/buffered(s/from-vector([]), 4)
+    assert-eq!(s/collect(b3), [])
+}

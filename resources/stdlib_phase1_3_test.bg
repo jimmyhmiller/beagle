@@ -14,7 +14,10 @@ use beagle.url as url
 fn main() {
     // text
     println(text/repeat-string("ab", 3) == "ababab")
-    println(text/format("%s is %d", ["age", 42]) == "age is 42")
+    // printf replaced by ${...} string interpolation
+    let label = "age"
+    let n = 42
+    println("${label} is ${n}" == "age is 42")
     // base64 (RFC 4648)
     println(b64/encode("Man") == "TWFu")
     println(b64/encode("hello") == "aGVsbG8=")

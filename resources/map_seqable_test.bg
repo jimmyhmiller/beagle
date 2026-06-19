@@ -15,13 +15,13 @@ fn main() {
     println(seq(m) != null)
 
     // sum the values via reduce over entries
-    println(reduce(m, 0, fn(acc, e) { acc + e[1] }) == 6)
+    println(reduce(fn(acc, e) { acc + e[1] }, 0, m) == 6)
 
     // count works
     println(count(m) == 3)
 
     // map over entries (sort the resulting keys to make it deterministic)
-    let ks = sort(map(m, fn(e) { e[0] }))
+    let ks = sort(map(fn(e) { e[0] }, m))
     println(ks == [:a, :b, :c])
 
     // empty map seqs to null

@@ -13,5 +13,5 @@ fn main() {
 }
 
 // @beagle.core.snapshot
-// Caught error: SystemError.TypeError { message: "Cannot access property 'foo' on null", location: null }
+// Caught error: SystemError.TypeError { message: "Cannot access property 'foo' on null", location: "null_property_test/main (resources/null_property_test.bg:3)" }
 // done

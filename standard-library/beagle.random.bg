@@ -441,7 +441,7 @@ fn main() {
     let rsa = make-rng(2718)
     let samp = sample(rsa, orig, 4)
     check("sample size", 4, length(samp))
-    check-true("sample elements all from v", all?(samp, fn(x) { contains-elem(orig, x) }))
+    check-true("sample elements all from v", all?(fn(x) { contains-elem(orig, x) }, samp))
     check-true("sample elements distinct", distinct-count(samp) == length(samp))
     check-true("sample k=0 empty", length(sample(make-rng(1), orig, 0)) == 0)
     check-true("sample k=n is permutation", multiset-equal(orig, sample(make-rng(5), orig, length(orig))))
@@ -490,7 +490,7 @@ fn main() {
 // --- test helpers ---
 
 fn contains-elem(v, e) {
-    any?(v, fn(x) { equal(x, e) })
+    any?(fn(x) { equal(x, e) }, v)
 }
 
 fn distinct-count(v) {

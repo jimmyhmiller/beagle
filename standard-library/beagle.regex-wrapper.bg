@@ -103,7 +103,7 @@ fn find(pattern, s) {
 //   find-all("[0-9]+", "a1b22c333")  // => ["1", "22", "333"]
 //   find-all("a*", "aba")            // => ["a", "", "a", ""]
 fn find-all(pattern, s) {
-    map(find-all-positions(pattern, s), fn(d) { get(d, :match) })
+    map(fn(d) { get(d, :match) }, find-all-positions(pattern, s))
 }
 
 // Vector of match descriptors for every match: each is a map

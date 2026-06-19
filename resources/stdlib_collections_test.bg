@@ -12,51 +12,51 @@ fn even?(n) {
 
 fn main() {
     // Test map
-    let doubled = map([1, 2, 3], fn(x) { x * 2 })
+    let doubled = map(fn(x) { x * 2 }, [1, 2, 3])
     println("map:", doubled)
 
     // Test filter
-    let evens = filter([1, 2, 3, 4, 5], fn(x) { even?(x) })
+    let evens = filter(fn(x) { even?(x) }, [1, 2, 3, 4, 5])
     println("filter:", evens)
 
     // Test reduce
-    let sum = reduce([1, 2, 3, 4], 0, fn(acc, x) { acc + x })
+    let sum = reduce(fn(acc, x) { acc + x }, 0, [1, 2, 3, 4])
     println("reduce:", sum)
 
     // Test any?
-    let has-even = any?([1, 3, 4, 5], fn(x) { even?(x) })
+    let has-even = any?(fn(x) { even?(x) }, [1, 3, 4, 5])
     println("any?:", has-even)
 
     // Test all?
-    let all-positive = all?([1, 2, 3], fn(x) { x > 0 })
+    let all-positive = all?(fn(x) { x > 0 }, [1, 2, 3])
     println("all?:", all-positive)
 
     // Test none?
-    let no-negatives = none?([1, 2, 3], fn(x) { x < 0 })
+    let no-negatives = none?(fn(x) { x < 0 }, [1, 2, 3])
     println("none?:", no-negatives)
 
     // Test find
-    let found = find([1, 2, 3, 4], fn(x) { x > 2 })
+    let found = find(fn(x) { x > 2 }, [1, 2, 3, 4])
     println("find:", found)
 
     // Test find-index
-    let idx = find-index([1, 2, 3, 4], fn(x) { x > 2 })
+    let idx = find-index(fn(x) { x > 2 }, [1, 2, 3, 4])
     println("find-index:", idx)
 
     // Test take
-    let first-two = take([1, 2, 3, 4], 2)
+    let first-two = take(2, [1, 2, 3, 4])
     println("take:", first-two)
 
     // Test drop
-    let after-two = drop([1, 2, 3, 4], 2)
+    let after-two = drop(2, [1, 2, 3, 4])
     println("drop:", after-two)
 
     // Test take-while
-    let while-small = take-while([1, 2, 3, 4, 1], fn(x) { x < 3 })
+    let while-small = take-while(fn(x) { x < 3 }, [1, 2, 3, 4, 1])
     println("take-while:", while-small)
 
     // Test drop-while
-    let after-small = drop-while([1, 2, 3, 4, 1], fn(x) { x < 3 })
+    let after-small = drop-while(fn(x) { x < 3 }, [1, 2, 3, 4, 1])
     println("drop-while:", after-small)
 
     // Test slice
@@ -85,19 +85,19 @@ fn main() {
     println("flatten:", flatten([[1, 2], [3, 4]]))
 
     // Test flat-map
-    println("flat-map:", flat-map([1, 2], fn(x) { [x, x * 10] }))
+    println("flat-map:", flat-map(fn(x) { [x, x * 10] }, [1, 2]))
 
     // Test zip
     println("zip:", zip([1, 2, 3], ["a", "b", "c"]))
 
     // Test zip-with
-    println("zip-with:", zip-with([1, 2, 3], [10, 20, 30], fn(a, b) { a + b }))
+    println("zip-with:", zip-with(fn(a, b) { a + b }, [1, 2, 3], [10, 20, 30]))
 
     // Test interleave
     println("interleave:", interleave([1, 2, 3], ["a", "b", "c"]))
 
     // Test interpose
-    println("interpose:", interpose([1, 2, 3], 0))
+    println("interpose:", interpose(0, [1, 2, 3]))
 
     // Test reverse
     println("reverse:", reverse([1, 2, 3]))
@@ -116,10 +116,10 @@ fn main() {
     println("iterate:", iterate(fn(x) { x * 2 }, 1, 5))
 
     // Test partition
-    println("partition:", partition([1, 2, 3, 4, 5, 6], 2))
+    println("partition:", partition(2, [1, 2, 3, 4, 5, 6]))
 
     // Test group-by
-    println("group-by:", group-by([1, 2, 3, 4, 5, 6], fn(x) { mod(x, 2) }))
+    println("group-by:", group-by(fn(x) { mod(x, 2) }, [1, 2, 3, 4, 5, 6]))
 
     // Test frequencies
     println("frequencies:", frequencies([1, 1, 2, 2, 2, 3]))
@@ -131,7 +131,7 @@ fn main() {
     println("sort:", sort([3, 1, 4, 1, 5, 9, 2, 6]))
 
     // Test sort-by
-    println("sort-by:", sort-by(["bb", "a", "ccc"], fn(s) { length(s) }))
+    println("sort-by:", sort-by(fn(s) { length(s) }, ["bb", "a", "ccc"]))
 
     // Test identity
     let id-result = identity(42)

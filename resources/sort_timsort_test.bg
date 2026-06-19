@@ -79,13 +79,13 @@ fn main() {
     check-sorted("large-random-b", lcg-seq(1000, 123))
 
     // sort-by
-    let by-len = sort-by(["bb", "a", "cccc", "ddd"], fn(s) { length(s) })
+    let by-len = sort-by(fn(s) { length(s) }, ["bb", "a", "cccc", "ddd"])
     println("sort-by-len:", by-len)
 
     // Stability: sort pairs [key, tag] by key; original order of equal keys
     // must be preserved. Input alternates tag 0/1 per key.
     let pairs = [[2, 0], [1, 0], [2, 1], [1, 1], [3, 0], [1, 2]]
-    let by-first = sort-by(pairs, fn(p) { get(p, 0) })
+    let by-first = sort-by(fn(p) { get(p, 0) }, pairs)
     println("stable:", by-first)
 }
 

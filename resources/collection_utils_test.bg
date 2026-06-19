@@ -10,8 +10,8 @@ fn main() {
     println("\nTesting min-by and max-by:")
     let words = ["cat", "elephant", "dog", "butterfly"]
     println("Words: " ++ format(words, 0))
-    let shortest = min-by(words, fn(s) { length(s) })
-    let longest = max-by(words, fn(s) { length(s) })
+    let shortest = min-by(fn(s) { length(s) }, words)
+    let longest = max-by(fn(s) { length(s) }, words)
     println("Shortest word: " ++ shortest)
     println("Longest word: " ++ longest)
 
@@ -20,16 +20,16 @@ fn main() {
     println("Items: " ++ format(items, 0))
 
     // Regular reduce (left to right): ((((0 - 1) - 2) - 3) - 4) = -10
-    let left = reduce(items, 0, fn(acc, x) { acc - x })
+    let left = reduce(fn(acc, x) { acc - x }, 0, items)
     println("reduce (left to right): " ++ to-string(left))
 
     // Reduce-right (right to left): ((((0 - 4) - 3) - 2) - 1) = -10
-    let right = reduce-right(items, 0, fn(acc, x) { acc - x })
+    let right = reduce-right(fn(acc, x) { acc - x }, 0, items)
     println("reduce-right (right to left): " ++ to-string(right))
 
     // Build a list to show order
-    let build-left = reduce(items, [], fn(acc, x) { push(acc, x) })
-    let build-right = reduce-right(items, [], fn(acc, x) { push(acc, x) })
+    let build-left = reduce(fn(acc, x) { push(acc, x) }, [], items)
+    let build-right = reduce-right(fn(acc, x) { push(acc, x) }, [], items)
     println("Build order (left): " ++ format(build-left, 0))
     println("Build order (right): " ++ format(build-right, 0))
 

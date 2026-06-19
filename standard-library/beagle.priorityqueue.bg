@@ -180,7 +180,7 @@ fn pq-pop(pq) {
         } else {
             // Move the last element to the root, drop the tail, sift down.
             let last-val = get(v, len - 1)
-            let without-last = take(v, len - 1)
+            let without-last = take(len - 1, v)
             let with-new-root = assoc(without-last, 0, last-val)
             let new-items = pq-sift-down(with-new-root, 0, cmp)
             [root, PriorityQueue { items: new-items, compare: cmp }]

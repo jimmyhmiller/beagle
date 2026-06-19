@@ -20,9 +20,9 @@ fn threw?(thunk) {
 
 fn main() {
     // seq idempotency across collection kinds
-    println(reduce(seq([1, 2, 3]), 0, fn(a, e) { a + e }) == 6)
+    println(reduce(fn(a, e) { a + e }, 0, seq([1, 2, 3])) == 6)
     println(stats/mean(seq([2, 4, 6])) == 4.0)
-    println(map(seq([1, 2, 3]), fn(x) { x * 2 }) == [2, 4, 6])
+    println(map(fn(x) { x * 2 }, seq([1, 2, 3])) == [2, 4, 6])
     println(count(seq("abc")) == 3)
 
     // ip leading-zero octets rejected; valid still parse; bare 0 ok
@@ -40,7 +40,7 @@ fn main() {
     println(re/find-all("a*", "aba") == ["a", "", "a", ""])
     println(re/find-all("[0-9]+", "a1b22c333") == ["1", "22", "333"])
     let positions = re/find-all-positions("a*", "aba")
-    println(map(positions, fn(d) { get(d, :match) }) == re/find-all("a*", "aba"))
+    println(map(fn(d) { get(d, :match) }, positions) == re/find-all("a*", "aba"))
 }
 
 // @beagle.core.snapshot

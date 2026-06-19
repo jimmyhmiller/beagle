@@ -1,0 +1,140 @@
+namespace map_null_values_test
+
+// Regression tests for HAMT maps storing null values the Clojure way:
+// occupancy is via the node bitmap, branch-vs-leaf is discriminated by the KEY
+// slot (never by value == null), and lookups use an internal not-found sentinel
+// so a stored null is distinguishable from a missing key.
+
+test "stored null value is retrievable and distinct from absent" {
+    let m = assoc({}, :a, null)
+    // get cannot tell stored-null from absent (Clojure's 2-arg wart)
+    assert-eq!(get(m, :a), null)
+    assert-eq!(get(m, :missing), null)
+    // ...but contains?/find-entry/3-arg get can
+    assert!(contains?(m, :a))
+    assert!(contains?(m, :missing) == false)
+    assert-eq!(get(m, :a, "default"), null)
+    assert-eq!(get(m, :missing, "default"), "default")
+}
+
+test "find-entry distinguishes stored null from missing" {
+    let m = assoc({}, :a, null)
+    let entry = find-entry(m, :a)
+    assert-eq!(get(entry, 0), :a)
+    assert-eq!(get(entry, 1), null)
+    assert-eq!(find-entry(m, :missing), null)
+}
+
+test "count and keys include null-valued entries" {
+    let m = assoc(assoc({}, :a, null), :b, 2)
+    assert-eq!(length(m), 2)
+    let ks = keys(m)
+    assert-eq!(length(ks), 2)
+    // both keys recoverable
+    assert!(contains?(m, :a))
+    assert!(contains?(m, :b))
+}
+
+test "null value survives overwrite both directions" {
+    let m1 = assoc({}, :a, 1)
+    let m2 = assoc(m1, :a, null)
+    assert-eq!(get(m2, :a), null)
+    assert!(contains?(m2, :a))
+    let m3 = assoc(m2, :a, 99)
+    assert-eq!(get(m3, :a), 99)
+}
+
+test "null keys work (null is never a node marker)" {
+    let m = assoc({}, null, "null-key-value")
+    assert-eq!(get(m, null), "null-key-value")
+    assert!(contains?(m, null))
+    let m2 = assoc(m, null, null)
+    assert-eq!(get(m2, null), null)
+    assert!(contains?(m2, null))
+    assert-eq!(get(m2, null, "d"), null)
+}
+
+test "many null-valued entries (forces array-node promotion)" {
+    let mut m = {}
+    let mut i = 0
+    while i < 40 {
+        m = assoc(m, i, null)
+        i = i + 1
+    }
+    assert-eq!(length(m), 40)
+    // every key present with null value
+    let mut j = 0
+    while j < 40 {
+        assert!(contains?(m, j))
+        assert-eq!(get(m, j), null)
+        assert-eq!(get(m, j, "missing"), null)
+        j = j + 1
+    }
+    assert!(contains?(m, 100) == false)
+    assert-eq!(get(m, 100, "missing"), "missing")
+    // keys() returns all 40
+    assert-eq!(length(keys(m)), 40)
+}
+
+test "dissoc preserves remaining null values" {
+    let m = assoc(assoc(assoc({}, :a, null), :b, null), :c, 3)
+    let m2 = dissoc(m, :c)
+    assert-eq!(length(m2), 2)
+    assert!(contains?(m2, :a))
+    assert!(contains?(m2, :b))
+    assert!(contains?(m2, :c) == false)
+    assert-eq!(get(m2, :a), null)
+}
+
+test "contains? is polymorphic" {
+    // String => substring
+    assert!(contains?("hello world", "lo wo"))
+    assert!(contains?("hello", "xyz") == false)
+    // Map => key presence
+    assert!(contains?({:a 1}, :a))
+    assert!(contains?({:a 1}, :b) == false)
+    // Set => membership
+    assert!(contains?(#{1, 2, 3}, 2))
+    assert!(contains?(#{1, 2, 3}, 9) == false)
+    // Vector => index in range
+    assert!(contains?([10, 20, 30], 0))
+    assert!(contains?([10, 20, 30], 2))
+    assert!(contains?([10, 20, 30], 3) == false)
+    assert!(contains?([10, 20, 30], 0 - 1) == false)
+}
+
+test "3-arg get on vector still uses default for out-of-range" {
+    let v = [1, 2, 3]
+    assert-eq!(get(v, 0, "d"), 1)
+    assert-eq!(get(v, 9, "d"), "d")
+}
+
+test "merge copies null values" {
+    let m1 = assoc({}, :a, 1)
+    let m2 = assoc({}, :b, null)
+    let merged = merge(m1, m2)
+    assert-eq!(length(merged), 2)
+    assert!(contains?(merged, :b))
+    assert-eq!(get(merged, :b), null)
+}
+
+test "merge-with treats present-with-null as present" {
+    // key :a present in m1 with null value -> resolver must run, not be skipped
+    let m1 = assoc({}, :a, null)
+    let m2 = assoc({}, :a, 5)
+    let merged = merge-with(fn(v1, v2) { [v1, v2] }, m1, m2)
+    let pair = get(merged, :a)
+    assert-eq!(get(pair, 0), null)
+    assert-eq!(get(pair, 1), 5)
+}
+
+test "select-keys keeps present-with-null entries" {
+    let m = assoc(assoc({}, :a, null), :b, 2)
+    let selected = select-keys(m, [:a])
+    assert-eq!(length(selected), 1)
+    assert!(contains?(selected, :a))
+    assert-eq!(get(selected, :a), null)
+    // a requested key that is absent is not added
+    let selected2 = select-keys(m, [:a, :missing])
+    assert-eq!(length(selected2), 1)
+}

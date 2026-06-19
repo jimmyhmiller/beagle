@@ -111,7 +111,15 @@ fn pad-num(n, width) {
 }
 
 fn format-iso8601(dt) {
-    pad-num(dt.year, 4) ++ "-" ++
+    // ISO 8601 years are a fixed-width 4-digit field; negative years carry a
+    // leading '-' and the DIGITS are still zero-padded to 4 (e.g. -0044). Pad the
+    // magnitude, not the signed value, so the sign doesn't eat a digit slot.
+    let year-str = if dt.year < 0 {
+        "-" ++ pad-num(0 - dt.year, 4)
+    } else {
+        pad-num(dt.year, 4)
+    }
+    year-str ++ "-" ++
     pad-num(dt.month, 2) ++ "-" ++
     pad-num(dt.day, 2) ++ "T" ++
     pad-num(dt.hour, 2) ++ ":" ++

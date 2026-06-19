@@ -1252,11 +1252,36 @@ fn merge(stream1, stream2) {
         left: stream1,
         right: stream2,
         left_done: atom(false),
-        right_done: atom(false)
+        right_done: atom(false),
+        turn: atom(0)
     })
 }
 
-struct MergeSource { left, right, left_done, right_done }
+struct MergeSource { left, right, left_done, right_done, turn }
+
+// Pull one side of a merge. On Done, mark that side finished and pull the OTHER
+// side (so we never yield Done while a side still has elements). On Error, mark
+// the side finished and propagate. `from-left` selects the side.
+fn merge-pull(self, from-left) {
+    let s = if from-left { self.left } else { self.right }
+    let result = next(s)
+    match result {
+        StreamResult.Done {} => {
+            if from-left {
+                reset!(self.left_done, true)
+                if deref(self.right_done) { StreamResult.Done {} } else { merge-pull(self, false) }
+            } else {
+                reset!(self.right_done, true)
+                if deref(self.left_done) { StreamResult.Done {} } else { merge-pull(self, true) }
+            }
+        },
+        StreamResult.Error { error } => {
+            if from-left { reset!(self.left_done, true) } else { reset!(self.right_done, true) }
+            result
+        },
+        _ => result
+    }
+}
 
 extend MergeSource with StreamSource {
     fn source-next(self) {
@@ -1266,23 +1291,15 @@ extend MergeSource with StreamSource {
         if l_done && r_done {
             StreamResult.Done {}
         } else if l_done {
-            next(self.right)
+            merge-pull(self, false)
         } else if r_done {
-            next(self.left)
+            merge-pull(self, true)
         } else {
-            // Both active - alternate (simple round-robin)
-            let result = next(self.left)
-            match result {
-                StreamResult.Done {} => {
-                    reset!(self.left_done, true)
-                    next(self.right)
-                },
-                StreamResult.Error { error } => {
-                    reset!(self.left_done, true)
-                    result
-                },
-                _ => result
-            }
+            // Both active — genuinely alternate via a turn flag so the output is
+            // round-robin (left, right, left, right, …) rather than left-then-right.
+            let t = deref(self.turn)
+            reset!(self.turn, if t == 0 { 1 } else { 0 })
+            merge-pull(self, t == 0)
         }
     }
 
@@ -1354,8 +1371,10 @@ extend BufferedSource with StreamSource {
     fn source-next(self) {
         let buf = deref(self.buffer)
         if core/length(buf) > 0 {
-            // Return buffered value
-            let value = core/first(buf)
+            // Return buffered value. The buffer is a PersistentVector (built with
+            // push), which is Seqable but not itself a Seq — so use indexed get,
+            // not first (the Seq protocol method, which needs a live seq).
+            let value = core/get(buf, 0)
             reset!(self.buffer, core/rest(buf))
             StreamResult.Value { value: value }
         } else {
@@ -1383,7 +1402,7 @@ extend BufferedSource with StreamSource {
             if core/length(new_buf) == 0 {
                 StreamResult.Done {}
             } else {
-                let value = core/first(new_buf)
+                let value = core/get(new_buf, 0)
                 reset!(self.buffer, core/rest(new_buf))
                 StreamResult.Value { value: value }
             }

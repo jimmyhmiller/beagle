@@ -1,14 +1,14 @@
 namespace redefine_variadic_fn_test
 
 fn sum(...nums) {
-    reduce(nums, 0, fn(acc, n) { acc + n })
+    reduce(fn(acc, n) { acc + n }, 0, nums)
 }
 
 fn log(...args) {
-    let msg = reduce(args, "", fn(acc, a) {
+    let msg = reduce(fn(acc, a) {
         if acc == "" { to-string(a) }
         else { acc ++ " " ++ to-string(a) }
-    })
+    }, "", args)
     println(msg)
 }
 
@@ -21,7 +21,7 @@ fn main() {
     // Redefine sum to multiply instead
     eval("
         fn sum(...nums) {
-            reduce(nums, 1, fn(acc, n) { acc * n })
+            reduce(fn(acc, n) { acc * n }, 1, nums)
         }
     ")
 
@@ -31,9 +31,9 @@ fn main() {
     // Redefine log to add prefix
     eval("
         fn log(...args) {
-            let msg = reduce(args, \"[LOG]\", fn(acc, a) {
+            let msg = reduce(fn(acc, a) {
                 acc ++ \" \" ++ to-string(a)
-            })
+            }, \"[LOG]\", args)
             println(msg)
         }
     ")
@@ -44,7 +44,7 @@ fn main() {
     // Redefine back to original sum
     eval("
         fn sum(...nums) {
-            reduce(nums, 0, fn(acc, n) { acc + n })
+            reduce(fn(acc, n) { acc + n }, 0, nums)
         }
     ")
 

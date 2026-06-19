@@ -61,7 +61,7 @@ fn send-and-receive(conn, request) {
 
                 // Check for done status
                 let status = get(msg, "status")
-                if status != null && any?(status, fn(s) { s == "done" }) {
+                if status != null && any?(fn(s) { s == "done" }, status) {
                     done = true
                 }
             }
