@@ -1,0 +1,70 @@
+namespace worker_thread_io_check_test
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.channel as chan
+
+// ============================================================================
+// §2.1 STEP 0 — gating capability check.
+// ============================================================================
+// Question: can a thread spawned FROM a `test {}` body do real socket I/O,
+// even though the test body itself runs WITHOUT the ambient cooperative async
+// handler? (FUTURE_WORK §2.1 "Gap 1" assumption.)
+//
+// If GREEN: the synchronous-barrier test design needs no async-handler fix —
+// worker threads (which DO get their own cooperative scheduler via
+// __run_thread_start -> run-cooperative) carry all the I/O, and the test body
+// only ever touches pure-atom channels (CAS busy-spin, no async effect).
+//
+// Determinism is from happens-before, never timing:
+//   - server sends "listening" on `ready_ch` AFTER socket/listen returns;
+//   - the client receives that before it connects (so no connect-refusal retry);
+//   - the test body blocks on `result_ch`, which the server fills only after it
+//     has read the client's bytes to EOF.
+// The test body performs NO async op — only chan/receive (busy-spin on an atom).
+
+// Accumulate bytes until the peer closes (EOF -> read returns null/"").
+fn read-to-eof(conn) {
+    let mut acc = ""
+    let mut done = false
+    while done == false {
+        let data = socket/read(conn, 64)
+        if data == null || data == "" {
+            done = true
+        } else {
+            acc = acc ++ data
+        }
+    }
+    acc
+}
+
+test "worker threads spawned from a test body can do socket I/O" {
+    let host = "127.0.0.1"
+    let port = 20000 + core/random-int(15000)
+    let ready_ch = chan/make-channel()
+    let result_ch = chan/make-channel()
+
+    // Server worker — ALL listen/accept/read socket I/O happens here, in a
+    // spawned thread (which has its own cooperative scheduler).
+    thread(fn() {
+        let listener = socket/listen(host, port)
+        chan/send!(ready_ch, "listening")     // happens-after listen returns
+        let conn = socket/accept(listener)
+        let data = read-to-eof(conn)
+        chan/send!(result_ch, data)
+        socket/close(conn)
+        socket/close-listener(listener)
+    })
+
+    // Client worker — connects ONLY after the server signals it is listening.
+    thread(fn() {
+        chan/receive(ready_ch)                // happens-after listen
+        let conn = socket/connect(host, port)
+        socket/write(conn, "ping")
+        socket/close(conn)                    // graceful close flushes "ping" then EOF
+    })
+
+    // Test body: ONLY a channel receive (pure-atom spin — no async effect).
+    let got = chan/receive(result_ch)
+    assert-eq!(got, "ping")
+}
