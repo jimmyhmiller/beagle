@@ -2,112 +2,57 @@ namespace repl_session_test
 
 use beagle.core as core
 use beagle.repl-session as session
+use beagle.test-async as ta
 
 // ============================================================================
-// REPL Session Tests
+// REPL session tests (deterministic test{} blocks).
 // ============================================================================
-// Tests session creation, eval, output capture, and cancellation.
+// Tests in-process session eval + output capture. Previously skipped because it
+// relied on `core/sleep(100)` to "wait" for the session thread — a timing guess.
+//
+// DETERMINISM (happens-before, never timing): session-eval returns a
+// `result_atom` that the session-eval-loop thread reset!s EXACTLY ONCE — to the
+// complete responses vector — when the eval finishes (process-eval-request ->
+// build-responses -> reset!). That single atomic publish is a real happens-before
+// edge. We poll that visible write with await-condition! (watchdog-bounded: a
+// hung eval is a HARD FAIL, never a hang), then read the finished responses.
+// No sleep, no scheduling guess. The session machinery owns its own thread, so
+// the test body performs no async op — only atom polls + asserts.
 
-fn test-output-capture() {
-    println("Testing output capture...")
-
-    let results = []
-    let results_atom = atom(results)
-
-    let sess = session/create-session("test-1")
-
-    // Submit eval request that prints
-    session/session-eval(sess, "req-1", "println(\"Hello from session\")", fn(resp) {
-        swap!(results_atom, fn(res) {
-            push(res, resp)
-        })
-    })
-
-    // Wait for eval to complete
-    core/sleep(100)
-
-    // Check results
-    let responses = deref(results_atom)
-    println("Got", length(responses), "responses")
-
-    // Should have: output message, value message, done message
+// First non-null value of `key` across a responses vector.
+fn find-field(responses, key) {
+    let mut v = null
     let mut i = 0
     while i < length(responses) {
-        let resp = nth(responses, i)
-        let id = get(resp, :id)
-        let out = get(resp, :out)
-        let value = get(resp, :value)
-        let status = get(resp, :status)
-
-        if out != null {
-            println("  Output:", out)
-        }
-        if value != null {
-            println("  Value:", value)
-        }
-        if status != null {
-            println("  Status:", status)
-        }
-
+        let rv = get(nth(responses, i), key)
+        if rv != null { v = rv }
         i = i + 1
     }
+    v
+}
 
+// Submit `code` and deterministically wait for the session thread's single
+// visible publish of the complete responses vector.
+fn eval-and-wait(sess, req_id, code) {
+    let result_atom = session/session-eval(sess, req_id, code)
+    ta/await-condition!(fn() { deref(result_atom) != null })
+    deref(result_atom)
+}
+
+test "session eval returns the value (no sleep)" {
+    let sess = session/create-session("test-eval")
+    let responses = eval-and-wait(sess, "req-1", "1 + 2")
+    // result_atom is published only with the COMPLETE vector (incl. :status
+    // ["done"]), so this is a finished eval, not a partial read.
+    assert!(find-field(responses, :status) != null)
+    assert-eq!(find-field(responses, :value), "3")
     session/session-close(sess)
 }
 
-fn test-simple-eval() {
-    println("Testing simple eval...")
-
-    let results = []
-    let results_atom = atom(results)
-
-    let sess = session/create-session("test-2")
-
-    // Submit eval request
-    session/session-eval(sess, "req-2", "1 + 2", fn(resp) {
-        swap!(results_atom, fn(res) {
-            push(res, resp)
-        })
-    })
-
-    // Wait for eval to complete
-    core/sleep(100)
-
-    // Check results
-    let responses = deref(results_atom)
-    println("Got", length(responses), "responses")
-
-    let mut i = 0
-    while i < length(responses) {
-        let resp = nth(responses, i)
-        let value = get(resp, :value)
-        let status = get(resp, :status)
-
-        if value != null {
-            println("  Value:", value)
-        }
-        if status != null {
-            println("  Status:", status)
-        }
-
-        i = i + 1
-    }
-
+test "session eval captures printed output (no sleep)" {
+    let sess = session/create-session("test-out")
+    let responses = eval-and-wait(sess, "req-2", "println(\"Hello from session\")")
+    assert!(find-field(responses, :status) != null)
+    assert-eq!(find-field(responses, :out), "Hello from session")
     session/session-close(sess)
 }
-
-fn main() {
-    println("REPL Session Tests")
-    println("==================")
-    println("")
-
-    test-simple-eval()
-    println("")
-
-    test-output-capture()
-    println("")
-
-    println("Tests complete")
-}
-
-// Skip: Session thread timing and output ordering depends on scheduling

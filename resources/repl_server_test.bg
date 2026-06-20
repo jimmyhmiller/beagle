@@ -3,37 +3,46 @@ namespace repl_server_test
 use beagle.core as core
 use beagle.socket as socket
 use beagle.repl as repl
+use beagle.channel as chan
+use beagle.test-async as ta
 
 // ============================================================================
-// Deterministic REPL-server end-to-end live-coding test.
+// Deterministic REPL-server end-to-end live-coding test (test{} block).
 // ============================================================================
 // Starts a real REPL server on a background thread and drives it as a client
 // over the socket, proving the LIVE-CODING SURFACE: a function / struct /
 // protocol redefinition issued through the REPL is correct and observable on
 // the very next eval.
 //
-// WHY main()+snapshot (not a `test {}` block): a `test {}` block currently runs
-// WITHOUT the ambient cooperative async handler (only main() and spawned
-// threads get it — see beagle.async/__main__), so socket ops, which `perform`
-// an async effect, can't run in a test body. main() has the handler. (Giving
-// `test {}` blocks an async runtime is a separate, larger change — tracked in
-// docs/FUTURE_WORK.md.)
+// WHY THIS IS A `test {}` BLOCK (was main()+snapshot): a test body runs without
+// the ambient cooperative async handler, but a thread spawned FROM it gets its
+// own scheduler (see resources/worker_thread_io_check_test.bg). So ALL socket
+// I/O happens in two worker threads (server + client); the TEST BODY only does
+// channel receives (pure-atom CAS spin — no async effect) and asserts.
 //
-// DETERMINISM (argued from happens-before, not timing):
-//  - Startup: the server sets `ready` to true right AFTER socket/listen returns
-//    (happens-before); main waits for it, then connects (no sleep-to-guess, no
-//    refusal-retry).
+// DETERMINISM (happens-before, never timing):
+//  - Startup: the server sets `ready` right AFTER socket/listen returns; the
+//    client worker awaits that visible write (await-condition!) before it
+//    connects — no connect-refusal retry, no sleep-to-guess.
 //  - Op ordering: the REPL protocol is synchronous request->response.
-//    `send-and-receive` blocks until the `:status ["done"]` terminator, so op
-//    N+1 is not sent until op N is fully drained. The server is single-threaded
-//    per client and `handle-eval` spin-waits on a single atomic publish of the
-//    COMPLETE response before sending — so a response happens-after the eval
-//    fully completed (incl. a structural redefine's in-eval STW migration).
-//  - A torn / half-applied redefine deterministically FAILS the snapshot: the
-//    next call prints the OLD value (distinct from NEW, so they never coincide)
-//    or an error.
-//  - Output determinism: the server is started in `quiet` mode (no server-side
-//    prints), so main's stdout is exactly the lines below, in order.
+//    send-and-receive blocks until the `:status ["done"]` terminator, so op N+1
+//    is not sent until op N is fully drained; the server is single-threaded per
+//    client and publishes the COMPLETE response before sending (a response
+//    happens-after the eval fully completed, incl. a structural redefine's
+//    in-eval STW migration).
+//  - Client->test handoff: each observable value crosses a channel via send!
+//    (a happens-before edge). The channel is FIFO with ONE producer (the client
+//    worker), so the test body's ordered assert-receives! sequence is
+//    deterministic — value K is asserted against result K.
+//  - A torn/half-applied redefine deterministically FAILS: the next call yields
+//    the OLD value (distinct from NEW, so they never coincide) or an error, and
+//    assert-receives! reports the mismatch.
+//  - Shutdown: the client sets `stop` BEFORE closing the session, so when
+//    handle-client returns the server's post-session stop-check sees it and
+//    exits its accept loop (a test{} block has no process force-exit to mop up a
+//    lingering accept()). The test body barriers on BOTH workers finishing
+//    (client `done` + server `server-stopped`) before returning, so no thread
+//    leaks into the next test.
 //
 // SCOPE (no overclaim): proves the SEQUENTIAL live-coding surface. Does NOT
 // exercise concurrent dispatch during a redefine — that is the torn-read repro
@@ -113,61 +122,81 @@ fn eval-req(id, code) {
     {:op "eval", :id id, :session "live", :code code}
 }
 
-fn main() {
-    let host = "127.0.0.1"
-    let port = 20000 + core/random-int(15000)
-    let stop = atom(false)
-    let ready = atom(false)
-
-    // Quiet server on a background thread (threads have the async handler).
-    thread(fn() {
-        repl/start-repl-server-stoppable(host, port, stop, ready, true)
-    })
-
-    // Deterministic startup: the server sets `ready` right after socket/listen.
-    while !deref(ready) {
-        core/sleep(2)
-    }
+// The client worker: connect, drive the 14-op redefinition sequence, push each
+// observable value onto `results` in protocol order, then shut the session +
+// server down and signal `done`. Runs in a spawned thread (which has the async
+// handler), so its socket ops work even though the test BODY's does not.
+fn run-client(host, port, stop, ready, results, done) {
+    // Deterministic startup: await the server's visible `ready` write (set right
+    // after socket/listen). Watchdog-bounded, so a server that never starts is a
+    // hard fail, not a hang.
+    ta/await-condition!(fn() { deref(ready) })
     let conn = socket/connect(host, port)
 
     // ---- FUNCTION (value) redefinition: live recompile ----
     send-and-receive(conn, eval-req("1", "fn compute(n) { n + 1 }"))
-    println("fn-old: " ++ response-value(send-and-receive(conn, eval-req("2", "compute(99)"))))
+    chan/send!(results, response-value(send-and-receive(conn, eval-req("2", "compute(99)"))))
     send-and-receive(conn, eval-req("3", "fn compute(n) { n * 2 }"))
-    // OLD body would print 100; a torn/half-applied redefine breaks the snapshot.
-    println("fn-new: " ++ response-value(send-and-receive(conn, eval-req("4", "compute(99)"))))
+    chan/send!(results, response-value(send-and-receive(conn, eval-req("4", "compute(99)"))))
 
     // ---- STRUCT redefinition: ADD a field (fresh construction) ----
     send-and-receive(conn, eval-req("5", "struct Box { a }"))
     send-and-receive(conn, eval-req("6", "struct Box { a, b }"))
     send-and-receive(conn, eval-req("7", "fn box-b(x) { x.b }"))
     let s = send-and-receive(conn, eval-req("8", "box-b(Box { a: 1, b: 7 })"))
-    println("struct-newfield: " ++ response-value(s))
-    println("struct-err: " ++ to-string(response-error(s)))
+    chan/send!(results, response-value(s))
+    chan/send!(results, response-error(s))
 
     // ---- PROTOCOL redefinition: re-extend an impl ----
     send-and-receive(conn, eval-req("9", "protocol Greet { fn greet(self) }"))
     send-and-receive(conn, eval-req("10", "struct Person { n }"))
     send-and-receive(conn, eval-req("11", "extend Person with Greet { fn greet(self) { 1 } }"))
-    println("proto-old: " ++ response-value(send-and-receive(conn, eval-req("12", "greet(Person { n: 0 })"))))
+    chan/send!(results, response-value(send-and-receive(conn, eval-req("12", "greet(Person { n: 0 })"))))
     send-and-receive(conn, eval-req("13", "extend Person with Greet { fn greet(self) { 2 } }"))
-    println("proto-new: " ++ response-value(send-and-receive(conn, eval-req("14", "greet(Person { n: 0 })"))))
+    chan/send!(results, response-value(send-and-receive(conn, eval-req("14", "greet(Person { n: 0 })"))))
 
     // ---- DETERMINISTIC SHUTDOWN ----
-    // Close the session first (stops its eval-loop thread via the cancel token —
-    // otherwise that thread loops forever and the process can't exit), then stop
-    // the server and disconnect.
-    send-and-receive(conn, {:op "close", :id "98", :session "live"})
+    // Set `stop` FIRST so the server's post-session check (after handle-client
+    // returns) sees it and exits the accept loop; THEN close the session (which
+    // ends handle-client), then disconnect, then signal the test body.
     reset!(stop, true)
+    send-and-receive(conn, {:op "close", :id "98", :session "live"})
     socket/close(conn)
-    println("done")
+    chan/send!(done, "shutdown-complete")
 }
 
-// @beagle.core.snapshot
-// fn-old: 100
-// fn-new: 198
-// struct-newfield: 7
-// struct-err: null
-// proto-old: 1
-// proto-new: 2
-// done
+test "REPL server live-coding: fn/struct/protocol redefinition over the socket" {
+    let host = "127.0.0.1"
+    let port = 20000 + core/random-int(15000)
+    let stop = atom(false)
+    let ready = atom(false)
+    let results = chan/make-channel()
+    let done = chan/make-channel()
+    let server_done = chan/make-channel()
+
+    // Server worker (quiet). Signals `server-stopped` AFTER the accept loop
+    // exits, so the test body can barrier on the server thread fully finishing.
+    thread(fn() {
+        repl/start-repl-server-stoppable(host, port, stop, ready, true)
+        chan/send!(server_done, "server-stopped")
+    })
+
+    // Client worker — all socket I/O lives here.
+    thread(fn() {
+        run-client(host, port, stop, ready, results, done)
+    })
+
+    // Test body: assert each observable value in protocol order. Each crosses a
+    // happens-before edge (send!); single-producer FIFO => positional pairing.
+    // The REPL sends each eval result as its STRING representation (val_str).
+    ta/assert-receives!(results, "100")  // fn-old:          compute(99) = 99 + 1
+    ta/assert-receives!(results, "198")  // fn-new:          compute(99) = 99 * 2
+    ta/assert-receives!(results, "7")    // struct-newfield: box-b(Box{a:1,b:7})
+    ta/assert-receives!(results, null)   // struct-err:      none
+    ta/assert-receives!(results, "1")    // proto-old:       greet => 1
+    ta/assert-receives!(results, "2")    // proto-new:       greet => 2
+
+    // Barrier on BOTH workers completing before the test returns (no leaks).
+    ta/assert-receives!(done, "shutdown-complete")
+    ta/assert-receives!(server_done, "server-stopped")
+}
