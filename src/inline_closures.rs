@@ -651,6 +651,7 @@ mod tests {
             },
             value: Box::new(value),
             token_range: tr(),
+            once: false,
         }
     }
     fn call(name: &str, args: Vec<Ast>) -> Ast {

@@ -628,6 +628,7 @@ mod tests {
             },
             value: Box::new(id("v")),
             token_range: tr(),
+            once: false,
         }];
         assert!(var_escapes(&body, "v", &fns()));
     }
@@ -695,6 +696,7 @@ mod tests {
             },
             value: Box::new(value),
             token_range: tr(),
+            once: false,
         }
     }
     fn assign(lhs: Ast, rhs: Ast) -> Ast {
