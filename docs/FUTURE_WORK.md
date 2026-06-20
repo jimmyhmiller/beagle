@@ -156,12 +156,37 @@ regression coverage so they don't silently return:
 
 Currently skipped (`// Skip`) tests that represent real coverage holes:
 
-- `resources/repl_server_test.bg` — skipped: *"Output ordering depends on thread
-  scheduling and server doesn't exit."* The REPL server is the live-coding
-  surface; it has **no deterministic end-to-end test**. This is the most
-  important gap to close.
-- `resources/repl_session_test.bg` — skipped for the same scheduling/ordering
-  reason.
+- `resources/repl_server_test.bg` — 🟢 **DONE.** Now a deterministic
+  `main()`+snapshot end-to-end live-coding test: it starts a real REPL server
+  (made stoppable + readiness-signalling + quiet) and drives function / struct
+  (add-field) / protocol redefinition over the socket, asserting the new
+  behavior is observable on the next eval. Determinism comes from the
+  synchronous request→response barrier + a readiness atom (no sleeps). Building
+  it found and fixed the `update_binding` concurrent-redefinition race
+  (§1.2-adjacent). It is `main()`+snapshot rather than a `test {}` block because
+  of the async-handler gap below.
+- `resources/repl_session_test.bg` — still skipped for the same scheduling/ordering
+  reason; convert it the same way.
+
+**Found while building the REPL test (two real infra gaps):**
+
+- 🔴 **`test {}` blocks have no ambient async handler.** Only `main()` and
+  spawned threads get the cooperative scheduler (via `beagle.async/__main__` →
+  `run-cooperative`); a `test {}` body does not, so socket / file / `sleep`
+  ops (which `perform` an async effect) can't run in a test body, and even
+  threads spawned from a test body can't do I/O (no event loop). This is why
+  async tests are all `main()`+snapshot. Attempted fix: run each test body
+  under `run-cooperative` in `src/main.rs run_blocks` — non-async tests pass,
+  but socket/`sleep` in a test body then *hangs* (the cooperative parking
+  doesn't resume under the test-runner's nested invocation). Needs proper
+  integration before `test {}` blocks can test async/live-coding paths
+  directly.
+- 🔴 **`main` does not force-exit while spawned threads run.** A background
+  thread that never self-terminates blocks process exit (no force-exit
+  primitive) — verified with a minimal repro. The REPL test had to explicitly
+  `close` its session (to stop the session eval-loop thread) and stop the
+  server before `main` could return. Servers/long-lived-thread programs need a
+  force-exit or all threads must be cancellable.
 - `resources/struct_structural_redefine_race_test.bg` — now enabled as a `test`
   block, but historically the hardest to keep green; keep it in the
   always-run-under-`--gc-always` set.

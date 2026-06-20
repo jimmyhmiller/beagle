@@ -376,10 +376,34 @@ fn handle-client(client) {
 }
 
 fn start-repl-server(host, port) {
-    println("Starting REPL server on " ++ host ++ ":" ++ to-string(port))
+    // Production entry point: a stop atom that is never set, so the accept loop
+    // runs forever exactly as before. The existing 2-arg callers (jim-editor,
+    // examples, repl-main) are unaffected. The ready atom is a throwaway, and
+    // `quiet` is false so the usual startup logging is preserved.
+    start-repl-server-stoppable(host, port, atom(false), atom(false), false)
+}
+
+// Stoppable variant (for tests / embedders).
+//  - `ready-atom` is set to true right AFTER `socket/listen` returns, so a
+//    client can wait for it and then connect without racing startup (a
+//    happens-before readiness signal — no sleep, no connect-retry).
+//  - After the current client session ends, if `stop-atom` is true, close the
+//    listener and exit the accept loop. The stop check is on the path OUT of
+//    handle-client, so the server never re-blocks in `accept` once stop is
+//    observed — shutdown is deterministic (the test sets stop before
+//    disconnecting).
+//  - `quiet` suppresses the server's own stdout logging, so a snapshot test can
+//    drive it without nondeterministic cross-thread print interleaving.
+fn start-repl-server-stoppable(host, port, stop-atom, ready-atom, quiet) {
+    if !quiet {
+        println("Starting REPL server on " ++ host ++ ":" ++ to-string(port))
+    }
 
     let server = socket/listen(host, port)
-    println("REPL server listening...")
+    reset!(ready-atom, true)
+    if !quiet {
+        println("REPL server listening...")
+    }
 
     // Keep server handling single-threaded to avoid runtime races while still
     // supporting multiple sequential client sessions.
@@ -387,10 +411,21 @@ fn start-repl-server(host, port) {
     while running {
         try {
             let client = socket/accept(server)
-            println("Client connected")
+            if !quiet {
+                println("Client connected")
+            }
             handle-client(client)
+            if deref(stop-atom) == true {
+                try { socket/close-listener(server) } catch (e) { null }
+                running = false
+            }
         } catch (e) {
-            println("Error accepting connection:", e)
+            if !quiet {
+                println("Error accepting connection:", e)
+            }
+            if deref(stop-atom) == true {
+                running = false
+            }
         }
     }
 }
