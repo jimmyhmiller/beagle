@@ -106,11 +106,15 @@ pub extern "C" fn protocol_dispatch(
     //   indivisible store — the true "atomic 16-byte publish". Paired with the
     //   reader's atomic LDP, a torn key/value pairing is impossible.
     // - x86-64: an aligned 16-byte SSE store (MOVDQA) is single-copy atomic on
-    //   all AVX-capable x86-64, so it publishes key+value as one indivisible
-    //   event too — matching the reader's atomic MOVDQA snapshot. This is NOT a
-    //   locked instruction. (Two ordered 8-byte stores are NOT enough here: a
-    //   reader's atomic 16-byte load could still observe an old-key/new-value
-    //   intermediate memory state mid-publish.)
+    //   AVX-capable x86-64, so it publishes key+value as one indivisible event
+    //   too — matching the reader's atomic MOVDQA snapshot. This is NOT a locked
+    //   instruction. (Two ordered 8-byte stores are NOT enough here: a reader's
+    //   atomic 16-byte load could still observe an old-key/new-value
+    //   intermediate memory state mid-publish.) Precondition: 16-byte alignment
+    //   (debug_asserted below) + an AVX-capable CPU (Intel/AMD formally
+    //   guarantee aligned 16B SSE/AVX load/store atomicity on AVX parts, i.e.
+    //   every x86-64 since ~2011 — all of Beagle's x86 targets incl. Rosetta).
+    //   A pre-AVX x86-64 would need a CMPXCHG16B fallback; not a real target.
     // Slot 0 starts as the `usize::MAX` sentinel, so a reader racing the very
     // first publish simply misses and takes the (correct) slow path.
     #[cfg(target_arch = "aarch64")]
