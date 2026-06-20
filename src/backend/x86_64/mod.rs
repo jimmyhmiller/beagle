@@ -553,6 +553,22 @@ impl CodegenBackend for X86_64Backend {
         self.inner.load_pair(reg1, reg2, location, offset);
     }
 
+    fn load_pair_from_heap(
+        &mut self,
+        reg1: Self::Register,
+        reg2: Self::Register,
+        base: Self::Register,
+        offset: i32,
+    ) {
+        // x86-64 has no LDP; emit two contiguous 8-byte MOVs, KEY (reg1) FIRST
+        // then VALUE (reg2). x86 TSO preserves load->load program order, so a
+        // reader that sees a freshly published key (offset 0) also sees the
+        // matching value (offset 8) written before it by the producer — no
+        // tear, and crucially NO locked instruction on the hot dispatch path.
+        // The existing `load_pair` emits exactly this order.
+        self.inner.load_pair(reg1, reg2, base, offset);
+    }
+
     // === Debug info ===
 
     fn share_label_info_debug(&self, function_pointer: usize) -> Result<(), CompileError> {

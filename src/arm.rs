@@ -504,6 +504,23 @@ pub fn load_pair(reg1: Register, reg2: Register, destination: Register, offset: 
     }
 }
 
+/// Load-pair using the SignedOffset addressing mode (does NOT mutate the base
+/// register, unlike `load_pair` which is PostIndex). `offset` is in 8-byte
+/// units (LDP's scaled imm7). A naturally-16-byte-aligned 64-bit `LDP` is
+/// single-copy atomic on ARMv8.4+/FEAT_LSE2 (all Apple Silicon), which is what
+/// the protocol-dispatch inline cache relies on to read [key, fn_ptr] as one
+/// indivisible pair (see src/builtins/dispatch.rs).
+pub fn load_pair_offset(reg1: Register, reg2: Register, base: Register, offset: i32) -> ArmAsm {
+    ArmAsm::LdpGen {
+        opc: 0b10,
+        class_selector: LdpGenSelector::SignedOffset,
+        imm7: offset,
+        rt2: reg2,
+        rt: reg1,
+        rn: base,
+    }
+}
+
 pub fn branch_with_link(destination: i32) -> ArmAsm {
     ArmAsm::Bl { imm26: destination }
 }
@@ -763,6 +780,30 @@ impl LowLevelArm {
     pub fn load_pair(&mut self, reg1: Register, reg2: Register, location: Register, offset: i32) {
         self.instructions
             .push(load_pair(reg1, reg2, location, offset));
+    }
+    /// Atomic 16-byte pair load (SignedOffset LDP — base is NOT mutated).
+    /// Single-copy atomic for a naturally-16-byte-aligned address on
+    /// FEAT_LSE2 (all Apple Silicon). `reg1`/`reg2` must be distinct and
+    /// distinct from `base` (LDP with overlapping registers is CONSTRAINED
+    /// UNPREDICTABLE).
+    pub fn load_pair_from_heap(
+        &mut self,
+        reg1: Register,
+        reg2: Register,
+        base: Register,
+        offset: i32,
+    ) {
+        debug_assert!(
+            reg1.index != reg2.index,
+            "atomic LDP requires distinct destination registers (got {} twice)",
+            reg1.index
+        );
+        debug_assert!(
+            base.index != reg1.index && base.index != reg2.index,
+            "atomic LDP base register must differ from both destinations"
+        );
+        self.instructions
+            .push(load_pair_offset(reg1, reg2, base, offset));
     }
     pub fn add(&mut self, destination: Register, a: Register, b: Register) {
         self.instructions.push(add(destination, a, b));

@@ -94,18 +94,45 @@ pub extern "C" fn protocol_dispatch(
         }
     }
 
-    // Update cache. The fast path checks slot 0 (type_id) as the key, then
-    // loads slot 1 (fn_ptr) as the value. Write the value FIRST, then publish
-    // the key with a release fence between, so a concurrent reader that sees a
-    // freshly-written key also sees the matching value — never a torn pairing
-    // of a new key with a stale fn_ptr (which would dispatch to the wrong
-    // impl). Slot 0 is initialized to the `usize::MAX` sentinel, so a reader
-    // that races the value write simply misses and takes the (correct) slow
-    // path. This is a slow-path-only ordering fix; the fast path is unchanged.
-    let buffer = unsafe { from_raw_parts_mut(cache_location as *mut usize, 2) };
-    buffer[1] = fn_ptr;
-    std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
-    buffer[0] = type_id;
+    // Publish the cache entry as the 16-byte pair [type_id @0, fn_ptr @8].
+    // The reader (src/ast.rs ProtocolDispatch fast path) loads this pair
+    // atomically (ARM64 LDP / x86 ordered loads), so the producer must publish
+    // it such that the reader can never observe a new key paired with a stale
+    // fn_ptr (which would dispatch into the wrong impl and fault). The cache
+    // entry is 16-byte aligned (see Compiler::add_protocol_dispatch_cache).
+    //
+    // - ARM64: a single naturally-16-byte-aligned STP is single-copy atomic
+    //   under FEAT_LSE2 (all Apple Silicon), so key+value are published in one
+    //   indivisible store — the true "atomic 16-byte publish". Paired with the
+    //   reader's atomic LDP, a torn key/value pairing is impossible.
+    // - x86-64: there is no cheap aligned 16-byte atomic store, and none is
+    //   needed: under TSO, writing the value FIRST then the key (store->store
+    //   order preserved) means a reader that observes the new key has already
+    //   observed the matching value. The Release fence is redundant-but-cheap
+    //   insurance against compiler reordering. NO locked instruction is used.
+    // Slot 0 starts as the `usize::MAX` sentinel, so a reader racing the very
+    // first publish simply misses and takes the (correct) slow path.
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        debug_assert!(
+            cache_location % 16 == 0,
+            "protocol dispatch cache entry must be 16-byte aligned for atomic STP"
+        );
+        core::arch::asm!(
+            "stp {key}, {val}, [{ptr}]",
+            key = in(reg) type_id,
+            val = in(reg) fn_ptr,
+            ptr = in(reg) cache_location,
+            options(nostack, preserves_flags),
+        );
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    unsafe {
+        let entry = cache_location as *mut usize;
+        entry.add(1).write(fn_ptr); // value @ offset 8 first
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+        entry.write(type_id); // then key @ offset 0
+    }
 
     fn_ptr
 }

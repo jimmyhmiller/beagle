@@ -2143,6 +2143,12 @@ fn instruction_name(inst: &Instruction) -> &'static str {
         Instruction::LoadConstant(..) => "LoadConstant",
         Instruction::Call(..) => "Call",
         Instruction::HeapLoad(..) => "HeapLoad",
+        // Intentionally NOT translated by `to_op`: the atomic pair-load is a
+        // two-def op that doesn't map cleanly onto the single-assignment SSA
+        // form, so a function using it bails out of SSA to the legacy codegen
+        // (which lowers it correctly). SSA is off by default; the torn-read fix
+        // lives on the legacy path. Named here so the bail message is clear.
+        Instruction::HeapLoadPair(..) => "HeapLoadPair",
         Instruction::HeapLoadReg(..) => "HeapLoadReg",
         Instruction::HeapLoadByteReg(..) => "HeapLoadByteReg",
         Instruction::HeapStore(..) => "HeapStore",

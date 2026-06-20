@@ -160,6 +160,12 @@ pub enum Instruction {
     // bool is builtin?
     Call(Value, Value, Vec<Value>, bool),
     HeapLoad(Value, Value, i32),
+    /// Atomic 16-byte pair load: `(dst_key, dst_value, base, offset_in_slots)`.
+    /// Loads `[base+offset*8] -> dst_key` and `[base+(offset+1)*8] -> dst_value`
+    /// as one indivisible pair (ARM64 LDP / x86 two ordered loads). Used by the
+    /// protocol-dispatch inline cache so the key guard and the fn_ptr can never
+    /// be observed torn across a concurrent redefinition. See dispatch.rs.
+    HeapLoadPair(Value, Value, Value, i32),
     HeapLoadReg(Value, Value, Value),
     HeapLoadByteReg(Value, Value, Value),
     HeapStore(Value, Value),
@@ -581,6 +587,9 @@ impl Instruction {
             Instruction::HeapLoad(a, b, _) => {
                 get_registers!(a, b)
             }
+            Instruction::HeapLoadPair(a, b, c, _) => {
+                get_registers!(a, b, c)
+            }
             Instruction::AtomicLoad(a, b) => {
                 get_registers!(a, b)
             }
@@ -727,6 +736,7 @@ impl Instruction {
             | Instruction::Mul(value, value1, value2, _)
             | Instruction::Div(value, value1, value2, _)
             | Instruction::Modulo(value, value1, value2, _)
+            | Instruction::HeapLoadPair(value, value1, value2, _)
             | Instruction::HeapLoadReg(value, value1, value2)
             | Instruction::HeapLoadByteReg(value, value1, value2)
             | Instruction::HeapStoreOffsetReg(value, value1, value2)
@@ -4020,6 +4030,21 @@ impl Ir {
                     backend.load_from_heap(dest, ptr, *offset);
                     self.store_spill(dest, dest_spill, backend);
                 }
+                Instruction::HeapLoadPair(dest_key, dest_val, ptr, offset) => {
+                    // Atomic 16-byte pair load of the inline-cache [key, value].
+                    // `ptr` is materialized first; the two destinations resolve
+                    // to distinct registers (allocator gives live vregs distinct
+                    // colors; spilled dests get distinct scratch temps from a
+                    // pool disjoint from `ptr`), so the LDP rt/rt2/rn never alias.
+                    let ptr = self.value_to_register(ptr, backend);
+                    let key_spill = self.dest_spill(dest_key);
+                    let val_spill = self.dest_spill(dest_val);
+                    let key_reg = self.value_to_register(dest_key, backend);
+                    let val_reg = self.value_to_register(dest_val, backend);
+                    backend.load_pair_from_heap(key_reg, val_reg, ptr, *offset);
+                    self.store_spill(key_reg, key_spill, backend);
+                    self.store_spill(val_reg, val_spill, backend);
+                }
                 Instruction::AtomicLoad(dest, ptr) => {
                     // TODO: Does the spill work properly here?
                     let ptr = self.value_to_register(ptr, backend);
@@ -5214,6 +5239,23 @@ impl Ir {
         self.instructions
             .push(Instruction::HeapLoad(dest.into(), source, offset));
         dest.into()
+    }
+
+    /// Atomically load the 16-byte pair at `source + offset*8` as
+    /// `(key, value)` = `([source+offset*8], [source+(offset+1)*8])`. Lowers to
+    /// a single ARM64 LDP (single-copy atomic when 16-byte aligned, FEAT_LSE2)
+    /// or two ordered x86 loads. The returned `key` is loaded before `value`;
+    /// callers should guard on `key` and only use `value` on a hit.
+    pub fn load_pair_from_memory(&mut self, source: Value, offset: i32) -> (Value, Value) {
+        let key = self.volatile_register();
+        let value = self.volatile_register();
+        self.instructions.push(Instruction::HeapLoadPair(
+            key.into(),
+            value.into(),
+            source,
+            offset,
+        ));
+        (key.into(), value.into())
     }
 
     pub fn get_tag(&mut self, value: Value) -> Value {

@@ -1,0 +1,94 @@
+namespace dispatch_torn_read_test
+
+// Regression for the protocol-dispatch inline-cache TORN READ.
+//
+// Each per-call-site protocol dispatch has a 16-byte inline cache holding a
+// [type_id, fn_ptr] pair. A single monomorphic call site that is hit
+// concurrently by multiple threads passing DIFFERENT types thrashes that
+// cache: every type change republishes the pair through the slow path.
+//
+// PRE-FIX, the reader loaded the key (offset 0) and the fn_ptr (offset 8) as
+// TWO separate 8-byte loads, and the writer stored them as two separate
+// stores. With concurrent writers/readers (and on weakly-ordered ARM64) a
+// reader could observe a freshly-published KEY paired with a STALE fn_ptr from
+// the other type — dispatching e.g. `describe(dog)` into Cat's compiled body,
+// which then reads a field that does not exist on a Dog. ~2% under stress.
+//
+// FIX: the reader loads, and the ARM64 writer publishes, the pair as one
+// atomic 16-byte unit (LDP / STP — single-copy atomic under FEAT_LSE2 on Apple
+// Silicon; x86-64 relies on TSO load/store ordering with key-first emission).
+// With the fix a thread ALWAYS gets the impl matching the value it passed.
+// Expect ZERO torn dispatches.
+//
+// Proving the test catches the bug: revert ONLY the reader change in
+// src/ast.rs (back to two `load_from_memory` calls) and this test fails. It is
+// most aggressive under `--gc-always` and `BEAGLE_SPECIALIZE_THRESHOLD=1`,
+// which widen the publish/read race window:
+//   BEAGLE_SPECIALIZE_THRESHOLD=1 cargo run -- test --gc-always \
+//       resources/dispatch_torn_read_test.bg
+
+protocol Describe {
+    fn describe(self)
+}
+
+struct Dog { name }
+struct Cat { lives }
+
+// Distinct, NON-allocating impls (fast under gc stress). Cat's impl reads a
+// Cat-only field, so a torn Dog->Cat dispatch returns the wrong value (or
+// faults reading a field Dog lacks) — both are detected below.
+extend Dog with Describe {
+    fn describe(self) { 1 }
+}
+extend Cat with Describe {
+    fn describe(self) { self.lives }
+}
+
+// ONE shared optimized-dispatch call site, hit by every thread.
+fn run(x) {
+    describe(x)
+}
+
+letonce torn = atom(0)
+letonce done = atom(0)
+
+fn hammer(x, expected, n) {
+    let mut i = 0
+    while i < n {
+        try {
+            if run(x) != expected {
+                swap!(torn, fn(c) { c + 1 })
+            }
+        } catch (e, resume) {
+            // A torn dispatch into the wrong impl can also fault (reading a
+            // field the actual type lacks). Count it and keep going.
+            swap!(torn, fn(c) { c + 1 })
+            resume(null)
+        }
+        i = i + 1
+    }
+    swap!(done, fn(c) { c + 1 })
+}
+
+test "concurrent polymorphic dispatch has no torn inline-cache read" {
+    reset!(torn, 0)
+    reset!(done, 0)
+
+    let dog = Dog { name: "rex" }
+    let cat = Cat { lives: 9 }
+    let n = 300000
+
+    thread(fn() { hammer(dog, 1, n) })
+    thread(fn() { hammer(cat, 9, n) })
+    thread(fn() { hammer(dog, 1, n) })
+    thread(fn() { hammer(cat, 9, n) })
+
+    // Spin-wait for all four readers to finish.
+    let mut w = 0
+    while deref(done) < 4 && w < 2000000000 {
+        w = w + 1
+    }
+
+    assert-eq!(deref(done), 4)
+    assert-eq!(deref(torn), 0)
+}

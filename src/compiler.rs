@@ -1674,6 +1674,16 @@ impl Compiler {
                 .as_ptr()
                 .add(self.protocol_dispatch_cache_offset) as usize
         };
+        // The reader loads, and the ARM64 writer publishes, this entry as one
+        // atomic 16-byte pair (LDP/STP). Single-copy atomicity REQUIRES the
+        // entry be 16-byte aligned. The mmap base is page-aligned and entries
+        // stride by 16, so this holds — assert it so a future layout change
+        // (non-mmap base, odd stride) fails loudly instead of silently
+        // reintroducing the torn read. See src/builtins/dispatch.rs.
+        debug_assert!(
+            location % 16 == 0,
+            "protocol dispatch cache entry must be 16-byte aligned for atomic LDP/STP"
+        );
         // Initialize type_id with sentinel value that will never match a real type_id
         // This ensures the first call always goes to slow path (struct_id=0 would otherwise match)
         unsafe {

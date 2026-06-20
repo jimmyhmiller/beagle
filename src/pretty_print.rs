@@ -247,6 +247,15 @@ impl PrettyPrint for Instruction {
                     value1.pretty_print()
                 )
             }
+            Instruction::HeapLoadPair(key, value, base, offset) => {
+                format!(
+                    "heap_load_pair {}, {}, {}, {}",
+                    key.pretty_print(),
+                    value.pretty_print(),
+                    base.pretty_print(),
+                    offset
+                )
+            }
             Instruction::HeapLoadReg(value, value1, value2) => {
                 format!(
                     "heap_load_reg {}, {}, {}",

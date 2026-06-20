@@ -537,6 +537,17 @@ impl CodegenBackend for Arm64Backend {
         self.inner.load_pair(reg1, reg2, location, offset);
     }
 
+    fn load_pair_from_heap(
+        &mut self,
+        reg1: Self::Register,
+        reg2: Self::Register,
+        base: Self::Register,
+        offset: i32,
+    ) {
+        // Single aligned LDP — single-copy atomic on FEAT_LSE2 (Apple Silicon).
+        self.inner.load_pair_from_heap(reg1, reg2, base, offset);
+    }
+
     // === Debug info ===
 
     fn share_label_info_debug(&self, function_pointer: usize) -> Result<(), CompileError> {

@@ -328,6 +328,26 @@ pub trait CodegenBackend: Sized {
         offset: i32,
     );
 
+    /// Atomic 16-byte pair load from a heap/raw pointer `base + offset*8`,
+    /// loading `[base+offset*8] -> reg1` and `[base+(offset+1)*8] -> reg2`
+    /// WITHOUT mutating `base`. `offset` is in 8-byte slots.
+    ///
+    /// On ARM64 this lowers to a single naturally-aligned `LDP`, which is
+    /// single-copy atomic under FEAT_LSE2 (all Apple Silicon) — the reader half
+    /// of the protocol-dispatch inline-cache torn-read fix. On x86-64 it lowers
+    /// to two contiguous, naturally-aligned 8-byte loads emitted key-first; x86
+    /// TSO preserves load->load order, so a reader that observes a freshly
+    /// published key also observes the matching value (no tear) without any
+    /// locked instruction on the hot path. Callers MUST keep `reg1` as the
+    /// guard/key destination loaded before `reg2`.
+    fn load_pair_from_heap(
+        &mut self,
+        reg1: Self::Register,
+        reg2: Self::Register,
+        base: Self::Register,
+        offset: i32,
+    );
+
     // === Debug info ===
 
     fn share_label_info_debug(

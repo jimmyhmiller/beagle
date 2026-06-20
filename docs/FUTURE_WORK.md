@@ -115,6 +115,18 @@ tracked across `docs/SSA_STATE_AND_POSTMORTEM.md`,
 - 🔴 Orphan `Label`-marker blocks polluting the predecessor map; dominance
   verifier landed for diagnostics but the root structural fix is open
   (`project_ssa_orphan_blocks`).
+- 🔴 **`HeapLoadPair` (the protocol-dispatch torn-read fix) has no SSA
+  representation and currently forces a bail to legacy.** The atomic
+  inline-cache pair-load is a *two-def* IR op (`HeapLoadPair(key, value, base,
+  offset)`); the single-assignment SSA form has no multi-result op, so `to_op`
+  in `src/cfg/builder.rs` leaves it untranslated and any protocol-dispatch
+  function bails out of SSA to legacy (which lowers it to the atomic `LDP`, so
+  it is *correct* — just not SSA-compiled). **Before SSA goes default-on**, this
+  must be either (a) given a real SSA multi-result representation that lowers to
+  `LDP`, or (b) made an explicit, asserted permanent-bail — otherwise flipping
+  SSA on would silently route protocol dispatch through an SSA path that
+  reintroduces the torn read. Do not let this rot. Regression:
+  `resources/dispatch_torn_read_test.bg`.
 - The architectural contract is `docs/SSA_ARCHITECTURE.md` (invariants I1–I10);
   any SSA diff that contradicts it is a blocking failure.
 
