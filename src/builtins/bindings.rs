@@ -369,13 +369,21 @@ pub unsafe extern "C" fn uninstall_continuation_mark(
 pub unsafe extern "C" fn update_binding(
     _stack_pointer: usize,
     _frame_pointer: usize,
+    namespace_id: usize,
     namespace_slot: usize,
     value: usize,
 ) -> usize {
     print_call_builtin(get_runtime().get(), "update_binding");
     let runtime = get_runtime().get_mut();
+    // The namespace id is baked at COMPILE time (alongside the slot), NOT read
+    // from the mutable global `current_namespace` at store time. Reading the
+    // global here was a race: a concurrent compile/eval/namespace-switch could
+    // move it between this binding's slot reservation and this store, so the
+    // store would target the wrong namespace (whose cell_addrs lacks the slot)
+    // and panic in Runtime::update_binding. Baking the slot's namespace keeps
+    // redefinition lock-free and always publishes to the right namespace.
+    let namespace_id = BuiltInTypes::untag(namespace_id);
     let namespace_slot = BuiltInTypes::untag(namespace_slot);
-    let namespace_id = runtime.current_namespace_id();
 
     // Cells are the authoritative store. Writing one is a single 8-byte
     // store into a stable mmap region — no allocation, no GC trigger,
@@ -391,13 +399,16 @@ pub unsafe extern "C" fn update_binding(
 pub unsafe extern "C" fn store_function_binding(
     stack_pointer: usize,
     frame_pointer: usize,
+    namespace_id: usize,
     namespace_slot: usize,
     function: usize,
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
     let runtime = get_runtime().get_mut();
+    // namespace_id is baked at COMPILE time (with the slot), not read from the
+    // mutable global at store time — see update_binding for the race this fixes.
+    let namespace_id = BuiltInTypes::untag(namespace_id);
     let namespace_slot = BuiltInTypes::untag(namespace_slot);
-    let namespace_id = runtime.current_namespace_id();
 
     // Extract the raw function pointer
     let fn_ptr = BuiltInTypes::untag(function) as *const u8;

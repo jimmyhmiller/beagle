@@ -1203,7 +1203,7 @@ impl Runtime {
             "beagle.builtin/update-binding",
             update_binding as *const u8,
             true,
-            3, // stack_pointer, namespace_slot, value
+            4, // stack_pointer, namespace_id, namespace_slot, value
         )?;
 
         self.add_builtin_function_with_fp(
@@ -1211,7 +1211,7 @@ impl Runtime {
             store_function_binding as *const u8,
             true,
             true,
-            4, // stack_pointer, frame_pointer, namespace_slot, function
+            5, // stack_pointer, frame_pointer, namespace_id, namespace_slot, function
         )?;
 
         self.add_builtin_function(

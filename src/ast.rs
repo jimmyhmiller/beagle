@@ -2068,6 +2068,7 @@ impl AstCompiler<'_> {
                     // Use the full qualified name for namespace slot reservation
                     let reserved_namespace_slot = self.compiler.reserve_namespace_slot(full_name);
                     self.store_function_binding(
+                        Value::TaggedConstant(namespace_id as isize),
                         Value::TaggedConstant(reserved_namespace_slot as isize),
                         function_reg,
                     );
@@ -2840,13 +2841,17 @@ impl AstCompiler<'_> {
                     spread: None,
                     token_range: ast.token_range(),
                 })?;
-                let namespace_id = self
+                let ns_id = self.current_namespace_id();
+                // NOTE: find_binding returns the SLOT index (not a namespace id);
+                // it was previously mis-named `namespace_id`.
+                let slot = self
                     .compiler
-                    .find_binding(self.current_namespace_id(), &name)
+                    .find_binding(ns_id, &name)
                     .ok_or_else(|| CompileError::BindingNotFound { name: name.clone() })?;
                 let value_reg = self.ir.assign_new(value);
                 self.store_namespaced_variable(
-                    Value::TaggedConstant(namespace_id as isize),
+                    Value::TaggedConstant(ns_id as isize),
+                    Value::TaggedConstant(slot as isize),
                     value_reg,
                 );
                 Ok(value)
@@ -2897,13 +2902,17 @@ impl AstCompiler<'_> {
                     spread: None,
                     token_range,
                 })?;
-                let namespace_id = self
+                let ns_id = self.current_namespace_id();
+                // NOTE: find_binding returns the SLOT index (not a namespace id);
+                // it was previously mis-named `namespace_id`.
+                let slot = self
                     .compiler
-                    .find_binding(self.current_namespace_id(), &name)
+                    .find_binding(ns_id, &name)
                     .ok_or_else(|| CompileError::BindingNotFound { name: name.clone() })?;
                 let value_reg = self.ir.assign_new(value);
                 self.store_namespaced_variable(
-                    Value::TaggedConstant(namespace_id as isize),
+                    Value::TaggedConstant(ns_id as isize),
+                    Value::TaggedConstant(slot as isize),
                     value_reg,
                 );
                 // TODO: This should probably return the enum value
@@ -3026,9 +3035,11 @@ impl AstCompiler<'_> {
                     spread: None,
                     token_range: ast.token_range(),
                 })?;
+                let ns_id = self.current_namespace_id();
                 let reserved_namespace_slot = self.compiler.reserve_namespace_slot(&name);
                 let value_reg = self.ir.assign_new(value);
                 self.store_namespaced_variable(
+                    Value::TaggedConstant(ns_id as isize),
                     Value::TaggedConstant(reserved_namespace_slot as isize),
                     value_reg,
                 );
@@ -4287,6 +4298,7 @@ impl AstCompiler<'_> {
                         let reg = self.ir.assign_new(value);
                         let reserved_namespace_slot = self.compiler.reserve_namespace_slot(name);
                         self.store_namespaced_variable(
+                            Value::TaggedConstant(namespace_id as isize),
                             Value::TaggedConstant(reserved_namespace_slot as isize),
                             reg,
                         );
@@ -4396,6 +4408,7 @@ impl AstCompiler<'_> {
                 let namespace_id = self.compiler.current_namespace_id();
                 let slot = self.compiler.reserve_namespace_slot(&name);
                 self.store_namespaced_variable(
+                    Value::TaggedConstant(namespace_id as isize),
                     Value::TaggedConstant(slot as isize),
                     reg,
                 );
@@ -5075,6 +5088,7 @@ impl AstCompiler<'_> {
                     let namespace_id = self.current_namespace_id();
                     let reserved_namespace_slot = self.compiler.reserve_namespace_slot(&full_function_name);
                     self.store_namespaced_variable(
+                        Value::TaggedConstant(namespace_id as isize),
                         Value::TaggedConstant(reserved_namespace_slot as isize),
                         result_reg,
                     );
@@ -7239,19 +7253,34 @@ impl AstCompiler<'_> {
         Ok(())
     }
 
-    fn store_function_binding(&mut self, slot: Value, fn_reg: VirtualRegister) {
+    // `namespace_id` is the COMPILE-TIME namespace this slot belongs to, baked
+    // as an immediate so the store never re-reads the mutable global
+    // `current_namespace` at runtime (the concurrent-redefinition race).
+    fn store_function_binding(
+        &mut self,
+        namespace_id: Value,
+        slot: Value,
+        fn_reg: VirtualRegister,
+    ) {
+        let namespace_id: VirtualRegister = self.ir.assign_new(namespace_id);
         let slot: VirtualRegister = self.ir.assign_new(slot);
         let _ = self.call_builtin(
             "beagle.builtin/store-function-binding",
-            vec![slot.into(), fn_reg.into()],
+            vec![namespace_id.into(), slot.into(), fn_reg.into()],
         );
     }
 
-    fn store_namespaced_variable(&mut self, slot: Value, reg: VirtualRegister) {
+    fn store_namespaced_variable(
+        &mut self,
+        namespace_id: Value,
+        slot: Value,
+        reg: VirtualRegister,
+    ) {
+        let namespace_id: VirtualRegister = self.ir.assign_new(namespace_id);
         let slot: VirtualRegister = self.ir.assign_new(slot);
         let _ = self.call_builtin(
             "beagle.builtin/update-binding",
-            vec![slot.into(), reg.into()],
+            vec![namespace_id.into(), slot.into(), reg.into()],
         );
     }
 
