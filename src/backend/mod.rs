@@ -332,14 +332,18 @@ pub trait CodegenBackend: Sized {
     /// loading `[base+offset*8] -> reg1` and `[base+(offset+1)*8] -> reg2`
     /// WITHOUT mutating `base`. `offset` is in 8-byte slots.
     ///
-    /// On ARM64 this lowers to a single naturally-aligned `LDP`, which is
-    /// single-copy atomic under FEAT_LSE2 (all Apple Silicon) — the reader half
-    /// of the protocol-dispatch inline-cache torn-read fix. On x86-64 it lowers
-    /// to two contiguous, naturally-aligned 8-byte loads emitted key-first; x86
-    /// TSO preserves load->load order, so a reader that observes a freshly
-    /// published key also observes the matching value (no tear) without any
-    /// locked instruction on the hot path. Callers MUST keep `reg1` as the
-    /// guard/key destination loaded before `reg2`.
+    /// This is the reader half of the protocol-dispatch inline-cache torn-read
+    /// fix, and it MUST be a single atomic 16-byte snapshot on every backend —
+    /// two separate 8-byte loads are NOT acceptable, because with concurrent
+    /// writers a reader's two loads can straddle two different publishes (an
+    /// old key paired with a new value), which is the exact bug this fixes.
+    /// - ARM64: a single naturally-aligned `LDP` (single-copy atomic under
+    ///   FEAT_LSE2, all Apple Silicon).
+    /// - x86-64: a single aligned `MOVDQA` into an XMM, split into `reg1`/`reg2`
+    ///   (single-copy atomic on AVX-capable parts / via Rosetta's LSE2
+    ///   translation). NOT a locked instruction.
+    /// Neither relies on memory ordering between two loads. See
+    /// src/builtins/dispatch.rs for the matching atomic producer.
     fn load_pair_from_heap(
         &mut self,
         reg1: Self::Register,

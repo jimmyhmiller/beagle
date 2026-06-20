@@ -279,6 +279,32 @@ mod tests {
         }
     }
 
+    /// The protocol-dispatch inline-cache atomic 16-byte load (src/x86.rs
+    /// `load_pair_from_heap`) uses xmm15 as a FIXED scratch. That is only safe
+    /// because no live float ever occupies xmm15: on x86-64 the SSA FP
+    /// allocator pool is empty (`X86_64_LAYOUT.allocator_fp`) and the legacy
+    /// backend keeps floats heap-boxed, so nothing persists in any XMM across
+    /// the read. If a future change adds xmm15 to the FP allocator pool, an
+    /// unboxed float could live across the dispatch read and the scratch would
+    /// SILENTLY corrupt it. Enforce the reservation here (CI runs `--release`,
+    /// where the sibling `debug_assert!` at the read site is compiled out) so
+    /// that change fails loudly. Pick a different scratch before allocating
+    /// xmm15. Runs only on x86 builds, where `X86_64_LAYOUT` exists.
+    #[cfg(any(
+        feature = "backend-x86-64",
+        all(target_arch = "x86_64", not(feature = "backend-arm64"))
+    ))]
+    #[test]
+    fn protocol_dispatch_xmm15_scratch_reserved_from_fp_pool() {
+        const SCRATCH_XMM: u32 = 15;
+        assert!(
+            !X86_64_LAYOUT.allocator_fp.contains(&SCRATCH_XMM),
+            "xmm15 is the protocol-dispatch atomic-load scratch (src/x86.rs \
+             load_pair_from_heap); it must NOT be an allocatable FP register, \
+             or a live float could collide with it"
+        );
+    }
+
     /// Identity function with a single arg → physical X0.
     #[test]
     fn entry_param_maps_to_arg_reg() {

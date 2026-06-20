@@ -4849,14 +4849,14 @@ impl AstCompiler<'_> {
                 self.ir.assign(type_id_reg, primitive_type_id);
 
                 // 7. Atomically load the cached [type_id, fn_ptr] pair, THEN
-                // compare. Reading both words as one indivisible 16-byte pair
-                // (ARM64 LDP — single-copy atomic under FEAT_LSE2; x86 two
-                // ordered loads, key-first, safe under TSO) is what eliminates
-                // the torn read: a concurrent protocol redefinition publishes a
-                // new key + new fn_ptr, and the reader must never observe the
-                // new key paired with the stale fn_ptr. The key is loaded
-                // before/atomically-with the value — never after the guard
-                // branch. See src/builtins/dispatch.rs for the producer side.
+                // compare. Both words are read as ONE indivisible 16-byte
+                // snapshot — ARM64 `LDP`, x86-64 aligned `MOVDQA` (NOT two
+                // separate loads: with concurrent writers those tear, see
+                // dispatch.rs / the regression test). This eliminates the torn
+                // read: a concurrent protocol redefinition publishes a new key +
+                // new fn_ptr, and the reader can never observe the new key
+                // paired with the stale fn_ptr because it never assembles the
+                // pair from two reads. See src/builtins/dispatch.rs (producer).
                 self.ir.write_label(type_id_computed);
                 let (cached_type_id, fn_ptr) =
                     self.ir.load_pair_from_memory(cache_ptr_reg.into(), 0);

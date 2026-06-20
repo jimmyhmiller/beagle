@@ -1654,7 +1654,13 @@ impl LowLevelX86 {
     ///
     /// xmm15 is a fixed scratch: legacy float arithmetic only holds values in
     /// XMM transiently within a single op (floats are heap-boxed), so no live
-    /// float occupies it here, and it is dead before the following call.
+    /// float occupies it here, and it is dead before the following call. This is
+    /// ENFORCED, not just assumed: the x86 SSA FP allocator pool is empty
+    /// (`X86_64_LAYOUT.allocator_fp`) so nothing is ever colored to xmm15, and
+    /// the `debug_assert!` below + the CI test
+    /// `protocol_dispatch_xmm15_scratch_reserved_from_fp_pool` (in
+    /// src/cfg/regalloc/physical.rs) fail loudly if a future change adds xmm15
+    /// to that pool.
     pub fn load_pair_from_heap(
         &mut self,
         reg1: X86Register,
@@ -1662,7 +1668,15 @@ impl LowLevelX86 {
         base: X86Register,
         offset: i32,
     ) {
-        let scratch = X86Register::from_index(15); // xmm15
+        const SCRATCH_XMM: usize = 15;
+        debug_assert!(
+            !crate::cfg::regalloc::physical::X86_64_LAYOUT
+                .allocator_fp
+                .contains(&(SCRATCH_XMM as u32)),
+            "xmm15 is the protocol-dispatch atomic-load scratch; it must not be \
+             an allocatable FP register (a live float would collide with it)"
+        );
+        let scratch = X86Register::from_index(SCRATCH_XMM); // xmm15
         self.instructions.push(X86Asm::MovdqaXM {
             dest: scratch,
             base,
