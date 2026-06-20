@@ -1639,13 +1639,18 @@ impl LowLevelX86 {
     /// PRECONDITIONS for single-copy atomicity (both hold for Beagle's targets):
     /// 1. The address is 16-byte aligned (the inline cache is; see
     ///    Compiler::add_protocol_dispatch_cache, which debug_asserts it).
-    /// 2. The CPU is AVX-capable. Intel & AMD formally guarantee that aligned
-    ///    16-byte SSE/AVX loads/stores are single-copy atomic on AVX-capable
-    ///    parts (formalized ~2021) — i.e. every x86-64 since ~2011, which
-    ///    covers all of Beagle's x86 targets (modern Linux, and Rosetta on
-    ///    Apple Silicon). On a hypothetical pre-AVX x86-64 part MOVDQA
-    ///    atomicity is NOT architecturally guaranteed and this would need a
-    ///    fallback (e.g. CMPXCHG16B); not a real target today.
+    /// 2. The aligned 16-byte access is single-copy atomic. How that is
+    ///    provided differs per target, and BOTH of Beagle's x86 targets have it:
+    ///    - Native x86-64: guaranteed on AVX-capable CPUs (Intel & AMD
+    ///      formalized aligned 16B SSE/AVX load/store atomicity ~2021; holds on
+    ///      every x86-64 since ~2011 — CI and server targets are all AVX).
+    ///    - Rosetta 2 on Apple Silicon: AVX is NOT exposed (SSE2-only — verified
+    ///      via CPUID under Rosetta on macOS 26.5.1), so the AVX guarantee does
+    ///      NOT apply there. Instead Rosetta translates the aligned 16-byte SSE
+    ///      access into an atomic ARM64 op (LSE2), so it is atomic in practice
+    ///      (empirically 0-torn).
+    ///    A hypothetical native PRE-AVX x86-64 part would have neither and would
+    ///    need a CMPXCHG16B fallback; not a real target today.
     ///
     /// xmm15 is a fixed scratch: legacy float arithmetic only holds values in
     /// XMM transiently within a single op (floats are heap-boxed), so no live

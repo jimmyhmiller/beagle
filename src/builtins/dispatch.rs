@@ -111,10 +111,13 @@ pub extern "C" fn protocol_dispatch(
     //   instruction. (Two ordered 8-byte stores are NOT enough here: a reader's
     //   atomic 16-byte load could still observe an old-key/new-value
     //   intermediate memory state mid-publish.) Precondition: 16-byte alignment
-    //   (debug_asserted below) + an AVX-capable CPU (Intel/AMD formally
-    //   guarantee aligned 16B SSE/AVX load/store atomicity on AVX parts, i.e.
-    //   every x86-64 since ~2011 — all of Beagle's x86 targets incl. Rosetta).
-    //   A pre-AVX x86-64 would need a CMPXCHG16B fallback; not a real target.
+    //   (debug_asserted below) + single-copy atomicity of the aligned 16B
+    //   access, which both x86 targets have via different means: native x86-64
+    //   gets it from the AVX 16B load/store atomicity guarantee (every x86-64
+    //   since ~2011 is AVX-capable); Rosetta on Apple Silicon is SSE2-only (AVX
+    //   NOT exposed — verified via CPUID) but translates the aligned MOVDQA to
+    //   an atomic ARM64 op (LSE2), so it is atomic in practice (empirically
+    //   0-torn). A native pre-AVX x86-64 would need a CMPXCHG16B fallback.
     // Slot 0 starts as the `usize::MAX` sentinel, so a reader racing the very
     // first publish simply misses and takes the (correct) slow path.
     #[cfg(target_arch = "aarch64")]
