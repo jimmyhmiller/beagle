@@ -195,7 +195,11 @@ pub struct BitmaskImmediate {
 
 /// Is this number's binary representation all 1s?
 fn is_mask(imm: u64) -> bool {
-    ((imm + 1) & imm) == 0
+    // `wrapping_add`: imm == u64::MAX is all-1s (a valid mask), but `imm + 1`
+    // overflows and panics in debug builds — which crashed debug compilation of
+    // any `and_imm(u64::MAX)` (e.g. protocol dispatch). Wrapping is correct here:
+    // MAX.wrapping_add(1) == 0, so 0 & MAX == 0 => true, as intended.
+    (imm.wrapping_add(1) & imm) == 0
 }
 
 /// Is this number's binary representation one or more 1s followed by
