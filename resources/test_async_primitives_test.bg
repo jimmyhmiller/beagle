@@ -1,0 +1,80 @@
+namespace test_async_primitives_test
+
+use beagle.core as core
+use beagle.channel as chan
+use beagle.test-async as ta
+
+// ============================================================================
+// §2.1 STEP 1 — validation of the non-deterministic assertion primitives.
+// ============================================================================
+// Each test below is itself a deterministic test{} block: PASS is decided by a
+// happens-before edge (a worker's channel send! or visible atom write), and the
+// watchdog-fires cases are wrapped in assert-throws! so a HARD FAIL on hang is
+// asserted, never relied upon for a pass.
+
+// ---- assert-set-eq! : pure unordered/multiset compare (no timing) ----
+
+test "assert-set-eq! accepts the same multiset in any order" {
+    ta/assert-set-eq!([3, 1, 2, 1], [1, 1, 2, 3])
+    ta/assert-set-eq!([], [])
+    ta/assert-set-eq!(["a", "b", "a"], ["a", "a", "b"])
+}
+
+test "assert-set-eq! rejects differing multiplicity" {
+    assert-throws!(fn() { ta/assert-set-eq!([1, 2, 3], [1, 2, 2]) })
+}
+
+test "assert-set-eq! rejects differing length" {
+    assert-throws!(fn() { ta/assert-set-eq!([1, 2], [1, 2, 3]) })
+}
+
+// ---- assert-receives! : one value across a happens-before edge ----
+
+test "assert-receives! gets the value a worker sends" {
+    let ch = chan/make-channel()
+    thread(fn() { chan/send!(ch, "hello") })
+    ta/assert-receives!(ch, "hello")
+}
+
+test "assert-receives! reports a mismatch" {
+    let ch = chan/make-channel()
+    thread(fn() { chan/send!(ch, "actual") })
+    assert-throws!(fn() { ta/assert-receives!(ch, "expected") })
+}
+
+// ---- assert-receives-all! : exact count-barrier + unordered compare ----
+
+test "assert-receives-all! collects N results in any arrival order" {
+    let ch = chan/make-channel()
+    // Four workers each send once; arrival order is nondeterministic.
+    thread(fn() { chan/send!(ch, "w-1") })
+    thread(fn() { chan/send!(ch, "w-2") })
+    thread(fn() { chan/send!(ch, "w-3") })
+    thread(fn() { chan/send!(ch, "w-4") })
+    ta/assert-receives-all!(ch, 4, ["w-4", "w-3", "w-2", "w-1"])
+}
+
+test "assert-receives-all! misuse (n != expected count) is a hard error" {
+    let ch = chan/make-channel()
+    assert-throws!(fn() { ta/assert-receives-all!(ch, 3, ["a", "b"]) })
+}
+
+// ---- assert-eventually! : visible atom write (the escape hatch) ----
+
+test "assert-eventually! waits for a worker's visible atom write" {
+    let flag = atom(false)
+    thread(fn() { reset!(flag, true) })
+    ta/assert-eventually!(fn() { deref(flag) })
+}
+
+// ---- the watchdog must FIRE (hard fail), never hang or silently pass ----
+
+test "assert-receives! watchdog fires when no value ever arrives" {
+    let ch = chan/make-channel()
+    // Nobody sends. A short watchdog must THROW (not hang, not pass).
+    assert-throws!(fn() { ta/assert-receives!(ch, "never", 50) })
+}
+
+test "await-condition! watchdog fires when the predicate stays false" {
+    assert-throws!(fn() { ta/await-condition!(fn() { false }, 50) })
+}

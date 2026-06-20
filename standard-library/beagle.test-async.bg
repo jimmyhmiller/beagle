@@ -1,0 +1,216 @@
+namespace beagle.test-async
+
+use beagle.core as core
+use beagle.channel as chan
+
+// ============================================================================
+// beagle.test-async — non-deterministic assertion primitives for concurrency
+// and live-coding tests. (FUTURE_WORK §2.1.)
+// ============================================================================
+//
+// These let a `test {}` block assert on CONCURRENT outcomes DETERMINISTICALLY.
+// The whole design rests on three rules (the determinism contract):
+//
+//   1. PASS IS DECIDED BY A HAPPENS-BEFORE EDGE, never by timing. A worker
+//      thread `send!`s on a channel (a hardware CAS on the atom word — a real
+//      happens-before edge, see beagle.channel); the test thread `receive`s it.
+//      The assertion is about the VALUE that crossed that edge, not about when.
+//
+//   2. TIMEOUTS ARE WATCHDOGS, NEVER THE ASSERTION. Every wait is bounded by a
+//      generous wall-clock watchdog. A correct test NEVER depends on the
+//      watchdog value — it returns the instant the value/condition is ready. The
+//      watchdog exists ONLY to convert a real hang/deadlock into a clean HARD
+//      FAIL (a thrown error) instead of an infinite spin or a stuck CI. A
+//      watchdog firing is ALWAYS a failure surfaced, never silently passed.
+//
+//   3. ORDER-INSENSITIVITY = EXACT COUNT-BARRIER, THEN UNORDERED COMPARE. To
+//      assert "these N results arrived in any order", `receive` EXACTLY N values
+//      (the count derives from the test's structure — N workers => N results),
+//      then compare as a multiset. Never "sleep then check".
+//
+// All pure Beagle over channels (atoms + compare-and-swap!) + core/time-now()
+// (a monotonic-ns process clock). No new runtime support.
+
+// --- watchdog clock ----------------------------------------------------------
+
+// Default watchdog: generous enough that a correct-but-slow machine never fails
+// spuriously, small enough that a real hang surfaces quickly. Tunable per call.
+fn default-watchdog-ms() { 5000 }
+
+// core/time-now() is monotonic nanoseconds since process start. Convert a
+// millisecond budget into an absolute nanosecond deadline.
+fn deadline-after(watchdog_ms) {
+    core/time-now() + watchdog_ms * 1000000
+}
+
+fn past-deadline?(deadline) {
+    core/time-now() > deadline
+}
+
+// Burn a small, growing amount of pure CPU between empty polls so we don't
+// re-load the atom as fast as the core can issue loads (mirrors
+// beagle.channel/spin-backoff). No allocation, no GC interaction.
+fn spin-burn(n) {
+    let mut i = 0
+    let mut acc = 0
+    while i < n {
+        acc = acc + i
+        i = i + 1
+    }
+    null
+}
+
+// --- bounded receive (the watchdog wait) -------------------------------------
+
+// Receive one value from `ch`, blocking (busy-spin) until it is available OR the
+// watchdog fires. On the happy path this returns the instant a value is present
+// (happens-before the producer's send!), with ZERO dependence on watchdog_ms.
+// On a hang it throws (HARD FAIL) naming `what`.
+fn receive-within(ch, watchdog_ms, what) {
+    receive-within-spin(ch, deadline-after(watchdog_ms), watchdog_ms, what, 1)
+}
+
+fn receive-within-spin(ch, deadline, watchdog_ms, what, backoff) {
+    let r = chan/try-receive(ch)
+    // r is {:none true} when empty, else {:some v}. (The some/none wrapper means
+    // a legitimately-sent null or {:none ...} value can't be mistaken for empty.)
+    if get(r, :none) == true {
+        if past-deadline?(deadline) {
+            throw("${what}: watchdog timed out after ${watchdog_ms}ms with no value — the producer never sent (likely hung or deadlocked). This is a real failure, not a slow machine: raise the watchdog only if a CORRECT run genuinely needs longer.")
+        }
+        spin-burn(backoff)
+        let next-backoff = if backoff < 256 { backoff * 2 } else { backoff }
+        receive-within-spin(ch, deadline, watchdog_ms, what, next-backoff)
+    } else {
+        get(r, :some)
+    }
+}
+
+// --- unordered (multiset) equality -------------------------------------------
+
+// Count elements of `coll` deeply-equal to `x`. Uses equal(...) (structural), so
+// it works for any value type — no hashability requirement.
+fn count-equal(coll, x) {
+    let mut c = 0
+    for e in coll {
+        if equal(e, x) {
+            c = c + 1
+        }
+    }
+    c
+}
+
+// True iff `a` and `b` are equal as MULTISETS (same elements with the same
+// multiplicities, order irrelevant). Proof the two checks suffice: if lengths
+// match and every element of `a` has equal counts in `a` and `b`, then `b`
+// cannot contain an element outside `a` (its mass would exceed |b| = |a|), so
+// the multisets are identical.
+fn multiset-eq?(a, b) {
+    if length(a) != length(b) {
+        false
+    } else {
+        let mut ok = true
+        for x in a {
+            if count-equal(a, x) != count-equal(b, x) {
+                ok = false
+            }
+        }
+        ok
+    }
+}
+
+// Assert two collections are equal as multisets (order-insensitive). PURE
+// comparison — zero timing. This is what makes "results arrived in any order"
+// a deterministic assertion once the count-barrier has collected them all.
+fn assert-set-eq!(actual, expected) {
+    if multiset-eq?(actual, expected) == false {
+        throw("assert-set-eq! failed (unordered/multiset contents differ)\n  actual:   ${actual}\n  expected: ${expected}")
+    }
+    null
+}
+
+// --- await one value ---------------------------------------------------------
+
+// Assert the next value to arrive on `ch` deeply-equals `expected`. PASS is
+// decided by the happens-before edge of the producer's send!; the watchdog only
+// guards against the value never arriving.
+fn assert-receives! {
+    (ch, expected) => assert-receives!(ch, expected, default-watchdog-ms())
+    (ch, expected, watchdog_ms) => {
+        let got = receive-within(ch, watchdog_ms, "assert-receives!")
+        if equal(got, expected) == false {
+            throw("assert-receives! failed\n  expected: ${expected}\n       got: ${got}")
+        }
+        null
+    }
+}
+
+// --- await exactly N values, compare unordered -------------------------------
+
+// Receive EXACTLY `n` values from `ch` (the count-barrier), each bounded by the
+// watchdog, returning them in arrival order. The exact count is what makes this
+// deterministic: with N workers each sending once, we wait for all N.
+fn collect-n(ch, n, watchdog_ms) {
+    let mut acc = []
+    let mut i = 0
+    while i < n {
+        let label = "assert-receives-all! (awaiting value " ++ to-string(i + 1) ++ " of " ++ to-string(n) ++ ")"
+        let v = receive-within(ch, watchdog_ms, label)
+        acc = push(acc, v)
+        i = i + 1
+    }
+    acc
+}
+
+// Assert that EXACTLY `n` values arrive on `ch` and, as a multiset, equal
+// `expected-set`. Order of arrival is irrelevant; multiplicity is not. This is
+// the canonical concurrency assertion: an exact count-barrier (happens-before
+// on each value) followed by an unordered compare.
+fn assert-receives-all! {
+    (ch, n, expected-set) => assert-receives-all!(ch, n, expected-set, default-watchdog-ms())
+    (ch, n, expected-set, watchdog_ms) => {
+        if length(expected-set) != n {
+            throw("assert-receives-all! misuse: n=${n} but expected-set has ${length(expected-set)} elements — the count-barrier must match the number of expected results exactly.")
+        }
+        let got = collect-n(ch, n, watchdog_ms)
+        assert-set-eq!(got, expected-set)
+    }
+}
+
+// --- await a condition (escape hatch) ----------------------------------------
+
+// Block until the thunk `pred` returns truthy, or the watchdog fires.
+//
+// USE SPARINGLY — prefer the channel primitives above. This polls a predicate
+// rather than receiving across a channel's happens-before edge. It is only sound
+// when `pred` becomes true BECAUSE OF A WORKER'S VISIBLE MEMORY WRITE (e.g. an
+// atom set via reset!/swap!, which publishes a real happens-before edge) — never
+// because "enough time passed". The watchdog is still a HARD-FAIL-on-hang guard,
+// not the basis of the pass.
+fn await-condition! {
+    (pred) => await-condition!(pred, default-watchdog-ms())
+    (pred, watchdog_ms) => await-condition-spin!(pred, deadline-after(watchdog_ms), watchdog_ms, 1)
+}
+
+fn await-condition-spin!(pred, deadline, watchdog_ms, backoff) {
+    if pred() {
+        true
+    } else {
+        if past-deadline?(deadline) {
+            throw("await-condition!: watchdog timed out after ${watchdog_ms}ms — the predicate never became true. The awaited write never became visible (or the producer hung). This is a real failure, not a slow machine.")
+        }
+        spin-burn(backoff)
+        let next-backoff = if backoff < 256 { backoff * 2 } else { backoff }
+        await-condition-spin!(pred, deadline, watchdog_ms, next-backoff)
+    }
+}
+
+// assert-eventually! is await-condition! framed as an assertion (returns null on
+// success, throws on watchdog). Same determinism caveat applies.
+fn assert-eventually! {
+    (pred) => assert-eventually!(pred, default-watchdog-ms())
+    (pred, watchdog_ms) => {
+        await-condition!(pred, watchdog_ms)
+        null
+    }
+}

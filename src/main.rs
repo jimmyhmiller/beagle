@@ -88,6 +88,9 @@ pub mod embedded_stdlib {
             "beagle.cli.bg" => Some(include_str!("../standard-library/beagle.cli.bg")),
             "beagle.log.bg" => Some(include_str!("../standard-library/beagle.log.bg")),
             "beagle.test.bg" => Some(include_str!("../standard-library/beagle.test.bg")),
+            "beagle.test-async.bg" => {
+                Some(include_str!("../standard-library/beagle.test-async.bg"))
+            }
             "beagle.mathx.bg" => Some(include_str!("../standard-library/beagle.mathx.bg")),
             "beagle.ini.bg" => Some(include_str!("../standard-library/beagle.ini.bg")),
             "beagle.priorityqueue.bg" => {
