@@ -177,6 +177,28 @@ fn assert-receives-all! {
     }
 }
 
+// --- over-production check (no extras) ---------------------------------------
+
+// Assert `ch` holds no unreceived values, i.e. producers sent EXACTLY what was
+// consumed and not one more. assert-receives-all! collects exactly `n` and
+// ignores extras, so a bug that OVER-PRODUCES (sends n+1) is invisible to it
+// alone; this closes that gap.
+//
+// CONTRACT — SOUNDNESS DEPENDS ON ORDERING: call this ONLY AFTER a completion
+// happens-before barrier that guarantees every producer is DONE sending (e.g.
+// after assert-receives-all! on a SEPARATE `done` channel each worker signals
+// as its last act, or after joining all producers). Otherwise an extra value
+// merely in-flight races this snapshot and the check is meaningless — it would
+// pass while the over-production is still on its way. Pure (channel-count
+// snapshot), no timing: with the barrier in place, "empty now" => "stays empty".
+fn assert-channel-drained!(ch) {
+    let extra = chan/channel-count(ch)
+    if extra != 0 {
+        throw("assert-channel-drained! failed: ${extra} unreceived value(s) remain — a producer sent MORE than expected (over-production). (Call this only AFTER a completion barrier proves all producers are done, else an in-flight value races this check.)")
+    }
+    null
+}
+
 // --- await a condition (escape hatch) ----------------------------------------
 
 // Block until the thunk `pred` returns truthy, or the watchdog fires.

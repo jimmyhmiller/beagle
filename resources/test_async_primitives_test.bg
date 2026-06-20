@@ -11,6 +11,10 @@ use beagle.test-async as ta
 // happens-before edge (a worker's channel send! or visible atom write), and the
 // watchdog-fires cases are wrapped in assert-throws! so a HARD FAIL on hang is
 // asserted, never relied upon for a pass.
+//
+// This file is run repeatedly (each run executes ALL of its test{} blocks) to
+// check for concurrency flakiness; "N runs clean" means every block passed in
+// each of N whole-file runs.
 
 // ---- assert-set-eq! : pure unordered/multiset compare (no timing) ----
 
@@ -77,4 +81,28 @@ test "assert-receives! watchdog fires when no value ever arrives" {
 
 test "await-condition! watchdog fires when the predicate stays false" {
     assert-throws!(fn() { ta/await-condition!(fn() { false }, 50) })
+}
+
+// ---- assert-channel-drained! : over-production detection ----
+
+test "assert-channel-drained! passes when exactly-consumed (no extras)" {
+    let ch = chan/make-channel()
+    chan/send!(ch, "a")
+    chan/send!(ch, "b")
+    ta/assert-receives-all!(ch, 2, ["a", "b"])
+    // All produced values consumed by the count-barrier => channel drained.
+    ta/assert-channel-drained!(ch)
+}
+
+test "assert-channel-drained! detects over-production (n+1 sent, n consumed)" {
+    let ch = chan/make-channel()
+    // Three values produced but the test structure expects two: the extra is
+    // the over-production a multiset compare alone could miss (e.g. labels
+    // collide). All sends complete before we check (single thread = the
+    // completion barrier here), so the leftover is deterministically present.
+    chan/send!(ch, "x")
+    chan/send!(ch, "x")
+    chan/send!(ch, "x")
+    ta/assert-receives-all!(ch, 2, ["x", "x"])
+    assert-throws!(fn() { ta/assert-channel-drained!(ch) })
 }
