@@ -515,6 +515,20 @@ pub enum X86Asm {
         dest: X86Register,
         src: X86Register,
     },
+    /// MOVDQA xmm, m128 — aligned 128-bit load. On all AVX-capable x86-64
+    /// (single-copy) atomic for a 16-byte-aligned address; the reader half of
+    /// the protocol-dispatch atomic inline-cache snapshot. `offset` is in bytes.
+    MovdqaXM {
+        dest: X86Register,
+        base: X86Register,
+        offset: i32,
+    },
+    /// PEXTRQ r64, xmm, imm8 — extract a 64-bit lane from an XMM register.
+    Pextrq {
+        dest: X86Register,
+        src: X86Register,
+        imm: u8,
+    },
     /// CVTSI2SD xmm, r64 (convert signed 64-bit integer to double)
     Cvtsi2sd {
         dest: X86Register,
@@ -1094,6 +1108,27 @@ impl X86Asm {
                     0x0F,
                     0x6E,
                     modrm(0b11, dest.index, src.index),
+                ]
+            }
+
+            X86Asm::MovdqaXM { dest, base, offset } => {
+                // MOVDQA xmm, m128: 66 0F 6F /r (REX added by helper if needed).
+                let mut bytes = vec![0x66];
+                bytes.extend(encode_mem_op_no_rex(0x6F, dest.index, base.index, *offset));
+                bytes
+            }
+
+            X86Asm::Pextrq { dest, src, imm } => {
+                // PEXTRQ r/m64, xmm, imm8: 66 REX.W 0F 3A 16 /r ib
+                // ModRM.reg = xmm source, ModRM.rm = r64 destination.
+                vec![
+                    0x66,
+                    rex(true, src.index >= 8, false, dest.index >= 8),
+                    0x0F,
+                    0x3A,
+                    0x16,
+                    modrm(0b11, src.index, dest.index),
+                    *imm,
                 ]
             }
 

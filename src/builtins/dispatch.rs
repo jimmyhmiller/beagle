@@ -105,11 +105,12 @@ pub extern "C" fn protocol_dispatch(
     //   under FEAT_LSE2 (all Apple Silicon), so key+value are published in one
     //   indivisible store — the true "atomic 16-byte publish". Paired with the
     //   reader's atomic LDP, a torn key/value pairing is impossible.
-    // - x86-64: there is no cheap aligned 16-byte atomic store, and none is
-    //   needed: under TSO, writing the value FIRST then the key (store->store
-    //   order preserved) means a reader that observes the new key has already
-    //   observed the matching value. The Release fence is redundant-but-cheap
-    //   insurance against compiler reordering. NO locked instruction is used.
+    // - x86-64: an aligned 16-byte SSE store (MOVDQA) is single-copy atomic on
+    //   all AVX-capable x86-64, so it publishes key+value as one indivisible
+    //   event too — matching the reader's atomic MOVDQA snapshot. This is NOT a
+    //   locked instruction. (Two ordered 8-byte stores are NOT enough here: a
+    //   reader's atomic 16-byte load could still observe an old-key/new-value
+    //   intermediate memory state mid-publish.)
     // Slot 0 starts as the `usize::MAX` sentinel, so a reader racing the very
     // first publish simply misses and takes the (correct) slow path.
     #[cfg(target_arch = "aarch64")]
@@ -126,7 +127,26 @@ pub extern "C" fn protocol_dispatch(
             options(nostack, preserves_flags),
         );
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        debug_assert!(
+            cache_location % 16 == 0,
+            "protocol dispatch cache entry must be 16-byte aligned for atomic MOVDQA"
+        );
+        // Pack key (low 64) + fn_ptr (high 64) into one XMM, then publish the
+        // whole 16 bytes with a single aligned MOVDQA store (atomic).
+        core::arch::asm!(
+            "movq {tmp}, {key}",
+            "pinsrq {tmp}, {val}, 1",
+            "movdqa [{ptr}], {tmp}",
+            key = in(reg) type_id,
+            val = in(reg) fn_ptr,
+            ptr = in(reg) cache_location,
+            tmp = out(xmm_reg) _,
+            options(nostack, preserves_flags),
+        );
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     unsafe {
         let entry = cache_location as *mut usize;
         entry.add(1).write(fn_ptr); // value @ offset 8 first

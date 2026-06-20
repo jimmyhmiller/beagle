@@ -1628,6 +1628,42 @@ impl LowLevelX86 {
         });
     }
 
+    /// Atomic 16-byte pair load via an aligned SSE MOVDQA snapshot.
+    ///
+    /// Loads the 16 bytes at `[base + offset*8]` into a scratch XMM as ONE
+    /// atomic operation, then splits the lanes: `reg1` = low 64 (key),
+    /// `reg2` = high 64 (fn_ptr). An aligned 16-byte MOVDQA is single-copy
+    /// atomic on every AVX-capable x86-64 (incl. Rosetta), so the reader can
+    /// never assemble a key/value pair from two different concurrent writes —
+    /// the x86 equivalent of ARM's atomic LDP. NO locked instruction. Used by
+    /// the protocol-dispatch inline cache; see src/builtins/dispatch.rs for the
+    /// matching atomic MOVDQA producer.
+    ///
+    /// xmm15 is a fixed scratch: legacy float arithmetic only holds values in
+    /// XMM transiently within a single op (floats are heap-boxed), so no live
+    /// float occupies it here, and it is dead before the following call.
+    pub fn load_pair_from_heap(
+        &mut self,
+        reg1: X86Register,
+        reg2: X86Register,
+        base: X86Register,
+        offset: i32,
+    ) {
+        let scratch = X86Register::from_index(15); // xmm15
+        self.instructions.push(X86Asm::MovdqaXM {
+            dest: scratch,
+            base,
+            offset: offset * 8,
+        });
+        self.instructions
+            .push(X86Asm::MovqRX { dest: reg1, src: scratch }); // key = low 64
+        self.instructions.push(X86Asm::Pextrq {
+            dest: reg2,
+            src: scratch,
+            imm: 1,
+        }); // fn_ptr = high 64
+    }
+
     /// Share label info for debugging (stub for now)
     pub fn share_label_info_debug(&self, _function_pointer: usize) -> Result<(), CompileError> {
         // TODO: Implement debug info sharing for x86-64
