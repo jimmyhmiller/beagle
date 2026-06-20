@@ -1,5 +1,8 @@
 namespace concurrent_redefine_race_test
 
+use beagle.channel as chan
+use beagle.test-async as ta
+
 // Regression test for the enum/struct hot-reload data race.
 //
 // One OS thread reads a type's variant in a tight loop (`T.None`) — the way a
@@ -24,10 +27,8 @@ struct S { x }
 letonce stop = atom(false)
 letonce enum_errors = atom(0)
 letonce struct_errors = atom(0)
-letonce enum_done = atom(false)
-letonce struct_done = atom(false)
 
-fn spin_enum() {
+fn spin_enum(done_ch) {
     while !deref(stop) {
         try {
             T.None
@@ -36,10 +37,12 @@ fn spin_enum() {
             resume(null)
         }
     }
-    reset!(enum_done, true)
+    // Report this reader's final error count on exit — the send! is a
+    // happens-before edge the test body's count-barrier waits on.
+    chan/send!(done_ch, ["enum", deref(enum_errors)])
 }
 
-fn spin_struct() {
+fn spin_struct(done_ch) {
     while !deref(stop) {
         try {
             // Read a field off the live struct descriptor's binding.
@@ -50,18 +53,17 @@ fn spin_struct() {
             resume(null)
         }
     }
-    reset!(struct_done, true)
+    chan/send!(done_ch, ["struct", deref(struct_errors)])
 }
 
 test "concurrent enum + struct reload races no torn binding" {
     reset!(stop, false)
     reset!(enum_errors, 0)
     reset!(struct_errors, 0)
-    reset!(enum_done, false)
-    reset!(struct_done, false)
+    let done_ch = chan/make-channel()
 
-    thread(fn() { spin_enum() })
-    thread(fn() { spin_struct() })
+    thread(fn() { spin_enum(done_ch) })
+    thread(fn() { spin_struct(done_ch) })
 
     let mut i = 0
     while i < 600 {
@@ -74,12 +76,10 @@ struct S { x }")
 
     reset!(stop, true)
 
-    // Spin-wait for both readers to observe `stop` and exit.
-    let mut w = 0
-    while (!deref(enum_done) || !deref(struct_done)) && w < 200000000 {
-        w = w + 1
-    }
-
-    assert-eq!(deref(enum_errors), 0)
-    assert-eq!(deref(struct_errors), 0)
+    // Deterministic completion barrier (replaces the old iteration-capped
+    // busy-wait + done-atoms): EXACTLY both readers must finish — each send!s on
+    // exit, a happens-before edge — and BOTH must report ZERO errors, in either
+    // finish order (unordered multiset). A reader that never exits (a real hang)
+    // trips the watchdog as a HARD FAIL instead of spinning a magic-number cap.
+    ta/assert-receives-all!(done_ch, 2, [["enum", 0], ["struct", 0]])
 }

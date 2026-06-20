@@ -2,6 +2,9 @@ namespace concurrent_card_table_barrier_test
 
 // gc-always
 
+use beagle.channel as chan
+use beagle.test-async as ta
+
 // Regression: the generational write barrier must be safe under concurrent
 // mutators. A long-lived (old-gen) atom gets a fresh young struct swapped in on
 // every iteration (an old->young edge that must be card-marked), while two
@@ -14,18 +17,14 @@ namespace concurrent_card_table_barrier_test
 
 struct W { n, tag }
 let w_atom = atom(W { n: 0, tag: 99 })
-let done1 = atom(0)
-let done2 = atom(0)
 
 fn churn(i) { if i <= 0 { 0 } else { let _ = W { n: i, tag: 7 } churn(i - 1) } }
-fn wait_done(a, attempts) {
-    if deref(a) >= 1 { true }
-    else { if attempts > 100000000 { false } else { wait_done(a, attempts + 1) } }
-}
 
-fn main() {
-    thread(fn() { churn(350) swap!(done1, fn(x) { 1 }) })
-    thread(fn() { churn(350) swap!(done2, fn(x) { 1 }) })
+test "concurrent write barrier keeps the old->young edge under churn" {
+    let done_ch = chan/make-channel()
+    thread(fn() { churn(350) chan/send!(done_ch, ["t1", "done"]) })
+    thread(fn() { churn(350) chan/send!(done_ch, ["t2", "done"]) })
+
     let mut i = 0
     let mut bad = 0
     while i < 350 {
@@ -34,12 +33,14 @@ fn main() {
         swap!(w_atom, fn(prev) { W { n: i, tag: 99 } })
         i = i + 1
     }
-    wait_done(done1, 0)
-    wait_done(done2, 0)
-    println("bad=" ++ to-string(bad))
-    println("done")
-}
 
-// @beagle.core.snapshot
-// bad=0
-// done
+    // Deterministic completion barrier (replaces the magic-number-capped
+    // wait_done busy-spin): EXACTLY both churn threads must finish — each send!s
+    // on exit, a happens-before edge. Generous watchdog because gc-always is
+    // slow; a churn thread stuck on a dropped edge hard-fails instead of spinning.
+    ta/assert-receives-all!(done_ch, 2, [["t1", "done"], ["t2", "done"]], 20000)
+
+    // Every deref above saw the well-formed struct (tag 99), so the barrier never
+    // dropped the old->young edge.
+    assert-eq!(bad, 0)
+}

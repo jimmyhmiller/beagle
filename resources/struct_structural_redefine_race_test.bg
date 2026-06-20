@@ -7,6 +7,8 @@ namespace struct_structural_redefine_race_test
 // See docs/CONCURRENT_REDEFINE_OPEN_ISSUES.md (#7/#9).
 
 use beagle.core as core
+use beagle.channel as chan
+use beagle.test-async as ta
 
 // Regression test for the structural-redefine GC stale-root crash (the deeper
 // bug found alongside the binding-clobber race in concurrent_redefine_race_test.bg).
@@ -49,27 +51,24 @@ struct Point { x, y }")
     reset!(running, false)
 }
 
-fn wait_done(a, attempts) {
-    if deref(a) >= 1 {
-        true
-    } else if attempts > 2000000000 {
-        false
-    } else {
-        wait_done(a, attempts + 1)
-    }
-}
-
 test "concurrent structural redefine migrates live readers" {
     let running = atom(true)
     let crashed = atom(0)
-    let done1 = atom(0)
-    let done2 = atom(0)
+    let done_ch = chan/make-channel()
     let anchor = Point { x: 111, y: 222 }
-    thread(fn() { reader(anchor, running, crashed) swap!(done1, fn(x) { 1 }) })
-    thread(fn() { reader(anchor, running, crashed) swap!(done2, fn(x) { 1 }) })
+    thread(fn() { reader(anchor, running, crashed) chan/send!(done_ch, ["reader-1", "done"]) })
+    thread(fn() { reader(anchor, running, crashed) chan/send!(done_ch, ["reader-2", "done"]) })
     redefiner(40, running)
-    wait_done(done1, 0)
-    wait_done(done2, 0)
+
+    // Deterministic completion barrier (replaces the magic-number-capped
+    // wait_done busy-spin): EXACTLY both readers must finish — each send!s on
+    // exit, a happens-before edge — so once received, each reader's writes to
+    // `crashed` are visible and the post-barrier assertions see the FINAL state,
+    // not a racing one. A reader stuck on a forwarded/freed corpse (the very bug
+    // this guards) trips the watchdog as a HARD FAIL. Generous watchdog: this is
+    // a GC-stress test (40 grow/reorder/shrink rounds, gc after each).
+    ta/assert-receives-all!(done_ch, 2, [["reader-1", "done"], ["reader-2", "done"]], 20000)
+
     assert-eq!(deref(crashed), 0)
     assert-eq!(anchor.x, 111)
     assert-eq!(anchor.y, 222)
