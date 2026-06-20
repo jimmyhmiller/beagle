@@ -1682,8 +1682,10 @@ impl LowLevelX86 {
             base,
             offset: offset * 8,
         });
-        self.instructions
-            .push(X86Asm::MovqRX { dest: reg1, src: scratch }); // key = low 64
+        self.instructions.push(X86Asm::MovqRX {
+            dest: reg1,
+            src: scratch,
+        }); // key = low 64
         self.instructions.push(X86Asm::Pextrq {
             dest: reg2,
             src: scratch,
