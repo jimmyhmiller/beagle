@@ -515,6 +515,13 @@ impl Runtime {
             &[],
             "Trigger garbage collection manually.\n\nNormally GC runs automatically, but this can be useful for testing or freeing memory at specific points.",
         )?;
+        self.add_builtin_with_doc(
+            "beagle.core/heap-bytes",
+            heap_bytes as *const u8,
+            true,
+            &[],
+            "Live/used bytes in the managed heap (the GC's own accounting). Read right AFTER gc() for the live set — a deterministic leak metric (a per-round leak grows it monotonically across checkpoints). Excludes JIT code memory, which grows monotonically with redefinition and is not reclaimed.",
+        )?;
 
         // ============================================================================
         // Math Functions

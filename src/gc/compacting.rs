@@ -676,6 +676,13 @@ impl Allocator for CompactingHeap {
         self.options
     }
 
+    fn bytes_in_use(&self) -> usize {
+        // Real accounting: bytes occupied in the active (from) space. After a
+        // compaction this is exactly the compacted live set; a per-round leak
+        // grows it monotonically.
+        self.from_space.allocation_offset
+    }
+
     fn can_allocate(&self, words: usize, _kind: BuiltInTypes) -> bool {
         // Account for the JIT inline fast path's frontier. The fast
         // path bumps `MutatorState.alloc_ptr` without updating

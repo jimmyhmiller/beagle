@@ -1099,6 +1099,13 @@ impl Allocator for MarkAndSweep {
         self.options
     }
 
+    fn bytes_in_use(&self) -> usize {
+        // Real accounting: committed heap minus the free list. After a sweep
+        // this is the live set plus free-list fragmentation (no compaction);
+        // a per-round leak grows the live component monotonically.
+        self.heap_size().saturating_sub(self.free_bytes())
+    }
+
     fn can_allocate(&self, words: usize, _kind: BuiltInTypes) -> bool {
         // Before GC: returning `false` is harmless — it just makes the
         // runtime call `gc()` first, which is free if we really don't

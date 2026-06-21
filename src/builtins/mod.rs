@@ -470,3 +470,14 @@ pub unsafe extern "C" fn gc(stack_pointer: usize, frame_pointer: usize) -> usize
     runtime.gc_impl(frame_pointer);
     BuiltInTypes::null_value() as usize
 }
+
+/// Live/used bytes in the managed heap (the GC's own accounting). Read this
+/// right after `gc()` for the live set — the deterministic leak metric for the
+/// soak harness. Excludes JIT code memory (which grows monotonically with
+/// redefinition; see CodeAllocator, reported separately).
+pub unsafe extern "C" fn heap_bytes(stack_pointer: usize, frame_pointer: usize) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+    let bytes = runtime.heap_bytes_in_use();
+    BuiltInTypes::Int.tag(bytes as isize) as usize
+}

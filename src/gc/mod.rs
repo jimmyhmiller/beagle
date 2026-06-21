@@ -103,6 +103,16 @@ pub trait Allocator {
     /// to pre-trigger GC so that subsequent allocations are GC-free.
     fn can_allocate(&self, words: usize, kind: BuiltInTypes) -> bool;
 
+    /// Live/used bytes currently held by the managed heap. After a full
+    /// `gc()` this is (approximately) the live set; it is the deterministic
+    /// leak metric the soak harness asserts a bound on (a per-round leak shows
+    /// up here as monotonic growth across checkpoints). Each GC reports it from
+    /// its OWN real accounting (not an estimate that could mask a leak); the
+    /// default of `0` is only for an allocator that has not opted in.
+    fn bytes_in_use(&self) -> usize {
+        0
+    }
+
     /// Returns `(alloc_ptr, alloc_end)` — the byte addresses of the
     /// current bump-allocator frontier and its upper limit.
     ///

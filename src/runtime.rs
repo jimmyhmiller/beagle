@@ -6129,6 +6129,15 @@ impl Runtime {
         }
     }
 
+    /// Live/used bytes currently held by the managed heap (the GC's own
+    /// accounting). Intended to be read right after a forced `gc()` so it
+    /// reflects the live set — the deterministic leak metric the soak harness
+    /// asserts a bound on. Does NOT include JIT code memory (which grows
+    /// monotonically with redefinition and is reported separately).
+    pub fn heap_bytes_in_use(&self) -> usize {
+        self.memory.heap.bytes_in_use()
+    }
+
     pub fn gc_impl(&mut self, frame_pointer: usize) {
         // The tier-2 install drain must never allocate Beagle heap: it runs
         // inside this collector holding `install_apply_lock` (and, on the

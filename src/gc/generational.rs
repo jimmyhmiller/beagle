@@ -625,6 +625,14 @@ impl Allocator for GenerationalGC {
         self.options
     }
 
+    fn bytes_in_use(&self) -> usize {
+        // Real accounting: live young bytes + live old bytes. The old gen is a
+        // mark-and-sweep space, so its used = committed minus free list. After a
+        // full gc() the young space is drained into old; a per-round leak that
+        // survives promotion grows the old component monotonically.
+        self.young.allocation_offset + self.old.heap_size().saturating_sub(self.old.free_bytes())
+    }
+
     fn can_allocate(&self, words: usize, _kind: BuiltInTypes) -> bool {
         if self.too_large_for_young(words) {
             // Conservative: large objects go to old gen, can't cheaply check free list

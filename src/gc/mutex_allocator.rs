@@ -221,6 +221,13 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         self.alloc.can_allocate(words, kind)
     }
 
+    fn bytes_in_use(&self) -> usize {
+        // Lock for a consistent snapshot — this is a diagnostic read, not on
+        // the allocation hot path.
+        let _lock = self.mutex.lock().unwrap();
+        self.alloc.bytes_in_use()
+    }
+
     fn allocator_frontier(&self) -> (usize, usize) {
         // Multi-mutator safety: when more than one thread is registered,
         // the shared bump frontier cannot be exposed to the JIT's inline
