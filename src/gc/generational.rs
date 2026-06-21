@@ -972,9 +972,18 @@ impl GenerationalGC {
                         *slot_addr = BuiltInTypes::null_value() as usize;
                     }
                 }
-            } else {
+            } else if self.old.contains(untagged as *const u8) {
                 stack_old_gen.push(value);
             }
+            // else: a value that is in NEITHER space — a non-heap value
+            // (Function/Int/Bool/Null/String, e.g. a first-class function held
+            // transiently in a handle root during redefinition) or a pointer
+            // outside both heaps. It is NOT an old-gen object and must be
+            // skipped, exactly as the stack-frame scan does
+            // (`gather_stack_roots_inner` uses the identical `else if
+            // self.old.contains(..)`). The previous bare `else` pushed it to
+            // `process_old_gen_object`, which `from_tagged`s it and aborts on
+            // `is_heap_pointer` — the make_closure-under-starvation crash.
         }
 
         self.process_all_roots(stack_roots);

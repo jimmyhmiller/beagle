@@ -417,7 +417,13 @@ pub struct HeapObject {
 
 impl HeapObject {
     pub fn from_tagged(pointer: usize) -> Self {
-        assert!(BuiltInTypes::is_heap_pointer(pointer));
+        assert!(
+            BuiltInTypes::is_heap_pointer(pointer),
+            "from_tagged: not a heap pointer: tagged={:#x} tag={} kind={:?}",
+            pointer,
+            pointer & 0b111,
+            BuiltInTypes::get_kind(pointer)
+        );
         assert!(
             BuiltInTypes::untag(pointer).is_multiple_of(8),
             "Misaligned heap pointer: tagged={:#x}, untagged={:#x}, tag={}, untagged%8={}",
