@@ -52,10 +52,16 @@ Fix = make `Runtime::functions` never realloc:
   x86-sensitive publish order — readers never see a half-init element /
   unpublished chunk). No reclamation → no leak/epoch/hazard. Writes `&mut self`.
   3/3 unit tests incl the load-bearing `stable_addresses_across_grow`.
-- **TODO — the rewiring (mechanical, fully validated by review + suite ×3 GCs):**
-  swap `Runtime::functions: Vec<Function>` → `AppendOnlyChunked<Function>`. ~50
-  sites in `src/runtime.rs` + a few in `src/compiler.rs`, `src/repl.rs`,
-  `src/builtins/reflect.rs`, `src/builtins/mod.rs`. Patterns to convert:
+- **DONE (commit f15eb6b) — the rewiring:** swapped `Runtime::functions:
+  Vec<Function>` → `AppendOnlyChunked<Function>`. Container gained `last()`,
+  `truncate()` (compile-failure rollback — safe, rolled-back fns are unpublished),
+  `IndexMut`, `IntoIterator` for `&`/`&mut`. `upsert_function`/`rebind`/
+  `revert_function_pointer` restructured to find-index-via-immutable-scan-FIRST
+  (the container's method indexing borrows differently than Vec's NLL). Builds
+  clean; container unit tests 3/3; **default-GC full suite 437/437.** Minor: a
+  redundant wrapper block left in `upsert_function` (trivial cosmetic cleanup).
+  STILL TODO: ×3-GC + gc-always validation (with OSR-on folded), x86-validate the
+  publish, independent review. (Original site patterns, for reference:)
   - `.functions[idx]` → `Index` impl already provides this (works as-is).
   - `.functions.push(f)` → `.functions.push(f)` (returns idx; same).
   - `.functions.get(idx)` → same (`get` impl).
