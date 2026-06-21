@@ -176,21 +176,45 @@ blanket "call-free" check is wrong — fannkuch's calls are cold fallbacks, nbod
 
 **THE NUT (for the fresh session): distinguish a HOT-path call (nbody/advance,
 on every iteration → no promotion → regress) from a COLD fallback call (fannkuch
-array-OOB → skipped on the hot path → real win).** Two viable approaches:
-1. **CFG/dominance (static):** a call DOMINATED by the loop header (on every
-   iteration's path) is hot → gate out; a call only reachable via a guard's
-   FAILURE edge (the array bounds-check fall-through) is cold → ignore. Reuse
-   `cfg/loops.rs::natural_loops` + a dominator query over F's CFG. This is the
-   precise signal; it's the real judgment-heavy work.
-2. **MEASURED (build-then-check):** build F_osr, then count the loop's `SlotStore`
-   (writeback-every-iteration) count in the optimized IR — warm/promoted ≈ 1,
-   non-promoting ≈ 19 (OSR_PERF_HANDOFF.md §97-99). High ⇒ no promotion ⇒ DON'T
-   publish (skip). Directly measures the actual benefit (robust to the
-   slow-path-call confound) at the cost of one F_osr compile (on the compiler
-   thread, off the critical path). Likely the more robust v1.
-Either way: re-validate the A/B (fannkuch keeps ~1.5-1.74×, nbody NOT regressed,
-every benchmark ≥ tier-1), fold the 3 A-lite nits, re-validate ×3-GC + container
-stress, then bring it + the flip for the bar.
+array-OOB → skipped on the hot path → real win).**
+
+**MEASURED approach — DISPROVEN by calibration (don't build it).** We assumed
+"did the loop's values promote? / SlotStore count" was the cleaner signal. It is
+NOT. Ran `BEAGLE_SSA_LOG_MEM2REG=1 BEAGLE_OSR=1` on the F_osr variants:
+- `fannkuch$osr`: candidates=149, **promoted=125 (84%)** — promotes well, WINS.
+- `nbody/run$osr0`: candidates=13, **promoted=10 (77%)** — promotes ALSO well, yet
+  REGRESSES.
+The promotion ratio does NOT separate win from regress (both ~77-84%). nbody/run's
+regression is NOT failed promotion — it's OSR overhead (entry guards + buffer
+transfer) NOT AMORTIZING on a CALL-DOMINATED loop: run's per-iteration cost is
+dominated by the `advance()` CALL, which F_osr can't speed up (advance is its own
+fn); promoting run's loop counter saves nothing. So SlotStore-count / mem2reg-result
+is the wrong signal — discard it.
+
+**CFG-DOMINANCE — the CONFIRMED path (this is what to build).** A perf heuristic
+(reads CFG structure; does NOT alter gc-safety — gc-ADJACENT at most, and actually
+not even that: it's pure control-flow structure). Gate: does the natural loop being
+OSR'd contain a `Call` whose block **dominates a latch** (i.e. executes on EVERY
+iteration → the loop is call-bound → OSR overhead won't amortize)? If yes → SKIP
+(`return None`). fannkuch's cold OOB-fallback `Call`s are NOT latch-dominated (only
+on the bounds-guard FAILURE edge, bypassed on the hot path) → don't gate; nbody/run's
+`advance` call IS latch-dominated → gate out. INTEGRATION (in
+`build_osr_variant_inner`, after `base_ir`+`info` are captured, ~compiler.rs:1061,
+behind `BEAGLE_OSR_GATE`):
+- `let cfg = crate::cfg::builder::build_cfg(&base_ir)?;` (or reuse the analysis CFG)
+- `let loops = crate::cfg::loops::natural_loops(&cfg);` — `NaturalLoop { header,
+  body: HashSet<BlockId>, latches: Vec<BlockId> }`. Find the loop whose `header`
+  block corresponds to `info.header_label` (map the Label→BlockId; or, for a
+  single-hot-loop fn, the sole/outermost loop).
+- `let idom = crate::cfg::dom::compute_idoms(&cfg, &rpo);` + the `dominates(&idom,
+  a, b)` helper (already in `cfg/loops.rs`/`cfg/dom.rs`).
+- For each block in `loop.body` that contains an `Op::Call { .. }`: if it
+  `dominates` any `loop.latches[i]` → the loop is call-bound → `return None`.
+- Confirm the gate stays READ-ONLY on the CFG (a perf decision; no gc/IR mutation).
+Then A/B-validate (fannkuch keeps ~1.5-1.74×, nbody NOT regressed, every benchmark
+≥ tier-1 — the A/B is the backstop: too-aggressive → nbody regresses → caught;
+too-conservative → fannkuch loses → caught), fold the 3 A-lite nits, re-validate
+×3-GC + the container stress, then bring it + the flip for the bar.
 
 ### THE FLIP — gated on BOTH
 
