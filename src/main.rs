@@ -117,6 +117,7 @@ mod arm;
 #[macro_use]
 mod trace;
 pub mod abi;
+mod append_only_chunked;
 pub mod ast;
 pub mod backend;
 mod binding_space;
