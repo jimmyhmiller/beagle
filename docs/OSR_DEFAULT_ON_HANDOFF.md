@@ -143,8 +143,54 @@ the HARD bar; a missed-speedup is acceptable. A/B-validate against the full
 benchmark suite (fannkuch keeps ~1.5-1.74×, nbody not regressed, every benchmark
 ≥ tier-1). Measured/profile-guided is a future refinement IF v1 proves too
 conservative. **This is the judgment-heavy piece — do it with a clear head / fresh
-session, AFTER the mechanical rewiring.** Likely lives in `build_osr_variant_inner`
-(skip build/publish if not confident) and/or the OSR trigger in `src/ast.rs`.
+session, AFTER the mechanical rewiring.** Lives in `build_osr_variant_inner`
+(after `int_slots` is computed, ~compiler.rs:1117 — `return None` to SKIP, which
+the caller `build_osr_variant` turns into `osr_set_failed` → the loop stays
+tier-1). Behind an env override `BEAGLE_OSR_GATE` (default on).
+
+**ATTEMPT 1 (done, reverted to clean — the simple static signals DON'T separate
+the cases; here's exactly why, so the fresh session starts past the dead end):**
+Scan `base_ir.instructions` for op classes:
+- ARRAY signal = the inlined mutable-array ops = register-indexed heap ops
+  (`HeapLoadReg`/`HeapLoadByteReg`/`HeapStoreOffsetReg`/`HeapStoreByteOffsetReg`/
+  `HeapStoreByteOffsetMasked`) + `CompareAndSwap`.
+- FLOAT signal = `FloatBinOp`/`Add|Sub|Mul|DivFloat`/`CompareFloat`/`GuardFloat`/
+  `IntToFloat`/`FRoundToZero`/`StoreFloat`/`LoadLocalFloat`/`StoreLocalFloat`/
+  `MoveFloat`/`Fmov*`.
+- CALL signal = `Call`/`Recurse`/`TailRecurse`.
+
+Predicate `!int_slots.is_empty() || (has_array && !has_float)` → fannkuch n=11
+**1.78× ✓** but **nbody still 0.72× ✗**. Debug (`BEAGLE_OSR_DEBUG=1`) shows WHY:
+nbody's `advance` loops ARE correctly skipped (array+float), but **`nbody/run#L0`
+fires** — the OUTER iteration loop indexes `bodies[]` (→ array=true) and the
+floats live INSIDE `advance` (a separate fn, so run's own IR has float=false),
+yet run's loop CALLS `advance` every iteration. A loop-carried value can't
+register-promote across that call safepoint → F_osr is pure overhead → regression.
+So `array && !float` MISFIRES on an incidental-array, call-dominated loop.
+
+Adding `!has_call` to the predicate then BREAKS fannkuch (drops to 0.99×): the
+inlined array ops have a SLOW-PATH (bounds-OOB) fallback `Call` to the real
+wrapper, which is COLD (never taken on the hot path) but trips `has_call`. So a
+blanket "call-free" check is wrong — fannkuch's calls are cold fallbacks, nbody's
+`advance` call is hot.
+
+**THE NUT (for the fresh session): distinguish a HOT-path call (nbody/advance,
+on every iteration → no promotion → regress) from a COLD fallback call (fannkuch
+array-OOB → skipped on the hot path → real win).** Two viable approaches:
+1. **CFG/dominance (static):** a call DOMINATED by the loop header (on every
+   iteration's path) is hot → gate out; a call only reachable via a guard's
+   FAILURE edge (the array bounds-check fall-through) is cold → ignore. Reuse
+   `cfg/loops.rs::natural_loops` + a dominator query over F's CFG. This is the
+   precise signal; it's the real judgment-heavy work.
+2. **MEASURED (build-then-check):** build F_osr, then count the loop's `SlotStore`
+   (writeback-every-iteration) count in the optimized IR — warm/promoted ≈ 1,
+   non-promoting ≈ 19 (OSR_PERF_HANDOFF.md §97-99). High ⇒ no promotion ⇒ DON'T
+   publish (skip). Directly measures the actual benefit (robust to the
+   slow-path-call confound) at the cost of one F_osr compile (on the compiler
+   thread, off the critical path). Likely the more robust v1.
+Either way: re-validate the A/B (fannkuch keeps ~1.5-1.74×, nbody NOT regressed,
+every benchmark ≥ tier-1), fold the 3 A-lite nits, re-validate ×3-GC + container
+stress, then bring it + the flip for the bar.
 
 ### THE FLIP — gated on BOTH
 
