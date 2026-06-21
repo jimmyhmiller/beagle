@@ -4764,7 +4764,7 @@ pub struct Runtime {
     // TODO: Do I need anything more than
     // namespace manager? Shouldn't these functions
     // and things be under that?
-    pub functions: Vec<Function>,
+    pub functions: crate::append_only_chunked::AppendOnlyChunked<Function>,
     jump_table_reserved: Reserved,
     /// Committed jump-table pages, kept permanently writable and only ever
     /// appended (never removed or reordered). The pages hold a dense array of
@@ -4925,7 +4925,7 @@ impl Runtime {
             jump_table_lock: Mutex::new(()),
             jump_table_base_ptr,
             jump_table_offset: 0,
-            functions: vec![],
+            functions: crate::append_only_chunked::AppendOnlyChunked::new(),
             compiler_channel: None,
             compiler_thread: None,
             protocol_info: HashMap::new(),
@@ -9328,11 +9328,10 @@ impl Runtime {
             .get_function_by_pointer(untagged_pointer)
             .ok_or_else(|| format!("Function not found for pointer {:p}", untagged_pointer))?;
         let existing_function = existing_function.clone();
-        for (index, function) in self.functions.iter_mut().enumerate() {
-            if function.name == name {
-                self.overwrite_function(index, untagged_pointer, existing_function.size)?;
-                return Ok(());
-            }
+        let existing = self.functions.iter().position(|f| f.name == name);
+        if let Some(index) = existing {
+            self.overwrite_function(index, untagged_pointer, existing_function.size)?;
+            return Ok(());
         }
         Err(format!("Function {} not found in function table", name).into())
     }
@@ -9357,8 +9356,13 @@ impl Runtime {
         let mut already_defined = false;
         let mut function_pointer = 0;
         if let Some(n) = name {
-            for (index, function) in self.functions.iter_mut().enumerate() {
-                if function.name == n {
+            // Find the existing function by name via an immutable scan FIRST, so
+            // the &mut self operations below (overwrite_function / add_binding)
+            // and the per-field IndexMut writes don't overlap an iter_mut borrow
+            // of self.functions.
+            let existing = self.functions.iter().position(|f| f.name == n);
+            if let Some(index) = existing {
+                {
                     function_pointer = self.overwrite_function(index, pointer, size)?;
                     // Update variadic info on existing function
                     self.functions[index].is_variadic = is_variadic;
@@ -9429,7 +9433,6 @@ impl Runtime {
                         self.add_binding(n, tagged_fn);
                     }
                     already_defined = true;
-                    break;
                 }
             }
         }
@@ -9590,7 +9593,8 @@ impl Runtime {
     /// tier-2 specialization on a runtime redefinition. No-op if the function
     /// is gone (returns false).
     pub fn revert_function_pointer(&mut self, name: &str, pointer: usize, size: usize) -> bool {
-        if let Some(index) = self.functions.iter().position(|f| f.name == name) {
+        let existing = self.functions.iter().position(|f| f.name == name);
+        if let Some(index) = existing {
             let _ = self.overwrite_function(index, pointer as *const u8, size);
             true
         } else {

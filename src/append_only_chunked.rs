@@ -156,6 +156,36 @@ impl<T> AppendOnlyChunked<T> {
         Some(unsafe { &mut *chunk.add(idx % CHUNK_SIZE) })
     }
 
+    #[inline]
+    pub fn last(&self) -> Option<&T> {
+        let len = self.len.load(Ordering::Acquire);
+        if len == 0 { None } else { self.get(len - 1) }
+    }
+
+    /// Shrink to `new_len`, dropping the removed elements. The ONLY caller is the
+    /// compile-failure ROLLBACK (`compiler.rs`), which removes functions a FAILED
+    /// compile appended. Those functions are UNPUBLISHED — the compile errored
+    /// with installs deferred, so they were never put in the jump table and no
+    /// running code holds their pointer/index — hence no concurrent reader
+    /// references them, and dropping them is sound. We lower `len` FIRST (Release)
+    /// so any new reader bounds-check returns `None` for the removed range, THEN
+    /// drop. A later `push` to a reused (now-dropped) slot `ptr::write`s over it
+    /// (no double-drop, no leak). Chunk allocations are retained (append-only).
+    pub fn truncate(&mut self, new_len: usize) {
+        let old_len = self.len.load(Ordering::Relaxed);
+        if new_len >= old_len {
+            return;
+        }
+        self.len.store(new_len, Ordering::Release);
+        for idx in new_len..old_len {
+            let chunk = self.chunk_ptr(idx / CHUNK_SIZE, Ordering::Relaxed);
+            debug_assert!(!chunk.is_null());
+            // SAFETY: idx was < old_len so the element was initialized; it is
+            // unpublished (failed-compile rollback) so no reader holds it.
+            unsafe { std::ptr::drop_in_place(chunk.add(idx % CHUNK_SIZE)) };
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         let len = self.len.load(Ordering::Acquire);
         (0..len).map(move |i| self.get(i).expect("index < len is always present"))
@@ -176,11 +206,35 @@ impl<T> AppendOnlyChunked<T> {
     }
 }
 
+impl<'a, T> IntoIterator for &'a AppendOnlyChunked<T> {
+    type Item = &'a T;
+    type IntoIter = Box<dyn Iterator<Item = &'a T> + 'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.iter())
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut AppendOnlyChunked<T> {
+    type Item = &'a mut T;
+    type IntoIter = Box<dyn Iterator<Item = &'a mut T> + 'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.iter_mut())
+    }
+}
+
 impl<T> std::ops::Index<usize> for AppendOnlyChunked<T> {
     type Output = T;
     #[inline]
     fn index(&self, idx: usize) -> &T {
         self.get(idx)
+            .expect("AppendOnlyChunked: index out of bounds")
+    }
+}
+
+impl<T> std::ops::IndexMut<usize> for AppendOnlyChunked<T> {
+    #[inline]
+    fn index_mut(&mut self, idx: usize) -> &mut T {
+        self.get_mut(idx)
             .expect("AppendOnlyChunked: index out of bounds")
     }
 }
