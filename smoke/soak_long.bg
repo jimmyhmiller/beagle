@@ -1,0 +1,156 @@
+namespace soak_long
+
+use beagle.core as core
+use beagle.channel as chan
+use beagle.test-async as ta
+
+// ============================================================================
+// Standalone LONG-SESSION soak + STARVATION probe (FUTURE_WORK §4 priority-2,
+// §2.2 standing stress harness). NOT part of the test suite — run on demand:
+//
+//   cargo build --release
+//   ./target/release/beag run smoke/soak_long.bg                 # normal
+//   ./target/release/beag run --gc-always smoke/soak_long.bg     # starvation
+//   # for an hours-long soak, loop it:
+//   while ./target/release/beag run --gc-always smoke/soak_long.bg; do :; done
+//
+// Exit 0 = completed with zero reader errors and bounded GC heap. A nonzero exit
+// or a Rust panic/abort is a real failure to investigate (e.g. the is_heap_pointer
+// / "property 'resume' on null" fragility seen under extreme CPU starvation).
+//
+// READERS is deliberately OVERSUBSCRIBED (more reader threads than cores on a
+// typical machine) so that, combined with --gc-always and the allocation churn,
+// it saturates the GC/scheduler paths — the starvation probe.
+
+protocol SoakDescribable { fn soak-describe(self) }
+struct SoakThing { a }
+fn soak-fn(x) { x + 1 }
+
+let READERS = 12
+let CONCURRENT_ROUNDS = 1500
+let LEAK_WARMUP = 150
+let LEAK_CHECKPOINTS = 12
+let LEAK_ROUNDS_PER_CHECKPOINT = 50
+
+fn churn-struct-and-fn() {
+    eval("namespace soak_long
+struct SoakThing { a, b }")
+    eval("namespace soak_long
+struct SoakThing { b, a }")
+    eval("namespace soak_long
+struct SoakThing { a }")
+    eval("namespace soak_long
+fn soak-fn(x) { x * 2 }")
+    eval("namespace soak_long
+fn soak-fn(x) { x + 1 }")
+}
+
+fn churn-all() {
+    churn-struct-and-fn()
+    eval("namespace soak_long
+extend SoakThing with SoakDescribable { fn soak-describe(self) { 1 } }")
+    eval("namespace soak_long
+extend SoakThing with SoakDescribable { fn soak-describe(self) { 2 } }")
+}
+
+fn reader(anchor, stop, label, done_ch) {
+    let mut errors = 0
+    while !deref(stop) {
+        try {
+            let _ = anchor.a
+            let _ = soak-fn(1)
+        } catch (e, resume) {
+            errors = errors + 1
+            resume(null)
+        }
+    }
+    chan/send!(done_ch, [label, errors])
+}
+
+fn spawn-readers(anchor, stop, done_ch, n) {
+    let mut k = 0
+    while k < n {
+        let label = "r" ++ to-string(k)
+        thread(fn() { reader(anchor, stop, label, done_ch) })
+        k = k + 1
+    }
+}
+
+fn heap-after-gc() {
+    core/gc()
+    core/heap-bytes()
+}
+
+fn elapsed-ms(start) {
+    (core/time-now() - start) / 1000000
+}
+
+fn main() {
+    eval("namespace soak_long
+extend SoakThing with SoakDescribable { fn soak-describe(self) { 0 } }")
+
+    let start = core/time-now()
+    println("=== soak_long: ${READERS} oversubscribed readers, ${CONCURRENT_ROUNDS} concurrent rounds ===")
+
+    // ---- PHASE 1: sustained redefinition under oversubscribed readers ----
+    let stop = atom(false)
+    let done_ch = chan/make-channel()
+    let anchor = SoakThing { a: 7 }
+    spawn-readers(anchor, stop, done_ch, READERS)
+
+    let mut i = 0
+    while i < CONCURRENT_ROUNDS {
+        churn-struct-and-fn()
+        i = i + 1
+        if i % 250 == 0 {
+            println("  concurrent round ${i}/${CONCURRENT_ROUNDS}  heap=${core/heap-bytes()}  t=${elapsed-ms(start)}ms")
+        }
+    }
+    reset!(stop, true)
+
+    // Drain exactly READERS completion signals; assert every reader saw ZERO
+    // errors. (A Rust panic/abort under starvation would have crashed already.)
+    let mut got = []
+    let mut d = 0
+    while d < READERS {
+        let v = ta/receive-within(done_ch, 60000, "reader completion")
+        got = push(got, v)
+        d = d + 1
+    }
+    let mut total_errors = 0
+    for pair in got {
+        total_errors = total_errors + pair[1]
+    }
+    println("  PHASE 1 done: ${READERS} readers joined, total reader errors = ${total_errors}")
+    if total_errors != 0 {
+        throw("SOAK FAIL: ${total_errors} reader error(s) during sustained struct+fn redefinition (race-clean kinds should never error).")
+    }
+
+    // ---- PHASE 2: single-threaded leak trajectory (struct + fn + protocol) ----
+    println("=== PHASE 2: leak trajectory (single-threaded full churn) ===")
+    let mut w = 0
+    while w < LEAK_WARMUP { churn-all() w = w + 1 }
+
+    let mut checkpoints = []
+    let mut c = 0
+    println("  checkpoint,heap_bytes,t_ms")
+    while c < LEAK_CHECKPOINTS {
+        let mut r = 0
+        while r < LEAK_ROUNDS_PER_CHECKPOINT { churn-all() r = r + 1 }
+        let h = heap-after-gc()
+        checkpoints = push(checkpoints, h)
+        println("  ${c},${h},${elapsed-ms(start)}")
+        c = c + 1
+    }
+
+    let lo = min-of(checkpoints)
+    let hi = max-of(checkpoints)
+    let spread = hi - lo
+    println("  leak spread (max-min) over ${LEAK_CHECKPOINTS} checkpoints = ${spread} bytes")
+    if spread > 16384 {
+        throw("SOAK FAIL: GC heap grew ${spread} bytes across checkpoints — possible per-round leak (definition retention?).")
+    }
+
+    println("=== SOAK OK: 0 reader errors, bounded GC heap (spread ${spread}B), ${elapsed-ms(start)}ms ===")
+    "ok"
+}

@@ -1,0 +1,139 @@
+namespace soak_redefine_test
+
+use beagle.core as core
+use beagle.channel as chan
+use beagle.test-async as ta
+
+// ============================================================================
+// Long-session live-coding SOAK (FUTURE_WORK §4 priority-2 / §3.1).
+// ============================================================================
+// A live-programming language must survive a long live-coding session — many
+// redefinitions against running readers — without crashing, corrupting state, or
+// LEAKING. This asserts that DETERMINISTICALLY (bounded growth, not eyeball):
+//
+//  PHASE 1 (concurrent safety): sustained struct + fn redefinition under reader
+//    threads => ZERO reader errors, via the §2.1 channel completion barrier.
+//    (Race-clean kinds only; protocol-impl re-extend under concurrent readers is
+//    the separately-tracked §1.2 ~2% torn-read and is exercised single-threaded
+//    in Phase 2.)
+//
+//  PHASE 2 (no GC-heap leak): sustained struct + fn + protocol redefinition,
+//    single-threaded so the live set is noise-free, with multi-checkpoint
+//    heap-bytes sampling. A per-round leak (e.g. unbounded definition retention)
+//    shows as monotonic growth across checkpoints; a bounded heap keeps the
+//    checkpoint spread tiny. Measured empirically: the heap PLATEAUS after a
+//    short warmup on all 3 GCs (gen 24080->24400, compacting/ms 24080->24248,
+//    post-warmup spread ~tens of bytes), so SLACK is generous (never false-fails)
+//    yet a 1-descriptor/round leak over the window would be tens of KB.
+//
+//  NOTE (deliberately NOT asserted): total RSS is expected-unbounded because the
+//  JIT CodeAllocator never reclaims code (src/code_memory.rs) — every redefine
+//  emits new code. That is a real, separate long-session item (logged in
+//  FUTURE_WORK), not a GC leak; the soak asserts on the GC heap, which IS bounded.
+
+protocol SoakDescribable { fn soak-describe(self) }
+struct SoakThing { a }
+fn soak-fn(x) { x + 1 }
+
+// Race-clean churn (struct grow/reorder/shrink + fn) — safe under concurrent
+// readers. Each eval recompiles, exercising the redefinition path.
+fn churn-struct-and-fn() {
+    eval("namespace soak_redefine_test
+struct SoakThing { a, b }")
+    eval("namespace soak_redefine_test
+struct SoakThing { b, a }")
+    eval("namespace soak_redefine_test
+struct SoakThing { a }")
+    eval("namespace soak_redefine_test
+fn soak-fn(x) { x * 2 }")
+    eval("namespace soak_redefine_test
+fn soak-fn(x) { x + 1 }")
+}
+
+// Full churn including protocol re-extend — used single-threaded in Phase 2.
+fn churn-all() {
+    churn-struct-and-fn()
+    eval("namespace soak_redefine_test
+extend SoakThing with SoakDescribable { fn soak-describe(self) { 1 } }")
+    eval("namespace soak_redefine_test
+extend SoakThing with SoakDescribable { fn soak-describe(self) { 2 } }")
+}
+
+// Reader: reads a long-lived anchor's stable field + calls the live fn in a tight
+// loop (like a game loop), counting any crash, until stopped. Reports its error
+// count on exit (a happens-before edge the test body's barrier waits on).
+fn reader(anchor, stop, label, done_ch) {
+    let mut errors = 0
+    while !deref(stop) {
+        try {
+            let _ = anchor.a
+            let _ = soak-fn(1)
+        } catch (e, resume) {
+            errors = errors + 1
+            resume(null)
+        }
+    }
+    chan/send!(done_ch, [label, errors])
+}
+
+fn heap-after-gc() {
+    core/gc()
+    core/heap-bytes()
+}
+
+test "soak: sustained redefinition under concurrent readers stays correct" {
+    let stop = atom(false)
+    let done_ch = chan/make-channel()
+    let anchor = SoakThing { a: 7 }
+    thread(fn() { reader(anchor, stop, "r1", done_ch) })
+    thread(fn() { reader(anchor, stop, "r2", done_ch) })
+    thread(fn() { reader(anchor, stop, "r3", done_ch) })
+
+    let mut i = 0
+    while i < 300 {
+        churn-struct-and-fn()
+        i = i + 1
+    }
+    reset!(stop, true)
+
+    // All three readers finished with ZERO errors, in any order (§2.1 barrier).
+    ta/assert-receives-all!(done_ch, 3, [["r1", 0], ["r2", 0], ["r3", 0]], 20000)
+}
+
+test "soak: sustained redefinition does not leak the GC heap" {
+    // Warm up well past the observed plateau (~90 rounds) so caches / sticky-bit
+    // fallbacks have settled and the front-loaded growth is excluded.
+    let mut w = 0
+    while w < 150 {
+        churn-all()
+        w = w + 1
+    }
+
+    // Multi-checkpoint slope (per the design): a per-round leak grows the heap
+    // monotonically across checkpoints; a bounded heap keeps the spread tiny.
+    let checkpoints_n = 10
+    let rounds_per_checkpoint = 40
+    let slack_bytes = 16384
+
+    let mut checkpoints = []
+    let mut c = 0
+    while c < checkpoints_n {
+        let mut r = 0
+        while r < rounds_per_checkpoint {
+            churn-all()
+            r = r + 1
+        }
+        checkpoints = push(checkpoints, heap-after-gc())
+        c = c + 1
+    }
+
+    let lo = min-of(checkpoints)
+    let hi = max-of(checkpoints)
+    let first = first-of(checkpoints)
+    let last = last(checkpoints)
+
+    // Slope guard (end vs start) AND spread guard (max vs min) — either catches a
+    // monotonic per-round leak; both are ~tens of bytes for a bounded heap.
+    assert!((last - first) <= slack_bytes)
+    assert!((hi - lo) <= slack_bytes)
+}
