@@ -140,3 +140,31 @@ fix is that allocation sites route through their sticky-bit generic fallback
 after a forced STW migration, and migration history is cleared once that
 migration has completed. `get_old_definition` also searches retained definitions
 from newest to oldest for defensive behavior while migration is pending.
+
+## OPEN — `make_closure` `is_heap_pointer` abort under CPU starvation 🔴
+
+Reliably reproduced by the soak harness (`smoke/soak_long.bg`) under
+`--gc-always` while all cores are saturated — **2/2 crashes in ~8–12 s**:
+
+```
+thread '<unnamed>' panicked at src/types.rs:420:9:
+assertion failed: BuiltInTypes::is_heap_pointer(pointer)
+  ... beag::builtins::objects::make_closure ...
+thread caused non-unwinding panic. aborting.   (exit 134 / SIGABRT)
+```
+
+`make_closure` (src/builtins/objects.rs:233) reads its `function` argument,
+sees the `HeapObject` *tag*, then `HeapObject::from_tagged(function)` asserts
+`is_heap_pointer` and fails — i.e. `function` carries the HeapObject tag bits but
+a non-pointer payload: a **torn / clobbered tagged value**, the B4 GC-safety
+class (a maybe-pointer racing a concurrent moving GC / non-atomic 8-byte read).
+Pre-existing (independently observed during the §2.1 cross-GC review under two
+competing GC-suites saturating all cores); vanishes under normal load. The same
+starvation window also produced a `"Cannot access property 'resume' on null"` in
+`beagle.async/scheduler-loop` (gc-always card-table path).
+
+Repro: `for i in $(seq 1 $(sysctl -n hw.ncpu)); do yes >/dev/null & done;
+./target/release/beag run --gc-always smoke/soak_long.bg`. The standing rule
+(any maybe-pointer live across a GC safepoint must be in a GC-scanned slot)
+needs auditing for the `make_closure` argument path. Tracked also in FUTURE_WORK
+§1.3.

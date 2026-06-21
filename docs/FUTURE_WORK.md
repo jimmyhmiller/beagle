@@ -85,6 +85,15 @@ that might be a heap pointer must be in a GC-scanned slot.
   maybe-pointer cross-safepoint value is slot-rooted. A standing `--gc-always`
   fuzzer over concurrent allocation patterns is the realistic guard; it should
   be CI-enforced, not run by hand.
+- 🔴 **`make_closure` `is_heap_pointer` abort under CPU starvation** — the soak
+  harness (`smoke/soak_long.bg`, `--gc-always` + all cores saturated) RELIABLY
+  reproduces it (2/2 in ~8–12 s): `make_closure` reads its `function` arg with
+  the `HeapObject` tag but a non-pointer payload (a torn/clobbered tagged value;
+  B4 class), aborting at `src/types.rs:420`. Same window also yields a
+  `"property 'resume' on null"` in `beagle.async/scheduler-loop`. Pre-existing,
+  vanishes under normal load. Full details + repro in
+  `CONCURRENT_REDEFINE_OPEN_ISSUES.md`. This is the concrete bug the standing
+  `--gc-always` fuzzer above should gate on.
 
 ### 1.4 bigint missing core operations ⏸
 
@@ -341,7 +350,17 @@ Known gaps:
 - 🔴 **GC-root invariant enforcement** beyond discipline (§1.3) — a static or
   dynamic checker that proves the maybe-pointer-cross-safepoint rule.
 - 🔴 **Thread-count single source of truth** (§1.1).
-- 🟡 **Leak/RSS bounding** under long live sessions (§3.1).
+- 🟡 **Leak/RSS bounding** under long live sessions (§3.1). The GC heap itself
+  is bounded across redefinition — the soak harness measures a flat plateau on
+  all 3 GCs (`resources/soak_redefine_test.bg`, `smoke/soak_long.bg`).
+- 🔴 **JIT code memory is never reclaimed** — `CodeAllocator` (`src/code_memory.rs`)
+  only ever appends to `used_pages`; there is no free/reclaim path. Every
+  `eval`/redefinition emits fresh code, so a long live-coding session grows code
+  memory (hence total RSS) MONOTONICALLY and unboundedly — independent of the GC
+  heap. For a live-programming language where redefine is THE core operation,
+  this is a real long-session scalability limit. Needs code reclamation (free
+  superseded function bodies) or a relocating/compacting code cache. The soak
+  asserts only on the GC heap precisely because this makes RSS expected-unbounded.
 - 🟡 **Stop-the-world cost** of structural-redefinition migration — acceptable
   for a dev/live-coding loop, but it's a global pause; document the expected
   latency and whether it's tolerable for embedded hosts (games at 60fps).
