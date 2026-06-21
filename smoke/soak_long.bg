@@ -10,9 +10,14 @@ use beagle.test-async as ta
 //
 //   cargo build --release
 //   ./target/release/beag run smoke/soak_long.bg                 # normal
-//   ./target/release/beag run --gc-always smoke/soak_long.bg     # starvation
-//   # for an hours-long soak, loop it:
-//   while ./target/release/beag run --gc-always smoke/soak_long.bg; do :; done
+//
+// For the CPU-STARVATION probe (saturate every core under --gc-always — the
+// reliable repro vehicle for GC/scheduler fragility), use the wrapper script,
+// which reaps its CPU-burner saturators safely (timeout-wrapped + trap) so an
+// aborted/killed run never orphans them:
+//   smoke/soak_starvation.sh [WINDOW_SECONDS] [REPEATS]
+// Do NOT hand-spawn `yes` saturators + a trailing `pkill`: a panicked/timed-out
+// run aborts BEFORE the pkill and orphans them, saturating the host.
 //
 // Exit 0 = completed with zero reader errors and bounded GC heap. A nonzero exit
 // or a Rust panic/abort is a real failure to investigate (e.g. the is_heap_pointer
