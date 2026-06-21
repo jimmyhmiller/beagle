@@ -520,7 +520,7 @@ impl Runtime {
             heap_bytes as *const u8,
             true,
             &[],
-            "Live/used bytes in the managed heap (the GC's own accounting). Read right AFTER gc() for the live set — a deterministic leak metric (a per-round leak grows it monotonically across checkpoints). Excludes JIT code memory, which grows monotonically with redefinition and is not reclaimed.",
+            "Live/used bytes in the managed heap (the GC's own accounting). Read right AFTER gc() for the live set — a deterministic leak metric (a per-round leak grows it monotonically across checkpoints). Use RELATIVE deltas within ONE GC; absolute values are NOT comparable across GCs (mark-and-sweep reports committed minus free = live + fragmentation, not pure live; compacting/generational report the compacted/promoted live set). Excludes JIT code memory, which grows monotonically with redefinition and is not reclaimed.",
         )?;
 
         // ============================================================================

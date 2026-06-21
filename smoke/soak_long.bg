@@ -28,8 +28,8 @@ fn soak-fn(x) { x + 1 }
 
 let READERS = 12
 let CONCURRENT_ROUNDS = 1500
-let LEAK_WARMUP = 150
-let LEAK_CHECKPOINTS = 12
+let LEAK_WARMUP = 200
+let LEAK_CHECKPOINTS = 20
 let LEAK_ROUNDS_PER_CHECKPOINT = 50
 
 fn churn-struct-and-fn() {
@@ -147,7 +147,7 @@ extend SoakThing with SoakDescribable { fn soak-describe(self) { 0 } }")
     let hi = max-of(checkpoints)
     let spread = hi - lo
     println("  leak spread (max-min) over ${LEAK_CHECKPOINTS} checkpoints = ${spread} bytes")
-    if spread > 16384 {
+    if spread > 4096 {
         throw("SOAK FAIL: GC heap grew ${spread} bytes across checkpoints — possible per-round leak (definition retention?).")
     }
 

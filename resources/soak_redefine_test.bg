@@ -22,9 +22,11 @@ use beagle.test-async as ta
 //    heap-bytes sampling. A per-round leak (e.g. unbounded definition retention)
 //    shows as monotonic growth across checkpoints; a bounded heap keeps the
 //    checkpoint spread tiny. Measured empirically: the heap PLATEAUS after a
-//    short warmup on all 3 GCs (gen 24080->24400, compacting/ms 24080->24248,
-//    post-warmup spread ~tens of bytes), so SLACK is generous (never false-fails)
-//    yet a 1-descriptor/round leak over the window would be tens of KB.
+//    short warmup on all 3 GCs (gen 24080->24400, compacting/ms 24080->24248);
+//    a correct run's post-warmup spread is ~hundreds of bytes. The window + slack
+//    are tuned (see PHASE 2 below) so a MINIMAL ~1-small-object/round leak
+//    (~22 B/round) trips it (~22 KB over the window ≫ 4 KB slack) while a correct
+//    run never false-fails — verified both ways (correct run + injected leak).
 //
 //  NOTE (deliberately NOT asserted): total RSS is expected-unbounded because the
 //  JIT CodeAllocator never reclaims code (src/code_memory.rs) — every redefine
@@ -104,16 +106,24 @@ test "soak: sustained redefinition does not leak the GC heap" {
     // Warm up well past the observed plateau (~90 rounds) so caches / sticky-bit
     // fallbacks have settled and the front-loaded growth is excluded.
     let mut w = 0
-    while w < 150 {
+    while w < 200 {
         churn-all()
         w = w + 1
     }
 
-    // Multi-checkpoint slope (per the design): a per-round leak grows the heap
-    // monotonically across checkpoints; a bounded heap keeps the spread tiny.
-    let checkpoints_n = 10
-    let rounds_per_checkpoint = 40
-    let slack_bytes = 16384
+    // Multi-checkpoint slope: a per-round leak grows the heap monotonically
+    // across checkpoints; a bounded heap keeps the spread tiny. The window
+    // (1000 rounds) and slack (4096 B) are sized for SENSITIVITY to a SLOW leak,
+    // which is the whole point of a long-session soak: a minimal ~1-small-
+    // object/round leak (~22 B/round, empirically) grows ~22 KB over the window,
+    // far above the 4 KB slack, so it trips; the smallest leak this catches is
+    // ~4 B/round. A correct run's spread is ~hundreds of bytes (≪ 4 KB), so it
+    // never false-fails. (NOTE: these are RELATIVE byte deltas within ONE GC's
+    // accounting — do not compare absolute heap-bytes across GCs; mark-and-sweep
+    // reports committed−free = live + fragmentation, not pure live.)
+    let checkpoints_n = 20
+    let rounds_per_checkpoint = 50
+    let slack_bytes = 4096
 
     let mut checkpoints = []
     let mut c = 0
