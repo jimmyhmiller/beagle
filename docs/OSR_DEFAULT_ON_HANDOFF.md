@@ -60,8 +60,13 @@ Fix = make `Runtime::functions` never realloc:
   (the container's method indexing borrows differently than Vec's NLL). Builds
   clean; container unit tests 3/3; **default-GC full suite 437/437.** Minor: a
   redundant wrapper block left in `upsert_function` (trivial cosmetic cleanup).
-  STILL TODO: ×3-GC + gc-always validation (with OSR-on folded), x86-validate the
-  publish, independent review. (Original site patterns, for reference:)
+  **VALIDATED (ready for the bar):** ×3-GC plain suite 437/437
+  (gen/compacting/mark-sweep); OSR-on suite clean on all 3 (one low-frequency
+  pre-existing flake, didn't recur in 3 re-runs); **x86 (Rosetta) suite 437/437 —
+  the Acquire/Release publish is correct under x86-TSO**; container unit tests
+  3/3. Remaining: the independent container reviewer (publish ordering +
+  realloc-elimination genuine + rewiring behavior-identical + truncate-rollback
+  safety). (Original site patterns, for reference:)
   - `.functions[idx]` → `Index` impl already provides this (works as-is).
   - `.functions.push(f)` → `.functions.push(f)` (returns idx; same).
   - `.functions.get(idx)` → same (`get` impl).
