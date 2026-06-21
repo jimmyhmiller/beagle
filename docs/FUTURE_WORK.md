@@ -152,50 +152,68 @@ regression coverage so they don't silently return:
 
 ## 2. Testing gaps
 
-### 2.1 Skipped / non-deterministic tests 🔴
+### 2.1 Skipped / non-deterministic tests 🟢 (primitives + conversions landed)
 
-Currently skipped (`// Skip`) tests that represent real coverage holes:
+Formerly skipped / `main()`+snapshot tests that are now real, deterministic
+`test {}` blocks:
 
-- `resources/repl_server_test.bg` — 🟢 **DONE.** Now a deterministic
-  `main()`+snapshot end-to-end live-coding test: it starts a real REPL server
-  (made stoppable + readiness-signalling + quiet) and drives function / struct
-  (add-field) / protocol redefinition over the socket, asserting the new
-  behavior is observable on the next eval. Determinism comes from the
-  synchronous request→response barrier + a readiness atom (no sleeps). Building
-  it found and fixed the `update_binding` concurrent-redefinition race
-  (§1.2-adjacent). It is `main()`+snapshot rather than a `test {}` block because
-  of the async-handler gap below.
-- `resources/repl_session_test.bg` — still skipped for the same scheduling/ordering
-  reason; convert it the same way.
+- `resources/repl_server_test.bg` — 🟢 **DONE (now a `test {}` block).** Starts a
+  real REPL server (stoppable + readiness-signalling + quiet) and drives function
+  / struct (add-field) / protocol redefinition over the socket, asserting the new
+  behavior is observable on the next eval. ALL socket I/O runs in two worker
+  threads (server + client); the test BODY only does channel receives + asserts.
+  Determinism is happens-before: a readiness atom awaited before connect, the
+  synchronous request→response barrier, and a single-producer FIFO channel so
+  ordered `assert-receives!` pairs value K with result K. Building the original
+  found and fixed the `update_binding` concurrent-redefinition race
+  (§1.2-adjacent). 12/12 non-flaky; full suite + 3-GC matrix green.
+- `resources/repl_session_test.bg` — 🟢 **DONE (now a `test {}` block).**
+  Converted the same way: `session-eval` returns a `result_atom` the session
+  thread publishes once with the complete responses vector (a happens-before
+  edge); `await-condition!` polls that visible write (watchdog-bounded) instead
+  of `core/sleep(100)`. Also fixed the stale 4-arg `session-eval(…, callback)`
+  usage to the current 3-arg `result_atom` API. 10/10 non-flaky.
 
-**Found while building the REPL test (two real infra gaps):**
+**The non-deterministic assertion primitives shipped** — `beagle.test-async`
+(pure Beagle over channels + `core/time-now()`), used by the conversions above
+and the strengthened race tests below:
+`assert-set-eq!` (unordered/multiset equality), `assert-receives!` (one value
+across a happens-before edge), `assert-receives-all!` (EXACT count-barrier +
+unordered compare), `assert-channel-drained!` (post-barrier over-production
+check), `assert-eventually!` / `await-condition!` (visible-write escape hatch).
+Determinism contract (documented in-module): PASS is decided by a happens-before
+edge; timeouts are WATCHDOGS only (a firing is a HARD FAIL, never the pass
+basis); order-insensitivity = exact count-barrier then unordered compare.
 
-- 🔴 **`test {}` blocks have no ambient async handler.** Only `main()` and
-  spawned threads get the cooperative scheduler (via `beagle.async/__main__` →
-  `run-cooperative`); a `test {}` body does not, so socket / file / `sleep`
-  ops (which `perform` an async effect) can't run in a test body, and even
-  threads spawned from a test body can't do I/O (no event loop). This is why
-  async tests are all `main()`+snapshot. Attempted fix: run each test body
-  under `run-cooperative` in `src/main.rs run_blocks` — non-async tests pass,
-  but socket/`sleep` in a test body then *hangs* (the cooperative parking
-  doesn't resume under the test-runner's nested invocation). Needs proper
-  integration before `test {}` blocks can test async/live-coding paths
-  directly.
-- 🔴 **`main` does not force-exit while spawned threads run.** A background
-  thread that never self-terminates blocks process exit (no force-exit
-  primitive) — verified with a minimal repro. The REPL test had to explicitly
-  `close` its session (to stop the session eval-loop thread) and stop the
-  server before `main` could return. Servers/long-lived-thread programs need a
-  force-exit or all threads must be cancellable.
-- `resources/struct_structural_redefine_race_test.bg` — now enabled as a `test`
-  block, but historically the hardest to keep green; keep it in the
+- `resources/struct_structural_redefine_race_test.bg` — 🟢 strengthened with a
+  channel completion barrier (`assert-receives-all!`, 20s watchdog) replacing the
+  magic-number-capped `wait_done` busy-spin. Historically the hardest to keep
+  green; in the 3-GC matrix (default/compacting/mark-and-sweep/generational) it
+  passed the full suite on every GC and 12/12 standalone under mark-and-sweep AND
+  generational — the previously-documented structural-migration hang/crash on
+  those GCs (CONCURRENT_REDEFINE_OPEN_ISSUES.md) did NOT manifest, and if it ever
+  recurs the watchdog now turns the hang into a clean HARD FAIL. Keep it in the
   always-run-under-`--gc-always` set.
 
-These are skipped because the test harness compares stdout exactly and can't
-express "eventually" / "in any order" assertions. We need **non-deterministic
-assertion primitives** (await-condition, unordered-set-equality, timeout-bounded
-polling) so concurrency and server tests can run for real instead of being
-skipped.
+**The two infra gaps found while building the REPL test — re-characterized:**
+
+- 🟡 **`test {}` blocks have no ambient async handler — SIDESTEPPED, not yet
+  fixed.** A `test {}` body still can't directly do an async op (socket/file/
+  `sleep` that `perform`s the Async effect). BUT the earlier claim that *threads
+  spawned from a test body can't do I/O* is DISPROVEN: a spawned thread gets its
+  own scheduler (`__run_thread_start` → `run-cooperative`, lazy io-loop), so it
+  CAN do socket I/O — the original hang was the test BODY parking, not the worker
+  (verified: `resources/worker_thread_io_check_test.bg`, 8/8). So the deterministic
+  pattern is **delegate I/O to worker threads, synchronize the test body via
+  pure-atom channel `receive`** (no async effect in the body). Directly running
+  async in a test body (the `run-cooperative`-under-`run_blocks` integration)
+  remains open but is no longer on the critical path for live-coding tests.
+- 🟡 **`main` does not force-exit while spawned threads run — worked around by
+  lifecycle ownership.** Still no force-exit primitive. The converted tests own
+  worker lifecycle: signal `stop` before the session close (so the server exits
+  its accept loop) and barrier on every worker finishing (`done` + `server-stopped`)
+  before the test returns, so no thread leaks into the next test. A general
+  force-exit / cancellable-threads story is still wanted for servers.
 
 ### 2.2 No standing fuzz/stress harness in CI 🔴
 
@@ -256,8 +274,10 @@ with active readers, cooperative scheduler default.
 
 **Open for "robust":**
 
-- 🔴 **Deterministic REPL-server test coverage** (§2.1) — we cannot claim robust
-  live coding while the server's own test is skipped.
+- 🟢 **Deterministic REPL-server test coverage** (§2.1) — **DONE.** Both REPL
+  tests (`repl_server_test`, `repl_session_test`) are now real, deterministic
+  `test {}` blocks built on the `beagle.test-async` non-deterministic assertion
+  primitives; green on the full 3-GC matrix.
 - 🔴 **Long-session soak**: no evidence we can run a multi-hour live session.
   Need a soak test that continuously redefines structs/functions/protocols
   against worker threads and asserts no leak (RSS bound), no crash, no stale
@@ -349,8 +369,10 @@ Known gaps:
 For the stated goal — **production-ready with full robust live coding** — the
 critical path is roughly:
 
-1. **Deterministic REPL-server test + non-deterministic assertion primitives**
-   (§2.1) — unblocks honestly testing everything else about live coding.
+1. ✅ **Deterministic REPL-server test + non-deterministic assertion primitives**
+   (§2.1) — **DONE.** `beagle.test-async` shipped; both REPL tests + three
+   concurrent race tests are now deterministic `test {}` blocks; 3-GC matrix
+   green. This unblocks honestly testing everything else about live coding.
 2. **Long-session soak harness** for concurrent redefinition (§3.1, §2.2) —
    turns "we fixed nine bugs" into "it survives hours."
 3. **Close the protocol-redefine torn read to 0%** (§1.2).
