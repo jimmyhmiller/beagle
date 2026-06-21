@@ -141,30 +141,45 @@ after a forced STW migration, and migration history is cleared once that
 migration has completed. `get_old_definition` also searches retained definitions
 from newest to oldest for defensive behavior while migration is pending.
 
-## OPEN — `make_closure` `is_heap_pointer` abort under CPU starvation 🔴
+## RESOLVED — generational GC abort on a non-heap value in a handle root (the "make_closure starvation crash") 🟢
 
-Reliably reproduced by the soak harness (`smoke/soak_long.bg`) under
-`--gc-always` while all cores are saturated — **2/2 crashes in ~8–12 s**:
+Fixed in commit `bc96a10` (signed off). Reliably reproduced by the soak harness
+under `--gc-always` while all cores are saturated — **5/5 crashes pre-fix in
+~8–12 s; 0/N post-fix**:
 
 ```
 thread '<unnamed>' panicked at src/types.rs:420:9:
-assertion failed: BuiltInTypes::is_heap_pointer(pointer)
-  ... beag::builtins::objects::make_closure ...
-thread caused non-unwinding panic. aborting.   (exit 134 / SIGABRT)
+assertion failed: BuiltInTypes::is_heap_pointer(pointer)   (enriched: kind=Function)
+  ... generational.rs (gc root scan) -> process_old_gen_object -> from_tagged ...
+  ... triggered by make_closure's allocate() under gc-always ...
 ```
 
-`make_closure` (src/builtins/objects.rs:233) reads its `function` argument,
-sees the `HeapObject` *tag*, then `HeapObject::from_tagged(function)` asserts
-`is_heap_pointer` and fails — i.e. `function` carries the HeapObject tag bits but
-a non-pointer payload: a **torn / clobbered tagged value**, the B4 GC-safety
-class (a maybe-pointer racing a concurrent moving GC / non-atomic 8-byte read).
-Pre-existing (independently observed during the §2.1 cross-GC review under two
-competing GC-suites saturating all cores); vanishes under normal load. The same
-starvation window also produced a `"Cannot access property 'resume' on null"` in
-`beagle.async/scheduler-loop` (gc-always card-table path).
+ROOT CAUSE — **NOT** the original B4 / torn-read hypothesis (superseded;
+verify-before-claim applied to the root-cause via a debug backtrace). The crash
+value is a *clean* `Function`-tagged value (a raw code pointer; consistent across
+runs, not a torn half-write). It is a **missing range-check filter in GC root
+classification**: the generational collector's `extra_roots` (handle-root)
+classification used a bare `else { stack_old_gen.push(value) }`, pushing ANY
+non-young value — including a legitimate first-class `Function` held transiently
+in a handle root during redefinition — into `process_old_gen_object`, which
+`HeapObject::from_tagged`s it and aborts on `is_heap_pointer`. A concurrent
+gc-always collection (triggered by another thread's `make_closure` allocate)
+scans it under starvation. `make_closure:233`/`from_tagged` is the *symptom*
+site, not the cause.
 
-Repro: `for i in $(seq 1 $(sysctl -n hw.ncpu)); do yes >/dev/null & done;
-./target/release/beag run --gc-always smoke/soak_long.bg`. The standing rule
-(any maybe-pointer live across a GC safepoint must be in a GC-scanned slot)
-needs auditing for the `make_closure` argument path. Tracked also in FUTURE_WORK
-§1.3.
+FIX: add the `else if self.old.contains(..)` guard so a value in NEITHER space is
+skipped — making the handle-root path identical to the stack-frame scan
+(`gather_stack_roots_inner`), the proven-correct primary root path (its bare-else
+was the lone outlier). UAF-safety verified both ways: STATIC (only two object
+spaces young+old; large objects → old; the only other tagged-heap region is
+EternalSpace whose in-heap guard returns false → eternal objects are never
+collected so skipping them as roots is correct ⇒ "neither space" ⟺ "not a
+collectable heap object") + DYNAMIC (`BEAGLE_GC_VERIFY_ROOTS=1` under
+`--gc-always` ran clean — no un-updated/stale root). Lock-free (one range check),
+no regression (gen/compacting 437/437). The enriched `types.rs:420` assert
+(prints the offending value's tag/kind) is retained — zero-cost, and it pinned
+this bug + will pin future GC-root mis-scans.
+
+Standing regression: `smoke/soak_starvation.sh` (the safe, self-reaping
+starvation probe). Generational-only (the `extra_roots` young/old split is
+generational-specific; compacting/mark-sweep never had it).

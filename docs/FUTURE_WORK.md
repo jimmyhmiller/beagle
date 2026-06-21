@@ -85,15 +85,17 @@ that might be a heap pointer must be in a GC-scanned slot.
   maybe-pointer cross-safepoint value is slot-rooted. A standing `--gc-always`
   fuzzer over concurrent allocation patterns is the realistic guard; it should
   be CI-enforced, not run by hand.
-- 🔴 **`make_closure` `is_heap_pointer` abort under CPU starvation** — the soak
-  harness (`smoke/soak_long.bg`, `--gc-always` + all cores saturated) RELIABLY
-  reproduces it (2/2 in ~8–12 s): `make_closure` reads its `function` arg with
-  the `HeapObject` tag but a non-pointer payload (a torn/clobbered tagged value;
-  B4 class), aborting at `src/types.rs:420`. Same window also yields a
-  `"property 'resume' on null"` in `beagle.async/scheduler-loop`. Pre-existing,
-  vanishes under normal load. Full details + repro in
-  `CONCURRENT_REDEFINE_OPEN_ISSUES.md`. This is the concrete bug the standing
-  `--gc-always` fuzzer above should gate on.
+- 🟢 **The "make_closure is_heap_pointer abort under CPU starvation"** — FIXED
+  (commit `bc96a10`, signed off). Root cause was NOT the torn-read/B4 hypothesis
+  but a missing range-check filter in the generational collector's handle-root
+  classification (a clean `Function`-tagged value misclassified as an old-gen
+  object → `from_tagged` abort); `make_closure`/`types.rs:420` was the symptom
+  site. Verified UAF-safe static + dynamic; reproduced 5/5 pre-fix → 0/N post-fix
+  via `smoke/soak_starvation.sh`. Full write-up in
+  `CONCURRENT_REDEFINE_OPEN_ISSUES.md`. The standing `--gc-always` + saturation
+  probe (`smoke/soak_starvation.sh`) is the regression guard. (Still open: the
+  `"property 'resume' on null"` in `beagle.async/scheduler-loop` seen in the same
+  starvation window — separate, not yet root-caused.)
 
 ### 1.4 bigint missing core operations ⏸
 

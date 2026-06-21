@@ -975,15 +975,19 @@ impl GenerationalGC {
             } else if self.old.contains(untagged as *const u8) {
                 stack_old_gen.push(value);
             }
-            // else: a value that is in NEITHER space — a non-heap value
-            // (Function/Int/Bool/Null/String, e.g. a first-class function held
-            // transiently in a handle root during redefinition) or a pointer
-            // outside both heaps. It is NOT an old-gen object and must be
-            // skipped, exactly as the stack-frame scan does
+            // else: a value in NEITHER young nor old is not a collectable heap
+            // object and must be skipped, exactly as the stack-frame scan does
             // (`gather_stack_roots_inner` uses the identical `else if
-            // self.old.contains(..)`). The previous bare `else` pushed it to
-            // `process_old_gen_object`, which `from_tagged`s it and aborts on
-            // `is_heap_pointer` — the make_closure-under-starvation crash.
+            // self.old.contains(..)`). Handle-root values are heap-pointer-tagged
+            // at registration, so what actually reaches here is: a Function
+            // (raw code pointer — the make_closure-under-starvation crasher; held
+            // transiently in a handle root during redefinition), an EternalSpace
+            // pointer (every space's in-heap guard returns false for eternal
+            // objects, which are never collected — skipping is correct), or a
+            // stale Closure/HeapObject pointer outside both heaps. Skipping any of
+            // these is sound; none is a live young/old root. The previous bare
+            // `else` pushed it to `process_old_gen_object`, which `from_tagged`s
+            // it and aborts on `is_heap_pointer`.
         }
 
         self.process_all_roots(stack_roots);
