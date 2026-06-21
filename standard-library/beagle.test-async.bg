@@ -35,7 +35,14 @@ use beagle.channel as chan
 
 // Default watchdog: generous enough that a correct-but-slow machine never fails
 // spuriously, small enough that a real hang surfaces quickly. Tunable per call.
-fn default-watchdog-ms() { 5000 }
+//
+// 30s, not 5s: under a heavily loaded machine (a full parallel test suite +
+// concurrent compiles saturating every core), a CORRECT socket round-trip can
+// momentarily exceed 5s and a 5s default FALSE-FAILS — exactly the "never fail a
+// slow-but-correct run" rule (a flaky watchdog is worse than none). A correct run
+// returns the instant the value is present (≪1s), so a larger default costs a
+// correct run NOTHING; it only delays surfacing a genuine hang, which is fine.
+fn default-watchdog-ms() { 30000 }
 
 // core/time-now() is monotonic nanoseconds since process start. Convert a
 // millisecond budget into an absolute nanosecond deadline.
