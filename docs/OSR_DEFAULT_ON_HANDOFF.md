@@ -89,6 +89,27 @@ Fix = make `Runtime::functions` never realloc:
   correct + identical index/get/iter/push semantics + lock-free reads preserved +
   realloc-elimination genuine).
 
+### A-lite review NITS — fold these in with the benefit-gate work
+
+A-lite SIGNED OFF (approve-with-nits; the reviewer's own concurrent stress —
+1 writer × 6+ chunk boundaries + 4 readers — passed ARM64 20/20, x86-TSO 15/15).
+Three nits to land (mechanical; re-validate together with the gate, default
+suite + the container stress, to avoid two re-validation cycles):
+1. **Cosmetic:** delete the redundant wrapper block in `upsert_function`
+   (`src/runtime.rs`, left by the find-index-first restructure; behavior-identical).
+2. **MATTERS for the live-coding invariant:** `iter()`'s slow-scan `.expect`
+   (`src/append_only_chunked.rs:191`, reachable from `get_function_by_pointer`'s
+   slow scan) can PANIC if a concurrent compiler-thread `truncate` lowers `len`
+   mid-iteration (the redefine-vs-failed-compile race). NOT an A-lite regression
+   (the old `Vec` had same-or-worse exposure), but a mutator panic on a
+   redefine-vs-rollback race violates "redefine-while-hot stays robust" — harden
+   `iter()` to a graceful early-stop (`map_while(|i| self.get(i))` instead of
+   `map(...).expect(...)`), which stops cleanly when a concurrent truncate
+   shrinks `len`.
+3. **Typo:** fix the doc-comment typo in `append_only_chunked.rs` (the
+   `chunk_ptr` doc-comment "via a `Vec` of uninitialized capacity is unsafe"
+   sentence is garbled).
+
 ### Prereq 2 — BENEFIT GATE (no-regression): OSR fires only where tier-2 wins  [TODO — judgment-heavy]
 
 Measured A/B (OSR off→on, `THRESHOLD=10000`, all bit-identical):
