@@ -24,6 +24,13 @@ measured-win bar reshaped the work:
   `reflect_write_let*` disk-write races, NOT install-race). Mitigated since the
   doc by the L1/L2 dispatch redesign + stable-function-values + de-spec.
 
+**UPDATE: both prerequisites are now landed.** Prereq 1 (A-lite) was signed off;
+its 3 review nits are folded in. Prereq 2 (the benefit gate) is DONE and validated
+(nbody regression eliminated → 1.00–1.02×; fannkuch 1.49×/1.72× preserved; all
+bit-identical) — see "Prereq 2" below for the shipped gate and the two corrections
+to this doc's predictions. Remaining before the flip: the full ×3-GC suite +
+container stress re-validation, then the independent review of the gate + the flip.
+
 So the flip is NOT a flag flip. Two prerequisites, built in PARALLEL, then flip:
 
 ### Prereq 1 — A-LITE (memory-safety): chunked `self.functions`  [IN PROGRESS]
@@ -89,28 +96,74 @@ Fix = make `Runtime::functions` never realloc:
   correct + identical index/get/iter/push semantics + lock-free reads preserved +
   realloc-elimination genuine).
 
-### A-lite review NITS — fold these in with the benefit-gate work
+### A-lite review NITS — ALL DONE (folded in with the benefit gate)
 
 A-lite SIGNED OFF (approve-with-nits; the reviewer's own concurrent stress —
 1 writer × 6+ chunk boundaries + 4 readers — passed ARM64 20/20, x86-TSO 15/15).
-Three nits to land (mechanical; re-validate together with the gate, default
-suite + the container stress, to avoid two re-validation cycles):
-1. **Cosmetic:** delete the redundant wrapper block in `upsert_function`
-   (`src/runtime.rs`, left by the find-index-first restructure; behavior-identical).
-2. **MATTERS for the live-coding invariant:** `iter()`'s slow-scan `.expect`
-   (`src/append_only_chunked.rs:191`, reachable from `get_function_by_pointer`'s
-   slow scan) can PANIC if a concurrent compiler-thread `truncate` lowers `len`
-   mid-iteration (the redefine-vs-failed-compile race). NOT an A-lite regression
-   (the old `Vec` had same-or-worse exposure), but a mutator panic on a
-   redefine-vs-rollback race violates "redefine-while-hot stays robust" — harden
-   `iter()` to a graceful early-stop (`map_while(|i| self.get(i))` instead of
-   `map(...).expect(...)`), which stops cleanly when a concurrent truncate
-   shrinks `len`.
-3. **Typo:** fix the doc-comment typo in `append_only_chunked.rs` (the
-   `chunk_ptr` doc-comment "via a `Vec` of uninitialized capacity is unsafe"
-   sentence is garbled).
+All three nits landed:
+1. ✅ **Cosmetic:** deleted the redundant wrapper block in `upsert_function`
+   (`src/runtime.rs`); `cargo fmt` reindented (behavior-identical).
+2. ✅ **Live-coding invariant:** `iter()` now uses `map_while(|i| self.get(i))`
+   (`src/append_only_chunked.rs`) — stops cleanly when a concurrent compiler-thread
+   `truncate` shrinks `len` mid-iteration, instead of the old `.expect` PANIC.
+3. ✅ **Typo:** rewrote the garbled `chunk_ptr` doc-comment.
 
-### Prereq 2 — BENEFIT GATE (no-regression): OSR fires only where tier-2 wins  [TODO — judgment-heavy]
+### Prereq 2 — BENEFIT GATE (no-regression)  ✅ DONE — but NOT the way this doc predicted
+
+**Shipped gate** (`src/compiler.rs`, behind `BEAGLE_OSR_GATE`, default on). A loop
+is skipped (stays tier-1 — never a regression, at worst a missed win) when ANY of:
+
+1. **Tiers up via the entry counter** (cheap; checked at the TOP of
+   `build_osr_variant_inner`, BEFORE the recompile). `osr_tiers_up_via_entry`:
+   `specialized_names.contains(name)` OR the **live entry-counter call_count ≥
+   half the tier-up threshold**. OSR exists only for hot loops in functions that
+   DON'T tier up (entered once: fannkuch / main loops, call_count ~1). A call-hot
+   function (nbody/`advance`) already gets warm tier-2, so OSR is redundant.
+2. **Boxed-float function** — any float arithmetic in the CFG (whole-function
+   scan). OSR can't unbox floats (Phase D), so the variant is pure overhead.
+3. **Call-bound loop** — an `Op::Call` dominating a latch (the doc's original
+   CFG-dominance idea; kept — perf-neutral on the benchmarks but guards unseen
+   call-bound int-loop shapes).
+
+**Measured (final, `BEAGLE_OSR_THRESHOLD=10000`, best-of-4, all bit-identical):**
+
+| benchmark | off | on+gate | ratio |
+|---|---|---|---|
+| fannkuch n=10 | 2.94s | 1.97s | **1.49×** ✅ |
+| fannkuch n=11 | 35.41s | 20.57s | **1.72×** ✅ |
+| nbody n=200000 | 0.57s | 0.56s | **1.02×** ✅ (was 0.70×) |
+| nbody n=500000 | 1.08s | 1.08s | **1.00×** ✅ (was 0.84×) |
+| spectral n=500 | 0.58s | 0.60s | 0.97× (flat — boxed float, Phase D) |
+| mandelbrot n=1500 | 0.70s | 0.70s | 1.00× (flat) |
+| binary_trees n=14 | 0.20s | 0.20s | 1.00× |
+
+**Two corrections to this doc's predictions** (probe-first earned both):
+
+- **The regressor was NOT `run#L0` being call-bound.** Isolation
+  (`THRESHOLD=1e9` = instrumentation-only = FREE 0.60s; transfer = 0.86s, with
+  `run#L0` *already gated*) proved the cost is `advance`'s **boxed-float** loops.
+  And pure CFG structure CANNOT distinguish them from fannkuch's int loops: Beagle
+  compiles `dx*dx` as an inline int fast-path (dominates the latch, no Call) + a
+  COLD bail to the generic handler (the Call, on the non-dominating bail edge) —
+  an always-bailing float op is structurally identical to a rarely-bailing int
+  op. Only call-frequency / type-feedback separates them, hence signal (1).
+- **The gate had to run BEFORE the recompile, not after.** A gated loop still
+  paid the full feedback-recompile (the expensive `compile_ast_with_feedback`),
+  a FIXED ~0.17s for nbody's 3 gated `advance` loops — that *was* the residual
+  regression even when nothing built. Moving the cheap entry-counter check ahead
+  of the recompile (signals 2/3 still need the specialized IR, so they stay after)
+  brought nbody to exact parity.
+
+A-lite review nits (above): all 3 folded in.
+
+---
+
+#### Historical investigation (superseded by the shipped gate above)
+
+The analysis below is the original handoff's gate design and the ATTEMPT-1 /
+MEASURED / CFG-DOMINANCE reasoning. It is kept for the investigation trail; the
+CFG-DOMINANCE conclusion it reaches was empirically disproven (see corrections
+above). Read the shipped gate, not this, as the source of truth.
 
 Measured A/B (OSR off→on, `THRESHOLD=10000`, all bit-identical):
 
@@ -244,7 +297,11 @@ flip — flat ≠ regression, so it does NOT gate the flip.
 - A-lite container: `src/append_only_chunked.rs` (done). Rewire target:
   `Runtime::functions` (`src/runtime.rs:4767`), `get_function_by_pointer` (:9729),
   `upsert_function` (:9341), `overwrite_function`, `add_function` (:9511).
-- Benefit gate: `src/compiler.rs::build_osr_variant_inner` (:952, the
-  unconditional build+publish), the OSR trigger in `src/ast.rs:1296`/:1336.
+- Benefit gate (DONE): `src/compiler.rs::osr_tiers_up_via_entry` (cheap,
+  pre-recompile) + `::osr_loop_skip_reason` (CFG: float + call-bound), both gated
+  in `::build_osr_variant_inner` behind `BEAGLE_OSR_GATE`. CFG helpers:
+  `src/cfg/builder.rs::build_cfg_for_osr_gate` + `::block_id_for_label`. Entry
+  counts via `Compiler::entry_counter_slots` (populated in `add_function_counter`).
+  The OSR trigger is in `src/ast.rs::maybe_emit_osr_backedge_check`.
 - OSR machinery: `src/osr.rs`, `docs/OSR_DESIGN.md`, `docs/OSR_PERF_HANDOFF.md`
   (the int-path-near-warm + float Phase-D detail).
