@@ -329,6 +329,51 @@ pub fn build_cfg_for_int_analysis(
     Some((f, deopt_applied))
 }
 
+/// Build F's CFG for the OSR benefit gate's call-dominance check.
+///
+/// Mirrors `build_cfg_for_int_analysis` (cfg_ize + critical-edge split + dce),
+/// stopping before mem2reg — the gate only needs loop structure + dominance,
+/// which lift/mem2reg/opt don't alter. When `apply_deopt` is set (the default
+/// OSR path), the deopt rewrite redirects cold type/overflow guard bails to
+/// terminal deopt edges, so the gate sees the same hot-path control flow that
+/// F_osr actually runs: a cold guard-bail `Call` ends up on a non-latch-
+/// dominating edge, while a genuine per-iteration callee (e.g. nbody's
+/// `advance`) stays on the path that dominates the latch.
+///
+/// BlockIds are assigned by `cfg_ize` in ascending leader-position order and
+/// the later passes here only append or clear blocks (never renumber), so a
+/// BlockId derived via `block_id_for_label` on the same `ir` stays valid.
+pub fn build_cfg_for_osr_gate(
+    ir: &Ir,
+    generic_addr: usize,
+    pause_addr: usize,
+    nargs: usize,
+    apply_deopt: bool,
+) -> Option<CfgFunction> {
+    let mut f = cfg_ize(ir).ok()?;
+    if f.blocks.is_empty() {
+        return None;
+    }
+    split_critical_edges(&mut f);
+    dce_unreachable_blocks(&mut f);
+    if apply_deopt {
+        apply_deopt_rewrite(&mut f, generic_addr, pause_addr, Some(nargs));
+    }
+    Some(f)
+}
+
+/// Map a legacy IR `Label` to the `BlockId` it became under `cfg_ize`'s
+/// leader-ordered block numbering. Returns `None` if the label is not a block
+/// leader (a loop header always is — it's a back-edge target, hence a leader
+/// by rule 2). Valid for any CFG derived from the same `ir` via `cfg_ize`
+/// because block numbering is leader-position order and never renumbered.
+pub fn block_id_for_label(ir: &Ir, label: Label) -> Option<BlockId> {
+    let label_pos = *label_positions(&ir.instructions).get(&label.index)?;
+    let leaders = compute_leaders(&ir.instructions);
+    let idx = leaders.iter().position(|&l| l == label_pos)?;
+    Some(BlockId(idx as u32))
+}
+
 pub fn build_cfg(ir: &Ir) -> Result<CfgFunction, BuildError> {
     let mut f = cfg_ize(ir)?;
     if f.blocks.is_empty() {

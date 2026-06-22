@@ -443,6 +443,13 @@ pub struct Compiler {
     /// Layout: parallel mmap, slots are 8-byte signed integers.
     pub function_counter_cache: MmapMut,
     pub function_counter_cache_offset: usize,
+    /// Per-function ENTRY-counter slot + the threshold it was initialized to,
+    /// keyed by fully-qualified function name (OSR back-edge counters, keyed
+    /// `name#Ln`, are excluded). Lets the OSR benefit gate read how many times
+    /// a function has been *invoked* (`call_count = threshold - *slot`) — the
+    /// race-free signal for "this function is call-hot and will tier up via the
+    /// entry counter, so OSR is redundant" (vs a once-entered hot loop).
+    pub entry_counter_slots: HashMap<String, (usize, i64)>,
     /// Leaked C-strings, one per function with an entry counter,
     /// holding the function's fully-qualified name. The pointer is
     /// baked into the function's prologue; the trampoline reads it
@@ -949,12 +956,190 @@ impl Compiler {
         }
     }
 
+    /// Cheap, pre-recompile half of the OSR benefit gate: does this function
+    /// tier up on its own via the entry counter? If so, an OSR variant is
+    /// redundant (the loop will run in warm tier-2 anyway), so we skip it
+    /// WITHOUT paying the expensive feedback-recompile that `build_osr_variant_inner`
+    /// would otherwise run first. OSR exists precisely for hot loops in functions
+    /// that DON'T tier up (entered once, e.g. fannkuch / a main loop).
+    ///
+    /// Two signals, OR'd:
+    /// - `specialized_names`: it already crossed the entry threshold.
+    /// - live entry count ≥ half the tier-up threshold: race-free — catches the
+    ///   tight race where a function's hot inner loop trips the OSR back-edge
+    ///   threshold at the SAME call count its entry counter tiers up (nbody's
+    ///   `advance`: inner loop ~10 iters × 1000 calls = 10000 back-edges, entry
+    ///   threshold also 1000). `specialized_names` can lose that race; the live
+    ///   count can't. A once-entered hot loop has call_count ~1, far below the
+    ///   bar, so it still gets OSR'd. This is also the feedback-robust catch for
+    ///   float loops: a call-hot function's OSR re-capture often compiles GENERIC
+    ///   boxed arith (feedback stale post-tier-up, or not yet populated mid-race)
+    ///   whose float nature is invisible to a CFG scan — an always-bailing float
+    ///   op is structurally identical to a rarely-bailing int op.
+    ///
+    /// The non-atomic counter read matches the codebase's feedback-slot pattern
+    /// (`arith_feedback_for_address`); an aligned i64 read is atomic in practice
+    /// and a torn read at worst flips one gate decision, never memory safety.
+    fn osr_tiers_up_via_entry(&self, full_name: &str) -> bool {
+        if self.specialized_names.contains(full_name) {
+            return true;
+        }
+        self.entry_counter_slots
+            .get(full_name)
+            .map(|&(slot, threshold)| {
+                let value = unsafe { *(slot as *const i64) };
+                let call_count = threshold - value;
+                threshold > 0 && call_count * 2 >= threshold
+            })
+            .unwrap_or(false)
+    }
+
+    /// CFG-dependent half of the OSR benefit gate (behind `BEAGLE_OSR_GATE`,
+    /// default on). Returns `Some(reason)` when the natural loop being OSR'd is
+    /// **provably unprofitable**, so the caller skips OSR and the loop stays on
+    /// its safe tier-1 baseline — never a regression, at worst a missed win.
+    /// `None` means "build it". A pure perf decision: read-only on the CFG, no
+    /// GC/IR mutation. Runs AFTER the recompile (it needs the specialized IR);
+    /// the cheap entry-counter check above runs before it to avoid the recompile
+    /// for call-hot functions.
+    ///
+    /// Two skip conditions, both "OSR structurally can't help this shape":
+    ///
+    /// 1. **Boxed-float loop** — the loop body does float arithmetic. OSR
+    ///    cannot unbox floats yet (Phase D undone), so the variant carries the
+    ///    OSR-entry + buffer-transfer overhead with zero payoff. **This is the
+    ///    measured nbody regression**: `advance`'s float loops, OSR'd, dropped
+    ///    nbody to 0.70x. (The handoff doc blamed `run#L0` being call-bound;
+    ///    isolation — threshold=1e9 = free, transfer = regression, with `run#L0`
+    ///    *already gated* — proved the cost is the `advance` float variants, not
+    ///    `run#L0`. No float loop wins from OSR today, so gating them only drops
+    ///    flat/regressing cases.)
+    /// 2. **Call-bound loop** — an `Op::Call` whose block dominates a latch, so
+    ///    it runs every iteration. The per-iteration cost is dominated by a
+    ///    callee F_osr can't speed up (a separate function), so the transfer
+    ///    overhead never amortizes. Perf-neutral on nbody/run but guards the
+    ///    general call-bound int-loop shape (real programs have shapes the 7
+    ///    benchmarks don't). A *cold* fallback `Call` (fannkuch's inlined-array
+    ///    OOB slow path) sits on a guard-failure edge that does NOT dominate the
+    ///    latch, so it does not gate — preserving the ~1.5x win.
+    ///
+    /// Any inconclusive case (CFG build fails, header not mapped, loop not
+    /// found) returns `None` → OSR builds; the A/B backstop catches a
+    /// too-conservative or too-aggressive gate.
+    fn osr_loop_skip_reason(
+        base_ir: &crate::ir::Ir,
+        info: &crate::osr::OsrLoopInfo,
+        generic_addr: usize,
+        pause_addr: usize,
+        f_arity: usize,
+        apply_deopt: bool,
+    ) -> Option<&'static str> {
+        use crate::cfg::Op;
+        use crate::cfg::dom::{compute_idoms, dominates, reverse_postorder};
+        let dbg = std::env::var("BEAGLE_OSR_DEBUG").is_ok();
+
+        let cfg = crate::cfg::builder::build_cfg_for_osr_gate(
+            base_ir,
+            generic_addr,
+            pause_addr,
+            f_arity,
+            apply_deopt,
+        )?;
+
+        // (1) Boxed-float function — any float arithmetic / compare / conversion
+        // anywhere in F. OSR can't unbox floats (Phase D undone), so an OSR
+        // variant of a float-doing function carries entry+transfer overhead with
+        // zero payoff. This is a FUNCTION-level test on the whole CFG — it needs
+        // no loop identification, so it runs BEFORE the (fragile, per-loop)
+        // header→loop mapping below. nbody's `advance` does its float math in a
+        // *nested inner* loop, so a per-loop body scan can under-report it, and
+        // the header mapping can miss some of advance's loops entirely; the
+        // function-level scan gates all of them regardless. No float-doing
+        // function wins from OSR today, so this only drops flat/regressing
+        // cases — never a win.
+        let has_float = cfg.blocks.iter().any(|blk| {
+            blk.body.iter().any(|op| {
+                matches!(
+                    op,
+                    Op::AddFloat { .. }
+                        | Op::SubFloat { .. }
+                        | Op::MulFloat { .. }
+                        | Op::DivFloat { .. }
+                        | Op::CompareFloat { .. }
+                        | Op::IntToFloat { .. }
+                        | Op::FRoundToZero { .. }
+                )
+            })
+        });
+        if has_float {
+            return Some("boxed-float function");
+        }
+
+        // (2) Call-bound loop — a Call dominating a latch. Needs the specific
+        // natural loop; an inconclusive mapping just skips this secondary check.
+        let header = match crate::cfg::builder::block_id_for_label(base_ir, info.header_label) {
+            Some(h) => h,
+            None => {
+                if dbg {
+                    eprintln!(
+                        "[OSR-gate] header label {:?} not a CFG leader; skipping call-bound check",
+                        info.header_label
+                    );
+                }
+                return None;
+            }
+        };
+        let loops = crate::cfg::loops::natural_loops(&cfg);
+        let lp = match loops.iter().find(|l| l.header == header) {
+            Some(l) => l,
+            None => {
+                if dbg {
+                    eprintln!(
+                        "[OSR-gate] {:?} loop@{:?} mapped header={:?}, natural-loop headers={:?}; skipping call-bound check",
+                        base_ir.debug_name,
+                        info.header_label,
+                        header,
+                        loops.iter().map(|l| l.header).collect::<Vec<_>>()
+                    );
+                }
+                return None;
+            }
+        };
+        let rpo = reverse_postorder(&cfg);
+        let idom = compute_idoms(&cfg, &rpo);
+        for &b in &lp.body {
+            let has_call = cfg.blocks[b.0 as usize]
+                .body
+                .iter()
+                .any(|op| matches!(op, Op::Call { .. }));
+            if has_call && lp.latches.iter().any(|&latch| dominates(&idom, b, latch)) {
+                return Some("call-bound loop");
+            }
+        }
+        None
+    }
+
     fn build_osr_variant_inner(
         &mut self,
         full_name: &str,
         loop_idx: usize,
         key: &str,
     ) -> Option<()> {
+        // --- OSR benefit gate, cheap half (BEAGLE_OSR_GATE, default on). ---
+        // Skip call-hot functions BEFORE the expensive feedback-recompile below:
+        // they tier up via the entry counter, so an OSR variant is redundant.
+        // Doing this here (not after the recompile) is what keeps a gated loop
+        // from costing a full recompile — the fixed per-loop cost that otherwise
+        // regressed nbody (~0.17s, 3 gated `advance` loops × recompile).
+        let osr_gate = std::env::var("BEAGLE_OSR_GATE")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        if osr_gate && self.osr_tiers_up_via_entry(full_name) {
+            if std::env::var("BEAGLE_OSR_DEBUG").is_ok() {
+                eprintln!("[OSR-build] GATED (tiers up via entry counter) {}", key);
+            }
+            return None;
+        }
         // --- Resolve source + feedback (mirrors `specialize_function`). ---
         let (source_text, source_file, current_address, f_arity, feedback_bits, property_feedback) = {
             let runtime = get_runtime().get_mut();
@@ -1083,6 +1268,30 @@ impl Compiler {
                 .map(|p| p as usize)
                 .unwrap_or(0)
         };
+        // --- OSR benefit gate, CFG half (BEAGLE_OSR_GATE, default on). ---
+        // The cheap entry-counter half already ran at the top of this function
+        // (before the recompile). Here we skip boxed-float and call-bound loops
+        // now that we have the specialized IR. `return None` flows to the
+        // caller's `osr_set_failed`, so the loop stays on its tier-1 baseline —
+        // never a regression, at worst a missed win.
+        if osr_gate {
+            if let Some(reason) = Self::osr_loop_skip_reason(
+                &base_ir,
+                &info,
+                current_address,
+                pause_addr,
+                f_arity,
+                osr_deopt,
+            ) {
+                if std::env::var("BEAGLE_OSR_DEBUG").is_ok() {
+                    eprintln!("[OSR-build] GATED ({}) {}", reason, key);
+                }
+                return None;
+            }
+            if std::env::var("BEAGLE_OSR_DEBUG").is_ok() {
+                eprintln!("[OSR-build] BUILDING {}", key);
+            }
+        }
         // Classify which non-param live-in slots F treats as ints. Analyzing a
         // *deopt-applied* CFG of F (merge-back removed) makes `pointer_class`
         // report the loop-carried int accumulators as non-pointer. We guard
@@ -1770,6 +1979,12 @@ impl Compiler {
             *(slot as *mut i64) = threshold;
         }
         self.function_counter_cache_offset += 8;
+        // Track entry counters (bare names) so the OSR gate can read call
+        // counts. OSR back-edge counters are keyed `name#Ln` — exclude them.
+        if !function_name.contains('#') {
+            self.entry_counter_slots
+                .insert(function_name.to_string(), (slot, threshold));
+        }
         let cstring = std::ffi::CString::new(function_name).unwrap_or_default();
         let name_ptr = cstring.as_ptr() as usize;
         self.function_counter_names.push(cstring);
@@ -3080,6 +3295,7 @@ impl CompilerThread {
                         CompileError::MemoryMapping(format!("Failed to make mmap mutable: {}", e))
                     })?,
                 function_counter_cache_offset: 0,
+                entry_counter_slots: HashMap::new(),
                 function_counter_names: Vec::new(),
                 command_line_arguments: command_line_arguments.clone(),
                 pause_atom_ptr: None,
