@@ -9362,78 +9362,74 @@ impl Runtime {
             // of self.functions.
             let existing = self.functions.iter().position(|f| f.name == n);
             if let Some(index) = existing {
-                {
-                    function_pointer = self.overwrite_function(index, pointer, size)?;
-                    // Update variadic info on existing function
-                    self.functions[index].is_variadic = is_variadic;
-                    self.functions[index].min_args = min_args;
-                    // Update docstring and arg_names if provided
-                    if docstring.is_some() {
-                        self.functions[index].docstring = docstring.clone();
-                    }
-                    if !arg_names.is_empty() {
-                        self.functions[index].arg_names = arg_names.clone();
-                    }
-                    if source_file.is_some() {
-                        self.functions[index].source_file = source_file.clone();
-                    }
-                    if source_line.is_some() {
-                        self.functions[index].source_line = source_line;
-                    }
-                    // `source_text` is sticky for the SAME reason
-                    // `disk_location` is (just below). The drift check in
-                    // `reflect/persist` depends on the invariant
-                    // `file[disk_location] == source_text`, with both captured
-                    // together when the def was first loaded from disk. A plain
-                    // REPL redefine (`eval`) carries `source_text` (the eval'd
-                    // text) but no file context (`disk_location == None`);
-                    // letting it overwrite a disk-resident def's `source_text`
-                    // breaks the invariant and manufactures a phantom "file has
-                    // changed since loaded" drift even though the file on disk
-                    // never changed. So only overwrite when the new compile has
-                    // file context, or when there is no on-disk origin to
-                    // protect (a pure REPL def, where fresh source is wanted).
-                    if source_text.is_some()
-                        && (disk_location.is_some()
-                            || self.functions[index].disk_location.is_none())
-                    {
-                        self.functions[index].source_text = source_text.clone();
-                    }
-                    // `disk_location` is sticky: a REPL redefinition (where
-                    // the compile doesn't know an on-disk origin and thus
-                    // passes `None`) must not clobber the location captured
-                    // when the function was first loaded from disk.
-                    // `reflect/write-source` depends on this to splice the
-                    // edited text back into the right file and byte range.
-                    if disk_location.is_some() {
-                        self.functions[index].disk_location = disk_location.clone();
-                    }
-                    if applying_tier2_install() {
-                        // Tier-2 install: recompiled, semantically-identical
-                        // code. Rebind in place (non-allocating) so the drain
-                        // can't re-enter the collector, and so values already
-                        // captured from the binding pick up the faster code.
-                        self.rebind_installed_function(n, function_pointer);
-                    } else if let Some(stack_pointer) = self.try_get_stack_base() {
-                        // Normal redefinition on a stack-bearing thread: a fresh
-                        // struct, preserving capture-by-value semantics.
-                        let fn_obj = self
-                            .create_function_value(
-                                stack_pointer,
-                                function_pointer as *const u8,
-                                n,
-                                number_of_args,
-                            )
-                            .expect("Failed to create function value");
-                        self.add_binding(n, fn_obj);
-                    } else {
-                        // Compiler thread (no stack): Function-tagged pointer.
-                        let tagged_fn =
-                            BuiltInTypes::Function.tag(function_pointer as isize) as usize;
-                        self.add_binding(n, tagged_fn);
-                    }
-                    already_defined = true;
+                function_pointer = self.overwrite_function(index, pointer, size)?;
+                // Update variadic info on existing function
+                self.functions[index].is_variadic = is_variadic;
+                self.functions[index].min_args = min_args;
+                // Update docstring and arg_names if provided
+                if docstring.is_some() {
+                    self.functions[index].docstring = docstring.clone();
                 }
+                if !arg_names.is_empty() {
+                    self.functions[index].arg_names = arg_names.clone();
+                }
+                if source_file.is_some() {
+                    self.functions[index].source_file = source_file.clone();
+                }
+                if source_line.is_some() {
+                    self.functions[index].source_line = source_line;
+                }
+                // `source_text` is sticky for the SAME reason
+                // `disk_location` is (just below). The drift check in
+                // `reflect/persist` depends on the invariant
+                // `file[disk_location] == source_text`, with both captured
+                // together when the def was first loaded from disk. A plain
+                // REPL redefine (`eval`) carries `source_text` (the eval'd
+                // text) but no file context (`disk_location == None`);
+                // letting it overwrite a disk-resident def's `source_text`
+                // breaks the invariant and manufactures a phantom "file has
+                // changed since loaded" drift even though the file on disk
+                // never changed. So only overwrite when the new compile has
+                // file context, or when there is no on-disk origin to
+                // protect (a pure REPL def, where fresh source is wanted).
+                if source_text.is_some()
+                    && (disk_location.is_some() || self.functions[index].disk_location.is_none())
+                {
+                    self.functions[index].source_text = source_text.clone();
+                }
+                // `disk_location` is sticky: a REPL redefinition (where
+                // the compile doesn't know an on-disk origin and thus
+                // passes `None`) must not clobber the location captured
+                // when the function was first loaded from disk.
+                // `reflect/write-source` depends on this to splice the
+                // edited text back into the right file and byte range.
+                if disk_location.is_some() {
+                    self.functions[index].disk_location = disk_location.clone();
+                }
+                if applying_tier2_install() {
+                    // Tier-2 install: recompiled, semantically-identical
+                    // code. Rebind in place (non-allocating) so the drain
+                    // can't re-enter the collector, and so values already
+                    // captured from the binding pick up the faster code.
+                    self.rebind_installed_function(n, function_pointer);
+                } else if let Some(stack_pointer) = self.try_get_stack_base() {
+                    // Normal redefinition on a stack-bearing thread: a fresh
+                    // struct, preserving capture-by-value semantics.
+                    let fn_obj = self
+                        .create_function_value(
+                            stack_pointer,
+                            function_pointer as *const u8,
+                            n,
+                            number_of_args,
+                        )
+                        .expect("Failed to create function value");
+                    self.add_binding(n, fn_obj);
+                } else {
+                    // Compiler thread (no stack): Function-tagged pointer.
+                    let tagged_fn = BuiltInTypes::Function.tag(function_pointer as isize) as usize;
+                    self.add_binding(n, tagged_fn);
+                }
+                already_defined = true;
             }
         }
         if !already_defined {

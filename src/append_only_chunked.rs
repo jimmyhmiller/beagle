@@ -74,12 +74,14 @@ impl<T> AppendOnlyChunked<T> {
         self.len() == 0
     }
 
-    /// Allocate a fresh chunk of `CHUNK_SIZE` default-less slots. We allocate a
-    /// `Box<[T]>`-shaped block via a `Vec` of uninitialized capacity is unsafe;
-    /// instead we require the chunk be filled lazily. To keep it simple and safe
-    /// we allocate the chunk as a raw array of `T` written element-by-element by
-    /// `push` (only the slot at the live frontier is ever written before being
-    /// published), so a chunk only ever holds initialized elements below `len`.
+    /// Load the base pointer of the chunk holding `chunk_idx`.
+    ///
+    /// Chunks hold `CHUNK_SIZE` slots that have no `Default`. Materializing a
+    /// `Box<[T]>` would require every slot be initialized up front, which we
+    /// can't do for an arbitrary `T`; instead each chunk is a raw array of `T`
+    /// filled lazily, element-by-element, by `push`. Only the slot at the live
+    /// frontier is ever written, and only before it is published, so a chunk
+    /// only ever holds initialized elements below `len`.
     fn chunk_ptr(&self, chunk_idx: usize, order: Ordering) -> *mut T {
         self.chunks[chunk_idx].load(order)
     }
@@ -188,7 +190,12 @@ impl<T> AppendOnlyChunked<T> {
 
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         let len = self.len.load(Ordering::Acquire);
-        (0..len).map(move |i| self.get(i).expect("index < len is always present"))
+        // `map_while` (not `map(...).expect(...)`): a concurrent compiler-thread
+        // `truncate` (failed-compile rollback) can lower `len` mid-iteration, so
+        // a later `get(i)` may return `None` even though `i < len` was true at
+        // the snapshot. Stop cleanly at the first absent index rather than
+        // panicking a mutator — preserving "redefine-while-hot stays robust".
+        (0..len).map_while(move |i| self.get(i))
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
