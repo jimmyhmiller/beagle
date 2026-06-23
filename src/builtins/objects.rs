@@ -563,6 +563,37 @@ pub extern "C" fn write_field(
     value: usize,
 ) -> usize {
     save_gc_context!(stack_pointer, frame_pointer);
+
+    // Guard the target BEFORE untag+deref (mirrors `property_access`): setting a
+    // field on null or a scalar must raise a resumable TypeError, not abort. The
+    // un-guarded path used to non-unwinding-panic in `HeapObject::from_tagged`
+    // (`v.foo = 1` where `v` is null/scalar). See the deref-crash class.
+    if struct_pointer == BuiltInTypes::null_value() as usize {
+        let runtime = get_runtime().get_mut();
+        let str_constant_idx: usize = BuiltInTypes::untag(str_constant_ptr);
+        let property_name = runtime.string_constants[str_constant_idx].str.clone();
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                format!("Cannot set property '{}' on null", property_name),
+            );
+        }
+    }
+    if !BuiltInTypes::is_heap_pointer(struct_pointer) {
+        let runtime = get_runtime().get_mut();
+        let str_constant_idx: usize = BuiltInTypes::untag(str_constant_ptr);
+        let property_name = runtime.string_constants[str_constant_idx].str.clone();
+        let kind = BuiltInTypes::get_kind(struct_pointer);
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                format!("Cannot set property '{}' on {:?}", property_name, kind),
+            );
+        }
+    }
+
     struct_pointer = Runtime::follow_forwarding_pointer(struct_pointer);
     let runtime = get_runtime().get_mut();
     // write_field checks mutability and throws if not mutable
