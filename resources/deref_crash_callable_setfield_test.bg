@@ -1,0 +1,44 @@
+namespace deref_crash_callable_setfield_test
+
+// Regression: two members of the live-coding deref-crash class. Both were found
+// by smoke/zelda_livecode_hunt.py and used to take down the process:
+//   - Setting a field on null / a scalar used to non-unwinding-PANIC (abort) in
+//     builtins::objects::write_field (untag+deref with no tag-guard).
+//   - Calling a non-function value dynamically used to SIGSEGV: every HeapObject
+//     callee routes through dispatch_multi_arity, which read a struct's field 0
+//     as `num_arities` and jumped through a garbage jump-table pointer.
+// Both must now raise a clean, CATCHABLE (resumable) TypeError.
+
+struct Box { mut value }
+
+fn invoke(f) { f() }   // dynamic-call site: the callee is a runtime value
+fn give_five() { 5 }
+
+test "set field on null or a scalar throws instead of aborting" {
+    assert-throws!(fn() { let v = null  v.value = 1 })
+    assert-throws!(fn() { let v = 7     v.value = 1 })
+}
+
+test "calling a non-function value throws instead of segfaulting" {
+    let b = Box { value: 1 }
+    assert-throws!(fn() { invoke(b) })      // struct instance (the dispatch_multi_arity path)
+    assert-throws!(fn() { invoke(null) })   // null
+    assert-throws!(fn() { invoke(42) })     // scalar
+}
+
+test "valid field write + dynamic call still work" {
+    let b = Box { value: 1 }
+    b.value = 99
+    assert-eq!(b.value, 99)
+    assert-eq!(invoke(give_five), 5)
+}
+
+test "execution resumes after catching a deref-crash-class error" {
+    // The point of resumable errors: the program keeps running past the catch.
+    let mut hits = 0
+    assert-throws!(fn() { let v = null  v.value = 1 })
+    hits = hits + 1
+    assert-throws!(fn() { invoke(Box { value: 1 }) })
+    hits = hits + 1
+    assert-eq!(hits, 2)
+}

@@ -216,15 +216,45 @@ pub extern "C" fn dispatch_multi_arity(
 
     // Check if this is a Function struct object - if so, extract fn_ptr directly
     let heap_obj = HeapObject::from_tagged(multi_arity_obj);
-    if heap_obj.get_type_id() == 0 {
-        let struct_id = heap_obj.get_struct_id();
-        let runtime = get_runtime().get();
-        if struct_id == runtime.function_struct_id {
+    let type_id = heap_obj.get_type_id();
+    if type_id == 0 {
+        let is_fn_struct = {
+            let runtime = get_runtime().get();
+            heap_obj.get_struct_id() == runtime.function_struct_id
+        };
+        if is_fn_struct {
             // Return the Int-tagged fn_ptr from field 0
             // Callers expect a Function-tagged result, so re-tag it
             let int_tagged_fn_ptr = heap_obj.get_field(0);
             let raw_fn_ptr = BuiltInTypes::untag(int_tagged_fn_ptr);
             return BuiltInTypes::Function.tag(raw_fn_ptr as isize) as usize;
+        }
+        // A type_id==0 HeapObject that is NOT the function struct is a regular
+        // user struct instance. `compile_closure_call` routes EVERY HeapObject
+        // callee here, so calling a struct (`let c = S{ .. }; c()`) lands here.
+        // Reading it as the multi-arity arity table below treats field 0 as a
+        // `num_arities` count and jumps through a garbage jump-table pointer
+        // (SIGSEGV). Raise a resumable error instead. See the deref-crash class.
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                "Value is not callable (got a struct instance)".to_string(),
+            );
+        }
+    }
+
+    // Only genuine multi-arity function objects carry the arity table read
+    // below. Any other HeapObject reaching here (FunctionObject, enum, array,
+    // string, ...) is not a multi-arity callee — reject it cleanly rather than
+    // reading garbage as an arity count + jump-table pointer and jumping to it.
+    if type_id != TYPE_ID_MULTI_ARITY_FUNCTION as usize {
+        unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "TypeError",
+                format!("Value is not callable (HeapObject type_id={})", type_id),
+            );
         }
     }
 
