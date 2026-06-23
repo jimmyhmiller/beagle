@@ -269,14 +269,23 @@ Then A/B-validate (fannkuch keeps ~1.5-1.74×, nbody NOT regressed, every benchm
 too-conservative → fannkuch loses → caught), fold the 3 A-lite nits, re-validate
 ×3-GC + the container stress, then bring it + the flip for the bar.
 
-### THE FLIP — gated on BOTH
+### THE FLIP — ✅ DONE (commit `ddd559f`)
 
-Flip `BEAGLE_OSR` default-on (gate at `src/ast.rs:1296` env check). Ships ONLY
-when A-lite (memory-safe — OSR-on increases mode-1 exposure) AND the benefit gate
-(no regression) are both landed + reviewed. Bring the diff + measured-win numbers
-(fannkuch ~1.5-1.74× vs Node v24, all benchmarks ≥ tier-1, bit-identical,
-live-coding preserved — redefine-while-hot still takes effect via
-`revert_all_specializations`) for independent review.
+`maybe_emit_osr_backedge_check` (`src/ast.rs`) now emits the back-edge check
+unless `BEAGLE_OSR=0` (default ON). Both gates were landed + validated first:
+A-lite (memory-safe container) AND the benefit gate (no regression). A THIRD
+blocker surfaced during the flip — the code's own "default OFF" note citing an
+F_osr SSA hang in beagle-zelda's room-2 sort — and was cleared by a real
+beagle-zelda playtest with OSR on (clean; the note was stale post SSA/deopt
+hardening). The `tim-binary-insertion-sort#L0` F_osr also builds → transfers →
+completes correctly in a headless stress.
+
+Validated: suite 437/437 in the default shipping config (OSR on, default
+threshold) AND 437/437 ×3 GCs under OSR aggressive; gc-always container stress
+0/5; live-coding smoke 10/10; benchmarks at the default threshold fannkuch
+~1.6×, nbody/spectral no regression, bit-identical. `BEAGLE_OSR=0` is the escape
+hatch. Remaining open items are now just the independent reviews
+(gate + A-lite container) — behaviorally the flip is live on the branch.
 
 ### Follow-on (NOT a flip blocker) — D: float OSR (Phase-D)
 
