@@ -1275,17 +1275,23 @@ impl AstCompiler<'_> {
     /// times. Reuses the generic `TierUpCheck` primitive (decrement +
     /// conditional trampoline call).
     ///
-    /// **Opt-in via `BEAGLE_OSR=1` (default OFF).** A hot once-entered loop in a
+    /// **Default ON; opt out with `BEAGLE_OSR=0`.** A hot once-entered loop in a
     /// function that never trips the entry tier-up counter would otherwise run
     /// the whole computation unoptimized; OSR transfers it mid-flight into a
     /// warm-quality continuation (see `docs/OSR_PERF_HANDOFF.md`).
     ///
-    /// NOTE: default OFF on purpose. OSR's continuation `F_osr` is compiled
-    /// through the SSA backend, which still has latent control-flow bugs for
-    /// some real-world loops (e.g. `beagle.core/tim-binary-insertion-sort`,
-    /// whose F_osr hangs the beagle-zelda game on a room-2 sort). Turning OSR on
-    /// by default turned those latent bugs into hangs in previously-working
-    /// code. Keep it opt-in until F_osr SSA correctness is hardened.
+    /// HISTORY: this was opt-in because `F_osr` (compiled through the SSA
+    /// backend) had latent control-flow bugs for some real-world loops — notably
+    /// `beagle.core/tim-binary-insertion-sort`, whose F_osr once hung the
+    /// beagle-zelda game on a room-2 sort. Default-on is now gated by the OSR
+    /// *benefit gate* (`Compiler::osr_tiers_up_via_entry` + `osr_loop_skip_reason`,
+    /// `BEAGLE_OSR_GATE`): it keeps float / call-bound / call-hot loops on tier-1,
+    /// which both removes the perf regressions and avoids OSR'ing many of the
+    /// fragile shapes. Validated before the flip: suite 437/437 ×3 GCs (OSR
+    /// aggressive), gc-always container stress 0/5, live-coding smoke 10/10, all
+    /// benchmarks bit-identical (fannkuch ~1.7×, no nbody regression), and a real
+    /// beagle-zelda playtest with OSR on (incl. the room-2 sort) ran clean. If a
+    /// future F_osr SSA bug surfaces, `BEAGLE_OSR=0` is the escape hatch.
     ///
     /// Only emitted in TIER-1 (first-compile) code — that's the code OSR
     /// transfers *from*; tier-2 recompiles (non-empty feedback bits) skip it,
@@ -1293,9 +1299,10 @@ impl AstCompiler<'_> {
     /// the linear-scan allocator only uses callee-saved registers (X19-X27),
     /// so the trampoline call clobbers nothing the loop needs.
     fn maybe_emit_osr_backedge_check(&mut self, header_label: crate::common::Label) {
+        // Default ON; opt out with BEAGLE_OSR=0 (any other value, or unset, = on).
         if std::env::var("BEAGLE_OSR")
-            .map(|v| v != "1")
-            .unwrap_or(true)
+            .map(|v| v == "0")
+            .unwrap_or(false)
         {
             return;
         }
