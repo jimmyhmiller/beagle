@@ -1,0 +1,51 @@
+namespace ipv6_test
+use beagle.ip as ip
+
+test "parse-ipv6: basic + zero-compression" {
+    assert-eq!(ip/parse-ipv6("::1"), [0, 0, 0, 0, 0, 0, 0, 1])
+    assert-eq!(ip/parse-ipv6("::"), [0, 0, 0, 0, 0, 0, 0, 0])
+    assert-eq!(ip/parse-ipv6("2001:db8::1"), [8193, 3512, 0, 0, 0, 0, 0, 1])
+    assert-eq!(ip/parse-ipv6("fe80::1"), [65152, 0, 0, 0, 0, 0, 0, 1])
+    assert-eq!(ip/parse-ipv6("2001:0db8:0000:0000:0000:0000:0000:0001"), [8193, 3512, 0, 0, 0, 0, 0, 1])
+    assert-eq!(ip/parse-ipv6("1:2:3:4:5:6:7:8"), [1, 2, 3, 4, 5, 6, 7, 8])
+    assert-eq!(ip/parse-ipv6("1::"), [1, 0, 0, 0, 0, 0, 0, 0])
+}
+
+test "parse-ipv6: rejects invalid" {
+    assert-eq!(ip/parse-ipv6("1:2:3:4:5:6:7"), null)
+    assert-eq!(ip/parse-ipv6("1:2:3:4:5:6:7:8:9"), null)
+    assert-eq!(ip/parse-ipv6("1::2::3"), null)
+    assert-eq!(ip/parse-ipv6("gggg::1"), null)
+    assert-eq!(ip/parse-ipv6("12345::1"), null)
+    assert-eq!(ip/parse-ipv6("1:2:3:4:5:6:7:8::"), null)
+}
+
+test "ipv6-to-string: canonical RFC 5952" {
+    assert-eq!(ip/ipv6-to-string([0, 0, 0, 0, 0, 0, 0, 1]), "::1")
+    assert-eq!(ip/ipv6-to-string([0, 0, 0, 0, 0, 0, 0, 0]), "::")
+    assert-eq!(ip/ipv6-to-string([8193, 3512, 0, 0, 0, 0, 0, 1]), "2001:db8::1")
+    assert-eq!(ip/ipv6-to-string([1, 2, 3, 4, 5, 6, 7, 8]), "1:2:3:4:5:6:7:8")
+    assert-eq!(ip/ipv6-to-string([65152, 0, 0, 0, 0, 0, 0, 1]), "fe80::1")
+    // only the LONGEST run compressed (the leading 2-run stays explicit)
+    assert-eq!(ip/ipv6-to-string([1, 0, 0, 2, 0, 0, 0, 3]), "1:0:0:2::3")
+}
+
+test "round-trip parse <-> format" {
+    assert-eq!(ip/ipv6-to-string(ip/parse-ipv6("2001:db8::1")), "2001:db8::1")
+    assert-eq!(ip/ipv6-to-string(ip/parse-ipv6("::ffff")), "::ffff")
+    assert-eq!(ip/ipv6-to-string(ip/parse-ipv6("fe80::dead:beef")), "fe80::dead:beef")
+}
+
+test "ipv6 predicates" {
+    assert!(ip/is-ipv6-loopback?("::1"))
+    assert!(ip/is-ipv6-loopback?("0:0:0:0:0:0:0:1"))
+    assert!(ip/is-ipv6-loopback?("::2") == false)
+    assert!(ip/is-ipv6-unspecified?("::"))
+    assert!(ip/is-ipv6-link-local?("fe80::1"))
+    assert!(ip/is-ipv6-link-local?("fec0::1") == false)
+    assert!(ip/is-ipv6-multicast?("ff02::1"))
+    assert!(ip/is-ipv6-unique-local?("fc00::1"))
+    assert!(ip/is-ipv6-unique-local?("fd12::1"))
+    assert!(ip/ipv6?("2001:db8::1"))
+    assert!(ip/ipv6?("not-an-ip") == false)
+}

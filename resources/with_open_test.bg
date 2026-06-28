@@ -1,0 +1,44 @@
+namespace with_open_test
+
+// Regression for the Closeable protocol + with-open (RAII / try-with-resources).
+// A mock resource records whether it was closed, so we can assert with-open
+// closes on every exit path. Also exercises cross-namespace `extend T with Closeable`.
+
+struct FakeResource { closed }
+
+extend FakeResource with Closeable {
+    fn close(r) {
+        reset!(r.closed, true)
+    }
+}
+
+test "with-open closes the resource on normal completion and returns body's value" {
+    let flag = atom(false)
+    let r = FakeResource { closed: flag }
+    let result = with-open(r, fn(res) { 42 })
+    assert-eq!(result, 42)
+    assert!(deref(flag))
+}
+
+test "with-open closes the resource even when the body throws, then rethrows" {
+    let flag = atom(false)
+    let r = FakeResource { closed: flag }
+    assert-throws!(fn() { with-open(r, fn(res) { throw("boom") }) })
+    assert!(deref(flag))   // closed despite the exception
+}
+
+test "with-open passes the resource into the body" {
+    let flag = atom(false)
+    let r = FakeResource { closed: flag }
+    let got = with-open(r, fn(res) { res })
+    assert-eq!(got, r)
+    assert!(deref(flag))
+}
+
+test "close dispatches via the Closeable protocol directly" {
+    let flag = atom(false)
+    let r = FakeResource { closed: flag }
+    assert!(deref(flag) == false)
+    close(r)
+    assert!(deref(flag))
+}

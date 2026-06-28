@@ -1,0 +1,137 @@
+namespace struct-pack_ext2_test
+
+use beagle.struct-pack as sp
+
+// ---------------------------------------------------------------------------
+// Pad byte 'x' (writes/reads one zero byte, consumes no value)
+// ---------------------------------------------------------------------------
+
+test "pad byte writes a zero and consumes no value" {
+    // 'x' emits a 0 byte and does not pull from `values`
+    assert-eq!(sp/pack("xB", [0x05]), [0, 5])
+    assert-eq!(sp/pack(">Bx", [0x05]), [5, 0])
+    assert-eq!(sp/pack(">xB", [9]), [0, 9])
+    // pad with no remaining values is fine
+    assert-eq!(sp/pack(">x", []), [0])
+    assert-eq!(sp/pack("xx", []), [0, 0])
+}
+
+test "pad byte skips on unpack and yields no value" {
+    assert-eq!(sp/unpack(">BxB", [5, 0xFF, 7]), [5, 7])
+    assert-eq!(sp/unpack(">x", [0]), [])
+    // the skipped byte's contents are ignored
+    assert-eq!(sp/unpack(">xB", [99, 7]), [7])
+}
+
+test "pad byte round-trips inside a mixed format" {
+    let bytes = sp/pack(">BxH", [1, 0x0203])
+    assert-eq!(bytes, [1, 0, 2, 3])
+    assert-eq!(sp/unpack(">BxH", bytes), [1, 515])
+}
+
+test "pad byte counts toward calcsize" {
+    assert-eq!(sp/calcsize(">Bx"), 2)
+    assert-eq!(sp/calcsize("xx"), 2)
+    assert-eq!(sp/calcsize(">BxH"), 4)
+}
+
+test "pad byte unpack with too few bytes throws" {
+    assert-throws!(fn() { sp/unpack(">x", []) })
+    assert-throws!(fn() { sp/unpack(">Bx", [5]) })
+}
+
+// ---------------------------------------------------------------------------
+// 64-bit unsigned 'Q'
+// ---------------------------------------------------------------------------
+
+test "pack-u64 be/le/default" {
+    assert-eq!(sp/pack-u64-be(0x0102030405060708), [1, 2, 3, 4, 5, 6, 7, 8])
+    assert-eq!(sp/pack-u64-le(0x0102030405060708), [8, 7, 6, 5, 4, 3, 2, 1])
+    assert-eq!(sp/pack-u64(0x0102030405060708), [1, 2, 3, 4, 5, 6, 7, 8])
+    assert-eq!(sp/pack-u64-be(0), [0, 0, 0, 0, 0, 0, 0, 0])
+}
+
+test "pack-u64 negative throws" {
+    assert-throws!(fn() { sp/pack-u64-be(-1) })
+    assert-throws!(fn() { sp/pack-u64-le(-1) })
+}
+
+test "unpack-u64 be/le/default" {
+    assert-eq!(sp/unpack-u64-be([1, 2, 3, 4, 5, 6, 7, 8], 0), 0x0102030405060708)
+    assert-eq!(sp/unpack-u64-le([1, 2, 3, 4, 5, 6, 7, 8], 0), 0x0807060504030201)
+    assert-eq!(sp/unpack-u64([1, 2, 3, 4, 5, 6, 7, 8], 0), 0x0102030405060708)
+    // read at a non-zero offset
+    assert-eq!(sp/unpack-u64-be([0xAA, 1, 2, 3, 4, 5, 6, 7, 8], 1), 0x0102030405060708)
+}
+
+test "64-bit unsigned round trips" {
+    assert-eq!(sp/unpack-u64-be(sp/pack-u64-be(0x0102030405060708), 0), 0x0102030405060708)
+    assert-eq!(sp/unpack-u64-le(sp/pack-u64-le(0x00FF00FF00FF00), 0), 0x00FF00FF00FF00)
+}
+
+// ---------------------------------------------------------------------------
+// 64-bit signed 'q' (two's complement, sign-extended)
+// ---------------------------------------------------------------------------
+
+test "pack-i64 two's complement be/le" {
+    assert-eq!(sp/pack-i64-be(-1), [255, 255, 255, 255, 255, 255, 255, 255])
+    assert-eq!(sp/pack-i64-le(-1), [255, 255, 255, 255, 255, 255, 255, 255])
+    assert-eq!(sp/pack-i64-be(-256), [255, 255, 255, 255, 255, 255, 255, 0])
+    assert-eq!(sp/pack-i64-le(-256), [0, 255, 255, 255, 255, 255, 255, 255])
+    assert-eq!(sp/pack-i64(0x0102030405060708), [1, 2, 3, 4, 5, 6, 7, 8])
+}
+
+test "unpack-i64 sign extension" {
+    assert-eq!(sp/unpack-i64-be([255, 255, 255, 255, 255, 255, 255, 255], 0), -1)
+    assert-eq!(sp/unpack-i64-le([255, 255, 255, 255, 255, 255, 255, 255], 0), -1)
+    assert-eq!(sp/unpack-i64-be([255, 255, 255, 255, 255, 255, 255, 0], 0), -256)
+    assert-eq!(sp/unpack-i64([1, 2, 3, 4, 5, 6, 7, 8], 0), 0x0102030405060708)
+}
+
+test "64-bit signed round trips" {
+    assert-eq!(sp/unpack-i64-be(sp/pack-i64-be(-1), 0), -1)
+    assert-eq!(sp/unpack-i64-le(sp/pack-i64-le(-1234567), 0), -1234567)
+    assert-eq!(sp/unpack-i64-be(sp/pack-i64-be(0x0102030405060708), 0), 0x0102030405060708)
+}
+
+// ---------------------------------------------------------------------------
+// Format-string driven pack / unpack with the new codes
+// ---------------------------------------------------------------------------
+
+test "format Q big/little-endian" {
+    assert-eq!(sp/pack(">Q", [0x0102030405060708]), [1, 2, 3, 4, 5, 6, 7, 8])
+    assert-eq!(sp/pack("<Q", [0x0102030405060708]), [8, 7, 6, 5, 4, 3, 2, 1])
+    assert-eq!(sp/unpack(">Q", [1, 2, 3, 4, 5, 6, 7, 8]), [0x0102030405060708])
+    assert-eq!(sp/unpack("<Q", [8, 7, 6, 5, 4, 3, 2, 1]), [0x0102030405060708])
+}
+
+test "format q signed round-trips" {
+    assert-eq!(sp/pack(">q", [-1]), [255, 255, 255, 255, 255, 255, 255, 255])
+    assert-eq!(sp/unpack(">q", [255, 255, 255, 255, 255, 255, 255, 255]), [-1])
+    assert-eq!(sp/unpack(">q", sp/pack(">q", [-987654321])), [-987654321])
+}
+
+test "format combines pad and 64-bit codes" {
+    let bytes = sp/pack(">Bxq", [5, -1])
+    assert-eq!(bytes, [5, 0, 255, 255, 255, 255, 255, 255, 255, 255])
+    assert-eq!(sp/unpack(">Bxq", bytes), [5, -1])
+}
+
+test "format not enough bytes for Q throws" {
+    assert-throws!(fn() { sp/unpack(">Q", [1, 2, 3]) })
+}
+
+// ---------------------------------------------------------------------------
+// calcsize / code-width for the new codes
+// ---------------------------------------------------------------------------
+
+test "calcsize includes 64-bit and pad widths" {
+    assert-eq!(sp/calcsize(">Q"), 8)
+    assert-eq!(sp/calcsize(">q"), 8)
+    assert-eq!(sp/calcsize(">qQ"), 16)
+    assert-eq!(sp/calcsize(">Bxq"), 10)
+    assert-eq!(sp/calcsize(">Qx"), 9)
+    assert-eq!(sp/code-width("Q"), 8)
+    assert-eq!(sp/code-width("q"), 8)
+    assert-eq!(sp/code-width("x"), 1)
+}

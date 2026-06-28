@@ -1,0 +1,77 @@
+namespace stats_ext3_test
+
+// Coverage for the beagle.stats extensions: quantile (0..1 scale) and the
+// `stddev` spelling of population standard deviation. Expected values were
+// derived by reading standard-library/beagle.stats.bg.
+
+use beagle.stats as stats
+
+// --- quantile ---------------------------------------------------------------
+
+test "quantile 0.5 is the interpolating median" {
+    // n=10, rank = 0.5*9 = 4.5 -> s[4]=5, s[5]=6 -> 5 + (6-5)*0.5 = 5.5
+    assert-eq!(stats/quantile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 0.5), 5.5)
+}
+
+test "quantile 0 is min, 1 is max as floats" {
+    assert-eq!(stats/quantile([1, 2, 3, 4], 0), 1.0)
+    assert-eq!(stats/quantile([1, 2, 3, 4], 1), 4.0)
+}
+
+test "quantile linear interpolation between ranks" {
+    // rank = 0.25*3 = 0.75 -> 1 + (2-1)*0.75 = 1.75
+    assert-eq!(stats/quantile([1, 2, 3, 4], 0.25), 1.75)
+    // rank = 0.5*3 = 1.5 -> 2 + (3-2)*0.5 = 2.5
+    assert-eq!(stats/quantile([1, 2, 3, 4], 0.5), 2.5)
+}
+
+test "quantile matches percentile on the 0..100 scale" {
+    let data = [3, 1, 4, 1, 5, 9, 2, 6]
+    assert-eq!(stats/quantile(data, 0.25), stats/percentile(data, 25))
+    assert-eq!(stats/quantile(data, 0.9), stats/percentile(data, 90))
+}
+
+test "quantile sorts the input first" {
+    // unsorted input yields the same result as sorted input
+    assert-eq!(stats/quantile([4, 1, 3, 2], 0.5), stats/quantile([1, 2, 3, 4], 0.5))
+}
+
+test "quantile of single element returns that element as float" {
+    assert-eq!(stats/quantile([42], 0.5), 42.0)
+}
+
+test "quantile accepts arbitrary seqables" {
+    assert-eq!(stats/quantile(seq([1, 2, 3, 4]), 0.25), 1.75)
+}
+
+test "quantile throws on empty input" {
+    assert-throws!(fn() { stats/quantile([], 0.5) })
+}
+
+test "quantile throws when q is out of range" {
+    assert-throws!(fn() { stats/quantile([1, 2, 3], -0.1) })
+    assert-throws!(fn() { stats/quantile([1, 2, 3], 1.5) })
+}
+
+// --- stddev (alias spelling of population standard deviation) ----------------
+
+test "stddev is population standard deviation" {
+    assert-eq!(stats/stddev([2, 4, 4, 4, 5, 5, 7, 9]), 2.0)
+}
+
+test "stddev agrees with stdev" {
+    let data = [2, 4, 4, 4, 5, 5, 7, 9]
+    assert-eq!(stats/stddev(data), stats/stdev(data))
+}
+
+test "stddev of constant data is zero" {
+    assert-eq!(stats/stddev([5, 5, 5, 5]), 0.0)
+}
+
+test "stddev of single element is zero" {
+    assert-eq!(stats/stddev([7]), 0.0)
+}
+
+test "stddev throws on empty input" {
+    assert-throws!(fn() { stats/stddev([]) })
+}

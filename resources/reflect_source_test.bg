@@ -94,8 +94,8 @@ fn main() {
 // |/// Returns the last argument.
 // |///
 // |/// Examples:
-// |///   (println "Hello" "World")  ; prints: Hello World\n
-// |///   (println 1 2 3)            ; prints: 1 2 3\n
+// |///   println("Hello", "World")  // prints: Hello World\n
+// |///   println(1, 2, 3)            // prints: 1 2 3\n
 // |fn println(...args) {
 // |    let len = length(args)
 // |    if len == 0 {

@@ -103,17 +103,17 @@ fn main() {
         let read_new = fs/read-file("/test/new.txt")
         println("Read new file:", core/unwrap(read_new))
 
-        // Test exists?
+        // Test exists? (now returns a plain Bool)
         let exists1 = fs/exists?("/test/hello.txt")
-        println("hello.txt exists:", core/unwrap(exists1))
+        println("hello.txt exists:", exists1)
 
         let exists2 = fs/exists?("/nonexistent.txt")
-        println("nonexistent exists:", core/unwrap(exists2))
+        println("nonexistent exists:", exists2)
 
         // Test delete
         let _ = fs/delete-file("/test/new.txt")
         let exists3 = fs/exists?("/test/new.txt")
-        println("new.txt exists after delete:", core/unwrap(exists3))
+        println("new.txt exists after delete:", exists3)
 
         println("All mock tests passed!")
     }

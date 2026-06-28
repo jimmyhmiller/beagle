@@ -1,0 +1,74 @@
+namespace ini_ext_test
+
+use beagle.ini as ini
+
+// Sample INI. Keys before [db] live in the :default section (header "default").
+// Values are stored verbatim as strings by the parser; the typed getters
+// convert them. Expected results below are derived directly from these values.
+fn sample() {
+    ini/parse("topnum=7\n[db]\nhost=localhost\nport=5432\nratio=0.75\nbig=10\ndebug=true\nenabled=ON\nactive=Yes\noff1=off\nzero=0\none=1\nneg=-30\nbad=hello\ncap=FALSE\n[web]\nflag=no\n")
+}
+
+test "get-bool happy path and case-insensitive aliases" {
+    let cfg = sample()
+    assert-eq!(ini/get-bool(cfg, "db", "debug"), true)    // "true"
+    assert-eq!(ini/get-bool(cfg, "db", "enabled"), true)  // "ON"
+    assert-eq!(ini/get-bool(cfg, "db", "active"), true)   // "Yes"
+    assert-eq!(ini/get-bool(cfg, "db", "one"), true)      // "1"
+    assert-eq!(ini/get-bool(cfg, "db", "off1"), false)    // "off"
+    assert-eq!(ini/get-bool(cfg, "db", "zero"), false)    // "0"
+    assert-eq!(ini/get-bool(cfg, "db", "cap"), false)     // "FALSE"
+    assert-eq!(ini/get-bool(cfg, "web", "flag"), false)   // "no"
+}
+
+test "get-bool returns null when absent" {
+    let cfg = sample()
+    assert-eq!(ini/get-bool(cfg, "db", "missing"), null)   // key absent
+    assert-eq!(ini/get-bool(cfg, "nosuch", "flag"), null)  // section absent
+}
+
+test "get-bool throws on unparseable value" {
+    let cfg = sample()
+    assert-throws!(fn() { ini/get-bool(cfg, "db", "bad") })   // "hello"
+    assert-throws!(fn() { ini/get-bool(cfg, "db", "port") })  // "5432" is not a bool
+}
+
+test "get-int happy path including negatives and default section" {
+    let cfg = sample()
+    assert-eq!(ini/get-int(cfg, "db", "port"), 5432)
+    assert-eq!(ini/get-int(cfg, "db", "big"), 10)
+    assert-eq!(ini/get-int(cfg, "db", "zero"), 0)
+    assert-eq!(ini/get-int(cfg, "db", "neg"), -30)
+    assert-eq!(ini/get-int(cfg, "default", "topnum"), 7)  // pre-section key
+}
+
+test "get-int returns null when absent" {
+    let cfg = sample()
+    assert-eq!(ini/get-int(cfg, "db", "missing"), null)
+    assert-eq!(ini/get-int(cfg, "nosuch", "port"), null)
+}
+
+test "get-int throws on non-integer value" {
+    let cfg = sample()
+    assert-throws!(fn() { ini/get-int(cfg, "db", "ratio") })  // "0.75"
+    assert-throws!(fn() { ini/get-int(cfg, "db", "bad") })    // "hello"
+}
+
+test "get-float happy path including integer-shaped values" {
+    let cfg = sample()
+    assert-eq!(ini/get-float(cfg, "db", "ratio"), 0.75)
+    assert-eq!(ini/get-float(cfg, "db", "big"), 10.0)    // "10" -> 10.0
+    assert-eq!(ini/get-float(cfg, "db", "port"), 5432.0)
+    assert-eq!(ini/get-float(cfg, "db", "neg"), -30.0)
+}
+
+test "get-float returns null when absent" {
+    let cfg = sample()
+    assert-eq!(ini/get-float(cfg, "db", "missing"), null)
+    assert-eq!(ini/get-float(cfg, "nosuch", "ratio"), null)
+}
+
+test "get-float throws on non-numeric value" {
+    let cfg = sample()
+    assert-throws!(fn() { ini/get-float(cfg, "db", "bad") })  // "hello"
+}

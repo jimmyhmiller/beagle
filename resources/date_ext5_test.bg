@@ -1,0 +1,63 @@
+namespace date_ext5_test
+
+use beagle.date as date
+
+// Build a UTC DateTime from an ISO-8601 string (parse-iso8601 is the module's
+// own strict constructor, so the test stays independent of the wall clock).
+fn dt(s) {
+    date/parse-iso8601(s)
+}
+
+// ---------------------------------------------------------------------------
+// day-of-year
+// ---------------------------------------------------------------------------
+
+test "day-of-year is 1 on January 1st" {
+    assert-eq!(date/day-of-year(dt("2024-01-01T00:00:00Z")), 1)
+}
+
+test "day-of-year ignores time-of-day" {
+    // March 1st in a leap year: Jan (31) + Feb (29) = 60 days before, so 61.
+    assert-eq!(date/day-of-year(dt("2024-03-01T00:00:00Z")), 61)
+    assert-eq!(date/day-of-year(dt("2024-03-01T23:59:59Z")), 61)
+}
+
+test "day-of-year last day of a leap year is 366" {
+    assert-eq!(date/day-of-year(dt("2024-12-31T00:00:00Z")), 366)
+}
+
+test "day-of-year last day of a common year is 365" {
+    assert-eq!(date/day-of-year(dt("2023-12-31T00:00:00Z")), 365)
+}
+
+test "day-of-year March 1st in a common year is 60" {
+    // Jan (31) + Feb (28) = 59 days before, so 60.
+    assert-eq!(date/day-of-year(dt("2023-03-01T00:00:00Z")), 60)
+}
+
+// ---------------------------------------------------------------------------
+// is-weekend?
+// ---------------------------------------------------------------------------
+
+test "is-weekend? true on Saturday" {
+    // 2024-01-06 is a Saturday (weekday 6).
+    assert!(date/is-weekend?(dt("2024-01-06T00:00:00Z")))
+}
+
+test "is-weekend? true on Sunday" {
+    // 2024-01-07 is a Sunday (weekday 0).
+    assert!(date/is-weekend?(dt("2024-01-07T12:30:00Z")))
+}
+
+test "is-weekend? false on weekdays" {
+    // 2024-01-08 Monday, 2024-01-05 Friday.
+    assert!(!date/is-weekend?(dt("2024-01-08T00:00:00Z")))
+    assert!(!date/is-weekend?(dt("2024-01-05T00:00:00Z")))
+}
+
+test "is-weekend? matches weekday numbering (Sunday end of 2023)" {
+    // 2023-12-31 is a Sunday (weekday 0), so it is a weekend.
+    let sunday = dt("2023-12-31T00:00:00Z")
+    assert-eq!(date/weekday(sunday), 0)
+    assert!(date/is-weekend?(sunday))
+}

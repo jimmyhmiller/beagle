@@ -1,0 +1,79 @@
+namespace stream_ext5_test
+
+use beagle.stream as stream
+
+// ---------------------------------------------------------------------------
+// drop-while
+//
+// drop-while(stream, pred) discards the leading run where pred is true, then
+// yields the first failing value AND everything after it (pred is not consulted
+// again once dropping stops). Mirror of the existing take-while.
+// ---------------------------------------------------------------------------
+
+test "drop-while drops the leading prefix, keeps the rest" {
+    let s = stream/from-vector([1, 2, 3, 4, 1, 2])
+    let result = stream/collect(stream/drop-while(s, fn(x) { x < 3 }))
+    // drops 1, 2; yields 3; pred never consulted again so trailing 1, 2 stay
+    assert-eq!(result, [3, 4, 1, 2])
+}
+
+test "drop-while keeps values after the prefix even if they match the predicate" {
+    let s = stream/from-vector([1, 2, 5, 1, 9])
+    let result = stream/collect(stream/drop-while(s, fn(x) { x < 3 }))
+    // drops 1, 2; 5 fails the predicate so dropping stops; 1 and 9 stay
+    assert-eq!(result, [5, 1, 9])
+}
+
+test "drop-while yields everything when the first value fails the predicate" {
+    let s = stream/from-vector([5, 1, 2])
+    let result = stream/collect(stream/drop-while(s, fn(x) { x < 3 }))
+    assert-eq!(result, [5, 1, 2])
+}
+
+test "drop-while of all-matching values is empty" {
+    let s = stream/from-vector([1, 1, 1])
+    let result = stream/collect(stream/drop-while(s, fn(x) { x < 3 }))
+    assert-eq!(result, [])
+}
+
+test "drop-while of an empty stream is empty" {
+    let s = stream/from-vector([])
+    let result = stream/collect(stream/drop-while(s, fn(x) { x < 3 }))
+    assert-eq!(result, [])
+}
+
+test "drop-while works on strings" {
+    let s = stream/from-vector(["a", "a", "b", "a"])
+    let result = stream/collect(stream/drop-while(s, fn(x) { x == "a" }))
+    assert-eq!(result, ["b", "a"])
+}
+
+test "drop-while composes with take over a range" {
+    let s = stream/range(0, 10)
+    let dropped = stream/drop-while(s, fn(x) { x < 3 })
+    let result = stream/collect(stream/take(dropped, 2))
+    // drops 0, 1, 2; yields 3, 4
+    assert-eq!(result, [3, 4])
+}
+
+test "drop-while composes after map" {
+    let s = stream/from-vector([1, 2, 3])
+    let mapped = stream/map(s, fn(x) { x * 10 })
+    let result = stream/collect(stream/drop-while(mapped, fn(x) { x < 25 }))
+    // values are 10, 20, 30; drops 10, 20; yields 30
+    assert-eq!(result, [30])
+}
+
+test "drop-while propagates a predicate error thrown while dropping" {
+    assert-throws!(fn() {
+        stream/collect(stream/drop-while(stream/from-vector([1, 2, 3]), fn(x) { throw("boom") }))
+    })
+}
+
+test "take-while and drop-while partition a stream" {
+    // take-while already exists in the module; pair it with the new drop-while.
+    let prefix = stream/collect(stream/take-while(stream/from-vector([1, 2, 3, 4, 5]), fn(x) { x < 3 }))
+    let suffix = stream/collect(stream/drop-while(stream/from-vector([1, 2, 3, 4, 5]), fn(x) { x < 3 }))
+    assert-eq!(prefix, [1, 2])
+    assert-eq!(suffix, [3, 4, 5])
+}

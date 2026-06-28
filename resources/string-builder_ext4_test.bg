@@ -1,0 +1,67 @@
+namespace string-builder_ext4_test
+
+use beagle.string-builder as sb
+
+test "append-line! appends string then newline" {
+    let b = sb/new(16)
+    sb/append-line!(b, "hello")
+    assert-eq!(sb/to-string(b), "hello\n")
+    assert-eq!(sb/length(b), 6)
+}
+
+test "append-line! multiple lines accumulate" {
+    let b = sb/new(16)
+    sb/append-line!(b, "a")
+    sb/append-line!(b, "bc")
+    assert-eq!(sb/to-string(b), "a\nbc\n")
+    assert-eq!(sb/length(b), 5)
+}
+
+test "append-line! returns the same builder" {
+    let b = sb/new(16)
+    let r = sb/append-line!(b, "x")
+    assert-eq!(sb/to-string(r), "x\n")
+    assert-eq!(sb/length(r), 2)
+}
+
+test "append-line! with empty string just adds newline" {
+    let b = sb/new(16)
+    sb/append-line!(b, "")
+    assert-eq!(sb/to-string(b), "\n")
+    assert-eq!(sb/length(b), 1)
+}
+
+test "append-line! after a plain append!" {
+    let b = sb/new(16)
+    sb/append!(b, "no-newline")
+    sb/append-line!(b, "tail")
+    assert-eq!(sb/to-string(b), "no-newlinetail\n")
+    assert-eq!(sb/length(b), 15)
+}
+
+test "is-empty? true on fresh builder" {
+    let b = sb/new(16)
+    assert!(sb/is-empty?(b))
+    assert-eq!(sb/length(b), 0)
+}
+
+test "is-empty? false after append!" {
+    let b = sb/new(16)
+    sb/append!(b, "data")
+    assert-eq!(sb/is-empty?(b), false)
+}
+
+test "is-empty? false after append-line! of empty string" {
+    let b = sb/new(16)
+    sb/append-line!(b, "")
+    assert-eq!(sb/is-empty?(b), false)
+}
+
+test "is-empty? true again after clear!" {
+    let b = sb/new(16)
+    sb/append!(b, "data")
+    assert-eq!(sb/is-empty?(b), false)
+    sb/clear!(b)
+    assert!(sb/is-empty?(b))
+    assert-eq!(sb/length(b), 0)
+}

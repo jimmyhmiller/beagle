@@ -1,0 +1,71 @@
+namespace iter_ext2_test
+
+use beagle.iter as it
+
+// Coverage for the windowed + combinations-with-replacement additions to
+// beagle.iter. All functions are pure/deterministic and return persistent
+// vectors. Expected values derived by reading the implementations in
+// standard-library/beagle.iter.bg.
+
+// ----------------------------------------------------------------------------
+// windowed
+// ----------------------------------------------------------------------------
+
+test "windowed step 1 produces overlapping windows" {
+    assert-eq!(it/windowed(2, 1, [1, 2, 3, 4]), [[1, 2], [2, 3], [3, 4]])
+    assert-eq!(it/windowed(3, 1, [1, 2, 3, 4, 5]), [[1, 2, 3], [2, 3, 4], [3, 4, 5]])
+}
+
+test "windowed advances by step and drops trailing short window" {
+    assert-eq!(it/windowed(2, 2, [1, 2, 3, 4, 5]), [[1, 2], [3, 4]])
+    assert-eq!(it/windowed(2, 3, [1, 2, 3, 4, 5, 6, 7]), [[1, 2], [4, 5]])
+}
+
+test "windowed with window larger than input is empty" {
+    assert-eq!(it/windowed(3, 1, [1, 2]), [])
+    assert-eq!(it/windowed(2, 1, []), [])
+}
+
+test "windowed of size 1 yields singletons" {
+    assert-eq!(it/windowed(1, 1, [9, 8, 7]), [[9], [8], [7]])
+}
+
+test "windowed rejects invalid n and step" {
+    assert-throws!(fn() { it/windowed(0, 1, [1, 2, 3]) })
+    assert-throws!(fn() { it/windowed(-1, 1, [1, 2, 3]) })
+    assert-throws!(fn() { it/windowed(2, 0, [1, 2, 3]) })
+    assert-throws!(fn() { it/windowed(2, -1, [1, 2, 3]) })
+}
+
+// ----------------------------------------------------------------------------
+// combinations-with-replacement
+// ----------------------------------------------------------------------------
+
+test "combinations-with-replacement allows repeats in lex order" {
+    assert-eq!(it/combinations-with-replacement([1, 2, 3], 2),
+        [[1, 1], [1, 2], [1, 3], [2, 2], [2, 3], [3, 3]])
+    assert-eq!(it/combinations-with-replacement([1, 2], 2),
+        [[1, 1], [1, 2], [2, 2]])
+}
+
+test "combinations-with-replacement k can exceed input length" {
+    assert-eq!(it/combinations-with-replacement([5], 3), [[5, 5, 5]])
+}
+
+test "combinations-with-replacement k=0 is one empty combination" {
+    assert-eq!(it/combinations-with-replacement([1, 2, 3], 0), [[]])
+    assert-eq!(it/combinations-with-replacement([], 0), [[]])
+}
+
+test "combinations-with-replacement of empty pool with k>0 is empty" {
+    assert-eq!(it/combinations-with-replacement([], 2), [])
+}
+
+test "combinations-with-replacement count matches multiset formula" {
+    // C(n + k - 1, k) for n=3, k=3 => C(5,3) = 10
+    assert-eq!(length(it/combinations-with-replacement([1, 2, 3], 3)), 10)
+}
+
+test "combinations-with-replacement rejects negative k" {
+    assert-throws!(fn() { it/combinations-with-replacement([1, 2, 3], -1) })
+}

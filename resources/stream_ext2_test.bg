@@ -1,0 +1,85 @@
+namespace stream_ext2_test
+
+use beagle.stream as stream
+
+// ---------------------------------------------------------------------------
+// distinct
+// ---------------------------------------------------------------------------
+
+test "distinct drops later duplicate ints, keeping first-seen order" {
+    let s = stream/from-vector([1, 1, 2, 3, 3, 3, 2, 4])
+    let result = stream/collect(stream/distinct(s))
+    assert-eq!(result, [1, 2, 3, 4])
+}
+
+test "distinct works on strings" {
+    let s = stream/from-vector(["x", "y", "x", "z", "y"])
+    let result = stream/collect(stream/distinct(s))
+    assert-eq!(result, ["x", "y", "z"])
+}
+
+test "distinct of an empty stream is empty" {
+    let s = stream/from-vector([])
+    let result = stream/collect(stream/distinct(s))
+    assert-eq!(result, [])
+}
+
+test "distinct of all-unique values is unchanged" {
+    let s = stream/from-vector([5, 6, 7])
+    let result = stream/collect(stream/distinct(s))
+    assert-eq!(result, [5, 6, 7])
+}
+
+test "distinct composes after map" {
+    let s = stream/from-vector([1, 2, 2, 3])
+    let mapped = stream/map(s, fn(x) { x * 10 })
+    let result = stream/collect(stream/distinct(mapped))
+    assert-eq!(result, [10, 20, 30])
+}
+
+test "distinct is lazy: take only pulls what it needs" {
+    let s = stream/from-vector([1, 1, 2, 2, 3, 3, 4])
+    let result = stream/collect(stream/take(stream/distinct(s), 2))
+    assert-eq!(result, [1, 2])
+}
+
+// ---------------------------------------------------------------------------
+// scan
+// ---------------------------------------------------------------------------
+
+test "scan yields init then each running sum" {
+    let s = stream/from-vector([1, 2, 3])
+    let result = stream/collect(stream/scan(s, 0, fn(a, b) { a + b }))
+    assert-eq!(result, [0, 1, 3, 6])
+}
+
+test "scan of an empty stream yields just the initial value" {
+    let s = stream/from-vector([])
+    let result = stream/collect(stream/scan(s, 100, fn(a, b) { a + b }))
+    assert-eq!(result, [100])
+}
+
+test "scan accumulates strings" {
+    let s = stream/from-vector(["a", "b", "c"])
+    let result = stream/collect(stream/scan(s, "", fn(a, b) { a ++ b }))
+    assert-eq!(result, ["", "a", "ab", "abc"])
+}
+
+test "scan can build a running product" {
+    let s = stream/from-vector([1, 2, 3, 4])
+    let result = stream/collect(stream/scan(s, 1, fn(a, b) { a * b }))
+    assert-eq!(result, [1, 1, 2, 6, 24])
+}
+
+test "scan still emits init before a reducer error propagates" {
+    assert-throws!(fn() {
+        stream/collect(stream/scan(stream/from-vector([1, 2]), 0, fn(a, b) { throw("boom") }))
+    })
+}
+
+test "scan composes with take to bound an accumulation" {
+    let s = stream/from-vector([10, 20, 30, 40])
+    let scanned = stream/scan(s, 0, fn(a, b) { a + b })
+    let result = stream/collect(stream/take(scanned, 3))
+    assert-eq!(result, [0, 10, 30])
+}

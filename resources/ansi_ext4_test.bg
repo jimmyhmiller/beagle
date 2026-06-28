@@ -1,0 +1,57 @@
+namespace ansi_ext4_test
+
+use beagle.ansi as ansi
+
+// ESC byte (27) reused to build expected sequences, exactly as the module does.
+let esc = char-from-code(27)
+
+test "rgb foreground builds a 38;2;r;g;b truecolor escape" {
+    ansi/set-enabled!(true)
+    let expected = esc ++ "[38;2;10;20;30m" ++ "x" ++ esc ++ "[0m"
+    assert-eq!(ansi/rgb(10, 20, 30, "x"), expected)
+}
+
+test "bg-rgb background builds a 48;2;r;g;b truecolor escape" {
+    ansi/set-enabled!(true)
+    let expected = esc ++ "[48;2;1;2;3m" ++ "y" ++ esc ++ "[0m"
+    assert-eq!(ansi/bg-rgb(1, 2, 3, "y"), expected)
+}
+
+test "rgb with zero channels still emits the escape" {
+    ansi/set-enabled!(true)
+    let expected = esc ++ "[38;2;0;0;0m" ++ "k" ++ esc ++ "[0m"
+    assert-eq!(ansi/rgb(0, 0, 0, "k"), expected)
+}
+
+test "rgb and bg-rgb return text unchanged when disabled" {
+    ansi/set-enabled!(false)
+    assert-eq!(ansi/rgb(10, 20, 30, "x"), "x")
+    assert-eq!(ansi/bg-rgb(1, 2, 3, "y"), "y")
+    ansi/set-enabled!(true)
+}
+
+test "hyperlink wraps label in an OSC 8 sequence" {
+    ansi/set-enabled!(true)
+    let url = "https://example.com"
+    let expected = esc ++ "]8;;" ++ url ++ esc ++ "\\" ++ "go" ++ esc ++ "]8;;" ++ esc ++ "\\"
+    assert-eq!(ansi/hyperlink(url, "go"), expected)
+}
+
+test "hyperlink with empty url still closes the link region" {
+    ansi/set-enabled!(true)
+    let expected = esc ++ "]8;;" ++ esc ++ "\\" ++ "label" ++ esc ++ "]8;;" ++ esc ++ "\\"
+    assert-eq!(ansi/hyperlink("", "label"), expected)
+}
+
+test "hyperlink returns the bare label when disabled" {
+    ansi/set-enabled!(false)
+    assert-eq!(ansi/hyperlink("https://example.com", "go"), "go")
+    ansi/set-enabled!(true)
+}
+
+test "hyperlink result is exactly label plus nine extra ESC-framing bytes" {
+    ansi/set-enabled!(true)
+    let out = ansi/hyperlink("ab", "cd")
+    // url(2) + label(2) + "]8;;"(4) + "\\"(1) + "]8;;"(4) + "\\"(1) + 4 ESC bytes
+    assert-eq!(length(out), 18)
+}

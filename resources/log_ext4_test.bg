@@ -1,0 +1,78 @@
+namespace log_ext4_test
+
+use beagle.log as log
+
+// Coverage for the sorted-field structured logging added to beagle.log:
+// format-fields-sorted, format-line-fields-sorted, build-emit-line-sorted, and
+// log-fields. Expected values are derived by reading the module: keyword keys
+// render without their leading colon, and fields are emitted in ASCENDING key
+// order (lexicographic by rendered key string), each prefixed with a space.
+
+test "format-fields-sorted orders keys regardless of insertion order" {
+    // keys render as "path" < "status" (p=112 < s=115)
+    assert-eq!(
+        log/format-fields-sorted({:status 500, :path "/x"}),
+        " path=/x status=500"
+    )
+    // insertion order reversed -> same sorted output
+    assert-eq!(
+        log/format-fields-sorted({:path "/x", :status 500}),
+        " path=/x status=500"
+    )
+}
+
+test "format-fields-sorted with three keys is fully ordered" {
+    // method < path < status
+    assert-eq!(
+        log/format-fields-sorted({:status 500, :path "/x", :method "GET"}),
+        " method=GET path=/x status=500"
+    )
+}
+
+test "format-fields-sorted single key has one leading space" {
+    assert-eq!(log/format-fields-sorted({:z 9}), " z=9")
+}
+
+test "format-fields-sorted is empty for null and empty maps" {
+    assert-eq!(log/format-fields-sorted(null), "")
+    assert-eq!(log/format-fields-sorted({}), "")
+}
+
+test "format-line-fields-sorted prefixes the LEVEL and message" {
+    assert-eq!(
+        log/format-line-fields-sorted(:warn, "req", {:status 500, :path "/x"}),
+        "WARN req path=/x status=500"
+    )
+    // null/empty fields collapse to a plain line
+    assert-eq!(log/format-line-fields-sorted(:info, "msg", null), "INFO msg")
+    assert-eq!(log/format-line-fields-sorted(:info, "msg", {}), "INFO msg")
+}
+
+test "format-line-fields-sorted accepts int level constants" {
+    assert-eq!(
+        log/format-line-fields-sorted(log/LEVEL-ERROR, "boom", {:a 1, :b 2}),
+        "ERROR boom a=1 b=2"
+    )
+}
+
+test "log-fields respects the current min-level threshold" {
+    log/set-level!(:error)
+    // info is below error -> suppressed, returns false (does not throw)
+    assert-eq!(log/log-fields(:info, "suppressed", {:a 1}), false)
+    // error is at the threshold -> emitted, returns true
+    assert-eq!(log/log-fields(:error, "emitted", {:a 1}), true)
+    // restore default for other tests
+    log/set-level!(:debug)
+}
+
+test "log-fields at default level emits with null and populated fields" {
+    log/set-level!(:debug)
+    assert!(log/log-fields(:debug, "d", null))
+    assert!(log/log-fields(:info, "i", {:k 1}))
+    assert!(log/log-fields(:warn, "w", {:b 2, :a 1}))
+    assert!(log/log-fields(:error, "e", {}))
+}
+
+test "log-fields throws on an invalid level" {
+    assert-throws!(fn() { log/log-fields(:trace, "x", {:a 1}) })
+}

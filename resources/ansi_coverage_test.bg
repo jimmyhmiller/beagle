@@ -1,0 +1,173 @@
+namespace ansi_coverage_test
+
+use beagle.ansi as ansi
+
+// Regression coverage for the pure beagle.ansi SGR styling module.
+// ESC is byte 27; every wrap is  ESC[<code>m <text> ESC[0m.
+// We recompute ESC the same way the module does so expected values are exact.
+
+let ESC = char-from-code(27)
+
+// ---------------------------------------------------------------------------
+// Core wrapping
+// ---------------------------------------------------------------------------
+
+test "wrap via foreground color produces exact SGR sequence" {
+    assert-eq!(ansi/red("hi"), ESC ++ "[31m" ++ "hi" ++ ESC ++ "[0m")
+    assert-eq!(ansi/green("x"), ESC ++ "[32m" ++ "x" ++ ESC ++ "[0m")
+    assert-eq!(ansi/blue("y"), ESC ++ "[34m" ++ "y" ++ ESC ++ "[0m")
+}
+
+test "wrapping an empty string still emits the escape and reset" {
+    assert-eq!(ansi/red(""), ESC ++ "[31m" ++ ESC ++ "[0m")
+}
+
+test "text attributes use the documented codes" {
+    assert-eq!(ansi/bold("a"), ESC ++ "[1m" ++ "a" ++ ESC ++ "[0m")
+    assert-eq!(ansi/dim("a"), ESC ++ "[2m" ++ "a" ++ ESC ++ "[0m")
+    assert-eq!(ansi/italic("a"), ESC ++ "[3m" ++ "a" ++ ESC ++ "[0m")
+    assert-eq!(ansi/underline("a"), ESC ++ "[4m" ++ "a" ++ ESC ++ "[0m")
+    assert-eq!(ansi/blink("a"), ESC ++ "[5m" ++ "a" ++ ESC ++ "[0m")
+    assert-eq!(ansi/reverse("a"), ESC ++ "[7m" ++ "a" ++ ESC ++ "[0m")
+    assert-eq!(ansi/hidden("a"), ESC ++ "[8m" ++ "a" ++ ESC ++ "[0m")
+    assert-eq!(ansi/strikethrough("a"), ESC ++ "[9m" ++ "a" ++ ESC ++ "[0m")
+}
+
+test "the eight standard foreground colors map to 30..37" {
+    assert-eq!(ansi/black("z"), ESC ++ "[30m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/red("z"), ESC ++ "[31m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/green("z"), ESC ++ "[32m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/yellow("z"), ESC ++ "[33m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/blue("z"), ESC ++ "[34m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/magenta("z"), ESC ++ "[35m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/cyan("z"), ESC ++ "[36m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/white("z"), ESC ++ "[37m" ++ "z" ++ ESC ++ "[0m")
+}
+
+test "bright foreground colors map to 90..97" {
+    assert-eq!(ansi/bright-black("z"), ESC ++ "[90m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bright-red("z"), ESC ++ "[91m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bright-green("z"), ESC ++ "[92m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bright-yellow("z"), ESC ++ "[93m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bright-blue("z"), ESC ++ "[94m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bright-magenta("z"), ESC ++ "[95m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bright-cyan("z"), ESC ++ "[96m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bright-white("z"), ESC ++ "[97m" ++ "z" ++ ESC ++ "[0m")
+}
+
+test "gray and grey are aliases for bright-black (90)" {
+    assert-eq!(ansi/gray("g"), ESC ++ "[90m" ++ "g" ++ ESC ++ "[0m")
+    assert-eq!(ansi/gray("g"), ansi/bright-black("g"))
+    assert-eq!(ansi/grey("g"), ansi/bright-black("g"))
+    assert-eq!(ansi/gray("g"), ansi/grey("g"))
+}
+
+test "standard background colors map to 40..47" {
+    assert-eq!(ansi/bg-black("z"), ESC ++ "[40m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bg-red("z"), ESC ++ "[41m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bg-green("z"), ESC ++ "[42m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bg-yellow("z"), ESC ++ "[43m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bg-blue("z"), ESC ++ "[44m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bg-magenta("z"), ESC ++ "[45m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bg-cyan("z"), ESC ++ "[46m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bg-white("z"), ESC ++ "[47m" ++ "z" ++ ESC ++ "[0m")
+}
+
+test "bright background colors map to 100..107" {
+    assert-eq!(ansi/bg-bright-black("z"), ESC ++ "[100m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bg-bright-red("z"), ESC ++ "[101m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bg-bright-green("z"), ESC ++ "[102m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bg-bright-yellow("z"), ESC ++ "[103m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bg-bright-blue("z"), ESC ++ "[104m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bg-bright-magenta("z"), ESC ++ "[105m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bg-bright-cyan("z"), ESC ++ "[106m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bg-bright-white("z"), ESC ++ "[107m" ++ "z" ++ ESC ++ "[0m")
+}
+
+// ---------------------------------------------------------------------------
+// style / multi-code escapes
+// ---------------------------------------------------------------------------
+
+test "style with an empty codes vector returns the text unchanged (no escape)" {
+    assert-eq!(ansi/style("x", []), "x")
+    assert-eq!(ansi/style("", []), "")
+}
+
+test "style with a single code matches a plain wrap" {
+    assert-eq!(ansi/style("x", [31]), ESC ++ "[31m" ++ "x" ++ ESC ++ "[0m")
+}
+
+test "style joins multiple codes with semicolons" {
+    assert-eq!(ansi/style("x", [1, 31]), ESC ++ "[1;31m" ++ "x" ++ ESC ++ "[0m")
+    assert-eq!(ansi/style("q", [1, 4, 31]), ESC ++ "[1;4;31m" ++ "q" ++ ESC ++ "[0m")
+}
+
+test "256-color and truecolor helpers emit extended SGR" {
+    assert-eq!(ansi/fg-256(200, "y"), ESC ++ "[38;5;200m" ++ "y" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bg-256(17, "y"), ESC ++ "[48;5;17m" ++ "y" ++ ESC ++ "[0m")
+    assert-eq!(ansi/rgb(1, 2, 3, "z"), ESC ++ "[38;2;1;2;3m" ++ "z" ++ ESC ++ "[0m")
+    assert-eq!(ansi/bg-rgb(10, 20, 30, "z"), ESC ++ "[48;2;10;20;30m" ++ "z" ++ ESC ++ "[0m")
+}
+
+// ---------------------------------------------------------------------------
+// Nesting + combine
+// ---------------------------------------------------------------------------
+
+test "nesting wraps produces two escapes and two resets" {
+    assert-eq!(ansi/bold(ansi/red("x")),
+        ESC ++ "[1m" ++ ESC ++ "[31m" ++ "x" ++ ESC ++ "[0m" ++ ESC ++ "[0m")
+}
+
+test "combine applies functions left-to-right like manual nesting" {
+    let c = ansi/combine([ansi/bold, ansi/red])
+    assert-eq!(c("x"), ansi/bold(ansi/red("x")))
+}
+
+test "combine with an empty list is the identity function" {
+    let c = ansi/combine([])
+    assert-eq!(c("hi"), "hi")
+    assert-eq!(c(""), "")
+}
+
+test "combine with a single function equals that function" {
+    let c = ansi/combine([ansi/green])
+    assert-eq!(c("x"), ansi/green("x"))
+}
+
+// ---------------------------------------------------------------------------
+// strip-ansi
+// ---------------------------------------------------------------------------
+
+test "strip-ansi removes all SGR sequences, leaving plain text" {
+    assert-eq!(ansi/strip-ansi(ansi/red("hi")), "hi")
+    assert-eq!(ansi/strip-ansi(ansi/bold(ansi/red("hi"))), "hi")
+    assert-eq!(ansi/strip-ansi(ansi/style("hi", [1, 31])), "hi")
+}
+
+test "strip-ansi handles escapes in the middle and at the edges" {
+    assert-eq!(ansi/strip-ansi("a" ++ ansi/green("b") ++ "c"), "abc")
+    assert-eq!(ansi/strip-ansi(ESC ++ "[31mfoo"), "foo")
+}
+
+test "strip-ansi is a no-op on text with no escapes" {
+    assert-eq!(ansi/strip-ansi("plain text"), "plain text")
+    assert-eq!(ansi/strip-ansi(""), "")
+}
+
+test "strip-ansi leaves a lone ESC untouched" {
+    assert-eq!(ansi/strip-ansi(ESC ++ "xyz"), ESC ++ "xyz")
+}
+
+test "strip-ansi keeps malformed SGR sequences verbatim" {
+    // ESC[ with no 'm' terminator: kept and scanning resumes one char later.
+    assert-eq!(ansi/strip-ansi(ESC ++ "[31"), ESC ++ "[31")
+    // ESC[ followed by a non-parameter, non-'m' byte: not a valid SGR run.
+    assert-eq!(ansi/strip-ansi(ESC ++ "[Xm"), ESC ++ "[Xm")
+}
+
+test "strip-ansi is the inverse of any single color wrap for plain content" {
+    assert-eq!(ansi/strip-ansi(ansi/cyan("hello")), "hello")
+    assert-eq!(ansi/strip-ansi(ansi/bg-yellow("world")), "world")
+    assert-eq!(ansi/strip-ansi(ansi/fg-256(123, "abc")), "abc")
+    assert-eq!(ansi/strip-ansi(ansi/rgb(9, 8, 7, "rgb")), "rgb")
+}

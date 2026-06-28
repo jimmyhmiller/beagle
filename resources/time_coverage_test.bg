@@ -1,0 +1,152 @@
+namespace time_coverage_test
+
+use beagle.time as time
+
+// Regression coverage for the public API of standard-library/beagle.time.bg.
+// All calendar math is pure/deterministic; clock primitives are checked only
+// for monotone/range sanity so the suite stays parallel-safe.
+
+test "floor-div truncates toward negative infinity" {
+    assert-eq!(time/floor-div(7, 3), 2)
+    assert-eq!(time/floor-div(6, 3), 2)
+    assert-eq!(time/floor-div(-7, 3), -3)
+    assert-eq!(time/floor-div(7, -3), -3)
+    assert-eq!(time/floor-div(-7, -3), 2)
+    assert-eq!(time/floor-div(0, 5), 0)
+    // exact division: no off-by-one correction
+    assert-eq!(time/floor-div(-9, 3), -3)
+}
+
+test "floor-mod is non-negative for positive divisor" {
+    assert-eq!(time/floor-mod(7, 3), 1)
+    assert-eq!(time/floor-mod(-7, 3), 2)
+    assert-eq!(time/floor-mod(6, 3), 0)
+    // sign of result follows divisor sign
+    assert-eq!(time/floor-mod(7, -3), -2)
+    assert-eq!(time/floor-mod(-7, -3), -1)
+    // the wrap used by days-since-epoch for the second before the epoch
+    assert-eq!(time/floor-mod(-1, 86400), 86399)
+}
+
+test "floor identity a == floor-div(a,b)*b + floor-mod(a,b)" {
+    assert-eq!(time/floor-div(-7, 3) * 3 + time/floor-mod(-7, 3), -7)
+    assert-eq!(time/floor-div(7, -3) * (-3) + time/floor-mod(7, -3), 7)
+    assert-eq!(time/floor-div(123, 7) * 7 + time/floor-mod(123, 7), 123)
+}
+
+test "floor-div by zero throws" {
+    assert-throws!(fn() { time/floor-div(1, 0) })
+    assert-throws!(fn() { time/floor-mod(1, 0) })
+}
+
+test "days-from-civil epoch anchors" {
+    assert-eq!(time/days-from-civil(1970, 1, 1), 0)
+    assert-eq!(time/days-from-civil(1970, 1, 2), 1)
+    assert-eq!(time/days-from-civil(1969, 12, 31), -1)
+    assert-eq!(time/days-from-civil(2000, 1, 1), 10957)
+}
+
+test "days-from-civil handles leap years" {
+    // 2000 is a leap year (divisible by 400)
+    assert-eq!(time/days-from-civil(2000, 3, 1), 11017)
+    assert-eq!(time/days-from-civil(2001, 1, 1), 11323)
+    // exactly 366 days across the leap year 2000
+    assert-eq!(time/days-from-civil(2001, 1, 1) - time/days-from-civil(2000, 1, 1), 366)
+    // 1900 is NOT a leap year (divisible by 100, not 400): 365 days
+    assert-eq!(time/days-from-civil(1901, 1, 1) - time/days-from-civil(1900, 1, 1), 365)
+}
+
+test "civil-from-days inverts days-from-civil" {
+    assert-eq!(time/civil-from-days(0), [1970, 1, 1])
+    assert-eq!(time/civil-from-days(10957), [2000, 1, 1])
+    assert-eq!(time/civil-from-days(-1), [1969, 12, 31])
+    assert-eq!(time/civil-from-days(11017), [2000, 3, 1])
+}
+
+test "civil-from-days reaches year 0 (proleptic Gregorian)" {
+    // 1-based [year, month, day]; year 0 is valid in the proleptic calendar
+    assert-eq!(time/civil-from-days(-719468), [0, 3, 1])
+}
+
+test "civil/days round-trip over a wide span" {
+    let mut d = -2000
+    while d < 50000 {
+        let ymd = time/civil-from-days(d)
+        assert-eq!(time/days-from-civil(ymd[0], ymd[1], ymd[2]), d)
+        d = d + 97
+    }
+}
+
+test "days-since-epoch floors toward earlier days" {
+    assert-eq!(time/days-since-epoch(0), 0)
+    assert-eq!(time/days-since-epoch(86399), 0)
+    assert-eq!(time/days-since-epoch(86400), 1)
+    // one second before the epoch is the day before (floored), not 0
+    assert-eq!(time/days-since-epoch(-1), -1)
+}
+
+test "weekday is 0=Sunday..6=Saturday" {
+    // 1970-01-01 was a Thursday => 4
+    assert-eq!(time/weekday(0), 4)
+    // 784111777 = Sun 06 Nov 1994
+    assert-eq!(time/weekday(784111777), 0)
+    // one second before the epoch falls on Wed 31 Dec 1969 => 3
+    assert-eq!(time/weekday(-1), 3)
+    // weekday is stable for the whole day
+    assert-eq!(time/weekday(85000), 4)
+}
+
+test "civil-from-epoch decomposes UTC components" {
+    assert-eq!(time/civil-from-epoch(784111777), [1994, 11, 6, 8, 49, 37, 0])
+    assert-eq!(time/civil-from-epoch(0), [1970, 1, 1, 0, 0, 0, 4])
+    assert-eq!(time/civil-from-epoch(1000000000), [2001, 9, 9, 1, 46, 40, 0])
+    // pre-epoch: time-of-day wraps correctly
+    assert-eq!(time/civil-from-epoch(-1), [1969, 12, 31, 23, 59, 59, 3])
+}
+
+test "http-date formats RFC 1123 / HTTP Date headers" {
+    assert-eq!(time/http-date(784111777), "Sun, 06 Nov 1994 08:49:37 GMT")
+    assert-eq!(time/http-date(0), "Thu, 01 Jan 1970 00:00:00 GMT")
+    assert-eq!(time/http-date(946684800), "Sat, 01 Jan 2000 00:00:00 GMT")
+    assert-eq!(time/http-date(1000000000), "Sun, 09 Sep 2001 01:46:40 GMT")
+}
+
+test "http-date zero-pads day, hour, minute, second" {
+    // 86399 = 1970-01-01 23:59:59 => single digit day padded to "01"
+    assert-eq!(time/http-date(86399), "Thu, 01 Jan 1970 23:59:59 GMT")
+    // one second before epoch
+    assert-eq!(time/http-date(-1), "Wed, 31 Dec 1969 23:59:59 GMT")
+}
+
+test "http-date is consistent with civil-from-epoch" {
+    let epoch = 1234567890
+    let c = time/civil-from-epoch(epoch)
+    let s = time/http-date(epoch)
+    // month name and weekday name must agree with the decomposed indices
+    let day-names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    assert!(starts-with?(s, day-names[c[6]]))
+    assert!(ends-with?(s, " GMT"))
+}
+
+test "libc-path matches the running OS" {
+    let os = get-os()
+    let expected = if os == "macos" {
+        "libSystem.B.dylib"
+    } else if os == "linux" {
+        "/lib/x86_64-linux-gnu/libc.so.6"
+    } else {
+        "libc.so.6"
+    }
+    assert-eq!(time/libc-path(), expected)
+}
+
+test "clock primitives are sane and roughly agree" {
+    // these are well in the past, so any correct clock exceeds them
+    assert!(time/epoch-seconds() > 1700000000)
+    assert!(time/epoch-millis() > 1700000000000)
+    let s = time/epoch-seconds()
+    let ms = time/epoch-millis()
+    // millis/1000 should track seconds to within a couple seconds
+    assert!(time/floor-div(ms, 1000) - s >= -2)
+    assert!(time/floor-div(ms, 1000) - s <= 2)
+}

@@ -1,0 +1,101 @@
+namespace base64_coverage_test
+
+// Regression coverage for beagle.base64 (RFC 4648 encode/decode, standard +
+// URL-safe alphabets). All vectors derived from the source contract and
+// confirmed against the release binary. Pure/deterministic module.
+
+use beagle.base64 as b64
+
+test "encode standard RFC 4648 vectors" {
+    assert-eq!(b64/encode(""), "")
+    assert-eq!(b64/encode("M"), "TQ==")
+    assert-eq!(b64/encode("Ma"), "TWE=")
+    assert-eq!(b64/encode("Man"), "TWFu")
+    assert-eq!(b64/encode("hello"), "aGVsbG8=")
+    assert-eq!(b64/encode("foobar"), "Zm9vYmFy")
+}
+
+test "encode pads to multiple of four" {
+    // 1 leftover byte => two '=' ; 2 leftover bytes => one '='.
+    assert-eq!(length(b64/encode("M")), 4)
+    assert-eq!(length(b64/encode("Ma")), 4)
+    assert-eq!(length(b64/encode("Man")), 4)
+    assert-eq!(b64/encode("M")[3], "=")
+    assert-eq!(b64/encode("M")[2], "=")
+    assert-eq!(b64/encode("Ma")[3], "=")
+    assert-ne!(b64/encode("Ma")[2], "=")
+}
+
+test "encode accepts Vec<Int> of raw bytes" {
+    assert-eq!(b64/encode([0]), "AA==")
+    assert-eq!(b64/encode([255, 255, 255]), "////")
+    // 0xFBEFBE => every 6-bit group is 62 ('+').
+    assert-eq!(b64/encode([251, 239, 190]), "++++")
+    // 'M' is byte 77.
+    assert-eq!(b64/encode([77, 97, 110]), "TWFu")
+}
+
+test "encode multibyte string uses UTF-8 bytes" {
+    // 'é' is U+00E9 => UTF-8 bytes [195, 169].
+    assert-eq!(b64/encode("é"), "w6k=")
+    assert-eq!(b64/encode("é"), b64/encode([195, 169]))
+}
+
+test "encode-url uses url-safe alphabet and emits no padding" {
+    // 62 -> '-', 63 -> '_' instead of '+' and '/'.
+    assert-eq!(b64/encode-url([251, 239, 190]), "----")
+    assert-eq!(b64/encode-url([255, 255, 255]), "____")
+    // No '=' padding for partial groups.
+    assert-eq!(b64/encode-url(""), "")
+    assert-eq!(b64/encode-url("M"), "TQ")
+    assert-eq!(b64/encode-url("Ma"), "TWE")
+    assert-eq!(b64/encode-url("Man"), "TWFu")
+}
+
+test "decode standard base64 to byte vector" {
+    assert-eq!(b64/decode(""), [])
+    assert-eq!(b64/decode("TWFu"), [77, 97, 110])
+    assert-eq!(b64/decode("aGVsbG8="), [104, 101, 108, 108, 111])
+    assert-eq!(b64/decode("AA=="), [0])
+    assert-eq!(b64/decode("////"), [255, 255, 255])
+}
+
+test "decode ignores padding and ASCII whitespace" {
+    // '=' padding is optional on input.
+    assert-eq!(b64/decode("TQ"), b64/decode("TQ=="))
+    assert-eq!(b64/decode("TQ"), [77])
+    // space, tab, newline, carriage return all skipped.
+    assert-eq!(b64/decode("TW Fu"), [77, 97, 110])
+    assert-eq!(b64/decode("TW\tFu"), [77, 97, 110])
+    assert-eq!(b64/decode("TW\nFu"), [77, 97, 110])
+    assert-eq!(b64/decode("TW\rFu"), [77, 97, 110])
+}
+
+test "decode-url decodes url-safe alphabet and accepts standard input" {
+    // '-' -> 62, '_' -> 63.
+    assert-eq!(b64/decode-url("--__"), [251, 239, 255])
+    // decode-any is alphabet-agnostic, so standard text decodes too.
+    assert-eq!(b64/decode-url("TWFu"), [77, 97, 110])
+    assert-eq!(b64/decode("----"), b64/decode-url("----"))
+}
+
+test "decode rejects invalid base64 characters" {
+    // '@' (64) and '*' (42) are not in either alphabet.
+    assert-throws!(fn() { b64/decode("@") })
+    assert-throws!(fn() { b64/decode("ab*c") })
+    assert-throws!(fn() { b64/decode-url("!!!") })
+}
+
+test "bytes-to-string reverses byte vector to string" {
+    assert-eq!(b64/bytes-to-string([]), "")
+    assert-eq!(b64/bytes-to-string([104, 101, 108, 108, 111]), "hello")
+    assert-eq!(b64/bytes-to-string([77, 97, 110]), "Man")
+}
+
+test "encode/decode round-trips for strings and bytes" {
+    assert-eq!(b64/bytes-to-string(b64/decode(b64/encode("hello"))), "hello")
+    assert-eq!(b64/bytes-to-string(b64/decode(b64/encode("the quick brown fox"))), "the quick brown fox")
+    assert-eq!(b64/decode(b64/encode([0, 1, 2, 3, 254, 255])), [0, 1, 2, 3, 254, 255])
+    // url-safe round trip (no padding on the wire).
+    assert-eq!(b64/decode-url(b64/encode-url([251, 239, 190, 1])), [251, 239, 190, 1])
+}

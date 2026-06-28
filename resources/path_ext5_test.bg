@@ -1,0 +1,79 @@
+namespace path_ext5_test
+
+use beagle.path as p
+
+test "components: absolute paths get a leading slash element" {
+    assert-eq!(p/components("/a/b/c"), ["/", "a", "b", "c"])
+    assert-eq!(p/components("/usr/local/bin"), ["/", "usr", "local", "bin"])
+    assert-eq!(p/components("/"), ["/"])
+}
+
+test "components: relative paths have no leading slash element" {
+    assert-eq!(p/components("a/b"), ["a", "b"])
+    assert-eq!(p/components("single"), ["single"])
+}
+
+test "components: duplicate and trailing slashes dropped" {
+    assert-eq!(p/components("a//b/"), ["a", "b"])
+    assert-eq!(p/components("/a//b///"), ["/", "a", "b"])
+}
+
+test "components: empty path has no components" {
+    assert-eq!(p/components(""), [])
+}
+
+test "is-hidden?: dotfile basenames are hidden" {
+    assert!(p/is-hidden?(".bashrc"))
+    assert!(p/is-hidden?("/home/user/.config"))
+    assert!(p/is-hidden?("a/b/.git"))
+}
+
+test "is-hidden?: visible basenames are not hidden" {
+    assert-eq!(p/is-hidden?("/home/user/file.txt"), false)
+    assert-eq!(p/is-hidden?("visible"), false)
+    assert-eq!(p/is-hidden?("/a/b/c"), false)
+}
+
+test "is-hidden?: empty path is not hidden" {
+    assert-eq!(p/is-hidden?(""), false)
+}
+
+test "is-hidden?: dot and dotdot count as hidden by the basename rule" {
+    assert!(p/is-hidden?("."))
+    assert!(p/is-hidden?(".."))
+}
+
+test "strip-prefix: removes a leading directory prefix" {
+    assert-eq!(p/strip-prefix("/a/b/c", "/a/b"), "c")
+    assert-eq!(p/strip-prefix("/a/b/c", "/a"), "b/c")
+    assert-eq!(p/strip-prefix("a/b/c", "a/b"), "c")
+}
+
+test "strip-prefix: trailing and duplicate slashes in prefix are ignored" {
+    assert-eq!(p/strip-prefix("/a/b/c", "/a/b/"), "c")
+    assert-eq!(p/strip-prefix("/a//b/c", "/a/b"), "c")
+}
+
+test "strip-prefix: equal paths yield dot" {
+    assert-eq!(p/strip-prefix("/a/b", "/a/b"), ".")
+    assert-eq!(p/strip-prefix("a/b", "a/b"), ".")
+}
+
+test "strip-prefix: root and empty prefixes" {
+    assert-eq!(p/strip-prefix("/a/b", "/"), "a/b")
+    assert-eq!(p/strip-prefix("a/b", ""), "a/b")
+}
+
+test "strip-prefix: throws when p is not under prefix" {
+    assert-throws!(fn() { p/strip-prefix("/a/b/c", "/x") })
+    assert-throws!(fn() { p/strip-prefix("/a/b/c", "/a/x") })
+}
+
+test "strip-prefix: throws when prefix is longer than p" {
+    assert-throws!(fn() { p/strip-prefix("/a", "/a/b/c") })
+}
+
+test "strip-prefix: throws on absoluteness mismatch" {
+    assert-throws!(fn() { p/strip-prefix("/a/b", "a") })
+    assert-throws!(fn() { p/strip-prefix("a/b", "/a") })
+}

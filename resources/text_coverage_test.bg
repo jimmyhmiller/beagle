@@ -1,0 +1,155 @@
+namespace text_coverage_test
+
+// Regression coverage for beagle.text public API. Focuses on functions and
+// edge/error paths not already exercised by text_format_test.bg and the
+// stdlib_* tests (which cover fixed/round-to/commas/pad defaults and a couple
+// of string->bytes cases).
+
+use beagle.text as text
+
+test "repeat-string repeats and handles non-positive counts" {
+    assert-eq!(text/repeat-string("ab", 3), "ababab")
+    assert-eq!(text/repeat-string("x", 1), "x")
+    assert-eq!(text/repeat-string("x", 0), "")
+    assert-eq!(text/repeat-string("x", 0 - 5), "")
+    assert-eq!(text/repeat-string("", 4), "")
+}
+
+test "pad-left/pad-right pad with the WHOLE pad token (repeated + clipped)" {
+    assert-eq!(text/pad-left("42", 6, "ab"), "abab42")
+    assert-eq!(text/pad-right("ab", 6, "12"), "ab1212")
+    assert-eq!(text/pad-right("42", 5, "."), "42...")
+    // already wide enough => unchanged
+    assert-eq!(text/pad-left("hello", 3, "x"), "hello")
+    assert-eq!(text/pad-right("hello", 5, "x"), "hello")
+    // empty pad => unchanged (avoids div-by-zero)
+    assert-eq!(text/pad-left("42", 5, ""), "42")
+    assert-eq!(text/pad-right("42", 5, ""), "42")
+}
+
+test "capitalize uppercases first, lowercases rest" {
+    assert-eq!(text/capitalize("hELLO"), "Hello")
+    assert-eq!(text/capitalize("a"), "A")
+    assert-eq!(text/capitalize("ABC"), "Abc")
+    assert-eq!(text/capitalize(""), "")
+}
+
+test "title-case capitalizes each word and collapses whitespace" {
+    assert-eq!(text/title-case("the quick brown fox"), "The Quick Brown Fox")
+    assert-eq!(text/title-case("  hELLO   wORLD "), "Hello World")
+    assert-eq!(text/title-case("single"), "Single")
+    assert-eq!(text/title-case(""), "")
+}
+
+test "trim-chars strips a set of leading/trailing chars" {
+    assert-eq!(text/trim-chars("xxhelloxx", "x"), "hello")
+    assert-eq!(text/trim-chars("[[data]]", "[]"), "data")
+    assert-eq!(text/trim-chars("--a-b--", "-"), "a-b")
+    // nothing to trim
+    assert-eq!(text/trim-chars("hello", "x"), "hello")
+    // everything trimmed
+    assert-eq!(text/trim-chars("xxxx", "x"), "")
+    assert-eq!(text/trim-chars("", "x"), "")
+}
+
+test "trim-chars-left / trim-chars-right are one-sided" {
+    assert-eq!(text/trim-chars-left("xxhelloxx", "x"), "helloxx")
+    assert-eq!(text/trim-chars-right("xxhelloxx", "x"), "xxhello")
+    assert-eq!(text/trim-chars-left("hello", "x"), "hello")
+    assert-eq!(text/trim-chars-right("hello", "x"), "hello")
+}
+
+test "replace-all replaces every non-overlapping occurrence" {
+    assert-eq!(text/replace-all("a.b.c", ".", "/"), "a/b/c")
+    assert-eq!(text/replace-all("aaa", "a", "bb"), "bbbbbb")
+    assert-eq!(text/replace-all("hello", "x", "y"), "hello")
+    assert-eq!(text/replace-all("abab", "ab", ""), "")
+    // empty `old` is an error (would loop forever)
+    assert-throws!(fn() { text/replace-all("abc", "", "x") })
+}
+
+test "split-with-limit caps the number of pieces" {
+    assert-eq!(text/split-with-limit("a,b,c,d", ",", 2), ["a", "b,c,d"])
+    assert-eq!(text/split-with-limit("a,b,c,d", ",", 3), ["a", "b", "c,d"])
+    assert-eq!(text/split-with-limit("a,b,c", ",", 0), ["a", "b", "c"])
+    assert-eq!(text/split-with-limit("abc", ",", 2), ["abc"])
+    assert-eq!(text/split-with-limit("a,b,c", ",", 1), ["a,b,c"])
+    // empty delim is an error
+    assert-throws!(fn() { text/split-with-limit("abc", "", 2) })
+}
+
+test "starts/ends/contains-any? match against a collection" {
+    assert!(text/starts-with-any?("http://x", ["http://", "https://"]))
+    assert!(text/starts-with-any?("ftp://x", ["http://", "https://"]) == false)
+    assert!(text/ends-with-any?("a.png", [".png", ".jpg"]))
+    assert!(text/ends-with-any?("a.gif", [".png", ".jpg"]) == false)
+    assert!(text/contains-any?("hello world", ["xyz", "wor"]))
+    assert!(text/contains-any?("hello", ["a", "b"]) == false)
+    // empty candidate list => no match
+    assert!(text/contains-any?("hello", []) == false)
+}
+
+test "parse-float accepts well-formed numbers" {
+    assert-eq!(text/parse-float("3.14"), 3.14)
+    assert-eq!(text/parse-float("-0.5"), 0.0 - 0.5)
+    assert-eq!(text/parse-float("10"), 10.0)
+    assert-eq!(text/parse-float("1e3"), 1000.0)
+    assert-eq!(text/parse-float("2.5e-2"), 0.025)
+    assert-eq!(text/parse-float(".5"), 0.5)
+    assert-eq!(text/parse-float("1."), 1.0)
+    assert-eq!(text/parse-float("+5"), 5.0)
+}
+
+test "parse-float returns null on malformed input" {
+    assert-eq!(text/parse-float("abc"), null)
+    assert-eq!(text/parse-float(""), null)
+    assert-eq!(text/parse-float("1e"), null)
+    assert-eq!(text/parse-float("1.5.5"), null)
+    assert-eq!(text/parse-float("12x"), null)
+}
+
+test "int->hex renders hex with sign and case" {
+    assert-eq!(text/int->hex(255, false), "ff")
+    assert-eq!(text/int->hex(255, true), "FF")
+    assert-eq!(text/int->hex(0, false), "0")
+    assert-eq!(text/int->hex(16, false), "10")
+    assert-eq!(text/int->hex(10, false), "a")
+    assert-eq!(text/int->hex(10, true), "A")
+    assert-eq!(text/int->hex(0 - 255, false), "-ff")
+}
+
+test "count-occurrences counts non-overlapping matches" {
+    assert-eq!(text/count-occurrences("banana", "a"), 3)
+    assert-eq!(text/count-occurrences("aaaa", "aa"), 2)
+    assert-eq!(text/count-occurrences("banana", "x"), 0)
+    assert-eq!(text/count-occurrences("", "a"), 0)
+    // empty `sub` is an error
+    assert-throws!(fn() { text/count-occurrences("abc", "") })
+}
+
+test "reverse-string reverses characters" {
+    assert-eq!(text/reverse-string("abc"), "cba")
+    assert-eq!(text/reverse-string(""), "")
+    assert-eq!(text/reverse-string("x"), "x")
+    assert-eq!(text/reverse-string("abcba"), "abcba")
+}
+
+test "string->bytes / bytes->string round-trip via UTF-8" {
+    assert-eq!(text/string->bytes("A"), [65])
+    assert-eq!(text/string->bytes("é"), [195, 169])
+    assert-eq!(text/string->bytes(""), [])
+    assert-eq!(text/bytes->string([65]), "A")
+    assert-eq!(text/bytes->string([195, 169]), "é")
+    assert-eq!(text/bytes->string([]), "")
+    // round trip
+    assert-eq!(text/bytes->string(text/string->bytes("héllo")), "héllo")
+}
+
+test "ellipsize truncates to at most n chars with ellipsis" {
+    assert-eq!(text/ellipsize("hello world", 8, "..."), "hello...")
+    assert-eq!(text/ellipsize("hi", 8, "..."), "hi")
+    // exactly n => unchanged
+    assert-eq!(text/ellipsize("hello", 5, "..."), "hello")
+    // n <= ellipsis length => the ellipsis itself is clipped
+    assert-eq!(text/ellipsize("hello", 2, "..."), "..")
+}

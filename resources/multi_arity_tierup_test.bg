@@ -1,0 +1,26 @@
+namespace multi_arity_tierup_test
+
+use beagle.text as text
+
+// Regression: top-level multi-arity functions (`fn f { (a)=>... (a,b)=>... }`)
+// must tier-up correctly. Their stored per-arity source is a bare `(args) => body`
+// case, which previously failed the tier-up re-parse (parsed as top-level) — now
+// re-parsed under FragmentContext::ArityCase. This loop drives them hot; run under
+// BEAGLE_TEST_TIER2=1 to also exercise the specialized code.
+
+test "multi-arity functions stay correct under tier-up" {
+    let mut i = 0
+    let mut sink = ""
+    while i < 200000 {
+        sink = text/pad-left("42", 5)          // 2-arity
+        sink = text/pad-left("42", 5, "0")     // 3-arity
+        sink = text/center("x", 7, ".")        // 3-arity
+        i = i + 1
+    }
+    // Correct after warm-up / tier-up:
+    assert-eq!(text/pad-left("42", 5), "   42")
+    assert-eq!(text/pad-left("42", 5, "0"), "00042")
+    assert-eq!(text/pad-right("42", 5, "0"), "42000")
+    assert-eq!(text/center("x", 7, "."), "...x...")
+    assert-eq!(text/center("hi", 6), "  hi  ")
+}

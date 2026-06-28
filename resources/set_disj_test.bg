@@ -1,0 +1,45 @@
+namespace set_disj_test
+
+fn build-set(n) {
+    let mut s = #{}
+    let mut i = 0
+    while i < n { s = conj(s, i)  i = i + 1 }
+    s
+}
+
+test "set-remove drains correctly across node transitions" {
+    let mut s = build-set(100)
+    assert-eq!(length(s), 100)
+    let mut i = 0
+    while i < 100 {
+        s = set-remove(s, i)
+        assert!(contains?(s, i) == false)
+        assert-eq!(length(s), 100 - i - 1)
+        i = i + 1
+    }
+    assert-eq!(length(s), 0)
+}
+
+test "set-remove leaves other elements intact" {
+    let s = build-set(30)
+    let s2 = set-remove(s, 15)
+    assert!(contains?(s2, 15) == false)
+    assert!(contains?(s2, 14))
+    assert!(contains?(s2, 16))
+    assert-eq!(length(s2), 29)
+}
+
+test "set-remove of absent element is a no-op" {
+    let s = build-set(10)
+    let s2 = set-remove(s, 999)
+    assert-eq!(length(s2), 10)
+    assert!(contains?(s2, 5))
+}
+
+test "set-remove + re-add" {
+    let s = build-set(20)
+    let s2 = set-remove(s, 7)
+    let s3 = conj(s2, 7)
+    assert!(contains?(s3, 7))
+    assert-eq!(length(s3), 20)
+}

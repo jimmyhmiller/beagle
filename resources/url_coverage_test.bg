@@ -1,0 +1,151 @@
+namespace url_coverage_test
+
+// Coverage for beagle.url (percent-encoding + query-string utilities).
+// All functions are pure/deterministic, so this asserts concrete expected
+// values derived directly from the module source (RFC 3986 / form-urlencoded).
+
+use beagle.url as url
+
+test "encode-component happy path" {
+    assert-eq!(url/encode-component("a b&c"), "a%20b%26c")
+}
+
+test "encode-component empty string" {
+    assert-eq!(url/encode-component(""), "")
+}
+
+test "encode-component leaves unreserved set untouched" {
+    // RFC 3986 unreserved: A-Z a-z 0-9 - _ . ~
+    assert-eq!(url/encode-component("ABCabc123-_.~"), "ABCabc123-_.~")
+}
+
+test "encode-component escapes reserved ascii as uppercase hex" {
+    assert-eq!(url/encode-component("/"), "%2F")   // 0x2F
+    assert-eq!(url/encode-component("+"), "%2B")   // 0x2B
+    assert-eq!(url/encode-component("&"), "%26")
+}
+
+test "encode-component encodes multibyte utf8 per-byte" {
+    // 'é' is U+00E9 => UTF-8 bytes 0xC3 0xA9
+    assert-eq!(url/encode-component("é"), "%C3%A9")
+}
+
+test "decode-component happy path" {
+    assert-eq!(url/decode-component("a%20b%26c"), "a b&c")
+}
+
+test "decode-component keeps plus literal (component semantics)" {
+    assert-eq!(url/decode-component("+"), "+")
+    assert-eq!(url/decode-component("a+b"), "a+b")
+}
+
+test "decode-component reassembles utf8 bytes" {
+    assert-eq!(url/decode-component("%C3%A9"), "é")
+}
+
+test "decode-component leaves malformed escapes verbatim" {
+    // '%' not followed by two hex digits is kept literally and advanced past.
+    assert-eq!(url/decode-component("%2"), "%2")
+    assert-eq!(url/decode-component("%zz"), "%zz")
+}
+
+test "encode then decode round-trips" {
+    let original = "Hello, World! / ?x=é&z"
+    assert-eq!(url/decode-component(url/encode-component(original)), original)
+}
+
+test "decode-form maps plus to space" {
+    assert-eq!(url/decode-form("a+b"), "a b")
+}
+
+test "decode-form decodes percent escapes too" {
+    assert-eq!(url/decode-form("%2B"), "+")
+    assert-eq!(url/decode-form("a+b%26c"), "a b&c")
+}
+
+test "parse-query basic pairs with form decoding" {
+    let m = url/parse-query("x=1&y=hello%20world")
+    assert-eq!(get(m, "x"), "1")
+    assert-eq!(get(m, "y"), "hello world")
+}
+
+test "parse-query strips a leading question mark" {
+    let m = url/parse-query("?x=1")
+    assert-eq!(get(m, "x"), "1")
+}
+
+test "parse-query skips empty pairs from double ampersand" {
+    let m = url/parse-query("a=1&&b=2")
+    assert-eq!(get(m, "a"), "1")
+    assert-eq!(get(m, "b"), "2")
+    assert-eq!(count(keys(m)), 2)
+}
+
+test "parse-query key with no equals maps to empty string" {
+    let m = url/parse-query("k")
+    assert-eq!(get(m, "k"), "")
+}
+
+test "parse-query form-decodes both key and value (plus -> space)" {
+    let m = url/parse-query("a+b=c+d")
+    assert-eq!(get(m, "a b"), "c d")
+}
+
+test "parse-query empty string yields empty map" {
+    let m = url/parse-query("")
+    assert-eq!(count(keys(m)), 0)
+}
+
+test "parse-query last duplicate key wins" {
+    let m = url/parse-query("k=1&k=2")
+    assert-eq!(get(m, "k"), "2")
+}
+
+test "build-query single pair" {
+    assert-eq!(url/build-query({"x" "1"}), "x=1")
+}
+
+test "build-query encodes spaces as percent-twenty" {
+    assert-eq!(url/build-query({"y" "hello world"}), "y=hello%20world")
+}
+
+test "build-query coerces non-string values" {
+    assert-eq!(url/build-query({"n" 42}), "n=42")
+}
+
+test "build-query then parse-query round-trips a multi-key map" {
+    let original = {"name" "Ada Lovelace", "lang" "beagle & rust", "n" "7"}
+    let round = url/parse-query(url/build-query(original))
+    assert-eq!(get(round, "name"), "Ada Lovelace")
+    assert-eq!(get(round, "lang"), "beagle & rust")
+    assert-eq!(get(round, "n"), "7")
+}
+
+test "hex-digit maps 0..15 to uppercase hex chars" {
+    assert-eq!(url/hex-digit(0), "0")
+    assert-eq!(url/hex-digit(9), "9")
+    assert-eq!(url/hex-digit(10), "A")
+    assert-eq!(url/hex-digit(15), "F")
+}
+
+test "hex-digit throws on out-of-range input" {
+    assert-throws!(fn() { url/hex-digit(16) })
+    assert-throws!(fn() { url/hex-digit(-1) })
+}
+
+test "hex-value parses upper and lower case and rejects non-hex" {
+    assert-eq!(url/hex-value(char-code("0")), 0)
+    assert-eq!(url/hex-value(char-code("F")), 15)
+    assert-eq!(url/hex-value(char-code("f")), 15)
+    assert-eq!(url/hex-value(char-code("g")), -1)
+}
+
+test "unreserved-byte? classifies the unreserved set" {
+    assert!(url/unreserved-byte?(char-code("A")))
+    assert!(url/unreserved-byte?(char-code("z")))
+    assert!(url/unreserved-byte?(char-code("0")))
+    assert!(url/unreserved-byte?(char-code("~")))
+    assert!(url/unreserved-byte?(char-code("-")))
+    assert-ne!(url/unreserved-byte?(char-code(" ")), true)
+    assert-ne!(url/unreserved-byte?(char-code("&")), true)
+}

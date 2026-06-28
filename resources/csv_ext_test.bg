@@ -1,0 +1,93 @@
+namespace csv_ext_test
+
+// Regression coverage for the configurable-delimiter / quote additions to
+// beagle.csv: parse-with (options map), parse-tsv, and the unchanged comma
+// API. Expected values were derived by reading the parser state machine.
+
+use beagle.csv as csv
+
+// ---------------------------------------------------------------------------
+// parse-with — defaults behave exactly like parse
+// ---------------------------------------------------------------------------
+
+test "parse-with empty opts defaults to comma/double-quote" {
+    assert-eq!(csv/parse-with("a,b,c", {}), [["a", "b", "c"]])
+}
+
+test "parse-with defaults match the plain comma parser" {
+    assert-eq!(csv/parse-with("\"x,y\",z", {}), csv/parse("\"x,y\",z"))
+    assert-eq!(csv/parse-with("\"x,y\",z", {}), [["x,y", "z"]])
+}
+
+// ---------------------------------------------------------------------------
+// parse-with — custom delimiter
+// ---------------------------------------------------------------------------
+
+test "parse-with semicolon delimiter" {
+    assert-eq!(csv/parse-with("a;b;c\n1;2;3", {:delimiter ";"}),
+               [["a", "b", "c"], ["1", "2", "3"]])
+}
+
+test "parse-with default quote still honored under custom delimiter" {
+    assert-eq!(csv/parse-with("\"x;y\";z", {:delimiter ";"}), [["x;y", "z"]])
+}
+
+test "parse-with trailing newline adds no spurious row" {
+    assert-eq!(csv/parse-with("a;b\n", {:delimiter ";"}), [["a", "b"]])
+}
+
+// ---------------------------------------------------------------------------
+// parse-with — custom quote character
+// ---------------------------------------------------------------------------
+
+test "parse-with custom quote character protects the delimiter" {
+    assert-eq!(csv/parse-with("'a;b';c", {:delimiter ";" :quote "'"}),
+               [["a;b", "c"]])
+}
+
+test "parse-with custom quote character escapes by doubling" {
+    assert-eq!(csv/parse-with("'he said ''hi''';x", {:delimiter ";" :quote "'"}),
+               [["he said 'hi'", "x"]])
+}
+
+// ---------------------------------------------------------------------------
+// parse-tsv
+// ---------------------------------------------------------------------------
+
+test "parse-tsv splits on tabs" {
+    assert-eq!(csv/parse-tsv("a\tb\tc"), [["a", "b", "c"]])
+    assert-eq!(csv/parse-tsv("a\tb\n1\t2"), [["a", "b"], ["1", "2"]])
+}
+
+test "parse-tsv quoted field may contain a tab" {
+    assert-eq!(csv/parse-tsv("\"x\ty\"\tz"), [["x\ty", "z"]])
+}
+
+// ---------------------------------------------------------------------------
+// the original comma API is unchanged
+// ---------------------------------------------------------------------------
+
+test "comma parse still works after refactor" {
+    assert-eq!(csv/parse("a,b,c\n1,2,3"), [["a", "b", "c"], ["1", "2", "3"]])
+    assert-eq!(csv/parse(""), [])
+}
+
+// ---------------------------------------------------------------------------
+// error paths — bad options must fail loudly, never silently
+// ---------------------------------------------------------------------------
+
+test "parse-with rejects a multi-character delimiter" {
+    assert-throws!(fn() { csv/parse-with("a;b", {:delimiter ";;"}) })
+}
+
+test "parse-with rejects an empty delimiter" {
+    assert-throws!(fn() { csv/parse-with("a;b", {:delimiter ""}) })
+}
+
+test "parse-with rejects a multi-character quote" {
+    assert-throws!(fn() { csv/parse-with("a;b", {:delimiter ";" :quote "''"}) })
+}
+
+test "parse-with rejects a delimiter equal to the quote" {
+    assert-throws!(fn() { csv/parse-with("a,b", {:delimiter "," :quote ","}) })
+}

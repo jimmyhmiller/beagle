@@ -1,0 +1,143 @@
+namespace url_ext_test
+
+use beagle.url as url
+
+// Expected values below are derived by reading standard-library/beagle.url.bg,
+// not by running the code. parse-url splits fragment ('#') then query ('?')
+// then requires "://", then path on the first '/', then a TRAILING all-digit
+// port on the last ':' of the authority.
+
+test "parse-url full url" {
+    let u = url/parse-url("http://example.com:8080/path/to?x=1&y=2#section")
+    assert-eq!(u.scheme, "http")
+    assert-eq!(u.host, "example.com")
+    assert-eq!(u.port, 8080)
+    assert-eq!(u.path, "/path/to")
+    assert-eq!(u.query, "x=1&y=2")
+    assert-eq!(u.fragment, "section")
+}
+
+test "parse-url no port, root path, no query/fragment" {
+    let u = url/parse-url("https://example.org/")
+    assert-eq!(u.scheme, "https")
+    assert-eq!(u.host, "example.org")
+    assert!(nil?(u.port))
+    assert-eq!(u.path, "/")
+    assert!(nil?(u.query))
+    assert!(nil?(u.fragment))
+}
+
+test "parse-url no path" {
+    let u = url/parse-url("http://localhost")
+    assert-eq!(u.scheme, "http")
+    assert-eq!(u.host, "localhost")
+    assert!(nil?(u.port))
+    assert-eq!(u.path, "")
+    assert!(nil?(u.query))
+    assert!(nil?(u.fragment))
+}
+
+test "parse-url empty query and fragment keep their delimiters" {
+    // '?' present but nothing after => query is "" (not null).
+    let u = url/parse-url("http://h/p?#")
+    assert-eq!(u.path, "/p")
+    assert-eq!(u.query, "")
+    assert-eq!(u.fragment, "")
+}
+
+test "parse-url query may contain '/' and ':'" {
+    let u = url/parse-url("https://api.test/v1?next=/a/b&t=1:2")
+    assert-eq!(u.host, "api.test")
+    assert-eq!(u.path, "/v1")
+    assert-eq!(u.query, "next=/a/b&t=1:2")
+    assert!(nil?(u.fragment))
+}
+
+test "parse-url userinfo colon stays in host (only trailing digits are a port)" {
+    // last ':' precedes "pass@host" which is not all digits => no port split.
+    let u = url/parse-url("http://user:pass@host/path")
+    assert-eq!(u.host, "user:pass@host")
+    assert!(nil?(u.port))
+    assert-eq!(u.path, "/path")
+}
+
+test "parse-url userinfo plus real numeric port" {
+    let u = url/parse-url("http://user:pass@host:443/path")
+    assert-eq!(u.host, "user:pass@host")
+    assert-eq!(u.port, 443)
+    assert-eq!(u.path, "/path")
+}
+
+test "format-url is the inverse of parse-url" {
+    let urls = [
+        "http://example.com:8080/path/to?x=1&y=2#section",
+        "https://example.org/",
+        "http://localhost",
+        "ftp://files.test:21/pub/readme.txt",
+        "https://api.test/v1?next=/a/b&t=1:2",
+        "http://h/p?#"
+    ]
+    for s in urls {
+        assert-eq!(url/format-url(url/parse-url(s)), s)
+    }
+}
+
+test "format-url builds from a constructed struct" {
+    let u = url/Url {
+        scheme: "https",
+        host: "example.com",
+        port: null,
+        path: "/search",
+        query: "q=beagle",
+        fragment: null,
+    }
+    assert-eq!(url/format-url(u), "https://example.com/search?q=beagle")
+}
+
+test "parse-url throws on missing scheme separator" {
+    assert-throws!(fn() { url/parse-url("not-a-url") })
+    assert-throws!(fn() { url/parse-url("example.com:8080/x") })
+}
+
+test "parse-url throws on missing host" {
+    assert-throws!(fn() { url/parse-url("http:///path") })
+}
+
+test "parse-query-multi preserves duplicate keys" {
+    let m = url/parse-query-multi("a=1&a=2&b=3")
+    assert-eq!(get(m, "a"), ["1", "2"])
+    assert-eq!(get(m, "b"), ["3"])
+}
+
+test "parse-query-multi single value is still a vector" {
+    let m = url/parse-query-multi("a=1")
+    assert-eq!(get(m, "a"), ["1"])
+}
+
+test "parse-query-multi form-decodes keys and values" {
+    // leading '?' stripped; %20 and '+' both decode to space (form semantics).
+    let m = url/parse-query-multi("?x=hello%20world&x=foo+bar")
+    assert-eq!(get(m, "x"), ["hello world", "foo bar"])
+}
+
+test "parse-query-multi bare key yields empty-string value" {
+    let m = url/parse-query-multi("flag&x=1")
+    assert-eq!(get(m, "flag"), [""])
+    assert-eq!(get(m, "x"), ["1"])
+}
+
+test "parse-query-multi skips empty pairs from '&&'" {
+    let m = url/parse-query-multi("a=1&&a=2")
+    assert-eq!(get(m, "a"), ["1", "2"])
+}
+
+test "parse-query-multi on empty string is an empty map" {
+    assert-eq!(url/parse-query-multi(""), {})
+}
+
+test "parse-query-multi complements last-wins parse-query" {
+    // The existing parse-query keeps only the last duplicate value...
+    assert-eq!(get(url/parse-query("a=1&a=2"), "a"), "2")
+    // ...while parse-query-multi keeps all of them.
+    assert-eq!(get(url/parse-query-multi("a=1&a=2"), "a"), ["1", "2"])
+}

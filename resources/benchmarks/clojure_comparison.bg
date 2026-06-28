@@ -1,6 +1,6 @@
 namespace clojure-comparison
 use beagle.core as core
-use beagle.collections as coll
+use beagle._collections as coll
 
 // ============================================================================
 // Utility functions

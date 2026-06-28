@@ -1,0 +1,213 @@
+namespace string-builder_coverage_test
+
+use beagle.string-builder as sb
+
+test "new starts empty with requested capacity" {
+    let b = sb/new(8)
+    assert-eq!(sb/length(b), 0)
+    assert-eq!(sb/capacity(b), 8)
+    assert-eq!(sb/to-string(b), "")
+}
+
+test "append! adds string contents and updates length" {
+    let b = sb/new(16)
+    sb/append!(b, "hello")
+    assert-eq!(sb/to-string(b), "hello")
+    assert-eq!(sb/length(b), 5)
+    sb/append!(b, " world")
+    assert-eq!(sb/to-string(b), "hello world")
+    assert-eq!(sb/length(b), 11)
+}
+
+test "append! of empty string is a no-op" {
+    let b = sb/new(4)
+    sb/append!(b, "")
+    assert-eq!(sb/length(b), 0)
+    assert-eq!(sb/to-string(b), "")
+}
+
+test "append! returns the same builder for chaining" {
+    let b = sb/new(4)
+    assert-eq!(sb/append!(b, "a"), b)
+    sb/append!(sb/append!(b, "b"), "c")
+    assert-eq!(sb/to-string(b), "abc")
+}
+
+test "growth past initial capacity reallocates buffer" {
+    let b = sb/new(4)
+    sb/append!(b, "hello world")
+    assert-eq!(sb/to-string(b), "hello world")
+    assert!(sb/capacity(b) >= 11)
+}
+
+test "append-char! appends a single character" {
+    let b = sb/new(4)
+    sb/append-char!(b, "x")
+    sb/append-char!(b, "y")
+    assert-eq!(sb/to-string(b), "xy")
+}
+
+test "append-byte! appends a raw byte value" {
+    let b = sb/new(4)
+    sb/append-byte!(b, 72)  // 'H'
+    sb/append-byte!(b, 105) // 'i'
+    assert-eq!(sb/to-string(b), "Hi")
+    assert-eq!(sb/length(b), 2)
+}
+
+test "append-byte! masks out-of-range values to a u8" {
+    let b = sb/new(4)
+    sb/append-byte!(b, 321) // 321 & 255 == 65 == 'A'
+    assert-eq!(sb/to-string(b), "A")
+    sb/append-byte!(b, 256) // 256 & 255 == 0
+    assert-eq!(sb/length(b), 2)
+}
+
+test "append-int! appends decimal representation including negatives" {
+    let b = sb/new(4)
+    sb/append-int!(b, 42)
+    assert-eq!(sb/to-string(b), "42")
+    let c = sb/new(4)
+    sb/append-int!(c, -17)
+    assert-eq!(sb/to-string(c), "-17")
+    let d = sb/new(4)
+    sb/append-int!(d, 0)
+    assert-eq!(sb/to-string(d), "0")
+}
+
+test "append-int! returns the builder" {
+    let b = sb/new(4)
+    assert-eq!(sb/append-int!(b, 5), b)
+}
+
+test "append-float! formats like println" {
+    let b = sb/new(8)
+    sb/append-float!(b, 3.14)
+    assert-eq!(sb/to-string(b), "3.14")
+    let c = sb/new(8)
+    sb/append-float!(c, 3.5)
+    assert-eq!(sb/to-string(c), "3.5")
+}
+
+test "mixed numeric and string appends" {
+    let b = sb/new(4)
+    sb/append-int!(b, 42)
+    sb/append!(b, " ")
+    sb/append-float!(b, 3.14)
+    assert-eq!(sb/to-string(b), "42 3.14")
+}
+
+test "append-range! copies s[start:end]" {
+    let b = sb/new(8)
+    sb/append-range!(b, "hello world", 0, 5)
+    assert-eq!(sb/to-string(b), "hello")
+    let c = sb/new(8)
+    sb/append-range!(c, "hello world", 6, 11)
+    assert-eq!(sb/to-string(c), "world")
+}
+
+test "append-range! of zero-width range adds nothing" {
+    let b = sb/new(8)
+    sb/append-range!(b, "hello", 2, 2)
+    assert-eq!(sb/length(b), 0)
+}
+
+test "append-range-filter-byte! skips the given byte" {
+    let b = sb/new(8)
+    sb/append-range-filter-byte!(b, "a,b,c", 0, 5, 44) // 44 == ','
+    assert-eq!(sb/to-string(b), "abc")
+}
+
+test "append-range-uppercase! uppercases ASCII letters" {
+    let b = sb/new(8)
+    sb/append-range-uppercase!(b, "hello", 0, 5)
+    assert-eq!(sb/to-string(b), "HELLO")
+}
+
+test "append-builder-range! copies bytes from another builder" {
+    let src = sb/new(8)
+    sb/append!(src, "abcdef")
+    let dst = sb/new(8)
+    sb/append-builder-range!(dst, src, 1, 4)
+    assert-eq!(sb/to-string(dst), "bcd")
+}
+
+test "index-byte finds byte at or after start, or -1" {
+    assert-eq!(sb/index-byte("hello", 108, 0), 2) // first 'l'
+    assert-eq!(sb/index-byte("hello", 108, 3), 3) // second 'l'
+    assert-eq!(sb/index-byte("hello", 122, 0), -1) // 'z' absent
+}
+
+test "byte-at reads a byte by index" {
+    let b = sb/new(4)
+    sb/append!(b, "Hi")
+    assert-eq!(sb/byte-at(b, 0), 72) // 'H'
+    assert-eq!(sb/byte-at(b, 1), 105) // 'i'
+}
+
+test "byte-at returns null for out-of-range indices" {
+    let b = sb/new(4)
+    sb/append!(b, "Hi")
+    assert-eq!(sb/byte-at(b, 5), null)
+    assert-eq!(sb/byte-at(b, -1), null)
+}
+
+test "set-byte-at! overwrites in range and returns the builder" {
+    let b = sb/new(4)
+    sb/append!(b, "Hi")
+    assert-eq!(sb/set-byte-at!(b, 0, 74), b) // 'J'
+    assert-eq!(sb/to-string(b), "Ji")
+}
+
+test "set-byte-at! is a no-op out of range" {
+    let b = sb/new(4)
+    sb/append!(b, "Hi")
+    sb/set-byte-at!(b, 99, 65)
+    assert-eq!(sb/to-string(b), "Hi")
+}
+
+test "reverse! reverses bytes in place and returns the builder" {
+    let b = sb/new(8)
+    sb/append!(b, "abcdef")
+    assert-eq!(sb/reverse!(b), b)
+    assert-eq!(sb/to-string(b), "fedcba")
+}
+
+test "reverse! of empty builder is empty" {
+    let b = sb/new(4)
+    sb/reverse!(b)
+    assert-eq!(sb/to-string(b), "")
+}
+
+test "clear! resets length but keeps capacity" {
+    let b = sb/new(8)
+    sb/append!(b, "abcdef")
+    let cap-before = sb/capacity(b)
+    sb/clear!(b)
+    assert-eq!(sb/length(b), 0)
+    assert-eq!(sb/to-string(b), "")
+    assert-eq!(sb/capacity(b), cap-before)
+}
+
+test "clear! lets the builder be reused" {
+    let b = sb/new(8)
+    sb/append!(b, "first")
+    sb/clear!(b)
+    sb/append!(b, "second")
+    assert-eq!(sb/to-string(b), "second")
+}
+
+test "to-string snapshots are independent of later mutation" {
+    let b = sb/new(8)
+    sb/append!(b, "hello world")
+    let snapshot = sb/to-string(b)
+    sb/append!(b, "!")
+    assert-eq!(snapshot, "hello world")
+    assert-eq!(sb/to-string(b), "hello world!")
+}
+
+test "repeated to-string produces equal but independent strings" {
+    let b = sb/new(8)
+    sb/append!(b, "abc")
+    assert-eq!(sb/to-string(b), sb/to-string(b))
+}

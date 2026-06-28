@@ -1,0 +1,42 @@
+namespace display_unification_test
+
+// Regression: to-string and ${} interpolation must route through the Format
+// protocol, so a custom `extend T with Format` is honored consistently by
+// println / to-string / ${} (previously ${} and to-string bypassed Format).
+
+struct Money { cents }
+
+extend Money with Format {
+    fn format(self, depth) {
+        "$${self.cents / 100}.${self.cents % 100}"
+    }
+}
+
+test "custom Format honored by to-string, format, and interpolation" {
+    let m = Money { cents: 1250 }
+    assert-eq!(format(m, 0), "$12.50")
+    assert-eq!(to-string(m), "$12.50")
+    assert-eq!("${m}", "$12.50")
+    assert-eq!("price is ${m} today", "price is $12.50 today")
+}
+
+test "to-string unchanged for built-in types" {
+    assert-eq!(to-string(42), "42")
+    assert-eq!(to-string(0 - 7), "-7")
+    assert-eq!(to-string(3.14), "3.14")
+    assert-eq!(to-string(true), "true")
+    assert-eq!(to-string(null), "null")
+    assert-eq!(to-string("hi"), "hi")                 // top-level: unquoted
+    assert-eq!(to-string([1, 2, 3]), "[1, 2, 3]")
+    assert-eq!(to-string(["a", "b"]), "[\"a\", \"b\"]")  // nested: quoted
+    assert-eq!(to-string({:k "v"}), "{:k \"v\"}")
+}
+
+test "to-string of a set works (previously returned ErrorUnknown)" {
+    assert-eq!(to-string(#{42}), "#{42}")
+}
+
+test "custom Format honored when nested in a collection" {
+    let m = Money { cents: 500 }
+    assert-eq!(to-string([m]), "[$5.0]")
+}

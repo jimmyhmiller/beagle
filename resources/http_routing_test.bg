@@ -1,0 +1,102 @@
+namespace http_routing_test
+use beagle.http as http
+
+fn p(pat, path) { http/match-path(pat, path) }
+
+test "match-path: literals match exactly" {
+    assert!(p("/users", "/users") != null)
+    assert!(p("/", "/") != null)
+    assert!(p("/a/b/c", "/a/b/c") != null)
+    assert-eq!(p("/a/b", "/a/c"), null)
+    assert-eq!(p("/a", "/a/b"), null)
+    assert-eq!(p("/a/b", "/a"), null)
+    assert-eq!(length(p("/users", "/users")), 0)
+}
+
+test "match-path: :name binds one segment" {
+    let m = p("/users/:id", "/users/42")
+    assert!(m != null)
+    assert-eq!(get(m, "id"), "42")
+    let m2 = p("/users/:id/posts/:pid", "/users/7/posts/9")
+    assert-eq!(get(m2, "id"), "7")
+    assert-eq!(get(m2, "pid"), "9")
+    assert-eq!(p("/users/:id", "/users"), null)
+    assert-eq!(p("/users/:id", "/users/7/extra"), null)
+}
+
+test "match-path: *name binds the rest of the path" {
+    let m = p("/files/*path", "/files/a/b/c")
+    assert-eq!(get(m, "path"), "a/b/c")
+    assert-eq!(get(p("/files/*path", "/files/x"), "path"), "x")
+    assert-eq!(get(p("/static/*rest", "/static/"), "rest"), "")
+}
+
+test "match-path: mixed literal + param + wildcard" {
+    let m = p("/api/:version/files/*rest", "/api/v2/files/img/logo.png")
+    assert-eq!(get(m, "version"), "v2")
+    assert-eq!(get(m, "rest"), "img/logo.png")
+}
+
+test "router dispatches to a param route and exposes req.params" {
+    let routes = [
+        http/route("GET", "/users/:id", fn(req) { http/ok("user=" ++ get(req.params, "id")) }),
+        http/route("GET", "/files/*path", fn(req) { http/ok("file=" ++ get(req.params, "path")) }),
+        http/route("GET", "/health", fn(req) { http/ok("ok") })
+    ]
+    let handler = http/router(routes, http/default-not-found)
+    let req = http/Request {
+        method: "GET", path: "/users/99", query: "", version: "HTTP/1.1",
+        headers: {}, body: "", params: {}
+    }
+    let resp = handler(req)
+    assert-eq!(resp.body, "user=99")
+
+    let req2 = http/Request {
+        method: "GET", path: "/files/img/a.png", query: "", version: "HTTP/1.1",
+        headers: {}, body: "", params: {}
+    }
+    assert-eq!(handler(req2).body, "file=img/a.png")
+
+    let req3 = http/Request {
+        method: "GET", path: "/health", query: "", version: "HTTP/1.1",
+        headers: {}, body: "", params: {}
+    }
+    assert-eq!(handler(req3).body, "ok")
+}
+
+test "router returns 405 on path match but wrong method" {
+    let routes = [http/route("GET", "/users/:id", fn(req) { http/ok("x") })]
+    let handler = http/router(routes, http/default-not-found)
+    let req = http/Request {
+        method: "POST", path: "/users/5", query: "", version: "HTTP/1.1",
+        headers: {}, body: "", params: {}
+    }
+    assert-eq!(handler(req).status, 405)
+}
+
+test "response combinators return modified copies" {
+    let r = http/ok("hi")
+    assert-eq!(http/with-status(r, 201).status, 201)
+    assert-eq!(http/with-status(r, 201).reason, "Created")
+    assert-eq!(http/with-body(r, "bye").body, "bye")
+    assert-eq!(get(http/with-header(r, "X-Test", "v").headers, "x-test"), "v")
+    assert-eq!(get(http/with-content-type(r, "application/xml").headers, "content-type"), "application/xml")
+    // original unchanged
+    assert-eq!(r.status, 200)
+    assert-eq!(r.body, "hi")
+}
+
+test "query-param decodes values" {
+    let req = http/Request {
+        method: "GET", path: "/s", query: "q=hello%20world&n=5", version: "HTTP/1.1",
+        headers: {}, body: "", params: {}
+    }
+    assert-eq!(http/query-param(req, "q"), "hello world")
+    assert-eq!(http/query-param(req, "n"), "5")
+    assert-eq!(http/query-param(req, "missing"), null)
+    let req2 = http/Request {
+        method: "GET", path: "/s", query: "", version: "HTTP/1.1",
+        headers: {}, body: "", params: {}
+    }
+    assert-eq!(length(http/query-params(req2)), 0)
+}

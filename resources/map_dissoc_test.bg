@@ -1,0 +1,117 @@
+namespace map_dissoc_test
+
+// Native HAMT remove (map-dissoc) regression. Must be correct across the
+// bitmap->array node transition (16 entries), with null values, absent keys,
+// and various removal orders.
+
+fn build(n) {
+    let mut m = {}
+    let mut i = 0
+    while i < n { m = assoc(m, i, i * 10)  i = i + 1 }
+    m
+}
+
+fn verify-remaining(m, removed, n) {
+    let mut i = 0
+    while i < n {
+        if contains?(removed, i) {
+            assert!(contains?(m, i) == false)
+        } else {
+            assert!(contains?(m, i))
+            assert-eq!(get(m, i), i * 10)
+        }
+        i = i + 1
+    }
+}
+
+fn drain-check(n) {
+    let mut m = build(n)
+    assert-eq!(length(m), n)
+    let mut i = 0
+    while i < n {
+        m = dissoc(m, i)
+        assert-eq!(length(m), n - i - 1)
+        assert!(contains?(m, i) == false)
+        i = i + 1
+    }
+    assert-eq!(length(m), 0)
+}
+
+test "dissoc full drain across node-type transitions" {
+    drain-check(1)
+    drain-check(5)
+    drain-check(16)
+    drain-check(17)
+    drain-check(50)
+    drain-check(200)
+}
+
+test "dissoc reverse-order drain keeps remaining keys valid" {
+    let mut m = build(100)
+    let mut removed = #{}
+    let mut i = 99
+    while i >= 0 {
+        m = dissoc(m, i)
+        removed = conj(removed, i)
+        i = i - 1
+    }
+    assert-eq!(length(m), 0)
+}
+
+test "dissoc partial removal leaves correct values" {
+    let mut m = build(80)
+    let mut removed = #{}
+    let mut i = 0
+    while i < 80 {
+        m = dissoc(m, i)
+        removed = conj(removed, i)
+        i = i + 3
+    }
+    verify-remaining(m, removed, 80)
+}
+
+test "dissoc of absent key returns an equal map" {
+    let m = build(20)
+    let m2 = dissoc(m, 999)
+    assert-eq!(length(m2), 20)
+    assert-eq!(get(m2, 5), 50)
+    // dissoc twice (second is a no-op)
+    let m3 = dissoc(dissoc(m, 5), 5)
+    assert-eq!(length(m3), 19)
+    assert!(contains?(m3, 5) == false)
+}
+
+test "dissoc preserves stored null values on other keys" {
+    let mut m = {}
+    m = assoc(m, :a, null)
+    m = assoc(m, :b, 2)
+    m = assoc(m, :c, null)
+    let m2 = dissoc(m, :b)
+    assert!(contains?(m2, :a))
+    assert-eq!(get(m2, :a), null)
+    assert!(contains?(m2, :c))
+    assert!(contains?(m2, :b) == false)
+    assert-eq!(length(m2), 2)
+}
+
+test "dissoc with string keys + re-assoc after remove" {
+    let mut m = {}
+    let words = ["apple", "banana", "cherry", "date", "elderberry", "fig", "grape"]
+    let mut i = 0
+    while i < length(words) { m = assoc(m, words[i], i)  i = i + 1 }
+    let m2 = dissoc(m, "cherry")
+    assert!(contains?(m2, "cherry") == false)
+    assert-eq!(get(m2, "banana"), 1)
+    assert-eq!(length(m2), 6)
+    // re-assoc the removed key
+    let m3 = assoc(m2, "cherry", 99)
+    assert-eq!(get(m3, "cherry"), 99)
+    assert-eq!(length(m3), 7)
+}
+
+test "dissoc the only key yields an empty map" {
+    let m = assoc({}, :only, 1)
+    let m2 = dissoc(m, :only)
+    assert-eq!(length(m2), 0)
+    assert!(contains?(m2, :only) == false)
+}

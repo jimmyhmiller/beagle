@@ -1,0 +1,28 @@
+namespace fs_predicate_bool_test
+
+use beagle.fs as fs
+use beagle.core as core
+
+// Regression for B3: fs predicates must return a plain Bool, not Result.Ok{value:bool}
+// (so `if fs/exists?(p)` is not always-true). Uses blocking-* (no handler required).
+
+test "fs predicates return plain bools" {
+    // /tmp exists and is a directory on every supported platform
+    assert-eq!(fs/blocking-exists?("/tmp"), true)
+    assert-eq!(fs/blocking-is-directory?("/tmp"), true)
+    assert-eq!(fs/blocking-is-file?("/tmp"), false)
+
+    // a path that does not exist
+    let missing = "/tmp/beagle-does-not-exist-${core/random-int(1000000000)}"
+    assert-eq!(fs/blocking-exists?(missing), false)
+    assert-eq!(fs/blocking-is-file?(missing), false)
+    assert-eq!(fs/blocking-is-directory?(missing), false)
+
+    // the critical property: usable directly in `if` (a Result.Ok struct would
+    // be truthy and make this branch always-taken)
+    let mut hit = false
+    if fs/blocking-exists?(missing) {
+        hit = true
+    }
+    assert-eq!(hit, false)
+}

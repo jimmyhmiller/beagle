@@ -1,0 +1,169 @@
+namespace stats_coverage_test
+
+// Thorough regression coverage for beagle.stats (pure/deterministic).
+// Expected values were derived by reading standard-library/beagle.stats.bg and
+// confirmed by running each function against the release binary.
+
+use beagle.stats as stats
+
+// --- sum (additive identity on empty) ---------------------------------------
+
+test "sum of integers" {
+    assert-eq!(stats/sum([1, 2, 3, 4]), 10)
+    assert-eq!(stats/sum([5]), 5)
+}
+
+test "sum of empty is zero (no throw)" {
+    assert-eq!(stats/sum([]), 0)
+}
+
+test "sum of floats" {
+    assert-eq!(stats/sum([1.5, 2.5, 1.0]), 5.0)
+}
+
+// --- mean -------------------------------------------------------------------
+
+test "mean returns a float" {
+    assert-eq!(stats/mean([1, 2, 3, 4]), 2.5)
+    assert-eq!(stats/mean([2, 4, 6]), 4.0)
+    // mean of integers is a Float, never truncated
+    assert-eq!(stats/mean([1, 2]), 1.5)
+}
+
+test "mean of single element" {
+    assert-eq!(stats/mean([7]), 7.0)
+}
+
+test "mean of empty throws" {
+    assert-throws!(fn() { stats/mean([]) })
+}
+
+// --- min / max / range-of ---------------------------------------------------
+
+test "min and max" {
+    assert-eq!(stats/min([3, 1, 4, 1, 5]), 1)
+    assert-eq!(stats/max([3, 1, 4, 1, 5]), 5)
+    assert-eq!(stats/min([-2, -9, 4]), -9)
+    assert-eq!(stats/max([-2, -9, 4]), 4)
+}
+
+test "range-of is max minus min" {
+    assert-eq!(stats/range-of([3, 1, 4, 1, 5]), 4)
+    assert-eq!(stats/range-of([10]), 0)
+}
+
+test "min/max/range-of throw on empty" {
+    assert-throws!(fn() { stats/min([]) })
+    assert-throws!(fn() { stats/max([]) })
+    assert-throws!(fn() { stats/range-of([]) })
+}
+
+// --- median -----------------------------------------------------------------
+
+test "median odd preserves element type" {
+    // odd count -> the single middle element, returned as-is (Int here)
+    assert-eq!(stats/median([1, 2, 3]), 2)
+    assert-eq!(stats/median([3, 1, 2]), 2)
+    assert-eq!(stats/median([5]), 5)
+}
+
+test "median even averages middle two as float" {
+    assert-eq!(stats/median([1, 2, 3, 4]), 2.5)
+    assert-eq!(stats/median([4, 1, 3, 2]), 2.5)
+}
+
+test "median throws on empty" {
+    assert-throws!(fn() { stats/median([]) })
+}
+
+// --- mode -------------------------------------------------------------------
+
+test "mode most frequent value" {
+    assert-eq!(stats/mode([1, 2, 2, 3, 3, 3]), 3)
+    assert-eq!(stats/mode([7, 7, 7, 2, 2]), 7)
+}
+
+test "mode ties broken by smallest value" {
+    assert-eq!(stats/mode([4, 4, 1, 1]), 1)
+}
+
+test "mode of single element" {
+    assert-eq!(stats/mode([9]), 9)
+}
+
+test "mode throws on empty" {
+    assert-throws!(fn() { stats/mode([]) })
+}
+
+// --- variance / stdev (population) ------------------------------------------
+
+test "population variance and stdev" {
+    assert-eq!(stats/variance([2, 4, 4, 4, 5, 5, 7, 9]), 4.0)
+    assert-eq!(stats/stdev([2, 4, 4, 4, 5, 5, 7, 9]), 2.0)
+}
+
+test "variance of constant data is zero" {
+    assert-eq!(stats/variance([5, 5, 5, 5]), 0.0)
+    assert-eq!(stats/stdev([5, 5, 5, 5]), 0.0)
+}
+
+test "variance/stdev throw on empty" {
+    assert-throws!(fn() { stats/variance([]) })
+    assert-throws!(fn() { stats/stdev([]) })
+}
+
+// --- variance / stdev (sample, Bessel) --------------------------------------
+
+test "sample variance and stdev" {
+    assert-eq!(stats/variance-sample([2, 4, 4, 4, 5, 5, 7, 9]), 4.571428571428571)
+    assert-eq!(stats/stdev-sample([2, 4, 4, 4, 5, 5, 7, 9]), 2.138089935299395)
+}
+
+test "sample variance needs at least two points" {
+    assert-throws!(fn() { stats/variance-sample([5]) })
+    assert-throws!(fn() { stats/variance-sample([]) })
+    assert-throws!(fn() { stats/stdev-sample([5]) })
+}
+
+test "sample variance exceeds population variance" {
+    let data = [2, 4, 4, 4, 5, 5, 7, 9]
+    assert!(stats/variance-sample(data) > stats/variance(data))
+}
+
+// --- percentile -------------------------------------------------------------
+
+test "percentile median equals 50th percentile" {
+    assert-eq!(stats/percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 50), 5.5)
+}
+
+test "percentile 0 is min, 100 is max" {
+    assert-eq!(stats/percentile([1, 2, 3, 4], 0), 1.0)
+    assert-eq!(stats/percentile([1, 2, 3, 4], 100), 4.0)
+}
+
+test "percentile linear interpolation between ranks" {
+    // rank = 25/100 * 3 = 0.75 -> 1 + (2-1)*0.75 = 1.75
+    assert-eq!(stats/percentile([1, 2, 3, 4], 25), 1.75)
+    // rank = 1.5 -> 2 + (3-2)*0.5 = 2.5
+    assert-eq!(stats/percentile([1, 2, 3, 4], 50), 2.5)
+}
+
+test "percentile of single element returns that element as float" {
+    assert-eq!(stats/percentile([42], 73), 42.0)
+}
+
+test "percentile throws on empty input" {
+    assert-throws!(fn() { stats/percentile([], 50) })
+}
+
+test "percentile throws when p out of range" {
+    assert-throws!(fn() { stats/percentile([1, 2, 3], -1) })
+    assert-throws!(fn() { stats/percentile([1, 2, 3], 101) })
+}
+
+// --- works on any seqable, not just literal vectors -------------------------
+
+test "stats accept arbitrary seqables" {
+    assert-eq!(stats/mean(seq([2, 4, 6])), 4.0)
+    assert-eq!(stats/sum(seq([1, 2, 3])), 6)
+}

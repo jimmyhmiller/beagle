@@ -1,0 +1,223 @@
+namespace cli_coverage_test
+
+use beagle.cli as cli
+
+// A reusable spec with one flag (short v), one option (short o, default),
+// no required entries — so parse never reports errors on the happy paths.
+fn simple-spec() {
+    let s = cli/make-spec("tool", "a tool")
+    let s = cli/add-flag(s, "verbose", "v", "verbose output")
+    cli/add-option(s, "out", "o", "output file", false, "def.txt")
+}
+
+// A spec with required entries to exercise the error paths.
+fn required-spec() {
+    let s = cli/make-spec("rtool", "needs args")
+    let s = cli/add-option(s, "name", "n", "the name", true, null)
+    cli/add-positional(s, "input", "input file", true)
+}
+
+test "make-spec builds an empty spec" {
+    let s = cli/make-spec("prog", "describe")
+    assert-eq!(get(s, :prog), "prog")
+    assert-eq!(get(s, :desc), "describe")
+    assert-eq!(length(get(s, :flags)), 0)
+    assert-eq!(length(get(s, :options)), 0)
+    assert-eq!(length(get(s, :positionals)), 0)
+}
+
+test "add-flag appends a flag entry" {
+    let s = cli/add-flag(cli/make-spec("p", "d"), "verbose", "v", "be loud")
+    assert-eq!(length(get(s, :flags)), 1)
+    let e = get(get(s, :flags), 0)
+    assert-eq!(get(e, :name), "verbose")
+    assert-eq!(get(e, :short), "v")
+    assert-eq!(get(e, :help), "be loud")
+}
+
+test "add-flag allows a null short form" {
+    let s = cli/add-flag(cli/make-spec("p", "d"), "debug", null, "dbg")
+    let e = get(get(s, :flags), 0)
+    assert-eq!(get(e, :short), null)
+}
+
+test "add-option appends an option entry with all fields" {
+    let s = cli/add-option(cli/make-spec("p", "d"), "out", "o", "outfile", true, "x")
+    let e = get(get(s, :options), 0)
+    assert-eq!(get(e, :name), "out")
+    assert-eq!(get(e, :short), "o")
+    assert-eq!(get(e, :required), true)
+    assert-eq!(get(e, :default), "x")
+}
+
+test "add-positional appends a positional entry" {
+    let s = cli/add-positional(cli/make-spec("p", "d"), "file", "the file", true)
+    let e = get(get(s, :positionals), 0)
+    assert-eq!(get(e, :name), "file")
+    assert-eq!(get(e, :required), true)
+}
+
+test "spec builders do not mutate the original spec" {
+    let base = cli/make-spec("p", "d")
+    let with-flag = cli/add-flag(base, "v", "v", "h")
+    assert-eq!(length(get(base, :flags)), 0)
+    assert-eq!(length(get(with-flag, :flags)), 1)
+}
+
+test "parse empty argv applies defaults, no errors" {
+    let r = cli/parse([], simple-spec())
+    let opts = get(r, :options)
+    assert-eq!(get(opts, "verbose"), false)
+    assert-eq!(get(opts, "out"), "def.txt")
+    assert-eq!(get(opts, :help), false)
+    assert-eq!(length(get(r, :positionals)), 0)
+    assert-eq!(length(get(r, :errors)), 0)
+}
+
+test "parse long flag sets it true" {
+    let r = cli/parse(["--verbose"], simple-spec())
+    assert-eq!(get(get(r, :options), "verbose"), true)
+    assert-eq!(length(get(r, :errors)), 0)
+}
+
+test "parse long option with separate value" {
+    let r = cli/parse(["--out", "file.txt"], simple-spec())
+    assert-eq!(get(get(r, :options), "out"), "file.txt")
+}
+
+test "parse long option with inline =value" {
+    let r = cli/parse(["--out=file.txt"], simple-spec())
+    assert-eq!(get(get(r, :options), "out"), "file.txt")
+}
+
+test "parse short flag sets it true" {
+    let r = cli/parse(["-v"], simple-spec())
+    assert-eq!(get(get(r, :options), "verbose"), true)
+}
+
+test "parse short option with separate value" {
+    let r = cli/parse(["-o", "x.txt"], simple-spec())
+    assert-eq!(get(get(r, :options), "out"), "x.txt")
+}
+
+test "parse short option with attached value -ovalue" {
+    let r = cli/parse(["-ox"], simple-spec())
+    assert-eq!(get(get(r, :options), "out"), "x")
+}
+
+test "parse short cluster: flag then option taking next token" {
+    let r = cli/parse(["-vo", "y.txt"], simple-spec())
+    let opts = get(r, :options)
+    assert-eq!(get(opts, "verbose"), true)
+    assert-eq!(get(opts, "out"), "y.txt")
+}
+
+test "parse positionals collects bare args" {
+    let r = cli/parse(["alpha", "beta"], simple-spec())
+    let p = get(r, :positionals)
+    assert-eq!(length(p), 2)
+    assert-eq!(get(p, 0), "alpha")
+    assert-eq!(get(p, 1), "beta")
+}
+
+test "parse double-dash ends option parsing" {
+    let r = cli/parse(["--", "--verbose", "-o"], simple-spec())
+    let p = get(r, :positionals)
+    assert-eq!(length(p), 2)
+    assert-eq!(get(p, 0), "--verbose")
+    assert-eq!(get(p, 1), "-o")
+    // verbose must remain at its default since it came after --
+    assert-eq!(get(get(r, :options), "verbose"), false)
+}
+
+test "parse treats negative number as a positional" {
+    let r = cli/parse(["-5"], simple-spec())
+    assert-eq!(get(get(r, :positionals), 0), "-5")
+}
+
+test "parse unknown long option records an error" {
+    let r = cli/parse(["--nope"], simple-spec())
+    let errs = get(r, :errors)
+    assert-eq!(length(errs), 1)
+    assert-eq!(get(errs, 0), "unknown option --nope")
+}
+
+test "parse unknown short flag records an error" {
+    let r = cli/parse(["-z"], simple-spec())
+    assert-eq!(get(get(r, :errors), 0), "unknown flag -z")
+}
+
+test "parse long option missing its value records an error" {
+    let r = cli/parse(["--out"], simple-spec())
+    assert-eq!(get(get(r, :errors), 0), "option --out requires a value")
+}
+
+test "parse short option missing its value records an error" {
+    let r = cli/parse(["-o"], simple-spec())
+    assert-eq!(get(get(r, :errors), 0), "option -o requires a value")
+}
+
+test "parse flag given =value is flagged but still set true" {
+    let r = cli/parse(["--verbose=oops"], simple-spec())
+    assert-eq!(get(get(r, :errors), 0), "flag --verbose does not take a value")
+    assert-eq!(get(get(r, :options), "verbose"), true)
+}
+
+test "parse --help surfaces :help and skips required checks" {
+    let r = cli/parse(["--help"], required-spec())
+    assert-eq!(get(get(r, :options), :help), true)
+    assert-eq!(length(get(r, :errors)), 0)
+}
+
+test "parse -h surfaces :help" {
+    let r = cli/parse(["-h"], simple-spec())
+    assert-eq!(get(get(r, :options), :help), true)
+}
+
+test "parse missing required option and positional records both errors" {
+    let r = cli/parse([], required-spec())
+    let errs = get(r, :errors)
+    assert-eq!(length(errs), 2)
+    assert-eq!(get(errs, 0), "missing required option --name")
+    assert-eq!(get(errs, 1), "missing required positional <input>")
+}
+
+test "parse satisfying required entries yields no errors" {
+    let r = cli/parse(["--name", "bob", "in.txt"], required-spec())
+    assert-eq!(get(get(r, :options), "name"), "bob")
+    assert-eq!(get(get(r, :positionals), 0), "in.txt")
+    assert-eq!(length(get(r, :errors)), 0)
+}
+
+test "parse with required option present but positional missing" {
+    let r = cli/parse(["--name", "bob"], required-spec())
+    let errs = get(r, :errors)
+    assert-eq!(length(errs), 1)
+    assert-eq!(get(errs, 0), "missing required positional <input>")
+}
+
+test "help-text includes usage, options, flags and the implicit help line" {
+    let h = cli/help-text(simple-spec())
+    assert!(index-of(h, "Usage: tool") >= 0)
+    assert!(index-of(h, "a tool") >= 0)
+    assert!(index-of(h, "Options:") >= 0)
+    assert!(index-of(h, "--out") >= 0)
+    assert!(index-of(h, "Flags:") >= 0)
+    assert!(index-of(h, "--verbose") >= 0)
+    assert!(index-of(h, "-h, --help") >= 0)
+}
+
+test "help-text marks required option and positional in usage" {
+    let h = cli/help-text(required-spec())
+    assert!(index-of(h, "<input>") >= 0)
+    assert!(index-of(h, "(required)") >= 0)
+    assert!(index-of(h, "Arguments:") >= 0)
+}
+
+test "help-text on a bare spec still shows the help flag" {
+    let h = cli/help-text(cli/make-spec("bare", "nothing here"))
+    assert!(index-of(h, "Usage: bare") >= 0)
+    assert!(index-of(h, "-h, --help") >= 0)
+    // No flags/options declared, so no "[options]" in the usage line.
+    assert!(index-of(h, "[options]") < 0)
+}

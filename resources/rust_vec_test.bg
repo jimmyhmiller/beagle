@@ -1,5 +1,5 @@
 namespace rust-vec-test
-use beagle.collections as rvec
+use beagle._collections as rvec
 use beagle.primitive as primitive
 
 fn fill-vec-helper(v, i, n) {

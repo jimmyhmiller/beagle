@@ -1,0 +1,83 @@
+namespace os_coverage_test
+
+// Regression coverage for beagle.os (standard-library/beagle.os.bg).
+// I/O- and environment-bound module, so this is light-but-real: process
+// ids, cwd shape, hostname shape, and env round-trips. No network, no
+// wall-clock equality. Env var names are uniquified per run so concurrent
+// test files don't clobber each other's variables. process-exit is NOT
+// exercised (it terminates the process).
+
+use beagle.os as os
+use beagle.core as core
+
+// A process-unique env var name so parallel test runs never collide.
+fn unique-var() {
+    "BEAGLE_OS_COVERAGE_" ++ to-string(core/random-int(1000000000))
+}
+
+test "getpid returns a positive integer" {
+    let pid = os/getpid()
+    assert!(pid > 0)
+}
+
+test "getppid returns a positive integer" {
+    let ppid = os/getppid()
+    assert!(ppid > 0)
+}
+
+test "getpid and getppid differ" {
+    // A process is never its own parent.
+    assert-ne!(os/getpid(), os/getppid())
+}
+
+test "getuid is non-negative" {
+    assert!(os/getuid() >= 0)
+}
+
+test "getcwd is an absolute path" {
+    let cwd = os/getcwd()
+    assert!(length(cwd) > 0)
+    // getcwd always reports an absolute path.
+    assert-eq!(cwd[0], "/")
+}
+
+test "hostname is a non-empty string" {
+    let host = os/hostname()
+    assert!(length(host) > 0)
+}
+
+test "getenv of an unset variable is null" {
+    let missing = os/getenv(unique-var())
+    assert-eq!(missing, null)
+}
+
+test "setenv then getenv round-trips the value" {
+    let name = unique-var()
+    let ok = os/setenv(name, "round-trip-value")
+    assert!(ok)
+    assert-eq!(os/getenv(name), "round-trip-value")
+    // cleanup so we don't leak env state to other tests
+    os/unsetenv(name)
+}
+
+test "setenv overwrites an existing value" {
+    let name = unique-var()
+    os/setenv(name, "first")
+    os/setenv(name, "second")
+    assert-eq!(os/getenv(name), "second")
+    os/unsetenv(name)
+}
+
+test "unsetenv removes a set variable" {
+    let name = unique-var()
+    os/setenv(name, "to-be-removed")
+    assert-eq!(os/getenv(name), "to-be-removed")
+    let ok = os/unsetenv(name)
+    assert!(ok)
+    assert-eq!(os/getenv(name), null)
+}
+
+test "unsetenv of an already-unset variable still succeeds" {
+    // Removing a variable that isn't set is not an error.
+    assert!(os/unsetenv(unique-var()))
+}

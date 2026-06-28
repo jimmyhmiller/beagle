@@ -1,0 +1,171 @@
+namespace csv_coverage_test
+
+// Regression coverage for beagle.csv (RFC 4180 CSV parse/write).
+// All expected values were confirmed by running the module directly.
+
+use beagle.csv as csv
+
+// ---------------------------------------------------------------------------
+// parse
+// ---------------------------------------------------------------------------
+
+test "parse basic grid" {
+    assert-eq!(csv/parse("a,b,c\n1,2,3"), [["a", "b", "c"], ["1", "2", "3"]])
+}
+
+test "parse empty input yields empty vector" {
+    assert-eq!(csv/parse(""), [])
+}
+
+test "parse single field, no terminator" {
+    assert-eq!(csv/parse("hello"), [["hello"]])
+}
+
+test "parse trailing newline does not add spurious row" {
+    assert-eq!(csv/parse("a,b,c\n1,2,3\n"), [["a", "b", "c"], ["1", "2", "3"]])
+}
+
+test "parse CRLF is a single record terminator" {
+    assert-eq!(csv/parse("a\r\nb"), [["a"], ["b"]])
+}
+
+test "parse trailing field separator yields empty field" {
+    assert-eq!(csv/parse("a,"), [["a", ""]])
+}
+
+test "parse empty lines preserved as single empty field rows" {
+    assert-eq!(csv/parse("a,\n,b"), [["a", ""], ["", "b"]])
+    assert-eq!(csv/parse("a\n\nb"), [["a"], [""], ["b"]])
+    assert-eq!(csv/parse("\n"), [[""]])
+    assert-eq!(csv/parse("\n\n"), [[""], [""]])
+}
+
+// ---------------------------------------------------------------------------
+// parse — quoting rules
+// ---------------------------------------------------------------------------
+
+test "parse quoted field may contain the delimiter" {
+    assert-eq!(csv/parse("\"x,y\",z"), [["x,y", "z"]])
+}
+
+test "parse escaped doubled-quote inside quoted field" {
+    assert-eq!(csv/parse("\"he said \"\"hi\"\"\",b"), [["he said \"hi\"", "b"]])
+}
+
+test "parse embedded newline inside quoted field" {
+    assert-eq!(csv/parse("\"line1\nline2\",x"), [["line1\nline2", "x"]])
+}
+
+test "parse quote is literal when not at field start" {
+    assert-eq!(csv/parse("ab\"cd"), [["ab\"cd"]])
+}
+
+// ---------------------------------------------------------------------------
+// parse-with-header
+// ---------------------------------------------------------------------------
+
+test "parse-with-header maps each row by header keys" {
+    assert-eq!(
+        csv/parse-with-header("name,age\njim,42\nbob,30"),
+        [{"name" "jim", "age" "42"}, {"name" "bob", "age" "30"}])
+}
+
+test "parse-with-header empty input yields empty vector" {
+    assert-eq!(csv/parse-with-header(""), [])
+}
+
+test "parse-with-header fills missing fields with empty string" {
+    assert-eq!(csv/parse-with-header("a,b\n1"), [{"a" "1", "b" ""}])
+}
+
+test "parse-with-header drops fields beyond the header width" {
+    assert-eq!(csv/parse-with-header("a,b\n1,2,3"), [{"a" "1", "b" "2"}])
+}
+
+// ---------------------------------------------------------------------------
+// needs-quoting?
+// ---------------------------------------------------------------------------
+
+test "needs-quoting? false for plain and empty strings" {
+    assert-eq!(csv/needs-quoting?("plain"), false)
+    assert-eq!(csv/needs-quoting?(""), false)
+}
+
+test "needs-quoting? true for comma, quote, CR, LF" {
+    assert!(csv/needs-quoting?("a,b"))
+    assert!(csv/needs-quoting?("a\"b"))
+    assert!(csv/needs-quoting?("a\rb"))
+    assert!(csv/needs-quoting?("a\nb"))
+}
+
+// ---------------------------------------------------------------------------
+// write
+// ---------------------------------------------------------------------------
+
+test "write uses CRLF terminators including trailing" {
+    assert-eq!(csv/write([["a", "b"], ["1", "2"]]), "a,b\r\n1,2\r\n")
+}
+
+test "write empty rows yields empty string" {
+    assert-eq!(csv/write([]), "")
+}
+
+test "write quotes fields containing the delimiter" {
+    assert-eq!(csv/write([["x,y", "z"]]), "\"x,y\",z\r\n")
+}
+
+test "write doubles embedded quotes" {
+    assert-eq!(csv/write([["he\"hi"]]), "\"he\"\"hi\"\r\n")
+}
+
+test "write quotes fields containing a newline" {
+    assert-eq!(csv/write([["a\nb"]]), "\"a\nb\"\r\n")
+}
+
+test "write coerces non-string fields via to-string" {
+    assert-eq!(csv/write([[1, 2]]), "1,2\r\n")
+}
+
+test "write-with-header prepends the header row" {
+    assert-eq!(csv/write-with-header(["c1", "c2"], [["1", "2"]]), "c1,c2\r\n1,2\r\n")
+}
+
+// ---------------------------------------------------------------------------
+// round trip
+// ---------------------------------------------------------------------------
+
+test "parse is the inverse of write for tricky fields" {
+    let rows = [["a", "b,c"], ["x\"y", "line1\nline2"], ["", ""]]
+    assert-eq!(csv/parse(csv/write(rows)), rows)
+}
+
+test "round trip preserves embedded CRLF inside a quoted field" {
+    let rows = [["has\r\ncrlf", "ok"]]
+    assert-eq!(csv/parse(csv/write(rows)), rows)
+}
+
+// ---------------------------------------------------------------------------
+// error paths
+// ---------------------------------------------------------------------------
+
+test "parse rejects non-string input" {
+    assert-throws!(fn() { csv/parse(42) })
+    assert-throws!(fn() { csv/parse(null) })
+}
+
+test "parse-with-header rejects non-string input" {
+    assert-throws!(fn() { csv/parse-with-header(42) })
+}
+
+test "write rejects non-vector input and non-row elements" {
+    assert-throws!(fn() { csv/write(42) })
+    assert-throws!(fn() { csv/write([42]) })
+}
+
+test "write-with-header rejects a non-vector header" {
+    assert-throws!(fn() { csv/write-with-header(42, []) })
+}
+
+test "needs-quoting? rejects non-string input" {
+    assert-throws!(fn() { csv/needs-quoting?(42) })
+}

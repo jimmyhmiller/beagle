@@ -1,0 +1,138 @@
+namespace textwrap_coverage_test
+
+// Regression coverage for the beagle.textwrap module (pure/deterministic).
+// All expected values were confirmed by running the module directly.
+
+use beagle.textwrap as tw
+
+// ---------------------------------------------------------------------------
+// wrap
+// ---------------------------------------------------------------------------
+
+test "wrap greedy packs words to width" {
+    assert-eq!(tw/wrap("the quick brown fox", 9), ["the quick", "brown fox"])
+}
+
+test "wrap exact-width line boundary" {
+    // "aa bb" is 5 chars (fits == width), "aa bb cc" would be 8 (> 5).
+    assert-eq!(tw/wrap("aa bb cc dd", 5), ["aa bb", "cc dd"])
+}
+
+test "wrap keeps an over-long word whole on its own line" {
+    assert-eq!(tw/wrap("supercalifragilistic", 9), ["supercalifragilistic"])
+    // a long word is isolated but neighbours still wrap normally
+    assert-eq!(
+        tw/wrap("xx supercalifragilistic yy", 9),
+        ["xx", "supercalifragilistic", "yy"]
+    )
+}
+
+test "wrap collapses internal whitespace runs" {
+    assert-eq!(tw/wrap("a   b\tc", 80), ["a b c"])
+}
+
+test "wrap empty and whitespace-only input yields empty vector" {
+    assert-eq!(tw/wrap("", 9), [])
+    assert-eq!(tw/wrap("   ", 9), [])
+    assert-eq!(tw/wrap("  \n\t ", 9), [])
+}
+
+test "wrap throws on non-positive width" {
+    assert-throws!(fn() { tw/wrap("hello world", 0) })
+    assert-throws!(fn() { tw/wrap("hello world", -3) })
+}
+
+// ---------------------------------------------------------------------------
+// fill
+// ---------------------------------------------------------------------------
+
+test "fill joins wrapped lines with newlines" {
+    assert-eq!(tw/fill("the quick brown fox", 9), "the quick\nbrown fox")
+}
+
+test "fill round-trips with wrap+join" {
+    let text = "one two three four five six"
+    assert-eq!(tw/fill(text, 11), join(tw/wrap(text, 11), "\n"))
+}
+
+test "fill of empty input is empty string" {
+    assert-eq!(tw/fill("", 9), "")
+}
+
+test "fill throws on non-positive width" {
+    assert-throws!(fn() { tw/fill("hi there", 0) })
+}
+
+// ---------------------------------------------------------------------------
+// dedent
+// ---------------------------------------------------------------------------
+
+test "dedent removes uniform common prefix" {
+    assert-eq!(tw/dedent("    a\n    b"), "a\nb")
+}
+
+test "dedent removes only the longest common prefix" {
+    assert-eq!(tw/dedent("  a\n   b\n  c"), "a\n b\nc")
+}
+
+test "dedent ignores blank lines when computing prefix and normalizes them" {
+    assert-eq!(tw/dedent("    a\n\n    b"), "a\n\nb")
+}
+
+test "dedent of empty string is empty string" {
+    assert-eq!(tw/dedent(""), "")
+}
+
+test "dedent with no common prefix leaves text unchanged" {
+    assert-eq!(tw/dedent("a\nb\nc"), "a\nb\nc")
+}
+
+// ---------------------------------------------------------------------------
+// indent
+// ---------------------------------------------------------------------------
+
+test "indent prefixes every non-empty line" {
+    assert-eq!(tw/indent("a\nb", "> "), "> a\n> b")
+}
+
+test "indent leaves blank lines untouched" {
+    assert-eq!(tw/indent("a\n\nb", "> "), "> a\n\n> b")
+}
+
+test "indent preserves a trailing newline" {
+    assert-eq!(tw/indent("a\nb\n", "> "), "> a\n> b\n")
+}
+
+test "indent of empty string is empty string" {
+    assert-eq!(tw/indent("", "> "), "")
+}
+
+// ---------------------------------------------------------------------------
+// shorten
+// ---------------------------------------------------------------------------
+
+test "shorten returns collapsed text unchanged when it already fits" {
+    assert-eq!(tw/shorten("Hello world", 20, " [...]"), "Hello world")
+    // boundary: collapsed length == width
+    assert-eq!(tw/shorten("Hello world", 11, " [...]"), "Hello world")
+}
+
+test "shorten collapses whitespace even when it fits" {
+    assert-eq!(tw/shorten("a   b   c", 80, " [...]"), "a b c")
+}
+
+test "shorten truncates words and appends placeholder" {
+    assert-eq!(tw/shorten("Hello world this is long", 15, " [...]"), "Hello [...]")
+}
+
+test "shorten returns lstripped placeholder when no word fits" {
+    assert-eq!(tw/shorten("aaaa bbbb", 5, " [...]"), "[...]")
+}
+
+test "shorten throws on non-positive width" {
+    assert-throws!(fn() { tw/shorten("hello world", 0, " [...]") })
+}
+
+test "shorten throws when placeholder is larger than width" {
+    assert-throws!(fn() { tw/shorten("aaaa bbbb", 3, " [...]") })
+}

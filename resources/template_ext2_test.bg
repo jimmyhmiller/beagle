@@ -1,0 +1,52 @@
+namespace template_ext2_test
+
+use beagle.template as template
+
+test "compile + render-compiled matches render" {
+    let src = "Hello {{ name }}!"
+    let compiled = template/compile(src)
+    assert-eq!(template/render-compiled(compiled, {:name "World"}), "Hello World!")
+    // render-compiled must be byte-for-byte identical to render.
+    assert-eq!(
+        template/render-compiled(compiled, {:name "World"}),
+        template/render(src, {:name "World"})
+    )
+}
+
+test "compiled template is reusable across contexts" {
+    let compiled = template/compile("Hi {{ name }}")
+    assert-eq!(template/render-compiled(compiled, {:name "Ann"}), "Hi Ann")
+    assert-eq!(template/render-compiled(compiled, {:name "Bob"}), "Hi Bob")
+    // Re-rendering the first context again still works (no mutation).
+    assert-eq!(template/render-compiled(compiled, {:name "Ann"}), "Hi Ann")
+}
+
+test "render-compiled escapes by default and respects raw" {
+    let escaped = template/compile("{{ x }}")
+    assert-eq!(template/render-compiled(escaped, {:x "<a>"}), "&lt;a&gt;")
+    let raw = template/compile("{{{ x }}}")
+    assert-eq!(template/render-compiled(raw, {:x "<a>"}), "<a>")
+}
+
+test "render-compiled handles nested path, for, and if/else" {
+    let dotted = template/compile("{{ user.name }}")
+    assert-eq!(template/render-compiled(dotted, {:user {:name "Ann"}}), "Ann")
+
+    let looped = template/compile("{% for x in items %}{{ x }},{% endfor %}")
+    assert-eq!(template/render-compiled(looped, {:items [1, 2, 3]}), "1,2,3,")
+
+    let branch = template/compile("{% if cond %}yes{% else %}no{% endif %}")
+    assert-eq!(template/render-compiled(branch, {:cond true}), "yes")
+    assert-eq!(template/render-compiled(branch, {:cond false}), "no")
+}
+
+test "render-compiled rejects a non-compiled argument" {
+    assert-throws!(fn() { template/render-compiled("not compiled", {:a 1}) })
+    assert-throws!(fn() { template/render-compiled(42, {:a 1}) })
+}
+
+test "compile surfaces malformed-template errors eagerly" {
+    assert-throws!(fn() { template/compile("{{ unterminated") })
+    assert-throws!(fn() { template/compile("{% if x %}no endif") })
+    assert-throws!(fn() { template/compile("{% endif %}") })
+}

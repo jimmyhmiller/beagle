@@ -1,0 +1,58 @@
+namespace priorityqueue_ext3_test
+
+use beagle.priorityqueue as pq
+
+test "peek returns the min without removing it" {
+    let q = pq/from-vec([5, 3, 8, 1, 9, 2])
+    // Min of the set is 1.
+    assert-eq!(pq/peek(q), 1)
+    // peek is non-destructive: size unchanged and a second peek matches.
+    assert-eq!(pq/pq-size(q), 6)
+    assert-eq!(pq/peek(q), 1)
+}
+
+test "peek on an empty queue returns null" {
+    assert-eq!(pq/peek(pq/pq-new()), null)
+}
+
+test "peek matches pq-peek" {
+    let q = pq/pq-push(pq/pq-push(pq/pq-new(), 5), 3)
+    assert-eq!(pq/peek(q), pq/pq-peek(q))
+    assert-eq!(pq/peek(q), 3)
+}
+
+test "pq-size counts items" {
+    assert-eq!(pq/pq-size(pq/pq-new()), 0)
+    assert-eq!(pq/pq-size(pq/pq-push(pq/pq-new(), 5)), 1)
+    assert-eq!(pq/pq-size(pq/from-vec([5, 3, 8, 1, 9, 2])), 6)
+}
+
+test "pq-size matches pq-count" {
+    let q = pq/from-vec([10, 20, 30])
+    assert-eq!(pq/pq-size(q), pq/pq-count(q))
+}
+
+test "from-vec builds a min-heap" {
+    let q = pq/from-vec([5, 3, 8, 1, 9, 2])
+    assert-eq!(pq/peek(q), 1)
+    assert-eq!(pq/pq-to-sorted-vec(q), [1, 2, 3, 5, 8, 9])
+}
+
+test "from-vec on empty vector" {
+    let q = pq/from-vec([])
+    assert!(pq/pq-empty?(q))
+    assert-eq!(pq/pq-size(q), 0)
+    assert-eq!(pq/peek(q), null)
+}
+
+test "from-vec on single element" {
+    let q = pq/from-vec([42])
+    assert-eq!(pq/pq-size(q), 1)
+    assert-eq!(pq/peek(q), 42)
+    assert-eq!(pq/pq-to-sorted-vec(q), [42])
+}
+
+test "from-vec matches pq-from-vec" {
+    let v = [7, 2, 4, 6, 1]
+    assert-eq!(pq/pq-to-sorted-vec(pq/from-vec(v)), pq/pq-to-sorted-vec(pq/pq-from-vec(v)))
+}

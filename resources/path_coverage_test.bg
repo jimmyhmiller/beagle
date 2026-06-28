@@ -1,0 +1,162 @@
+namespace path_coverage_test
+
+// Regression coverage for the pure POSIX path module beagle.path.
+// All functions are deterministic string transforms (no filesystem, no
+// time, no network), so these tests are fully parallel-safe.
+
+use beagle.path as p
+
+test "is-absolute?" {
+    assert!(p/is-absolute?("/x"))
+    assert!(p/is-absolute?("/"))
+    assert!(p/is-absolute?("/a/b/c"))
+    assert-eq!(p/is-absolute?("x"), false)
+    assert-eq!(p/is-absolute?("a/b"), false)
+    assert-eq!(p/is-absolute?(""), false)
+    assert-eq!(p/is-absolute?("."), false)
+}
+
+test "basename happy paths" {
+    assert-eq!(p/basename("/a/b/c.txt"), "c.txt")
+    assert-eq!(p/basename("c.txt"), "c.txt")
+    assert-eq!(p/basename("/usr/bin/env"), "env")
+}
+
+test "basename edge cases" {
+    assert-eq!(p/basename("/a/b/"), "b")
+    assert-eq!(p/basename("/usr/"), "usr")
+    assert-eq!(p/basename("/"), "/")
+    assert-eq!(p/basename(""), "")
+    // trailing-slash run + duplicate-slash separators collapse
+    assert-eq!(p/basename("a//b"), "b")
+    assert-eq!(p/basename("/a/b///"), "b")
+    assert-eq!(p/basename("."), ".")
+}
+
+test "dirname happy paths" {
+    assert-eq!(p/dirname("/a/b/c.txt"), "/a/b")
+    assert-eq!(p/dirname("/a/b"), "/a")
+    assert-eq!(p/dirname("c.txt"), ".")
+}
+
+test "dirname edge cases" {
+    assert-eq!(p/dirname("/a/b/"), "/a")
+    assert-eq!(p/dirname("/x"), "/")
+    assert-eq!(p/dirname("/"), "/")
+    assert-eq!(p/dirname(""), ".")
+    assert-eq!(p/dirname(".."), ".")
+    // duplicate-slash separator must not leave a trailing slash on the head
+    assert-eq!(p/dirname("a//b"), "a")
+    assert-eq!(p/dirname("/a//b"), "/a")
+    assert-eq!(p/dirname("x//y//z"), "x//y")
+}
+
+test "join happy paths" {
+    assert-eq!(p/join("/a/b", "c"), "/a/b/c")
+    assert-eq!(p/join("/a/b/", "c"), "/a/b/c")
+    assert-eq!(p/join("a", "b"), "a/b")
+}
+
+test "join edge cases" {
+    assert-eq!(p/join("a", ""), "a")
+    assert-eq!(p/join("", "b"), "b")
+    // a leading slash on b makes the result absolute, overriding a
+    assert-eq!(p/join("a", "/b"), "/b")
+    assert-eq!(p/join("/a/b", "/c"), "/c")
+    // root special-case: no doubled slash
+    assert-eq!(p/join("/", "x"), "/x")
+    assert-eq!(p/join("", ""), "")
+    // trailing slashes on a are collapsed to one separator
+    assert-eq!(p/join("a///", "b"), "a/b")
+}
+
+test "join-all" {
+    assert-eq!(p/join-all(["/a", "b", "c"]), "/a/b/c")
+    assert-eq!(p/join-all(["x"]), "x")
+    assert-eq!(p/join-all([]), "")
+    // a mid-vector absolute segment resets the accumulation
+    assert-eq!(p/join-all(["a", "b", "/c", "d"]), "/c/d")
+    assert-eq!(p/join-all(["a/", "b/", "c"]), "a/b/c")
+}
+
+test "extension happy paths" {
+    assert-eq!(p/extension("x.tar.gz"), ".gz")
+    assert-eq!(p/extension("/a/b.txt"), ".txt")
+    assert-eq!(p/extension("a.txt"), ".txt")
+}
+
+test "extension edge cases" {
+    assert-eq!(p/extension("x"), "")
+    // a leading dot (dotfile) is not an extension separator
+    assert-eq!(p/extension(".bashrc"), "")
+    // dot belongs to a directory component, not the basename
+    assert-eq!(p/extension("/a.b/c"), "")
+    // a trailing dot IS an extension separator (matches posixpath)
+    assert-eq!(p/extension("file."), ".")
+    // all-dot names have no extension
+    assert-eq!(p/extension(".."), "")
+    assert-eq!(p/extension("..."), "")
+    // leading-dot run before the basename text is not an extension
+    assert-eq!(p/extension("...x"), "")
+}
+
+test "strip-extension" {
+    assert-eq!(p/strip-extension("x.tar.gz"), "x.tar")
+    assert-eq!(p/strip-extension("/a/b.txt"), "/a/b")
+    assert-eq!(p/strip-extension("file."), "file")
+    // no extension -> unchanged
+    assert-eq!(p/strip-extension("x"), "x")
+    assert-eq!(p/strip-extension(".bashrc"), ".bashrc")
+    assert-eq!(p/strip-extension(".."), "..")
+}
+
+test "split-path" {
+    assert-eq!(p/split-path("/a/b/c"), ["a", "b", "c"])
+    assert-eq!(p/split-path("a/b"), ["a", "b"])
+    // duplicate + trailing slashes produce no empty components
+    assert-eq!(p/split-path("a//b/"), ["a", "b"])
+    assert-eq!(p/split-path("///"), [])
+    assert-eq!(p/split-path(""), [])
+    assert-eq!(p/split-path("/"), [])
+    assert-eq!(p/split-path("single"), ["single"])
+}
+
+test "normalize happy paths" {
+    assert-eq!(p/normalize("/a/./b/../c"), "/a/c")
+    assert-eq!(p/normalize("a/b/../../c"), "c")
+    assert-eq!(p/normalize("a//b"), "a/b")
+    assert-eq!(p/normalize("/a/b/c/../../d"), "/a/d")
+}
+
+test "normalize edge cases" {
+    assert-eq!(p/normalize(""), ".")
+    assert-eq!(p/normalize("."), ".")
+    assert-eq!(p/normalize("/"), "/")
+    assert-eq!(p/normalize("./a"), "a")
+    assert-eq!(p/normalize("./././a"), "a")
+    // trailing slash collapses
+    assert-eq!(p/normalize("/a/b/"), "/a/b")
+    // '..' above an absolute root is dropped
+    assert-eq!(p/normalize("/.."), "/")
+    assert-eq!(p/normalize("/a/../../b"), "/b")
+    // a relative leading '..' cannot be resolved, so it is preserved
+    assert-eq!(p/normalize("../a"), "../a")
+    assert-eq!(p/normalize(".."), "..")
+    assert-eq!(p/normalize("../.."), "../..")
+    assert-eq!(p/normalize("a/b/../../../c"), "../c")
+}
+
+test "normalize round-trips with basename/dirname" {
+    let pth = "/usr/local/../bin/./env"
+    assert-eq!(p/normalize(pth), "/usr/bin/env")
+    assert-eq!(p/basename(p/normalize(pth)), "env")
+    assert-eq!(p/dirname(p/normalize(pth)), "/usr/bin")
+}
+
+test "null input throws via underlying length" {
+    // every entry point calls length(p) on its argument first
+    assert-throws!(fn() { p/is-absolute?(null) })
+    assert-throws!(fn() { p/basename(null) })
+    assert-throws!(fn() { p/dirname(null) })
+    assert-throws!(fn() { p/normalize(null) })
+}

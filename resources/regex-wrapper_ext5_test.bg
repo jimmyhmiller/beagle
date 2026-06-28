@@ -1,0 +1,23 @@
+namespace regex_wrapper_ext5_test
+
+use beagle.regex-wrapper as rx
+
+// Regression for the batch-5 regex-wrapper additions (the agent's test was lost
+// to a mid-response connection drop; these assertions match the verified behavior).
+
+test "find-all returns all non-overlapping matches" {
+    assert-eq!(rx/find-all("[0-9]+", "a12b345c6"), ["12", "345", "6"])
+    assert-eq!(rx/find-all("[0-9]+", "no digits here"), [])
+    assert-eq!(rx/find-all("a", "aaa"), ["a", "a", "a"])
+}
+
+test "split breaks the string on matches" {
+    assert-eq!(rx/split("[,;]", "a,b;c,d"), ["a", "b", "c", "d"])
+    assert-eq!(rx/split(",", "no-separator"), ["no-separator"])
+}
+
+test "replace-all-re replaces every match with the literal replacement" {
+    assert-eq!(rx/replace-all-re("[0-9]+", "x9y8", "N"), "xNyN")
+    assert-eq!(rx/replace-all-re("[0-9]+", "no digits", "N"), "no digits")
+    assert-eq!(rx/replace-all-re("a", "banana", "-"), "b-n-n-")
+}

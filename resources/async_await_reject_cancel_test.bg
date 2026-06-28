@@ -1,0 +1,46 @@
+namespace async_await_reject_cancel_test
+
+use beagle.async as async
+
+// Regression for B2: under the default cooperative scheduler, await on a
+// rejected future must THROW (not return the error as a value), and await on a
+// cancelled future must THROW (not park forever). The throw must cross the park
+// and be caught by the try/catch surrounding the await.
+
+fn main() {
+    // Rejected future: await must throw, caught here.
+    let f1 = async/make-future(async/FutureState.Pending {})
+    async/reject-future!(f1, "boom")
+    let r1 = try {
+        async/await(f1)
+        "NO-THROW"
+    } catch (e) {
+        "threw: " ++ e
+    }
+    println(r1)
+
+    // Cancelled future: await must throw (not hang).
+    let f2 = async/make-future(async/FutureState.Pending {})
+    async/cancel-future!(f2)
+    let r2 = try {
+        async/await(f2)
+        "NO-THROW"
+    } catch (e) {
+        "threw-cancel"
+    }
+    println(r2)
+
+    // Resolved future still returns its value through await.
+    let f3 = async/make-future(async/FutureState.Pending {})
+    async/resolve-future!(f3, 42)
+    println(async/await(f3))
+    println("done")
+
+    null
+}
+
+// @beagle.core.snapshot
+// threw: boom
+// threw-cancel
+// 42
+// done

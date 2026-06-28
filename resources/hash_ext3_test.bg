@@ -1,0 +1,59 @@
+namespace hash_ext3_test
+
+use beagle.hash as hash
+
+// CRC-32 (IEEE 802.3, reflected poly 0xEDB88320) and FNV-1a 32-bit checks.
+// Expected values derived by reading standard-library/beagle.hash.bg and the
+// canonical published test vectors for these algorithms.
+
+test "crc32 empty string is zero" {
+    // crc starts 0xFFFFFFFF, no bytes processed, returns 0xFFFFFFFF ^ 0xFFFFFFFF.
+    assert-eq!(hash/crc32(""), 0)
+}
+
+test "crc32 check value 123456789" {
+    // The standard CRC-32 check value for "123456789" is 0xCBF43926.
+    assert-eq!(hash/crc32("123456789"), 3421780262)
+}
+
+test "crc32 single char a" {
+    // CRC-32("a") == 0xE8B7BE43.
+    assert-eq!(hash/crc32("a"), 3904355907)
+}
+
+test "crc32 accepts byte vector input" {
+    // "123456789" as ASCII byte values must match the String form.
+    let bytes = [49, 50, 51, 52, 53, 54, 55, 56, 57]
+    assert-eq!(hash/crc32(bytes), hash/crc32("123456789"))
+    assert-eq!(hash/crc32(bytes), 3421780262)
+}
+
+test "crc32 result is within 32 bits" {
+    let v = hash/crc32("the quick brown fox")
+    assert!(v >= 0)
+    assert!(v <= 0xFFFFFFFF)
+}
+
+test "fnv1a-32 empty string is the offset basis" {
+    assert-eq!(hash/fnv1a-32(""), 2166136261)
+}
+
+test "fnv1a-32 single char a" {
+    // FNV-1a 32-bit("a") == 0xE40C292C.
+    assert-eq!(hash/fnv1a-32("a"), 3826002220)
+}
+
+test "fnv1a-32 foobar" {
+    // FNV-1a 32-bit("foobar") == 0xBF9CF968.
+    assert-eq!(hash/fnv1a-32("foobar"), 3214735720)
+}
+
+test "fnv1a-32 accepts byte vector input" {
+    // "a" as a single byte value must match the String form.
+    assert-eq!(hash/fnv1a-32([97]), hash/fnv1a-32("a"))
+    assert-eq!(hash/fnv1a-32([97]), 3826002220)
+}
+
+test "crc32 and fnv1a-32 differ for same input" {
+    assert-ne!(hash/crc32("hello"), hash/fnv1a-32("hello"))
+}

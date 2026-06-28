@@ -1,0 +1,142 @@
+namespace ip_coverage_test
+
+use beagle.ip as ip
+
+// Regression coverage for beagle.ip (standard-library/beagle.ip.bg).
+// IPv4 addresses are 32-bit ints in host order: (a<<24)|(b<<16)|(c<<8)|d.
+
+test "parse-ipv4 happy paths" {
+    assert-eq!(ip/parse-ipv4("192.168.1.1"), 3232235777)
+    assert-eq!(ip/parse-ipv4("0.0.0.0"), 0)
+    assert-eq!(ip/parse-ipv4("255.255.255.255"), 4294967295)
+    assert-eq!(ip/parse-ipv4("10.0.0.0"), 167772160)
+    assert-eq!(ip/parse-ipv4("8.8.8.8"), 134744072)
+    // bare-zero octets are valid
+    assert-eq!(ip/parse-ipv4("0.0.0.1"), 1)
+}
+
+test "parse-ipv4 rejects malformed shapes" {
+    // wrong number of dotted parts
+    assert-eq!(ip/parse-ipv4("1.2.3"), null)
+    assert-eq!(ip/parse-ipv4("1.2.3.4.5"), null)
+    assert-eq!(ip/parse-ipv4(""), null)
+    assert-eq!(ip/parse-ipv4("192.168.1"), null)
+    // octet out of range
+    assert-eq!(ip/parse-ipv4("256.1.1.1"), null)
+    assert-eq!(ip/parse-ipv4("999.1.1.1"), null)
+    // octet too long (> 3 chars)
+    assert-eq!(ip/parse-ipv4("1.2.3.4444"), null)
+    // non-digit characters
+    assert-eq!(ip/parse-ipv4("a.b.c.d"), null)
+    assert-eq!(ip/parse-ipv4("1.2.3.4 "), null)
+    // signed forms not accepted
+    assert-eq!(ip/parse-ipv4("-1.0.0.0"), null)
+    assert-eq!(ip/parse-ipv4("+1.0.0.0"), null)
+    // empty octet
+    assert-eq!(ip/parse-ipv4("1..2.3"), null)
+}
+
+test "parse-ipv4 rejects leading-zero octets (CVE-2021-29921 octal class)" {
+    assert-eq!(ip/parse-ipv4("010.0.0.1"), null)
+    assert-eq!(ip/parse-ipv4("192.168.001.1"), null)
+    assert-eq!(ip/parse-ipv4("00.0.0.0"), null)
+    // but a single bare zero octet is still fine
+    assert-eq!(ip/parse-ipv4("0.0.0.0"), 0)
+}
+
+test "parse-octet exact behavior" {
+    assert-eq!(ip/parse-octet("0"), 0)
+    assert-eq!(ip/parse-octet("255"), 255)
+    assert-eq!(ip/parse-octet("42"), 42)
+    assert-eq!(ip/parse-octet(""), null)
+    assert-eq!(ip/parse-octet("256"), null)
+    assert-eq!(ip/parse-octet("1000"), null)   // > 3 chars
+    assert-eq!(ip/parse-octet("01"), null)      // leading zero
+    assert-eq!(ip/parse-octet("-5"), null)
+    assert-eq!(ip/parse-octet("5a"), null)
+}
+
+test "ipv4-to-string happy paths" {
+    assert-eq!(ip/ipv4-to-string(3232235777), "192.168.1.1")
+    assert-eq!(ip/ipv4-to-string(0), "0.0.0.0")
+    assert-eq!(ip/ipv4-to-string(4294967295), "255.255.255.255")
+    assert-eq!(ip/ipv4-to-string(167772160), "10.0.0.0")
+}
+
+test "parse-ipv4 / ipv4-to-string round trip" {
+    assert-eq!(ip/ipv4-to-string(ip/parse-ipv4("172.16.254.1")), "172.16.254.1")
+    assert-eq!(ip/parse-ipv4(ip/ipv4-to-string(3232235781)), 3232235781)
+}
+
+test "prefix-to-mask boundaries" {
+    assert-eq!(ip/prefix-to-mask(0), 0)
+    assert-eq!(ip/prefix-to-mask(32), 4294967295)
+    assert-eq!(ip/prefix-to-mask(24), 4294967040)   // 0xFFFFFF00
+    assert-eq!(ip/prefix-to-mask(16), 4294901760)   // 0xFFFF0000
+    assert-eq!(ip/prefix-to-mask(8), 4278190080)    // 0xFF000000
+    assert-eq!(ip/prefix-to-mask(1), 2147483648)    // 0x80000000
+    // clamping outside [0,32]
+    assert-eq!(ip/prefix-to-mask(-5), 0)
+    assert-eq!(ip/prefix-to-mask(40), 4294967295)
+}
+
+test "cidr-network happy paths" {
+    assert-eq!(ip/cidr-network("192.168.1.0/24"), [3232235776, 4294967040])
+    assert-eq!(ip/cidr-network("10.0.0.0/8"), [167772160, 4278190080])
+    // host bits are masked off into the network address
+    assert-eq!(ip/cidr-network("192.168.1.5/24"), [3232235776, 4294967040])
+    // /0 collapses network to 0 with a zero mask
+    assert-eq!(ip/cidr-network("1.2.3.4/0"), [0, 0])
+    // /32 keeps the full address
+    assert-eq!(ip/cidr-network("8.8.8.8/32"), [134744072, 4294967295])
+}
+
+test "cidr-network rejects malformed input" {
+    assert-eq!(ip/cidr-network("192.168.1.0"), null)     // no slash
+    assert-eq!(ip/cidr-network("192.168.1.0/24/8"), null) // too many slashes
+    assert-eq!(ip/cidr-network("192.168.1.0/33"), null)   // prefix > 32
+    assert-eq!(ip/cidr-network("192.168.1.0/abc"), null)  // non-numeric prefix
+    assert-eq!(ip/cidr-network("999.1.1.1/24"), null)     // bad ip
+    assert-eq!(ip/cidr-network("192.168.1.0/05"), null)   // leading-zero prefix
+}
+
+test "ipv4-in-cidr? membership" {
+    assert!(ip/ipv4-in-cidr?("192.168.1.5", "192.168.1.0/24"))
+    assert!(ip/ipv4-in-cidr?("192.168.1.255", "192.168.1.0/24"))
+    assert-eq!(ip/ipv4-in-cidr?("192.168.2.5", "192.168.1.0/24"), false)
+    assert!(ip/ipv4-in-cidr?("10.5.6.7", "10.0.0.0/8"))
+    // /0 matches everything
+    assert!(ip/ipv4-in-cidr?("8.8.8.8", "0.0.0.0/0"))
+    // /32 matches only the exact host
+    assert!(ip/ipv4-in-cidr?("8.8.8.8", "8.8.8.8/32"))
+    assert-eq!(ip/ipv4-in-cidr?("8.8.8.9", "8.8.8.8/32"), false)
+}
+
+test "ipv4-in-cidr? returns false for invalid input" {
+    assert-eq!(ip/ipv4-in-cidr?("not-an-ip", "192.168.1.0/24"), false)
+    assert-eq!(ip/ipv4-in-cidr?("192.168.1.5", "garbage"), false)
+    assert-eq!(ip/ipv4-in-cidr?("192.168.1.5", "192.168.1.0/99"), false)
+}
+
+test "is-private-ipv4? RFC 1918 / loopback / link-local" {
+    // RFC 1918 ranges
+    assert!(ip/is-private-ipv4?("10.0.0.1"))
+    assert!(ip/is-private-ipv4?("172.16.0.1"))
+    assert!(ip/is-private-ipv4?("172.31.255.255"))
+    assert!(ip/is-private-ipv4?("192.168.1.1"))
+    // loopback + link-local
+    assert!(ip/is-private-ipv4?("127.0.0.1"))
+    assert!(ip/is-private-ipv4?("169.254.1.1"))
+}
+
+test "is-private-ipv4? public + boundary addresses are not private" {
+    assert-eq!(ip/is-private-ipv4?("8.8.8.8"), false)
+    assert-eq!(ip/is-private-ipv4?("11.0.0.1"), false)
+    // just below/above the 172.16/12 block
+    assert-eq!(ip/is-private-ipv4?("172.15.255.255"), false)
+    assert-eq!(ip/is-private-ipv4?("172.32.0.1"), false)
+    // 169.253 is not link-local
+    assert-eq!(ip/is-private-ipv4?("169.253.0.1"), false)
+    // invalid input is not private
+    assert-eq!(ip/is-private-ipv4?("bogus"), false)
+}

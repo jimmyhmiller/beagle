@@ -1,0 +1,148 @@
+namespace mathx_coverage_test
+
+// Coverage for beagle.mathx public API not already pinned by
+// stdlib_utils_test / stdlib_gaphunt_round4_test / gaphunt_round6_fixes_test
+// (those cover floor-div/floor-mod, parity for floats, overflow throws, and a
+// few happy paths). Here: constants, abs-int, sign, gcd/lcm edges, clamp,
+// lerp, min-of/max-of (incl. empty-input errors), factorial/pow-int edges and
+// error paths, angle conversion, and division-by-zero errors.
+
+use beagle.mathx as m
+
+test "constants pi and e" {
+    assert-eq!(m/pi(), 3.141592653589793)
+    assert-eq!(m/e(), 2.718281828459045)
+}
+
+test "abs-int" {
+    assert-eq!(m/abs-int(0 - 5), 5)
+    assert-eq!(m/abs-int(5), 5)
+    assert-eq!(m/abs-int(0), 0)
+}
+
+test "sign" {
+    assert-eq!(m/sign(0 - 3), -1)
+    assert-eq!(m/sign(0), 0)
+    assert-eq!(m/sign(42), 1)
+}
+
+test "gcd happy and edges" {
+    assert-eq!(m/gcd(12, 18), 6)
+    assert-eq!(m/gcd(0, 5), 5)
+    assert-eq!(m/gcd(5, 0), 5)
+    assert-eq!(m/gcd(0, 0), 0)
+    // always non-negative, operates on absolute values
+    assert-eq!(m/gcd(0 - 12, 18), 6)
+    assert-eq!(m/gcd(12, 0 - 18), 6)
+    assert-eq!(m/gcd(0 - 12, 0 - 18), 6)
+    // coprime
+    assert-eq!(m/gcd(7, 13), 1)
+}
+
+test "lcm happy and edges" {
+    assert-eq!(m/lcm(4, 6), 12)
+    assert-eq!(m/lcm(0, 5), 0)
+    assert-eq!(m/lcm(5, 0), 0)
+    assert-eq!(m/lcm(21, 6), 42)
+    // negatives -> non-negative result
+    assert-eq!(m/lcm(0 - 4, 6), 12)
+    assert-eq!(m/lcm(4, 0 - 6), 12)
+}
+
+test "clamp" {
+    assert-eq!(m/clamp(5, 0, 3), 3)
+    assert-eq!(m/clamp(0 - 1, 0, 3), 0)
+    assert-eq!(m/clamp(2, 0, 3), 2)
+    // on the boundaries
+    assert-eq!(m/clamp(0, 0, 3), 0)
+    assert-eq!(m/clamp(3, 0, 3), 3)
+}
+
+test "lerp" {
+    assert-eq!(m/lerp(0, 10, 0.5), 5.0)
+    assert-eq!(m/lerp(0, 10, 0.0), 0.0)
+    assert-eq!(m/lerp(0, 10, 1.0), 10.0)
+    // result is always a Float even with integer t
+    assert-eq!(m/lerp(2, 4, 1), 4.0)
+    // extrapolation past [0,1]
+    assert-eq!(m/lerp(0, 10, 2.0), 20.0)
+}
+
+test "min-of and max-of" {
+    assert-eq!(m/min-of([3, 1, 4, 1, 5]), 1)
+    assert-eq!(m/max-of([3, 1, 4, 1, 5]), 5)
+    // single element
+    assert-eq!(m/min-of([7]), 7)
+    assert-eq!(m/max-of([7]), 7)
+    // negatives
+    assert-eq!(m/min-of([0 - 3, 0 - 1, 0 - 9]), 0 - 9)
+    assert-eq!(m/max-of([0 - 3, 0 - 1, 0 - 9]), 0 - 1)
+}
+
+test "min-of and max-of throw on empty input" {
+    assert-throws!(fn() { m/min-of([]) })
+    assert-throws!(fn() { m/max-of([]) })
+}
+
+test "factorial happy and edges" {
+    assert-eq!(m/factorial(0), 1)
+    assert-eq!(m/factorial(1), 1)
+    assert-eq!(m/factorial(5), 120)
+    assert-eq!(m/factorial(10), 3628800)
+}
+
+test "factorial throws on negative input" {
+    assert-throws!(fn() { m/factorial(0 - 1) })
+}
+
+test "factorial throws on 61-bit overflow" {
+    // 21! overflows the 61-bit integer range -> hard error, not silent wrap
+    assert-throws!(fn() { m/factorial(21) })
+}
+
+test "pow-int happy and edges" {
+    assert-eq!(m/pow-int(2, 10), 1024)
+    assert-eq!(m/pow-int(3, 0), 1)
+    assert-eq!(m/pow-int(5, 3), 125)
+    // base 0
+    assert-eq!(m/pow-int(0, 0), 1)
+    assert-eq!(m/pow-int(0, 5), 0)
+    // base 1 and identity exponent
+    assert-eq!(m/pow-int(1, 100), 1)
+    assert-eq!(m/pow-int(7, 1), 7)
+    // negative base
+    assert-eq!(m/pow-int(0 - 2, 3), 0 - 8)
+    assert-eq!(m/pow-int(0 - 2, 4), 16)
+}
+
+test "pow-int throws on negative exponent" {
+    assert-throws!(fn() { m/pow-int(2, 0 - 1) })
+}
+
+test "pow-int throws on 61-bit overflow" {
+    assert-throws!(fn() { m/pow-int(2, 61) })
+}
+
+test "deg->rad and rad->deg" {
+    assert-eq!(m/deg->rad(180), m/pi())
+    assert-eq!(m/deg->rad(0), 0.0)
+    assert-eq!(m/rad->deg(m/pi()), 180.0)
+    assert-eq!(m/rad->deg(0.0), 0.0)
+}
+
+test "floor-div and floor-mod throw on division by zero" {
+    assert-throws!(fn() { m/floor-div(5, 0) })
+    assert-throws!(fn() { m/floor-mod(5, 0) })
+}
+
+test "floor-div and floor-mod core identity for ints" {
+    // floor-div rounds toward -inf; floor-mod has the sign of the divisor
+    assert-eq!(m/floor-div(7, 3), 2)
+    assert-eq!(m/floor-mod(7, 3), 1)
+    assert-eq!(m/floor-div(0 - 1, 3), -1)
+    assert-eq!(m/floor-mod(0 - 1, 3), 2)
+    assert-eq!(m/floor-div(7, 0 - 3), -3)
+    assert-eq!(m/floor-mod(7, 0 - 3), 0 - 2)
+    // identity: floor-div(a,b)*b + floor-mod(a,b) == a
+    assert-eq!(m/floor-div(0 - 7, 3) * 3 + m/floor-mod(0 - 7, 3), 0 - 7)
+}

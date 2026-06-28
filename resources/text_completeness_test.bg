@@ -1,0 +1,23 @@
+namespace text_completeness_test
+
+use beagle.text as text
+
+test "center pads both sides" {
+    assert-eq!(text/center("hi", 6), "  hi  ")
+    assert-eq!(text/center("hi", 7), "  hi   ")        // odd extra on the right
+    assert-eq!(text/center("hi", 7, "."), "..hi...")
+    assert-eq!(text/center("toolong", 3), "toolong")   // already wide enough
+    assert-eq!(text/center("x", 5, "ab"), "abxab")
+}
+
+test "chars splits a string into single-char strings" {
+    assert-eq!(text/chars("abc"), ["a", "b", "c"])
+    assert-eq!(text/chars(""), [])
+    assert-eq!(length(text/chars("hello")), 5)
+}
+
+test "lines splits on newlines" {
+    assert-eq!(text/lines("a\nb\nc"), ["a", "b", "c"])
+    assert-eq!(text/lines("single"), ["single"])
+    assert-eq!(text/lines("a\nb\n"), ["a", "b", ""])   // trailing newline -> trailing empty
+}

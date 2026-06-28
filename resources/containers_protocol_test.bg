@@ -1,0 +1,60 @@
+namespace containers_protocol_test
+
+use beagle.containers as c
+
+// Regression tests: Deque / DefaultMap / OrderedMap now participate in the core
+// collection protocols (count / get / assoc / contains? / keys / seq / conj / into / for).
+
+fn build-deque() {
+    // logical order [1, 2, 3]
+    c/push-back(c/push-back(c/push-front(c/deque-new(), 1), 2), 3)
+}
+
+test "Deque works through core protocols" {
+    let d = build-deque()
+    assert-eq!(count(d), 3)
+    assert-eq!(empty?(c/deque-new()), true)
+    assert-eq!(vec(d), [1, 2, 3])              // via Seqable
+    assert-eq!(count(conj(d, 4)), 4)           // via Conj (push-back)
+    assert-eq!(reduce(fn(a, x) { a + x }, 0, d), 6)
+    let mut collected = []
+    for x in d {
+        collected = push(collected, x)
+    }
+    assert-eq!(collected, [1, 2, 3])
+}
+
+test "DefaultMap works through core protocols" {
+    let dm = c/dm-assoc(c/dm-new(0), :a, 5)
+    assert-eq!(get(dm, :a), 5)
+    assert-eq!(get(dm, :missing), 0)           // stored default via Indexed
+    assert-eq!(get(dm, :missing, 99), 99)      // explicit 3-arg default
+    assert-eq!(count(dm), 1)
+    assert!(contains?(dm, :a))
+    assert-eq!(contains?(dm, :missing), false)
+    assert-eq!(keys(dm), [:a])
+    let dm2 = assoc(dm, :b, 7)                  // via Associable
+    assert-eq!(get(dm2, :b), 7)
+    assert-eq!(count(dm2), 2)
+}
+
+test "OrderedMap works through core protocols and preserves order" {
+    let om = c/om-assoc(c/om-assoc(c/om-assoc(c/om-new(), :x, 1), :y, 2), :z, 3)
+    assert-eq!(get(om, :y), 2)
+    assert-eq!(count(om), 3)
+    assert!(contains?(om, :x))
+    assert-eq!(keys(om), [:x, :y, :z])         // insertion order
+    let pairs = vec(om)                          // via Seqable -> [[:x 1] ...]
+    assert-eq!(get(get(pairs, 0), 0), :x)
+    assert-eq!(get(get(pairs, 2), 1), 3)
+    // re-assoc keeps position
+    let om2 = assoc(om, :x, 100)
+    assert-eq!(keys(om2), [:x, :y, :z])
+    assert-eq!(get(om2, :x), 100)
+}
+
+test "into accumulates onto a Deque via Conj" {
+    let d = into(c/deque-new(), [1, 2, 3])
+    assert-eq!(count(d), 3)
+    assert-eq!(vec(d), [1, 2, 3])
+}

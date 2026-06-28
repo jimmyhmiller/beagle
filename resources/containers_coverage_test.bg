@@ -1,0 +1,263 @@
+namespace containers_coverage_test
+
+use beagle.containers as c
+
+// ---------------------------------------------------------------------------
+// Deque
+// ---------------------------------------------------------------------------
+
+test "deque-new is empty" {
+    let d = c/deque-new()
+    assert!(c/deque-empty?(d))
+    assert-eq!(c/deque-count(d), 0)
+    assert-eq!(c/deque-to-vec(d), [])
+}
+
+test "deque push-back appends in logical order" {
+    let mut d = c/deque-new()
+    d = c/push-back(d, 1)
+    d = c/push-back(d, 2)
+    d = c/push-back(d, 3)
+    assert-eq!(c/deque-count(d), 3)
+    assert!(c/deque-empty?(d) == false)
+    assert-eq!(c/deque-to-vec(d), [1, 2, 3])
+}
+
+test "deque push-front prepends in logical order" {
+    let mut d = c/deque-new()
+    d = c/push-front(d, 1)
+    d = c/push-front(d, 2)
+    d = c/push-front(d, 3)
+    assert-eq!(c/deque-to-vec(d), [3, 2, 1])
+}
+
+test "deque mixed push-front/push-back logical order" {
+    let mut d = c/deque-new()
+    d = c/push-back(d, 1)
+    d = c/push-back(d, 2)
+    d = c/push-back(d, 3)
+    d = c/push-front(d, 0)
+    assert-eq!(c/deque-to-vec(d), [0, 1, 2, 3])
+    assert-eq!(c/deque-count(d), 4)
+}
+
+test "deque pop-front returns head and shrinking deque" {
+    let mut d = c/deque-new()
+    d = c/push-back(d, 1)
+    d = c/push-back(d, 2)
+    d = c/push-back(d, 3)
+    let r = c/pop-front(d)
+    assert-eq!(get(r, 0), 1)
+    let d2 = get(r, 1)
+    assert-eq!(c/deque-to-vec(d2), [2, 3])
+    assert-eq!(c/deque-count(d2), 2)
+}
+
+test "deque pop-back returns tail and shrinking deque" {
+    let mut d = c/deque-new()
+    d = c/push-back(d, 1)
+    d = c/push-back(d, 2)
+    d = c/push-back(d, 3)
+    let r = c/pop-back(d)
+    assert-eq!(get(r, 0), 3)
+    let d2 = get(r, 1)
+    assert-eq!(c/deque-to-vec(d2), [1, 2])
+}
+
+test "deque drain entirely from front preserves order" {
+    let mut d = c/deque-new()
+    d = c/push-back(d, 10)
+    d = c/push-back(d, 20)
+    d = c/push-back(d, 30)
+    d = c/push-back(d, 40)
+    let mut out = []
+    while c/deque-empty?(d) == false {
+        let r = c/pop-front(d)
+        out = push(out, get(r, 0))
+        d = get(r, 1)
+    }
+    assert-eq!(out, [10, 20, 30, 40])
+}
+
+test "deque drain entirely from back yields reversed order" {
+    let mut d = c/deque-new()
+    d = c/push-back(d, 10)
+    d = c/push-back(d, 20)
+    d = c/push-back(d, 30)
+    d = c/push-back(d, 40)
+    let mut out = []
+    while c/deque-empty?(d) == false {
+        let r = c/pop-back(d)
+        out = push(out, get(r, 0))
+        d = get(r, 1)
+    }
+    assert-eq!(out, [40, 30, 20, 10])
+}
+
+test "deque pop-front on single-front-element deque" {
+    let d = c/push-front(c/deque-new(), 7)
+    let r = c/pop-front(d)
+    assert-eq!(get(r, 0), 7)
+    assert!(c/deque-empty?(get(r, 1)))
+}
+
+test "deque pop-back on single-back-element deque" {
+    let d = c/push-back(c/deque-new(), 7)
+    let r = c/pop-back(d)
+    assert-eq!(get(r, 0), 7)
+    assert!(c/deque-empty?(get(r, 1)))
+}
+
+test "deque pop-back rebalances from a front-only deque" {
+    // All elements pushed on the front; popping from the back forces rebalance.
+    let mut d = c/deque-new()
+    d = c/push-front(d, 1)  // logical [1]
+    d = c/push-front(d, 2)  // logical [2, 1]
+    d = c/push-front(d, 3)  // logical [3, 2, 1]
+    let r = c/pop-back(d)
+    assert-eq!(get(r, 0), 1)  // logical tail
+    assert-eq!(c/deque-to-vec(get(r, 1)), [3, 2])
+}
+
+test "deque pop-front rebalances from a back-only deque" {
+    let mut d = c/deque-new()
+    d = c/push-back(d, 1)
+    d = c/push-back(d, 2)
+    d = c/push-back(d, 3)
+    let r = c/pop-front(d)
+    assert-eq!(get(r, 0), 1)
+    assert-eq!(c/deque-to-vec(get(r, 1)), [2, 3])
+}
+
+test "deque pop-front on empty throws" {
+    assert-throws!(fn() { c/pop-front(c/deque-new()) })
+}
+
+test "deque pop-back on empty throws" {
+    assert-throws!(fn() { c/pop-back(c/deque-new()) })
+}
+
+// ---------------------------------------------------------------------------
+// DefaultMap
+// ---------------------------------------------------------------------------
+
+test "default-map returns default for absent keys" {
+    let dm = c/dm-new(0)
+    assert-eq!(c/dm-get(dm, :missing), 0)
+    assert-eq!(c/dm-count(dm), 0)
+}
+
+test "default-map stores and reads back values" {
+    let dm = c/dm-assoc(c/dm-new(0), :a, 5)
+    assert-eq!(c/dm-get(dm, :a), 5)
+    assert-eq!(c/dm-get(dm, :b), 0)  // still default
+    assert-eq!(c/dm-count(dm), 1)
+}
+
+test "default-map distinguishes stored-null from absent" {
+    let dm = c/dm-assoc(c/dm-new(99), :a, null)
+    assert-eq!(c/dm-get(dm, :a), null)  // explicit null, not default
+    assert-eq!(c/dm-get(dm, :b), 99)    // absent -> default
+}
+
+test "default-map update applies f to default when absent" {
+    let dm = c/dm-update(c/dm-new(0), :count, fn(x) { x + 1 })
+    assert-eq!(c/dm-get(dm, :count), 1)
+}
+
+test "default-map update applies f to current value when present" {
+    let mut dm = c/dm-new(0)
+    dm = c/dm-update(dm, :count, fn(x) { x + 1 })
+    dm = c/dm-update(dm, :count, fn(x) { x + 1 })
+    dm = c/dm-update(dm, :count, fn(x) { x + 10 })
+    assert-eq!(c/dm-get(dm, :count), 12)
+}
+
+test "default-map assoc overwrites existing key without growing count" {
+    let mut dm = c/dm-new(0)
+    dm = c/dm-assoc(dm, :a, 1)
+    dm = c/dm-assoc(dm, :a, 2)
+    assert-eq!(c/dm-get(dm, :a), 2)
+    assert-eq!(c/dm-count(dm), 1)
+}
+
+// ---------------------------------------------------------------------------
+// OrderedMap
+// ---------------------------------------------------------------------------
+
+test "ordered-map empty" {
+    let om = c/om-new()
+    assert-eq!(c/om-count(om), 0)
+    assert-eq!(c/om-keys-in-order(om), [])
+    assert-eq!(c/om-vals-in-order(om), [])
+    assert-eq!(c/om-pairs(om), [])
+    assert-eq!(c/om-get(om, :nope), null)
+}
+
+test "ordered-map preserves insertion order" {
+    let mut om = c/om-new()
+    om = c/om-assoc(om, :c, 3)
+    om = c/om-assoc(om, :a, 1)
+    om = c/om-assoc(om, :b, 2)
+    assert-eq!(c/om-keys-in-order(om), [:c, :a, :b])
+    assert-eq!(c/om-vals-in-order(om), [3, 1, 2])
+    assert-eq!(c/om-pairs(om), [[:c, 3], [:a, 1], [:b, 2]])
+    assert-eq!(c/om-count(om), 3)
+}
+
+test "ordered-map update keeps position but changes value" {
+    let mut om = c/om-new()
+    om = c/om-assoc(om, :a, 1)
+    om = c/om-assoc(om, :b, 2)
+    om = c/om-assoc(om, :a, 99)  // re-assoc existing key
+    assert-eq!(c/om-keys-in-order(om), [:a, :b])  // order unchanged
+    assert-eq!(c/om-vals-in-order(om), [99, 2])
+    assert-eq!(c/om-get(om, :a), 99)
+    assert-eq!(c/om-count(om), 2)
+}
+
+test "ordered-map get returns null for absent key" {
+    let om = c/om-assoc(c/om-new(), :a, 1)
+    assert-eq!(c/om-get(om, :a), 1)
+    assert-eq!(c/om-get(om, :z), null)
+}
+
+// ---------------------------------------------------------------------------
+// Set helpers over vectors-as-sets
+// ---------------------------------------------------------------------------
+
+test "set-union dedupes and includes both sides" {
+    assert-eq!(c/set-union-vec([1, 2, 2, 3], [3, 4]), [1, 2, 3, 4])
+}
+
+test "set-union of empties" {
+    assert-eq!(c/set-union-vec([], []), [])
+    assert-eq!(c/set-union-vec([1, 1], []), [1])
+    assert-eq!(c/set-union-vec([], [5, 5, 6]), [5, 6])
+}
+
+test "set-intersection keeps distinct shared elements in first-seen order" {
+    assert-eq!(c/set-intersection-vec([1, 2, 3, 3], [2, 3, 5]), [2, 3])
+}
+
+test "set-intersection with disjoint sets is empty" {
+    assert-eq!(c/set-intersection-vec([1, 2], [3, 4]), [])
+    assert-eq!(c/set-intersection-vec([], [1, 2]), [])
+    assert-eq!(c/set-intersection-vec([1, 2], []), [])
+}
+
+test "set-difference removes elements present in second" {
+    assert-eq!(c/set-difference-vec([1, 2, 3], [2]), [1, 3])
+    assert-eq!(c/set-difference-vec([1, 1, 2, 3], [2, 3]), [1])
+}
+
+test "set-difference with empty second returns distinct first" {
+    assert-eq!(c/set-difference-vec([1, 2, 2, 3], []), [1, 2, 3])
+    assert-eq!(c/set-difference-vec([], [1]), [])
+}
+
+test "set helpers work with string elements via structural equality" {
+    assert-eq!(c/set-union-vec(["a", "b"], ["b", "c"]), ["a", "b", "c"])
+    assert-eq!(c/set-intersection-vec(["a", "b", "c"], ["b", "c", "d"]), ["b", "c"])
+    assert-eq!(c/set-difference-vec(["a", "b", "c"], ["b"]), ["a", "c"])
+}

@@ -1,0 +1,80 @@
+namespace date_ext3_test
+
+use beagle.date as date
+
+// Expected values below are derived by reading standard-library/beagle.date.bg
+// and standard-library/beagle.time.bg:
+//   - weekday(dt) returns 0 = Sunday .. 6 = Saturday (1970-01-01 was Thursday)
+//   - weekday-name maps that integer to the full English name
+//   - diff-days(a, b) = days-from-civil(b) - days-from-civil(a), date-only,
+//     so time-of-day is ignored and the result is signed.
+
+test "weekday-name known dates" {
+    // 1970-01-01 was a Thursday (epoch day 0 -> floor-mod(0+4,7) = 4).
+    assert-eq!(date/weekday-name(date/parse-iso8601("1970-01-01T00:00:00Z")), "Thursday")
+    // 2000-01-01 was a Saturday (weekday 6).
+    assert-eq!(date/weekday-name(date/parse-iso8601("2000-01-01T00:00:00Z")), "Saturday")
+    // 2024-01-15 was a Monday (weekday 1).
+    assert-eq!(date/weekday-name(date/parse-iso8601("2024-01-15T12:30:00Z")), "Monday")
+    // 2024-01-14 was a Sunday (weekday 0) — exercises the index-0 name.
+    assert-eq!(date/weekday-name(date/parse-iso8601("2024-01-14T00:00:00Z")), "Sunday")
+}
+
+test "weekday-name ignores time of day" {
+    let early = date/parse-iso8601("2024-01-15T00:00:00Z")
+    let late = date/parse-iso8601("2024-01-15T23:59:59Z")
+    assert-eq!(date/weekday-name(early), "Monday")
+    assert-eq!(date/weekday-name(late), "Monday")
+    assert-eq!(date/weekday-name(early), date/weekday-name(late))
+}
+
+test "weekday-name matches numeric weekday" {
+    // weekday-name is built on weekday; the two must agree on the numbering.
+    let dt = date/parse-iso8601("2024-01-15T00:00:00Z")
+    assert-eq!(date/weekday(dt), 1)
+    assert-eq!(date/weekday-name(dt), "Monday")
+}
+
+test "diff-days positive and negative" {
+    let a = date/parse-iso8601("2024-01-15T00:00:00Z")
+    let b = date/parse-iso8601("2024-01-20T00:00:00Z")
+    assert-eq!(date/diff-days(a, b), 5)
+    assert-eq!(date/diff-days(b, a), 0 - 5)
+}
+
+test "diff-days same date is zero regardless of time" {
+    let a = date/parse-iso8601("2024-01-15T00:00:00Z")
+    let b = date/parse-iso8601("2024-01-15T23:59:59Z")
+    assert-eq!(date/diff-days(a, b), 0)
+    assert-eq!(date/diff-days(a, a), 0)
+}
+
+test "diff-days ignores time-of-day across a boundary" {
+    // Even though b is only two hours after a, they fall on different
+    // calendar days, so the date-only difference is exactly 1.
+    let a = date/parse-iso8601("2024-01-15T23:00:00Z")
+    let b = date/parse-iso8601("2024-01-16T01:00:00Z")
+    assert-eq!(date/diff-days(a, b), 1)
+}
+
+test "diff-days across year boundary" {
+    let a = date/parse-iso8601("2023-12-31T12:00:00Z")
+    let b = date/parse-iso8601("2024-01-01T06:00:00Z")
+    assert-eq!(date/diff-days(a, b), 1)
+}
+
+test "diff-days across a leap February" {
+    // 2024 is a leap year: Jan 31 -> Mar 1 is 30 days
+    // (Jan 31 -> Feb 1 = 1, Feb 1 -> Mar 1 = 29).
+    let a = date/parse-iso8601("2024-01-31T00:00:00Z")
+    let b = date/parse-iso8601("2024-03-01T00:00:00Z")
+    assert-eq!(date/diff-days(a, b), 30)
+}
+
+test "diff-days agrees with add-days" {
+    // add-days already exists; diff-days should invert a known day shift.
+    let a = date/parse-iso8601("2024-06-10T08:00:00Z")
+    let b = date/add-days(a, 100)
+    assert-eq!(date/diff-days(a, b), 100)
+    assert-eq!(date/diff-days(b, a), 0 - 100)
+}

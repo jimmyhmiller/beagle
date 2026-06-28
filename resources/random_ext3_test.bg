@@ -1,0 +1,110 @@
+namespace random_ext3_test
+
+use beagle.random as rand
+
+// All expected values below are derived by hand-executing the 32-bit xorshift
+// generator in beagle.random (xorshift-step: x^=x<<13; x^=x>>17; x^=x<<5; each
+// step masked to 32 bits) starting from the normalized seed. A Python reference
+// implementing the identical arithmetic produced the constants asserted here.
+
+// Membership test: is x an element of vector v?
+fn member?(v, x) {
+    let n = length(v)
+    let mut i = 0
+    let mut found = false
+    while i < n {
+        if v[i] == x {
+            found = true
+        }
+        i = i + 1
+    }
+    found
+}
+
+test "next-int produces the documented deterministic stream for seed 1" {
+    let r = rand/make-rng(1)
+    // seed 1 -> normalize-seed(1) == 1; first two xorshift steps.
+    assert-eq!(rand/next-int(r), 270369)
+    assert-eq!(rand/next-int(r), 67634689)
+}
+
+test "same seed yields identical streams" {
+    let a = rand/make-rng(123)
+    let b = rand/make-rng(123)
+    assert-eq!(rand/next-int(a), rand/next-int(b))
+    assert-eq!(rand/next-int(a), rand/next-int(b))
+}
+
+test "choice returns the element at the modular index of the first word" {
+    // seed 42 -> first next-int == 11355432; 11355432 mod 5 == 2; v[2] == 30.
+    let r = rand/make-rng(42)
+    assert-eq!(rand/choice(r, [10, 20, 30, 40, 50]), 30)
+}
+
+test "choice on an empty vector throws" {
+    let r = rand/make-rng(1)
+    assert-throws!(fn() { rand/choice(r, []) })
+}
+
+test "shuffle returns the exact Fisher-Yates permutation for seed 7" {
+    // Descending Fisher-Yates over [1,2,3,4,5] with seed 7 yields [1,3,2,5,4].
+    let r = rand/make-rng(7)
+    assert-eq!(rand/shuffle(r, [1, 2, 3, 4, 5]), [1, 3, 2, 5, 4])
+}
+
+test "shuffle does not mutate its input and preserves all elements" {
+    let original = [1, 2, 3, 4, 5]
+    let r = rand/make-rng(7)
+    let result = rand/shuffle(r, original)
+    // Input vector is unchanged.
+    assert-eq!(original, [1, 2, 3, 4, 5])
+    // Result is a permutation: same length, every original element present.
+    assert-eq!(length(result), 5)
+    assert!(member?(result, 1))
+    assert!(member?(result, 2))
+    assert!(member?(result, 3))
+    assert!(member?(result, 4))
+    assert!(member?(result, 5))
+}
+
+test "shuffle of an empty or single-element vector is unchanged" {
+    let r = rand/make-rng(7)
+    assert-eq!(rand/shuffle(r, []), [])
+    assert-eq!(rand/shuffle(r, [99]), [99])
+}
+
+test "sample returns the exact distinct prefix for seed 3" {
+    // Partial Fisher-Yates over [1..6], seed 3, k=3 yields [4,3,6].
+    let r = rand/make-rng(3)
+    assert-eq!(rand/sample(r, [1, 2, 3, 4, 5, 6], 3), [4, 3, 6])
+}
+
+test "sample with k == 0 returns the empty vector" {
+    let r = rand/make-rng(3)
+    assert-eq!(rand/sample(r, [1, 2, 3], 0), [])
+}
+
+test "sample draws distinct elements that are members of the source" {
+    let src = [1, 2, 3, 4, 5, 6]
+    let r = rand/make-rng(3)
+    let s = rand/sample(r, src, 3)
+    assert-eq!(length(s), 3)
+    // Each sampled element belongs to the source.
+    assert!(member?(src, s[0]))
+    assert!(member?(src, s[1]))
+    assert!(member?(src, s[2]))
+    // Elements are distinct (no replacement).
+    assert-ne!(s[0], s[1])
+    assert-ne!(s[0], s[2])
+    assert-ne!(s[1], s[2])
+}
+
+test "sample throws when k exceeds the collection length" {
+    let r = rand/make-rng(1)
+    assert-throws!(fn() { rand/sample(r, [1, 2, 3], 4) })
+}
+
+test "sample throws when k is negative" {
+    let r = rand/make-rng(1)
+    assert-throws!(fn() { rand/sample(r, [1, 2, 3], 0 - 1) })
+}

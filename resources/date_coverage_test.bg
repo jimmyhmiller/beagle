@@ -1,0 +1,201 @@
+namespace date_coverage_test
+
+use beagle.date as date
+
+// Regression coverage for beagle.date. Existing tests (stdlib_phase9,
+// gaphunt_round6_fixes, stdlib_round2_fixes) only touch format-iso8601 of a
+// couple vectors, is-leap-year?, and one bad-parse case. This file covers the
+// rest of the public surface: from-epoch/to-epoch decomposition + round-trips,
+// arithmetic (add-seconds/add-days/diff-seconds), weekday, days-in-month,
+// pad-num, dt-equal?, and the full parse-iso8601 validation/error matrix.
+
+test "from-epoch decomposes the epoch (UTC) field by field" {
+    let e = date/from-epoch(0)
+    assert-eq!(e.year, 1970)
+    assert-eq!(e.month, 1)
+    assert-eq!(e.day, 1)
+    assert-eq!(e.hour, 0)
+    assert-eq!(e.minute, 0)
+    assert-eq!(e.second, 0)
+}
+
+test "from-epoch decomposes a known headline vector" {
+    // 784111777 = 1994-11-06T08:49:37Z
+    let v = date/from-epoch(784111777)
+    assert-eq!(v.year, 1994)
+    assert-eq!(v.month, 11)
+    assert-eq!(v.day, 6)
+    assert-eq!(v.hour, 8)
+    assert-eq!(v.minute, 49)
+    assert-eq!(v.second, 37)
+}
+
+test "from-epoch handles negative epoch (pre-1970)" {
+    let d = date/from-epoch(0 - 86400)
+    assert-eq!(d.year, 1969)
+    assert-eq!(d.month, 12)
+    assert-eq!(d.day, 31)
+    assert-eq!(d.hour, 0)
+    assert-eq!(date/format-iso8601(d), "1969-12-31T00:00:00Z")
+}
+
+test "to-epoch inverts from-epoch across a wide span" {
+    let mut t = 0 - 500000000
+    let mut ok = true
+    while t < 2000000000 {
+        if date/to-epoch(date/from-epoch(t)) != t {
+            ok = false
+        }
+        t = t + 97654321
+    }
+    assert!(ok)
+}
+
+test "to-epoch from explicit DateTime fields" {
+    let dt = date/DateTime { year: 2023, month: 11, day: 14, hour: 22, minute: 13, second: 20 }
+    assert-eq!(date/to-epoch(dt), 1700000000)
+}
+
+test "format-iso8601 zero-pads every field" {
+    let dt = date/DateTime { year: 2024, month: 6, day: 1, hour: 9, minute: 5, second: 7 }
+    assert-eq!(date/format-iso8601(dt), "2024-06-01T09:05:07Z")
+}
+
+test "format/parse round-trip over a wide span" {
+    let mut t = 0
+    let mut ok = true
+    while t < 4000000000 {
+        let dt = date/from-epoch(t)
+        if date/to-epoch(date/parse-iso8601(date/format-iso8601(dt))) != t {
+            ok = false
+        }
+        t = t + 86399 * 17
+    }
+    assert!(ok)
+}
+
+test "parse-iso8601 happy path, with and without trailing Z" {
+    let a = date/parse-iso8601("1994-11-06T08:49:37Z")
+    assert-eq!(date/to-epoch(a), 784111777)
+    // trailing Z is optional
+    let b = date/parse-iso8601("1994-11-06T08:49:37")
+    assert-eq!(date/to-epoch(b), 784111777)
+    assert!(date/dt-equal?(a, b))
+}
+
+test "parse-iso8601 accepts a valid leap day" {
+    let leap = date/parse-iso8601("2024-02-29T12:00:00Z")
+    assert-eq!(leap.month, 2)
+    assert-eq!(leap.day, 29)
+}
+
+test "parse-iso8601 rejects Feb 29 in a non-leap year" {
+    assert-throws!(fn() { date/parse-iso8601("2023-02-29T00:00:00Z") })
+}
+
+test "parse-iso8601 rejects out-of-range components" {
+    assert-throws!(fn() { date/parse-iso8601("2024-13-01T00:00:00Z") })  // month
+    assert-throws!(fn() { date/parse-iso8601("2024-00-01T00:00:00Z") })  // month 0
+    assert-throws!(fn() { date/parse-iso8601("2024-04-31T00:00:00Z") })  // April has 30
+    assert-throws!(fn() { date/parse-iso8601("2024-01-00T00:00:00Z") })  // day 0
+    assert-throws!(fn() { date/parse-iso8601("2024-01-01T24:00:00Z") })  // hour
+    assert-throws!(fn() { date/parse-iso8601("2024-01-01T00:60:00Z") })  // minute
+    assert-throws!(fn() { date/parse-iso8601("2024-01-01T00:00:60Z") })  // second
+}
+
+test "parse-iso8601 rejects bad separators" {
+    assert-throws!(fn() { date/parse-iso8601("2024/01/01T00:00:00Z") })  // wrong date seps
+    assert-throws!(fn() { date/parse-iso8601("2024-01-01 00:00:00Z") })  // space instead of T
+    assert-throws!(fn() { date/parse-iso8601("2024-01-01T00-00:00Z") })  // wrong time sep
+}
+
+test "parse-iso8601 rejects non-digits and bad length" {
+    assert-throws!(fn() { date/parse-iso8601("20x4-01-01T00:00:00Z") })  // non-digit
+    assert-throws!(fn() { date/parse-iso8601("2024-01-01T00:00:0") })    // too short (<19)
+    assert-throws!(fn() { date/parse-iso8601("2024-01-01T00:00:00X") })  // junk where Z expected
+    assert-throws!(fn() { date/parse-iso8601("2024-01-01T00:00:00ZZ") }) // trailing junk after Z
+    assert-throws!(fn() { date/parse-iso8601("") })                      // empty
+}
+
+test "add-seconds shifts the instant" {
+    let v = date/from-epoch(784111777)
+    assert-eq!(date/to-epoch(date/add-seconds(v, 1)), 784111778)
+    assert-eq!(date/to-epoch(date/add-seconds(v, 0 - 37)), 784111740)
+    // round-trip
+    assert-eq!(date/to-epoch(date/add-seconds(date/add-seconds(v, 100), 0 - 100)), 784111777)
+}
+
+test "add-days shifts whole days and crosses month boundaries" {
+    let v = date/from-epoch(784111777)
+    let plus10 = date/add-days(v, 10)
+    assert-eq!(date/to-epoch(plus10), 784111777 + 10 * 86400)
+    assert-eq!(plus10.day, 16)
+    // 1970-01-01 + 31 days = 1970-02-01
+    let crossed = date/add-days(date/from-epoch(0), 31)
+    assert-eq!(date/format-iso8601(crossed), "1970-02-01T00:00:00Z")
+    // round-trip back
+    assert-eq!(date/to-epoch(date/add-days(plus10, 0 - 10)), 784111777)
+}
+
+test "diff-seconds is b - a in whole seconds" {
+    let v = date/from-epoch(784111777)
+    let plus10 = date/add-days(v, 10)
+    assert-eq!(date/diff-seconds(v, plus10), 10 * 86400)
+    assert-eq!(date/diff-seconds(plus10, v), 0 - (10 * 86400))
+    assert-eq!(date/diff-seconds(v, v), 0)
+}
+
+test "weekday: 0=Sunday .. 6=Saturday" {
+    // 1970-01-01 was a Thursday (4); 1994-11-06 a Sunday (0).
+    assert-eq!(date/weekday(date/from-epoch(0)), 4)
+    assert-eq!(date/weekday(date/from-epoch(784111777)), 0)
+    // 2023-11-14 was a Tuesday (2).
+    assert-eq!(date/weekday(date/from-epoch(1700000000)), 2)
+    // advancing one day advances the weekday by one (mod 7).
+    let e = date/from-epoch(0)
+    assert-eq!(date/weekday(date/add-days(e, 1)), 5)
+    assert-eq!(date/weekday(date/add-days(e, 3)), 0)
+    assert-eq!(date/weekday(date/add-days(e, 7)), 4)
+}
+
+test "is-leap-year? follows the proleptic Gregorian rule" {
+    assert!(date/is-leap-year?(2000))   // div by 400
+    assert!(date/is-leap-year?(2024))   // div by 4
+    assert!(date/is-leap-year?(1996))
+    assert!(date/is-leap-year?(1900) == false)  // div by 100, not 400
+    assert!(date/is-leap-year?(2100) == false)
+    assert!(date/is-leap-year?(2023) == false)  // not div by 4
+}
+
+test "days-in-month is leap-aware" {
+    assert-eq!(date/days-in-month(2024, 1), 31)
+    assert-eq!(date/days-in-month(2024, 4), 30)
+    assert-eq!(date/days-in-month(2024, 2), 29)  // leap
+    assert-eq!(date/days-in-month(2023, 2), 28)  // non-leap
+    assert-eq!(date/days-in-month(2024, 12), 31)
+    assert-eq!(date/days-in-month(2024, 11), 30)
+}
+
+test "pad-num zero-pads to width but never truncates" {
+    assert-eq!(date/pad-num(5, 2), "05")
+    assert-eq!(date/pad-num(2024, 4), "2024")
+    assert-eq!(date/pad-num(7, 1), "7")
+    assert-eq!(date/pad-num(123, 2), "123")  // wider than width: left intact
+    assert-eq!(date/pad-num(0, 4), "0000")
+}
+
+test "dt-equal? compares all six fields" {
+    let a = date/from-epoch(784111777)
+    let b = date/from-epoch(784111777)
+    let c = date/from-epoch(784111778)
+    assert!(date/dt-equal?(a, b))
+    assert!(date/dt-equal?(a, c) == false)
+}
+
+test "now() returns a plausible current DateTime" {
+    let n = date/now()
+    assert!(n.year >= 2024)
+    assert!(n.month >= 1 && n.month <= 12)
+    assert!(n.day >= 1 && n.day <= 31)
+    assert!(n.hour >= 0 && n.hour <= 23)
+}

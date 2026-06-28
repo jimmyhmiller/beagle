@@ -1,0 +1,93 @@
+namespace json_ext_test
+
+use beagle.json as json
+
+// ---------------------------------------------------------------------------
+// stringify-sorted
+// ---------------------------------------------------------------------------
+
+test "stringify-sorted orders top-level keys ascending" {
+    assert-eq!(json/stringify-sorted({:b 1, :a 2, :c 3}), "{\"a\":2,\"b\":1,\"c\":3}")
+}
+
+test "stringify-sorted sorts nested objects too (canonical, all depths)" {
+    assert-eq!(
+        json/stringify-sorted({:z {:b 1, :a 2}, :a 3}),
+        "{\"a\":3,\"z\":{\"a\":2,\"b\":1}}"
+    )
+}
+
+test "stringify-sorted sorts objects nested inside arrays" {
+    assert-eq!(json/stringify-sorted([{:b 1, :a 2}]), "[{\"a\":2,\"b\":1}]")
+}
+
+test "stringify-sorted handles empty object and empty array" {
+    assert-eq!(json/stringify-sorted({}), "{}")
+    assert-eq!(json/stringify-sorted([]), "[]")
+}
+
+test "stringify-sorted handles scalars unchanged" {
+    assert-eq!(json/stringify-sorted(42), "42")
+    assert-eq!(json/stringify-sorted("hi"), "\"hi\"")
+    assert-eq!(json/stringify-sorted(true), "true")
+    assert-eq!(json/stringify-sorted(false), "false")
+    assert-eq!(json/stringify-sorted(null), "null")
+    assert-eq!(json/stringify-sorted([1, 2, 3]), "[1,2,3]")
+}
+
+test "stringify-sorted agrees with stringify for a single-key object" {
+    assert-eq!(json/stringify-sorted({:a 1}), json/stringify({:a 1}))
+    assert-eq!(json/stringify-sorted({:a 1}), "{\"a\":1}")
+}
+
+// ---------------------------------------------------------------------------
+// parse-result
+// ---------------------------------------------------------------------------
+
+test "parse-result returns Ok on a valid object" {
+    let r = json/parse-result("{\"a\":1}")
+    assert!(ok?(r))
+    match r {
+        Result.Ok { value } => assert-eq!(get(value, :a), 1),
+        Result.Err { error } => assert!(false)
+    }
+}
+
+test "parse-result returns Ok on a valid array" {
+    let r = json/parse-result("[1, 2, 3]")
+    assert!(ok?(r))
+    match r {
+        Result.Ok { value } => {
+            assert-eq!(length(value), 3)
+            assert-eq!(value[0], 1)
+            assert-eq!(value[2], 3)
+        },
+        Result.Err { error } => assert!(false)
+    }
+}
+
+test "parse-result returns Err on truncated input (no throw)" {
+    let r = json/parse-result("{")
+    assert!(ok?(r) == false)
+    match r {
+        Result.Ok { value } => assert!(false),
+        Result.Err { error } => assert!(instance-of(error, String))
+    }
+}
+
+test "parse-result returns Err on trailing data" {
+    let r = json/parse-result("1 2")
+    assert!(ok?(r) == false)
+}
+
+test "parse-result returns Err on an invalid literal" {
+    let r = json/parse-result("nope")
+    assert!(ok?(r) == false)
+}
+
+test "parse-result Ok value round-trips through stringify-sorted" {
+    match json/parse-result("{\"b\":2,\"a\":1}") {
+        Result.Ok { value } => assert-eq!(json/stringify-sorted(value), "{\"a\":1,\"b\":2}"),
+        Result.Err { error } => assert!(false)
+    }
+}

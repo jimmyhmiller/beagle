@@ -1,0 +1,135 @@
+namespace ini_coverage_test
+
+use beagle.ini as ini
+
+// Coverage for the PUBLIC api of beagle.ini: parse/1 and stringify/1.
+// Behaviors are derived directly from standard-library/beagle.ini.bg.
+
+test "parse: empty input yields empty map" {
+    assert-eq!(ini/parse(""), {})
+}
+
+test "parse: blank and whitespace-only lines are ignored" {
+    assert-eq!(ini/parse("\n\n   \n\t\n"), {})
+}
+
+test "parse: bare keys land in the :default section" {
+    assert-eq!(ini/parse("foo=bar"), {:default {"foo" "bar"}})
+}
+
+test "parse: basic sections with keyword keys and string props" {
+    let d = ini/parse("[db]\nhost=localhost\nport=5432\n[web]\ndebug=true")
+    assert-eq!(get(get(d, :db), "host"), "localhost")
+    assert-eq!(get(get(d, :db), "port"), "5432")
+    assert-eq!(get(get(d, :web), "debug"), "true")
+    assert-eq!(get(d, :missing), null)
+}
+
+test "parse: default keys before a section header coexist with sections" {
+    let d = ini/parse("foo=bar\n[db]\nx=y")
+    assert-eq!(get(get(d, :default), "foo"), "bar")
+    assert-eq!(get(get(d, :db), "x"), "y")
+}
+
+test "parse: colon separator works like equals" {
+    assert-eq!(get(ini/parse("host:localhost"), :default), {"host" "localhost"})
+}
+
+test "parse: first separator wins, later = / : kept in value" {
+    // '=' before ':' -> value keeps the colon
+    assert-eq!(get(get(ini/parse("url=http://x:80"), :default), "url"), "http://x:80")
+    // ':' before '=' -> value keeps the equals
+    assert-eq!(get(get(ini/parse("time:12=30"), :default), "time"), "12=30")
+}
+
+test "parse: full-line comments (; and #) are ignored" {
+    assert-eq!(ini/parse("; a comment\n# another\nk=v"), {:default {"k" "v"}})
+}
+
+test "parse: inline ; and # are NOT stripped (kept in value)" {
+    assert-eq!(get(get(ini/parse("k = v  ; inline"), :default), "k"), "v  ; inline")
+    assert-eq!(get(get(ini/parse("k=a#b"), :default), "k"), "a#b")
+}
+
+test "parse: whitespace around keys and values is trimmed" {
+    assert-eq!(ini/parse("  key   =   value  "), {:default {"key" "value"}})
+}
+
+test "parse: section header whitespace inside brackets is trimmed" {
+    let d = ini/parse("[  db  ]\nx=y")
+    assert-eq!(get(d, :db), {"x" "y"})
+}
+
+test "parse: duplicate keys -> last one wins" {
+    assert-eq!(ini/parse("a=1\na=2\na=3"), {:default {"a" "3"}})
+}
+
+test "parse: quoted values have surrounding quotes stripped, inner literal" {
+    // surrounding-quote stripping preserves leading/trailing whitespace
+    assert-eq!(get(get(ini/parse("k=\" spaced \""), :default), "k"), " spaced ")
+    // empty quoted string -> empty value
+    assert-eq!(get(get(ini/parse("k=\"\""), :default), "k"), "")
+}
+
+test "parse: a lone quote (len < 2) is not treated as a quoted value" {
+    assert-eq!(get(get(ini/parse("k=\""), :default), "k"), "\"")
+}
+
+test "parse: value with an embedded (non-surrounding) quote is kept literal" {
+    assert-eq!(get(get(ini/parse("k=a\"b"), :default), "k"), "a\"b")
+}
+
+test "parse: line with no separator is skipped entirely" {
+    // 'nosep' has no '=' or ':' so :default is never even materialized
+    assert-eq!(ini/parse("nosep"), {})
+}
+
+test "parse: empty key (separator at start) is allowed" {
+    assert-eq!(ini/parse("=v"), {:default {"" "v"}})
+}
+
+test "parse: empty value after separator is allowed" {
+    assert-eq!(ini/parse("k="), {:default {"k" ""}})
+}
+
+test "parse: CRLF and bare-CR line endings are accepted" {
+    assert-eq!(ini/parse("[db]\r\nhost=localhost\r\nport=5432"),
+               ini/parse("[db]\nhost=localhost\nport=5432"))
+    assert-eq!(ini/parse("a=1\rb=2"), {:default {"a" "1", "b" "2"}})
+}
+
+test "parse: repeated section header merges into the same section" {
+    let d = ini/parse("[db]\nx=1\n[db]\ny=2")
+    assert-eq!(get(d, :db), {"x" "1", "y" "2"})
+}
+
+test "stringify: default section is emitted header-less and first" {
+    assert-eq!(ini/stringify({:default {"foo" "bar"}}), "foo=bar\n")
+}
+
+test "stringify: a single named section gets a [header]" {
+    assert-eq!(ini/stringify({:db {"host" "localhost"}}), "[db]\nhost=localhost\n")
+}
+
+test "stringify: values needing quotes (leading/trailing ws) are re-quoted" {
+    assert-eq!(ini/stringify({:default {"k" " v "}}), "k=\" v \"\n")
+}
+
+test "stringify: values containing a quote are quoted on write" {
+    assert-eq!(ini/stringify({:default {"k" "a\"b"}}), "k=\"a\"b\"\n")
+}
+
+test "stringify: plain values are written unquoted" {
+    assert-eq!(ini/stringify({:default {"k" "v"}}), "k=v\n")
+}
+
+test "round-trip: parse(stringify(parse(x))) == parse(x)" {
+    let src = "foo=bar\n[db]\nhost=localhost\nport=5432\n[web]\ndebug=true"
+    let once = ini/parse(src)
+    assert-eq!(ini/parse(ini/stringify(once)), once)
+}
+
+test "round-trip preserves quote-needing values losslessly" {
+    let m = {:default {"a" " leading", "b" "trailing ", "c" "has\"quote"}}
+    assert-eq!(ini/parse(ini/stringify(m)), m)
+}

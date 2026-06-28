@@ -1,0 +1,76 @@
+namespace bigint_division_test
+
+use beagle.bigint as big
+
+fn s(x) { big/from-string(x) }
+fn str(b) { big/to-string(b) }
+
+// a == div(a,b)*b + mod(a,b)
+fn check-identity(a-str, b-str) {
+    let a = s(a-str)
+    let b = s(b-str)
+    let q = big/div(a, b)
+    let r = big/mod(a, b)
+    let recombined = big/add(big/mul(q, b), r)
+    assert-eq!(str(recombined), a-str)
+}
+
+test "unsigned long division matches known values" {
+    assert-eq!(str(big/div(s("100"), s("7"))), "14")
+    assert-eq!(str(big/mod(s("100"), s("7"))), "2")
+    assert-eq!(str(big/div(s("1000000000000000000000"), s("1000000000"))), "1000000000000")
+    assert-eq!(str(big/mod(s("1000000000000000000000"), s("1000000000"))), "0")
+    // 1000003 / 1000 = 1000 rem 3
+    assert-eq!(str(big/div(s("1000003"), s("1000"))), "1000")
+    assert-eq!(str(big/mod(s("1000003"), s("1000"))), "3")
+}
+
+test "exact division has zero remainder" {
+    assert-eq!(str(big/div(s("1000"), s("8"))), "125")
+    assert-eq!(str(big/mod(s("1000"), s("8"))), "0")
+    // a/b*b == a when b | a
+    let a = s("99999999999999999999000000")
+    let b = s("1000000")
+    assert-eq!(str(big/mul(big/div(a, b), b)), str(a))
+}
+
+test "signed division truncates toward zero, remainder follows dividend" {
+    // -17 / 5 = -3 rem -2
+    assert-eq!(str(big/div(s("-17"), s("5"))), "-3")
+    assert-eq!(str(big/mod(s("-17"), s("5"))), "-2")
+    // 17 / -5 = -3 rem 2
+    assert-eq!(str(big/div(s("17"), s("-5"))), "-3")
+    assert-eq!(str(big/mod(s("17"), s("-5"))), "2")
+    // -17 / -5 = 3 rem -2
+    assert-eq!(str(big/div(s("-17"), s("-5"))), "3")
+    assert-eq!(str(big/mod(s("-17"), s("-5"))), "-2")
+}
+
+test "div/mod identity holds across sizes and signs" {
+    check-identity("0", "7")
+    check-identity("5", "7")
+    check-identity("123456789", "1000")
+    check-identity("-123456789", "1000")
+    check-identity("987654321987654321987654321", "123456789")
+    check-identity("-987654321987654321987654321", "-123456789")
+}
+
+test "pow via square-and-multiply" {
+    assert-eq!(str(big/pow(s("2"), 10)), "1024")
+    assert-eq!(str(big/pow(s("2"), 100)), "1267650600228229401496703205376")
+    assert-eq!(str(big/pow(s("10"), 20)), "100000000000000000000")
+    assert-eq!(str(big/pow(s("7"), 0)), "1")
+    assert-eq!(str(big/pow(s("-3"), 3)), "-27")
+}
+
+test "abs" {
+    assert-eq!(str(big/abs(s("-123456789"))), "123456789")
+    assert-eq!(str(big/abs(s("123456789"))), "123456789")
+    assert-eq!(str(big/abs(s("0"))), "0")
+}
+
+test "division by zero throws" {
+    assert-throws!(fn() { big/div(s("5"), s("0")) })
+    assert-throws!(fn() { big/mod(s("5"), s("0")) })
+    assert-throws!(fn() { big/pow(s("2"), -1) })
+}

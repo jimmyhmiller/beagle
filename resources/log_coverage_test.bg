@@ -1,0 +1,157 @@
+namespace log_coverage_test
+
+use beagle.log as log
+
+// Coverage for beagle.log public API. The module mutates a process-global
+// min-level atom, so every test that cares about level resets it explicitly
+// (and restores :debug at the end) to stay order-independent.
+
+test "current-level reflects the last set-level!" {
+    log/set-level!(:debug)
+    assert-eq!(log/current-level(), log/LEVEL-DEBUG)
+    log/set-level!(:info)
+    assert-eq!(log/current-level(), log/LEVEL-INFO)
+    log/set-level!(:error)
+    assert-eq!(log/current-level(), log/LEVEL-ERROR)
+    log/set-level!(:debug)
+}
+
+test "set-level! accepts int constants and returns them" {
+    assert-eq!(log/set-level!(log/LEVEL-WARN), log/LEVEL-WARN)
+    assert-eq!(log/current-level(), 2)
+    assert-eq!(log/set-level!(log/LEVEL-INFO), 1)
+    assert-eq!(log/current-level(), 1)
+    log/set-level!(:debug)
+}
+
+test "the four level constants are ordered debug<info<warn<error" {
+    assert!(log/LEVEL-DEBUG < log/LEVEL-INFO)
+    assert!(log/LEVEL-INFO < log/LEVEL-WARN)
+    assert!(log/LEVEL-WARN < log/LEVEL-ERROR)
+    assert-eq!(log/LEVEL-DEBUG, 0)
+    assert-eq!(log/LEVEL-ERROR, 3)
+}
+
+test "normalize-level maps keywords to their int constants" {
+    assert-eq!(log/normalize-level(:debug), log/LEVEL-DEBUG)
+    assert-eq!(log/normalize-level(:info), log/LEVEL-INFO)
+    assert-eq!(log/normalize-level(:warn), log/LEVEL-WARN)
+    assert-eq!(log/normalize-level(:error), log/LEVEL-ERROR)
+}
+
+test "normalize-level passes through valid int constants" {
+    assert-eq!(log/normalize-level(0), 0)
+    assert-eq!(log/normalize-level(3), 3)
+}
+
+test "normalize-level throws on unknown keyword and out-of-range int" {
+    assert-throws!(fn() { log/normalize-level(:trace) })
+    assert-throws!(fn() { log/normalize-level(4) })
+    assert-throws!(fn() { log/normalize-level(-1) })
+}
+
+test "level-name returns the uppercase name for each level" {
+    assert-eq!(log/level-name(log/LEVEL-DEBUG), "DEBUG")
+    assert-eq!(log/level-name(log/LEVEL-INFO), "INFO")
+    assert-eq!(log/level-name(log/LEVEL-WARN), "WARN")
+    assert-eq!(log/level-name(log/LEVEL-ERROR), "ERROR")
+}
+
+test "level-name throws on an unknown level int" {
+    assert-throws!(fn() { log/level-name(99) })
+    assert-throws!(fn() { log/level-name(-5) })
+}
+
+test "enabled? compares against min-level with int args too" {
+    log/set-level!(:info)
+    // keyword args
+    assert-eq!(log/enabled?(:debug), false)
+    assert-eq!(log/enabled?(:info), true)
+    // int args
+    assert-eq!(log/enabled?(log/LEVEL-DEBUG), false)
+    assert-eq!(log/enabled?(log/LEVEL-INFO), true)
+    assert-eq!(log/enabled?(log/LEVEL-ERROR), true)
+    log/set-level!(:debug)
+}
+
+test "enabled? at min-level boundary is inclusive" {
+    log/set-level!(:warn)
+    // exactly at min -> enabled
+    assert!(log/enabled?(:warn))
+    // one below -> disabled
+    assert-eq!(log/enabled?(:info), false)
+    log/set-level!(:debug)
+}
+
+test "format-line is exact and timestamp-free for keywords" {
+    assert-eq!(log/format-line(:debug, "hi"), "DEBUG hi")
+    assert-eq!(log/format-line(:error, "boom"), "ERROR boom")
+}
+
+test "format-line accepts int level constants" {
+    assert-eq!(log/format-line(log/LEVEL-WARN, "w"), "WARN w")
+    assert-eq!(log/format-line(0, "z"), "DEBUG z")
+}
+
+test "format-line stringifies non-string messages" {
+    assert-eq!(log/format-line(:info, 42), "INFO 42")
+    assert-eq!(log/format-line(:info, true), "INFO true")
+}
+
+test "format-line throws on an invalid level" {
+    assert-throws!(fn() { log/format-line(:nope, "x") })
+}
+
+test "format-fields renders empty for null and empty map" {
+    assert-eq!(log/format-fields(null), "")
+    assert-eq!(log/format-fields({}), "")
+}
+
+test "format-fields renders a single keyword field with leading space" {
+    assert-eq!(log/format-fields({:status 500}), " status=500")
+}
+
+test "format-fields stringifies non-keyword keys and values" {
+    // string key goes through to-string; value too
+    assert-eq!(log/format-fields({"a" 1}), " a=1")
+    assert-eq!(log/format-fields({:flag true}), " flag=true")
+}
+
+test "format-line-fields appends a single field" {
+    assert-eq!(log/format-line-fields(:warn, "req", {:code 404}), "WARN req code=404")
+}
+
+test "format-line-fields with empty or null fields is plain" {
+    assert-eq!(log/format-line-fields(:info, "msg", {}), "INFO msg")
+    assert-eq!(log/format-line-fields(:info, "msg", null), "INFO msg")
+}
+
+test "debug/info/warn/error return true when at default (debug) level" {
+    log/set-level!(:debug)
+    assert!(log/debug("d"))
+    assert!(log/info("i"))
+    assert!(log/warn("w"))
+    assert!(log/error("e"))
+}
+
+test "below-min messages are suppressed and return false (no throw)" {
+    log/set-level!(:error)
+    assert-eq!(log/debug("x"), false)
+    assert-eq!(log/info("x"), false)
+    assert-eq!(log/warn("x"), false)
+    // error is at min -> still emitted
+    assert-eq!(log/error("x"), true)
+    log/set-level!(:debug)
+}
+
+test "log structured respects level and returns emission bool" {
+    log/set-level!(:warn)
+    assert-eq!(log/log(:info, "suppressed", {:a 1}), false)
+    assert-eq!(log/log(:warn, "emitted", {:a 1}), true)
+    assert-eq!(log/log(:error, "emitted", null), true)
+    log/set-level!(:debug)
+}
+
+test "log with an invalid level throws before emitting" {
+    assert-throws!(fn() { log/log(:trace, "msg", null) })
+}

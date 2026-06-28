@@ -1,0 +1,144 @@
+namespace regex-wrapper_coverage_test
+
+use beagle.regex-wrapper as rxw
+
+// Coverage for beagle.regex-wrapper public API. The module is pure and
+// deterministic (uses the Rust `regex` crate's RE2-style syntax). Expected
+// values were confirmed against the release binary.
+
+test "compile + regex? recognize compiled regexes" {
+    let r = rxw/compile("[0-9]+")
+    assert!(rxw/regex?(r))
+    // a pattern string is NOT a compiled regex
+    assert!(!rxw/regex?("[0-9]+"))
+    assert!(!rxw/regex?(42))
+}
+
+test "compile throws on an invalid pattern" {
+    assert-throws!(fn() { rxw/compile("[") })
+    assert-throws!(fn() { rxw/compile("(") })
+}
+
+test "match? is unanchored (matches anywhere)" {
+    assert!(rxw/match?("[0-9]+", "abc123"))
+    assert!(!rxw/match?("[0-9]+", "abc"))
+    // empty pattern matches anywhere, including any string
+    assert!(rxw/match?("", "abc"))
+}
+
+test "match? accepts a pre-compiled regex" {
+    let r = rxw/compile("[0-9]+")
+    assert!(rxw/match?(r, "x9"))
+    assert!(!rxw/match?(r, "xyz"))
+}
+
+test "match? propagates invalid-pattern errors" {
+    assert-throws!(fn() { rxw/match?("(", "x") })
+}
+
+test "matches-full? requires the ENTIRE string to match" {
+    assert!(rxw/matches-full?("[0-9]+", "123"))
+    assert!(!rxw/matches-full?("[0-9]+", "12a3"))
+    assert!(rxw/matches-full?("a+", "aaa"))
+    assert!(!rxw/matches-full?("a+", "aaab"))
+}
+
+test "matches-full? throws when given a compiled regex" {
+    let r = rxw/compile("[0-9]+")
+    assert-throws!(fn() { rxw/matches-full?(r, "123") })
+}
+
+test "find returns first match string or null" {
+    assert-eq!(rxw/find("[0-9]+", "abc123def"), "123")
+    assert-eq!(rxw/find("[0-9]+", "abc"), null)
+    // leftmost match wins
+    assert-eq!(rxw/find("[0-9]+", "a1b22"), "1")
+}
+
+test "find-all returns every non-overlapping match" {
+    assert-eq!(rxw/find-all("[0-9]+", "a1b22c333"), ["1", "22", "333"])
+    assert-eq!(rxw/find-all("[0-9]+", "abc"), [])
+    assert-eq!(rxw/find-all("[0-9]+", ""), [])
+}
+
+test "find-all includes empty matches (Python re.findall semantics)" {
+    assert-eq!(rxw/find-all("a*", "aba"), ["a", "", "a", ""])
+}
+
+test "find-all-positions reports absolute offsets" {
+    let ps = rxw/find-all-positions("[0-9]+", "a1b22")
+    assert-eq!(count(ps), 2)
+    let p0 = ps[0]
+    assert-eq!(get(p0, :match), "1")
+    assert-eq!(get(p0, :start), 1)
+    assert-eq!(get(p0, :end), 2)
+    let p1 = ps[1]
+    assert-eq!(get(p1, :match), "22")
+    assert-eq!(get(p1, :start), 3)
+    assert-eq!(get(p1, :end), 5)
+}
+
+test "find-all-positions handles empty matches with one-char advance" {
+    let ps = rxw/find-all-positions("a*", "aba")
+    // [{a 0..1} {"" 1..1} {a 2..3} {"" 3..3}]
+    assert-eq!(count(ps), 4)
+    assert-eq!(get(ps[1], :match), "")
+    assert-eq!(get(ps[1], :start), 1)
+    assert-eq!(get(ps[1], :end), 1)
+    assert-eq!(get(ps[3], :start), 3)
+    assert-eq!(get(ps[3], :end), 3)
+    // find-all is exactly the :match projection of positions
+    assert-eq!(map(fn(d) { get(d, :match) }, ps), rxw/find-all("a*", "aba"))
+}
+
+test "find-all-positions on empty input is empty" {
+    assert-eq!(rxw/find-all-positions("[0-9]+", ""), [])
+}
+
+test "split returns between-match segments" {
+    assert-eq!(rxw/split(",", "a,b,c"), ["a", "b", "c"])
+    // leading/trailing matches yield empty-string segments at the ends
+    assert-eq!(rxw/split("[0-9]+", "1a2"), ["", "a", ""])
+    // no match => single-element vector with the whole string
+    assert-eq!(rxw/split(",", "abc"), ["abc"])
+    assert-eq!(rxw/split(",", ""), [""])
+}
+
+test "captures returns positional groups of the first match" {
+    assert-eq!(rxw/captures("(\\w+)@(\\w+)", "x@y"), ["x@y", "x", "y"])
+    assert-eq!(rxw/captures("(\\d+)-(\\d+)", "12-34"), ["12-34", "12", "34"])
+}
+
+test "captures: non-participating group is null; no match is null" {
+    assert-eq!(rxw/captures("(a)(b)?", "a"), ["a", "a", null])
+    assert-eq!(rxw/captures("[0-9]+", "abc"), null)
+}
+
+test "replace-all replaces every match" {
+    assert-eq!(rxw/replace-all("[aeiou]", "hello", "_"), "h_ll_")
+    assert-eq!(rxw/replace-all("[0-9]+", "a1b22c333", "#"), "a#b#c#")
+    // group reference in replacement
+    assert-eq!(rxw/replace-all("(\\w)(\\w)", "ab", "$2$1"), "ba")
+}
+
+test "replace-first replaces only the first match" {
+    assert-eq!(rxw/replace-first("[0-9]+", "a1b2c3", "X"), "aXb2c3")
+    // no match => string unchanged
+    assert-eq!(rxw/replace-first("[0-9]+", "abc", "X"), "abc")
+}
+
+test "replace-with calls f on each matched substring" {
+    assert-eq!(
+        rxw/replace-with("[0-9]+", "a1b22c", fn(m) { "<" ++ m ++ ">" }),
+        "a<1>b<22>c")
+    // empty pattern: f runs at each gap position
+    assert-eq!(rxw/replace-with("", "ab", fn(m) { "X" }), "XaXbX")
+    // no match => unchanged
+    assert-eq!(rxw/replace-with("[0-9]+", "abc", fn(m) { "X" }), "abc")
+}
+
+test "as-regex normalization: string and compiled forms agree" {
+    let r = rxw/compile("[0-9]+")
+    assert-eq!(rxw/find-all(r, "a1b22"), rxw/find-all("[0-9]+", "a1b22"))
+    assert-eq!(rxw/split(r, "1a2"), rxw/split("[0-9]+", "1a2"))
+}

@@ -1,0 +1,77 @@
+namespace os_ext4_test
+
+// Coverage for the temp-dir / separator / platform-predicate additions to
+// beagle.os (standard-library/beagle.os.bg). Expected values are derived by
+// reading the source: temp-dir reads TMPDIR with a "/tmp" fallback;
+// path-separator and line-separator are POSIX constants; the is-*? predicates
+// compare get-os() against fixed platform names. To stay parallel-safe these
+// tests never mutate the shared TMPDIR variable.
+
+use beagle.os as os
+use beagle.core as core
+
+test "path-separator is the POSIX slash" {
+    assert-eq!(os/path-separator(), "/")
+}
+
+test "line-separator is a single line feed" {
+    assert-eq!(os/line-separator(), "\n")
+    assert-eq!(length(os/line-separator()), 1)
+}
+
+test "temp-dir matches TMPDIR when set, else /tmp" {
+    // Branch-aware: read the live TMPDIR and assert the same logic the
+    // function implements, without mutating any shared env state.
+    let tmpdir = os/getenv("TMPDIR")
+    if tmpdir == null {
+        assert-eq!(os/temp-dir(), "/tmp")
+    } else {
+        assert-eq!(os/temp-dir(), tmpdir)
+    }
+}
+
+test "temp-dir is a non-empty string" {
+    assert!(length(os/temp-dir()) > 0)
+}
+
+test "is-macos? agrees with get-os" {
+    assert-eq!(os/is-macos?(), get-os() == "macos")
+}
+
+test "is-linux? agrees with get-os" {
+    assert-eq!(os/is-linux?(), get-os() == "linux")
+}
+
+test "is-windows? agrees with get-os" {
+    assert-eq!(os/is-windows?(), get-os() == "windows")
+}
+
+test "platform predicates are mutually exclusive" {
+    let m = os/is-macos?()
+    let l = os/is-linux?()
+    let w = os/is-windows?()
+    // No two platforms can be true at once.
+    assert!(not(m && l))
+    assert!(not(m && w))
+    assert!(not(l && w))
+}
+
+test "exactly one predicate matches the current known platform" {
+    // get-os() reports a single platform name; the matching predicate is
+    // true and the others are false. On Beagle's supported platforms this
+    // is always macos or linux.
+    let osname = get-os()
+    if osname == "macos" {
+        assert!(os/is-macos?())
+        assert!(not(os/is-linux?()))
+        assert!(not(os/is-windows?()))
+    } else if osname == "linux" {
+        assert!(os/is-linux?())
+        assert!(not(os/is-macos?()))
+        assert!(not(os/is-windows?()))
+    } else {
+        // Unknown platform: none of the predicates fire.
+        assert!(not(os/is-macos?()))
+        assert!(not(os/is-linux?()))
+    }
+}

@@ -1,0 +1,18 @@
+namespace vec_pop_gc_test
+// gc-always
+fn build(n) {
+    let mut v = []
+    let mut i = 0
+    while i < n { v = push(v, [i, i, i])  i = i + 1 }
+    v
+}
+test "vec-pop under gc-always keeps heap-pointer elements valid" {
+    let mut v = build(70)
+    let mut k = 70
+    while k > 0 {
+        v = butlast(v)
+        k = k - 1
+        assert-eq!(length(v), k)
+        if k > 0 { assert-eq!(get(v, k - 1), [k - 1, k - 1, k - 1]) }
+    }
+}

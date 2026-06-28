@@ -1,0 +1,228 @@
+namespace mutable-array_coverage_test
+
+use beagle.mutable-array as arr
+
+fn make3() {
+    let a = arr/new-array(3)
+    arr/write-field(a, 0, 10)
+    arr/write-field(a, 1, 20)
+    arr/write-field(a, 2, 30)
+    a
+}
+
+test "new-array allocates an array of the given size, zero-filled with null" {
+    let a = arr/new-array(4)
+    assert!(arr/is-array(a))
+    assert-eq!(arr/count(a), 4)
+    assert-eq!(arr/get(a, 0), null)
+    assert-eq!(arr/get(a, 3), null)
+}
+
+test "new-array(0) yields a valid empty array" {
+    let e = arr/new-array(0)
+    assert!(arr/is-array(e))
+    assert-eq!(arr/count(e), 0)
+    assert-eq!(arr/get(e, 0), null)
+}
+
+test "new-array with negative size throws" {
+    assert-throws!(fn() { arr/new-array(-1) })
+}
+
+test "write-field then read-field round-trips values" {
+    let a = make3()
+    assert-eq!(arr/read-field(a, 0), 10)
+    assert-eq!(arr/read-field(a, 1), 20)
+    assert-eq!(arr/read-field(a, 2), 30)
+}
+
+test "write-field overwrites an existing slot" {
+    let a = make3()
+    arr/write-field(a, 1, 99)
+    assert-eq!(arr/read-field(a, 1), 99)
+}
+
+test "get returns the same value as read-field for in-range indices" {
+    let a = make3()
+    assert-eq!(arr/get(a, 0), arr/read-field(a, 0))
+    assert-eq!(arr/get(a, 2), arr/read-field(a, 2))
+}
+
+test "read-field and get return null for out-of-bounds and negative indices" {
+    let a = make3()
+    assert-eq!(arr/read-field(a, 3), null)
+    assert-eq!(arr/read-field(a, 100), null)
+    assert-eq!(arr/read-field(a, -1), null)
+    assert-eq!(arr/get(a, 3), null)
+    assert-eq!(arr/get(a, -1), null)
+}
+
+test "write-field out-of-bounds throws (programmer error must surface)" {
+    let a = make3()
+    assert-throws!(fn() { arr/write-field(a, 9, 99) })
+    assert-throws!(fn() { arr/write-field(a, -1, 99) })
+    // contents unchanged after the rejected writes
+    assert-eq!(arr/read-field(a, 0), 10)
+    assert-eq!(arr/read-field(a, 2), 30)
+}
+
+test "write-field-or-ignore is the explicit memory-safe no-op variant" {
+    let a = make3()
+    assert-eq!(arr/write-field-or-ignore(a, 9, 99), null)
+    assert-eq!(arr/write-field-or-ignore(a, -1, 99), null)
+    assert-eq!(arr/read-field(a, 0), 10)
+    assert-eq!(arr/read-field(a, 2), 30)
+}
+
+test "read-field on a non-array throws" {
+    assert-throws!(fn() { arr/read-field(5, 0) })
+    assert-throws!(fn() { arr/read-field(null, 0) })
+}
+
+test "write-field on a non-array throws" {
+    assert-throws!(fn() { arr/write-field("nope", 0, 1) })
+}
+
+test "swap exchanges two in-range elements in place" {
+    let a = make3()
+    arr/swap(a, 0, 2)
+    assert-eq!(arr/read-field(a, 0), 30)
+    assert-eq!(arr/read-field(a, 1), 20)
+    assert-eq!(arr/read-field(a, 2), 10)
+}
+
+test "swap of an index with itself leaves the value intact" {
+    let a = make3()
+    arr/swap(a, 1, 1)
+    assert-eq!(arr/read-field(a, 1), 20)
+}
+
+test "swap with an out-of-range index is a no-op returning null" {
+    let a = make3()
+    assert-eq!(arr/swap(a, 0, 5), null)
+    assert-eq!(arr/swap(a, -1, 1), null)
+    assert-eq!(arr/read-field(a, 0), 10)
+    assert-eq!(arr/read-field(a, 2), 30)
+}
+
+test "swap on a non-array throws" {
+    assert-throws!(fn() { arr/swap(7, 0, 1) })
+}
+
+test "count returns the size of an array and 0 for null" {
+    assert-eq!(arr/count(make3()), 3)
+    assert-eq!(arr/count(arr/new-array(0)), 0)
+    assert-eq!(arr/count(null), 0)
+}
+
+test "is-array distinguishes arrays from scalars and null" {
+    assert!(arr/is-array(make3()))
+    assert!(arr/is-array(arr/new-array(0)))
+    assert-eq!(arr/is-array(5), false)
+    assert-eq!(arr/is-array("str"), false)
+    assert-eq!(arr/is-array(null), false)
+}
+
+test "copy-array produces an independent shallow copy" {
+    let a = make3()
+    let c = arr/copy-array(a)
+    assert-eq!(arr/read-field(c, 0), 10)
+    assert-eq!(arr/read-field(c, 1), 20)
+    assert-eq!(arr/read-field(c, 2), 30)
+    // mutating the copy does not affect the original
+    arr/write-field(c, 0, 777)
+    assert-eq!(arr/read-field(c, 0), 777)
+    assert-eq!(arr/read-field(a, 0), 10)
+}
+
+test "copy-array on a non-array throws" {
+    assert-throws!(fn() { arr/copy-array(null) })
+    assert-throws!(fn() { arr/copy-array(42) })
+}
+
+test "copy-from-array-to copies the prefix from a smaller into a larger array" {
+    let small = arr/new-array(2)
+    arr/write-field(small, 0, 5)
+    arr/write-field(small, 1, 6)
+    let big = arr/new-array(4)
+    arr/copy-from-array-to(small, big)
+    assert-eq!(arr/read-field(big, 0), 5)
+    assert-eq!(arr/read-field(big, 1), 6)
+    assert-eq!(arr/read-field(big, 2), null)
+    assert-eq!(arr/read-field(big, 3), null)
+}
+
+test "copy-from-array-to of equal-sized arrays copies every element" {
+    let a = make3()
+    let b = arr/new-array(3)
+    arr/copy-from-array-to(a, b)
+    assert-eq!(arr/read-field(b, 0), 10)
+    assert-eq!(arr/read-field(b, 1), 20)
+    assert-eq!(arr/read-field(b, 2), 30)
+}
+
+test "copy-from-array-to throws when source is larger than destination" {
+    let big = arr/new-array(4)
+    let small = arr/new-array(2)
+    assert-throws!(fn() { arr/copy-from-array-to(big, small) })
+}
+
+test "copy-from-array-to throws on non-array arguments" {
+    assert-throws!(fn() { arr/copy-from-array-to(null, arr/new-array(2)) })
+    assert-throws!(fn() { arr/copy-from-array-to(arr/new-array(2), 3) })
+}
+
+test "copy-range copies count elements starting at start into the same offsets" {
+    let src = arr/new-array(4)
+    arr/write-field(src, 0, 1)
+    arr/write-field(src, 1, 2)
+    arr/write-field(src, 2, 3)
+    arr/write-field(src, 3, 4)
+    let dst = arr/new-array(4)
+    arr/copy-range(src, dst, 1, 2)
+    assert-eq!(arr/read-field(dst, 0), null)
+    assert-eq!(arr/read-field(dst, 1), 2)
+    assert-eq!(arr/read-field(dst, 2), 3)
+    assert-eq!(arr/read-field(dst, 3), null)
+}
+
+test "copy-range with count 0 copies nothing" {
+    let src = make3()
+    let dst = arr/new-array(3)
+    arr/copy-range(src, dst, 0, 0)
+    assert-eq!(arr/read-field(dst, 0), null)
+    assert-eq!(arr/read-field(dst, 1), null)
+    assert-eq!(arr/read-field(dst, 2), null)
+}
+
+test "copy-range throws on non-array arguments" {
+    assert-throws!(fn() { arr/copy-range(null, arr/new-array(2), 0, 1) })
+    assert-throws!(fn() { arr/copy-range(arr/new-array(2), null, 0, 1) })
+}
+
+test "mod computes the remainder, sign follows the dividend" {
+    assert-eq!(arr/mod(17, 5), 2)
+    assert-eq!(arr/mod(10, 2), 0)
+    assert-eq!(arr/mod(-7, 3), -1)
+    assert-eq!(arr/mod(7, 7), 0)
+}
+
+test "arrays compare structurally by element values" {
+    let a = make3()
+    let c = arr/copy-array(a)
+    // equal contents compare equal even though they are distinct objects
+    assert-eq!(a, c)
+    // diverging a single element makes them unequal
+    arr/write-field(c, 0, 777)
+    assert-ne!(a, c)
+}
+
+test "arrays can hold heterogeneous values including null and nested arrays" {
+    let a = arr/new-array(3)
+    arr/write-field(a, 0, "hello")
+    arr/write-field(a, 1, null)
+    arr/write-field(a, 2, arr/new-array(1))
+    assert-eq!(arr/read-field(a, 0), "hello")
+    assert-eq!(arr/read-field(a, 1), null)
+    assert!(arr/is-array(arr/read-field(a, 2)))
+}

@@ -1,0 +1,193 @@
+namespace template_coverage_test
+
+// Regression coverage for beagle.template (standard-library/beagle.template.bg).
+// The only public function is `render(template, ctx)`; everything else is
+// internal. All expected values were confirmed by reading the source and
+// running the module against the release binary. Pure/deterministic — safe to
+// run concurrently with other test files.
+
+use beagle.template as tmpl
+
+test "empty template renders empty string" {
+    assert-eq!(tmpl/render("", {}), "")
+}
+
+test "literal text is copied verbatim" {
+    assert-eq!(tmpl/render("just text", {}), "just text")
+    // Braces only trigger when forming a real delimiter; lone text survives.
+    assert-eq!(tmpl/render("a b c\n1\t2", {}), "a b c\n1\t2")
+}
+
+test "basic variable interpolation" {
+    assert-eq!(tmpl/render("Hello {{ name }}!", {:name "World"}), "Hello World!")
+}
+
+test "missing variable renders empty string" {
+    assert-eq!(tmpl/render("[{{ missing }}]", {}), "[]")
+}
+
+test "dotted path resolves nested maps" {
+    assert-eq!(tmpl/render("{{ user.name }}", {:user {:name "Ann"}}), "Ann")
+    assert-eq!(tmpl/render("{{ a.b.c }}", {:a {:b {:c "deep"}}}), "deep")
+}
+
+test "missing nested segment renders empty" {
+    assert-eq!(tmpl/render("[{{ user.name }}]", {:user {}}), "[]")
+    assert-eq!(tmpl/render("[{{ a.b.c }}]", {}), "[]")
+}
+
+test "non-string values are stringified" {
+    assert-eq!(tmpl/render("{{ count }}", {:count 42}), "42")
+    assert-eq!(tmpl/render("{{ flag }}", {:flag true}), "true")
+    assert-eq!(tmpl/render("{{ flag }}", {:flag false}), "false")
+}
+
+test "string-keyed context resolved via keyword fallback" {
+    // Data maps may be keyed by string (CSV rows / manual maps); lookup falls
+    // back to the string form of the keyword segment.
+    assert-eq!(tmpl/render("Hi {{ name }}!", assoc({}, "name", "Csv")), "Hi Csv!")
+    let row = assoc({}, "user", assoc({}, "email", "a@b.c"))
+    assert-eq!(tmpl/render("{{ user.email }}", row), "a@b.c")
+}
+
+test "HTML escaping of the five significant characters" {
+    assert-eq!(tmpl/render("{{ x }}", {:x "&<>\"'"}), "&amp;&lt;&gt;&quot;&#39;")
+    assert-eq!(tmpl/render("{{ x }}", {:x "<b>"}), "&lt;b&gt;")
+}
+
+test "raw filter disables escaping" {
+    assert-eq!(tmpl/render("{{ x | raw }}", {:x "<b>&"}), "<b>&")
+}
+
+test "triple-brace is raw, same as raw filter" {
+    assert-eq!(tmpl/render("{{{ x }}}", {:x "<b>&"}), "<b>&")
+    // Triple-brace is tested before double-brace by the tokenizer.
+    assert-eq!(tmpl/render("a{{{ x }}}b", {:x "<&>"}), "a<&>b")
+}
+
+test "if without else: truthy renders body, falsy renders nothing" {
+    assert-eq!(tmpl/render("{% if ok %}Y{% endif %}", {:ok true}), "Y")
+    assert-eq!(tmpl/render("[{% if ok %}Y{% endif %}]", {:ok false}), "[]")
+}
+
+test "if/else picks the correct branch" {
+    assert-eq!(tmpl/render("{% if a %}T{% else %}F{% endif %}", {:a true}), "T")
+    assert-eq!(tmpl/render("{% if a %}T{% else %}F{% endif %}", {:a false}), "F")
+}
+
+test "truthiness: null/missing and false are falsy" {
+    assert-eq!(tmpl/render("{% if x %}T{% else %}F{% endif %}", {}), "F")
+    assert-eq!(tmpl/render("{% if x %}T{% else %}F{% endif %}", {:x null}), "F")
+    assert-eq!(tmpl/render("{% if x %}T{% else %}F{% endif %}", {:x false}), "F")
+}
+
+test "truthiness: empty string and empty vector are falsy" {
+    assert-eq!(tmpl/render("{% if x %}T{% else %}F{% endif %}", {:x ""}), "F")
+    assert-eq!(tmpl/render("{% if x %}T{% else %}F{% endif %}", {:x []}), "F")
+}
+
+test "truthiness: zero (Int and Float) is falsy, nonzero truthy" {
+    assert-eq!(tmpl/render("{% if x %}T{% else %}F{% endif %}", {:x 0}), "F")
+    assert-eq!(tmpl/render("{% if x %}T{% else %}F{% endif %}", {:x 0.0}), "F")
+    assert-eq!(tmpl/render("{% if x %}T{% else %}F{% endif %}", {:x 5}), "T")
+    assert-eq!(tmpl/render("{% if x %}T{% else %}F{% endif %}", {:x 1.5}), "T")
+}
+
+test "truthiness: non-empty string/vector are truthy" {
+    assert-eq!(tmpl/render("{% if x %}T{% else %}F{% endif %}", {:x "hi"}), "T")
+    assert-eq!(tmpl/render("{% if x %}T{% else %}F{% endif %}", {:x [1]}), "T")
+}
+
+test "for over a vector binds the loop variable" {
+    assert-eq!(tmpl/render("{% for x in items %}[{{ x }}]{% endfor %}",
+                           {:items ["a", "b", "c"]}), "[a][b][c]")
+}
+
+test "for over empty or missing vector renders nothing" {
+    assert-eq!(tmpl/render("[{% for x in items %}.{% endfor %}]", {:items []}), "[]")
+    assert-eq!(tmpl/render("[{% for x in items %}.{% endfor %}]", {}), "[]")
+}
+
+test "for loop var supports dotted access into elements" {
+    let blog = {:posts [{:title "First"}, {:title "Second"}]}
+    assert-eq!(tmpl/render("{% for p in posts %}<{{ p.title }}>{% endfor %}", blog),
+               "<First><Second>")
+}
+
+test "nested for + if" {
+    let blog = {:posts [{:title "First", :published true},
+                        {:title "Draft", :published false}]}
+    assert-eq!(tmpl/render("{% for p in posts %}{% if p.published %}-{{ p.title }};{% endif %}{% endfor %}", blog),
+               "-First;")
+}
+
+test "loop binding does not leak into outer context" {
+    // After the for, `x` is not bound at top level so it renders empty.
+    assert-eq!(tmpl/render("{% for x in items %}{{ x }}{% endfor %}[{{ x }}]",
+                           {:items ["a"]}), "a[]")
+}
+
+test "for value in loop is HTML-escaped by default" {
+    assert-eq!(tmpl/render("{% for x in items %}{{ x }}{% endfor %}",
+                           {:items ["<a>", "&"]}), "&lt;a&gt;&amp;")
+}
+
+test "unknown filter throws" {
+    assert-throws!(fn() { tmpl/render("{{ x | upper }}", {:x "a"}) })
+}
+
+test "empty variable reference throws" {
+    assert-throws!(fn() { tmpl/render("{{ }}", {}) })
+}
+
+test "malformed dotted path throws" {
+    assert-throws!(fn() { tmpl/render("{{ a..b }}", {}) })
+    assert-throws!(fn() { tmpl/render("{{ .a }}", {}) })
+    assert-throws!(fn() { tmpl/render("{{ a. }}", {}) })
+}
+
+test "if without a condition throws" {
+    assert-throws!(fn() { tmpl/render("{% if %}Y{% endif %}", {}) })
+}
+
+test "malformed for tag throws" {
+    assert-throws!(fn() { tmpl/render("{% for items %}.{% endfor %}", {}) })
+    assert-throws!(fn() { tmpl/render("{% for in items %}.{% endfor %}", {}) })
+}
+
+test "unmatched block tags throw" {
+    // if without endif
+    assert-throws!(fn() { tmpl/render("{% if x %}Y", {:x true}) })
+    // for without endfor
+    assert-throws!(fn() { tmpl/render("{% for x in items %}.", {:items []}) })
+    // stray closing tag at top level
+    assert-throws!(fn() { tmpl/render("{% endif %}", {}) })
+    assert-throws!(fn() { tmpl/render("{% endfor %}", {}) })
+}
+
+test "unterminated delimiters throw" {
+    assert-throws!(fn() { tmpl/render("{{ x", {}) })
+    assert-throws!(fn() { tmpl/render("{{{ x", {}) })
+    assert-throws!(fn() { tmpl/render("{% if x", {}) })
+}
+
+test "unknown tag keyword throws" {
+    assert-throws!(fn() { tmpl/render("{% while x %}Y{% endwhile %}", {}) })
+}
+
+test "for over a non-vector value throws a clear error" {
+    assert-throws!(fn() { tmpl/render("{% for x in n %}.{% endfor %}", {:n 5}) })
+    assert-throws!(fn() { tmpl/render("{% for x in n %}.{% endfor %}", {:n "str"}) })
+}
+
+test "whitespace inside delimiters is stripped" {
+    assert-eq!(tmpl/render("{{   name   }}", {:name "X"}), "X")
+    assert-eq!(tmpl/render("{%   if ok   %}Y{%  endif  %}", {:ok true}), "Y")
+}
+
+test "combined: interpolation, loop, and conditional together" {
+    let ctx = {:user {:name "Ada"}, :count 3, :items ["a", "b"]}
+    assert-eq!(
+        tmpl/render("Hi {{ user.name }} ({{ count }}):{% for i in items %} {{ i }}{% endfor %}{% if count %}!{% endif %}", ctx),
+        "Hi Ada (3): a b!")
+}

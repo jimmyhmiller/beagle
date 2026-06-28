@@ -1,0 +1,71 @@
+namespace json_ext4_test
+
+// Coverage for beagle.json/stringify-pretty's one-argument form, which emits
+// 2-space-indented, human-readable JSON. Pure/deterministic module.
+// Exact-string assertions use single-key objects/arrays so key order is
+// unambiguous; multi-key cases are checked order-independently (round-trip
+// and equivalence to the explicit-indent form).
+
+use beagle.json as json
+
+test "one-arg stringify-pretty uses a 2-space indent for objects" {
+    assert-eq!(json/stringify-pretty({:a 1}), "{\n  \"a\": 1\n}")
+}
+
+test "one-arg stringify-pretty uses a 2-space indent for arrays" {
+    assert-eq!(json/stringify-pretty([1, 2]), "[\n  1,\n  2\n]")
+    assert-eq!(json/stringify-pretty([1]), "[\n  1\n]")
+}
+
+test "one-arg stringify-pretty leaves empty containers compact" {
+    assert-eq!(json/stringify-pretty([]), "[]")
+    assert-eq!(json/stringify-pretty({}), "{}")
+}
+
+test "one-arg stringify-pretty indents nested arrays inside objects" {
+    assert-eq!(
+        json/stringify-pretty({:a [1, 2]}),
+        "{\n  \"a\": [\n    1,\n    2\n  ]\n}"
+    )
+}
+
+test "one-arg stringify-pretty indents nested objects" {
+    assert-eq!(
+        json/stringify-pretty({:a {:b 2}}),
+        "{\n  \"a\": {\n    \"b\": 2\n  }\n}"
+    )
+}
+
+test "one-arg stringify-pretty renders scalars like stringify" {
+    assert-eq!(json/stringify-pretty(42), "42")
+    assert-eq!(json/stringify-pretty(-7), "-7")
+    assert-eq!(json/stringify-pretty(true), "true")
+    assert-eq!(json/stringify-pretty(false), "false")
+    assert-eq!(json/stringify-pretty(null), "null")
+    assert-eq!(json/stringify-pretty("hi"), "\"hi\"")
+}
+
+test "one-arg stringify-pretty equals the explicit 2-space form" {
+    assert-eq!(
+        json/stringify-pretty({:a 1, :b 2, :c 3}),
+        json/stringify-pretty({:a 1, :b 2, :c 3}, 2)
+    )
+    assert-eq!(
+        json/stringify-pretty([{:x 1}, [2, 3], "s"]),
+        json/stringify-pretty([{:x 1}, [2, 3], "s"], 2)
+    )
+}
+
+test "two-arg stringify-pretty form is unchanged" {
+    assert-eq!(json/stringify-pretty({:a 1}, 4), "{\n    \"a\": 1\n}")
+    assert-eq!(json/stringify-pretty([1, 2], 2), "[\n  1,\n  2\n]")
+}
+
+test "pretty output round-trips through parse for multi-key maps" {
+    let value = {:a 1, :b [2, 3], :c {:d 4}}
+    assert-eq!(json/parse(json/stringify-pretty(value)), value)
+}
+
+test "one-arg stringify-pretty rejects unsupported value types" {
+    assert-throws!(fn() { json/stringify-pretty(atom(1)) })
+}

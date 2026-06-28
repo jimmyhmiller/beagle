@@ -1,0 +1,78 @@
+namespace base64_ext_test
+
+// Regression coverage for the beagle.base64 completeness APIs:
+//   decode-strict   -- validating decoder (rejects malformed input)
+//   decode-to-string -- lenient decode straight to a UTF-8 String
+// Vectors derived from RFC 4648 and the module source. Pure/deterministic.
+
+use beagle.base64 as b64
+
+test "decode-strict decodes canonical standard base64" {
+    assert-eq!(b64/decode-strict(""), [])
+    assert-eq!(b64/decode-strict("TWFu"), [77, 97, 110])
+    assert-eq!(b64/decode-strict("TQ=="), [77])
+    assert-eq!(b64/decode-strict("TWE="), [77, 97])
+    assert-eq!(b64/decode-strict("AA=="), [0])
+    assert-eq!(b64/decode-strict("////"), [255, 255, 255])
+    // "foobar" => [f,o,o,b,a,r].
+    assert-eq!(b64/decode-strict("Zm9vYmFy"), [102, 111, 111, 98, 97, 114])
+}
+
+test "decode-strict agrees with lenient decode on canonical input" {
+    assert-eq!(b64/decode-strict("Zm9vYmFy"), b64/decode("Zm9vYmFy"))
+    assert-eq!(b64/decode-strict("aGVsbG8="), b64/decode("aGVsbG8="))
+}
+
+test "decode-strict rejects non-multiple-of-four length" {
+    assert-throws!(fn() { b64/decode-strict("ab") })
+    assert-throws!(fn() { b64/decode-strict("abc") })
+    assert-throws!(fn() { b64/decode-strict("TWFu!") })
+    // Lenient decode tolerates the same short input that strict rejects.
+    assert-throws!(fn() { b64/decode-strict("TQ") })
+    assert-eq!(b64/decode("TQ"), [77])
+}
+
+test "decode-strict rejects invalid characters and whitespace" {
+    // '!' (33) is not in either alphabet.
+    assert-throws!(fn() { b64/decode-strict("!!!!") })
+    // A space is data-position whitespace -- strict rejects it (lenient skips).
+    assert-throws!(fn() { b64/decode-strict("TW F") })
+    assert-eq!(b64/decode("TW F"), [77, 97])
+}
+
+test "decode-strict rejects malformed padding" {
+    // More than two padding characters.
+    assert-throws!(fn() { b64/decode-strict("====") })
+    assert-throws!(fn() { b64/decode-strict("A===") })
+    // Padding must be trailing only.
+    assert-throws!(fn() { b64/decode-strict("Zg=A") })
+}
+
+test "decode-strict accepts every encode() result (canonical, padded)" {
+    assert-eq!(b64/decode-strict(b64/encode("hello")), [104, 101, 108, 108, 111])
+    assert-eq!(b64/decode-strict(b64/encode("Man")), [77, 97, 110])
+    assert-eq!(b64/decode-strict(b64/encode([0, 1, 2, 3, 254, 255])), [0, 1, 2, 3, 254, 255])
+}
+
+test "decode-to-string returns decoded UTF-8 text" {
+    assert-eq!(b64/decode-to-string(""), "")
+    assert-eq!(b64/decode-to-string("TWFu"), "Man")
+    assert-eq!(b64/decode-to-string("TQ=="), "M")
+    assert-eq!(b64/decode-to-string("aGVsbG8="), "hello")
+    assert-eq!(b64/decode-to-string("Zm9vYmFy"), "foobar")
+    // 'é' is UTF-8 bytes [195, 169]; base64 "w6k=".
+    assert-eq!(b64/decode-to-string("w6k="), "é")
+}
+
+test "decode-to-string is lenient like decode" {
+    // Missing padding is tolerated.
+    assert-eq!(b64/decode-to-string("aGVsbG8"), "hello")
+    // ASCII whitespace is skipped.
+    assert-eq!(b64/decode-to-string("TW\nFu"), "Man")
+    assert-eq!(b64/decode-to-string("TW Fu"), "Man")
+}
+
+test "encode then decode-to-string round-trips textual data" {
+    assert-eq!(b64/decode-to-string(b64/encode("the quick brown fox")), "the quick brown fox")
+    assert-eq!(b64/decode-to-string(b64/encode("hello")), "hello")
+}

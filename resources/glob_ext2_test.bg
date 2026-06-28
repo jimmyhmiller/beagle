@@ -1,0 +1,82 @@
+namespace glob_ext2_test
+
+use beagle.glob as glob
+
+// ---------------------------------------------------------------------------
+// expand-braces
+// ---------------------------------------------------------------------------
+
+test "expand-braces single group" {
+    assert-eq!(glob/expand-braces("a{b,c}d"), ["abd", "acd"])
+}
+
+test "expand-braces no braces is identity" {
+    assert-eq!(glob/expand-braces("plain"), ["plain"])
+    assert-eq!(glob/expand-braces(""), [""])
+}
+
+test "expand-braces whole-string group" {
+    assert-eq!(glob/expand-braces("{a,b}"), ["a", "b"])
+}
+
+test "expand-braces multiple groups cartesian product" {
+    assert-eq!(glob/expand-braces("{a,b}{1,2}"), ["a1", "a2", "b1", "b2"])
+}
+
+test "expand-braces empty option" {
+    assert-eq!(glob/expand-braces("a{,b}c"), ["ac", "abc"])
+}
+
+test "expand-braces single-option group stays literal" {
+    // No top-level comma => braces are kept literal (shell behavior).
+    assert-eq!(glob/expand-braces("x{a}y"), ["x{a}y"])
+}
+
+test "expand-braces unbalanced brace stays literal" {
+    assert-eq!(glob/expand-braces("a{b,c"), ["a{b,c"])
+}
+
+test "expand-braces nested groups expand out-in" {
+    assert-eq!(glob/expand-braces("a{b,c{d,e}}f"), ["abf", "acdf", "acef"])
+}
+
+test "expand-braces result feeds match?" {
+    let opts = glob/expand-braces("file.{txt,md}")
+    assert-eq!(opts, ["file.txt", "file.md"])
+    assert!(glob/match?(first(seq(opts)), "file.txt"))
+}
+
+test "expand-braces bad input throws" {
+    // A non-string cannot be length-scanned: clear runtime error, not a sentinel.
+    assert-throws!(fn() { glob/expand-braces(42) })
+}
+
+// ---------------------------------------------------------------------------
+// match-ci?
+// ---------------------------------------------------------------------------
+
+test "match-ci? folds case both ways" {
+    assert!(glob/match-ci?("*.TXT", "foo.txt"))
+    assert!(glob/match-ci?("FOO", "foo"))
+    assert!(glob/match-ci?("a?C", "ABc"))
+}
+
+test "match-ci? class ranges fold case" {
+    assert!(glob/match-ci?("[A-C]x", "BX"))
+    assert!(glob/match-ci?("[a-c]X", "bx"))
+}
+
+test "match-ci? respects non-match" {
+    assert!(glob/match-ci?("foo", "bar") == false)
+    assert!(glob/match-ci?("*.txt", "foo.md") == false)
+}
+
+test "match-ci? still honors path-segment rules" {
+    assert!(glob/match-ci?("src/**/*.BG", "src/a/b/c.bg"))
+    assert!(glob/match-ci?("*", "a/b") == false)
+}
+
+test "match? remains case-sensitive (unchanged)" {
+    assert!(glob/match?("*.txt", "foo.txt"))
+    assert!(glob/match?("*.TXT", "foo.txt") == false)
+}

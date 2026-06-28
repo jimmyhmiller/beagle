@@ -1,0 +1,164 @@
+namespace glob_coverage_test
+
+use beagle.glob as g
+use beagle.fs as fs
+use beagle.core as core
+
+// ---------------------------------------------------------------------------
+// match? — literal / *, ?, classes, escapes, ** path semantics, edge cases
+// ---------------------------------------------------------------------------
+
+test "match? literal characters" {
+    assert!(g/match?("abc", "abc"))
+    assert!(g/match?("abc", "abd") == false)
+    assert!(g/match?("abc", "ab") == false)    // pattern longer than name
+    assert!(g/match?("ab", "abc") == false)    // name longer than pattern
+}
+
+test "match? empty pattern and empty name" {
+    assert!(g/match?("", ""))                  // both exhausted
+    assert!(g/match?("", "a") == false)        // pattern exhausted, name not
+    assert!(g/match?("a", "") == false)        // name exhausted, literal left
+}
+
+test "match? single star matches a run within a segment" {
+    assert!(g/match?("*", ""))                 // * matches zero chars
+    assert!(g/match?("*", "anything"))
+    assert!(g/match?("*.txt", "foo.txt"))
+    assert!(g/match?("*.txt", "foo.md") == false)
+    assert!(g/match?("a*", "a"))               // * matches empty tail
+    assert!(g/match?("a*c", "abbbc"))
+    assert!(g/match?("a*c", "ac"))             // star spans nothing
+}
+
+test "match? single star never crosses '/'" {
+    assert!(g/match?("*", "a/b") == false)
+    assert!(g/match?("a*c", "a/c") == false)
+    assert!(g/match?("*/*", "a/b"))            // each segment its own star
+}
+
+test "match? question mark is exactly one non-slash char" {
+    assert!(g/match?("a?c", "abc"))
+    assert!(g/match?("a?c", "ac") == false)    // needs exactly one
+    assert!(g/match?("a?c", "abbc") == false)
+    assert!(g/match?("?", "/") == false)       // '?' refuses '/'
+    assert!(g/match?("a?c", "a/c") == false)
+}
+
+test "match? character class membership and ranges" {
+    assert!(g/match?("[abc]x", "bx"))
+    assert!(g/match?("[abc]x", "dx") == false)
+    assert!(g/match?("[a-c]x", "bx"))
+    assert!(g/match?("[a-c]x", "dx") == false)
+    assert!(g/match?("[a-cA-C]x", "Bx"))       // two ranges in one class
+}
+
+test "match? negated character class with ! and ^" {
+    assert!(g/match?("[!a]", "b"))
+    assert!(g/match?("[!a]", "a") == false)
+    assert!(g/match?("[^a]", "b"))
+    assert!(g/match?("[^a]", "a") == false)
+}
+
+test "match? character classes never match '/' even when negated" {
+    assert!(g/match?("[a-c]x", "/x") == false)
+    assert!(g/match?("[!a]", "/") == false)    // negated still rejects '/'
+}
+
+test "match? leading ']' inside a class is literal" {
+    assert!(g/match?("[]a]", "]"))             // ']' right after '[' is a member
+    assert!(g/match?("[]a]", "a"))
+    assert!(g/match?("[]a]", "b") == false)
+}
+
+test "match? unterminated class treats '[' as a literal char" {
+    assert!(g/match?("[abc", "[bc") == false)  // '[' literal, then 'a' vs 'b'
+    assert!(g/match?("[abc", "abc") == false)  // name must start with literal '['
+    assert!(g/match?("[xy", "[xy"))            // literal '[' then literal x,y
+}
+
+test "match? backslash escapes the next char as literal" {
+    assert!(g/match?("\\*", "*"))              // escaped star is literal '*'
+    assert!(g/match?("\\*", "a") == false)
+    assert!(g/match?("\\?", "?"))              // escaped '?' is literal
+    assert!(g/match?("\\?", "x") == false)
+    assert!(g/match?("\\[abc\\]", "[abc]"))    // escaped brackets are literals
+}
+
+test "match? trailing backslash matches a literal backslash" {
+    assert!(g/match?("a\\", "a\\"))
+    assert!(g/match?("a\\", "a") == false)
+}
+
+test "match? double-star crosses '/' as a whole path segment" {
+    assert!(g/match?("src/**/x", "src/a/b/x"))
+    assert!(g/match?("src/**/x", "src/x"))     // zero intermediate segments
+    assert!(g/match?("src/**/*.bg", "src/a/b/c.bg"))
+    assert!(g/match?("src/**", "src/a/b"))     // ** to end crosses slashes
+}
+
+test "match? non-segment ** collapses to a single star (no '/' crossing)" {
+    assert!(g/match?("a**b", "axyzb"))         // within a segment behaves like *
+    assert!(g/match?("a**b", "ax/yzb") == false) // not a whole segment, no cross
+    assert!(g/match?("***", "abc"))            // start..end run is a real **
+}
+
+// ---------------------------------------------------------------------------
+// translate — token description of how a pattern parses
+// ---------------------------------------------------------------------------
+
+test "translate literals and wildcards" {
+    assert-eq!(g/translate("a*c"), "LIT(a) STAR LIT(c)")
+    assert-eq!(g/translate("?"), "ANY")
+    assert-eq!(g/translate(""), "")            // empty pattern -> empty desc
+    assert-eq!(g/translate("ab"), "LIT(a) LIT(b)")
+}
+
+test "translate double-star vs collapsed stars" {
+    assert-eq!(
+        g/translate("src/**/*.bg"),
+        "LIT(s) LIT(r) LIT(c) LIT(/) DOUBLESTAR LIT(/) STAR LIT(.) LIT(b) LIT(g)")
+    // non-segment '**' is two separate STAR tokens, not DOUBLESTAR
+    assert-eq!(g/translate("a**b"), "LIT(a) STAR STAR LIT(b)")
+}
+
+test "translate character classes" {
+    assert-eq!(g/translate("[a-z]"), "CLASS(a-z)")
+    assert-eq!(g/translate("[!ab]"), "CLASS(!ab)")  // '!' negation marker
+    assert-eq!(g/translate("[^ab]"), "CLASS(!ab)")  // '^' normalizes to '!'
+    assert-eq!(g/translate("[]a]"), "CLASS(]a)")    // leading ']' is literal member
+}
+
+test "translate escaped char and unterminated class" {
+    assert-eq!(g/translate("\\*"), "LIT(*)")        // escape yields a literal
+    // unterminated class: '[' is a literal then each following char is a LIT
+    assert-eq!(g/translate("[abc"), "LIT([) LIT(a) LIT(b) LIT(c)")
+}
+
+// ---------------------------------------------------------------------------
+// find — fs-backed recursive walk. Uses a unique temp dir for parallel safety.
+// ---------------------------------------------------------------------------
+
+test "find returns relative paths matching the pattern" {
+    let base = "/tmp/glob_cov_" ++ to-string(core/random-int(2000000000)) ++ "_" ++ to-string(core/thread-id())
+    fs/run-blocking(fn() {
+        fs/create-dir-all(base ++ "/src/a")
+        fs/write-file(base ++ "/src/a/x.bg", "1")
+        fs/write-file(base ++ "/src/y.bg", "2")
+        fs/write-file(base ++ "/top.txt", "3")
+    })
+    // sort because directory-walk order is not guaranteed
+    let bg = sort(g/find("src/**/*.bg", base))
+    assert-eq!(bg, ["src/a/x.bg", "src/y.bg"])
+    let txt = sort(g/find("*.txt", base))
+    assert-eq!(txt, ["top.txt"])
+    // a pattern that matches nothing under the tree yields an empty vector
+    let none = g/find("nope/*.zzz", base)
+    assert-eq!(none, [])
+    fs/run-blocking(fn() { fs/remove-dir-all(base) })
+}
+
+test "find on a nonexistent directory yields an empty result, not an error" {
+    let missing = "/tmp/glob_cov_missing_" ++ to-string(core/random-int(2000000000))
+    assert-eq!(g/find("*", missing), [])
+}

@@ -1,0 +1,61 @@
+namespace vec_pop_test
+
+// B1 regression: native vec-pop (drop-last) on the 32-way trie. Must be correct
+// across tail/tree boundaries (32) and tree-level boundaries (1024).
+
+fn build(n) {
+    let mut v = []
+    let mut i = 0
+    while i < n { v = push(v, i)  i = i + 1 }
+    v
+}
+
+fn verify-prefix(v, len) {
+    assert-eq!(length(v), len)
+    let mut i = 0
+    while i < len {
+        assert-eq!(get(v, i), i)
+        i = i + 1
+    }
+}
+
+fn pop-all-check(n) {
+    let mut v = build(n)
+    verify-prefix(v, n)
+    let mut k = n
+    while k > 0 {
+        v = butlast(v)
+        k = k - 1
+        verify-prefix(v, k)
+    }
+    assert-eq!(length(v), 0)
+}
+
+test "vec-pop correctness across tail/tree/level boundaries" {
+    pop-all-check(1)
+    pop-all-check(2)
+    pop-all-check(31)
+    pop-all-check(32)
+    pop-all-check(33)
+    pop-all-check(63)
+    pop-all-check(64)
+    pop-all-check(65)
+    pop-all-check(1023)
+    pop-all-check(1024)
+    pop-all-check(1025)
+}
+
+test "vec-pop edge cases" {
+    assert-eq!(butlast([]), [])
+    assert-eq!(butlast([42]), [])
+    assert-eq!(butlast([1, 2, 3]), [1, 2])
+}
+
+test "vec-pop preserves immutability of the original" {
+    let v = build(100)
+    let w = butlast(v)
+    assert-eq!(length(v), 100)
+    assert-eq!(get(v, 99), 99)
+    assert-eq!(length(w), 99)
+    assert-eq!(get(w, 98), 98)
+}

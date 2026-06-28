@@ -1,0 +1,226 @@
+namespace struct-pack_coverage_test
+
+use beagle.struct-pack as sp
+
+// ---------------------------------------------------------------------------
+// 8-bit
+// ---------------------------------------------------------------------------
+
+test "pack-u8 happy + boundaries" {
+    assert-eq!(sp/pack-u8(0), [0])
+    assert-eq!(sp/pack-u8(200), [200])
+    assert-eq!(sp/pack-u8(0xFF), [255])
+}
+
+test "pack-u8 out of range throws" {
+    assert-throws!(fn() { sp/pack-u8(256) })
+    assert-throws!(fn() { sp/pack-u8(-1) })
+}
+
+test "pack-i8 two's complement + boundaries" {
+    assert-eq!(sp/pack-i8(0), [0])
+    assert-eq!(sp/pack-i8(-1), [255])
+    assert-eq!(sp/pack-i8(-128), [128])
+    assert-eq!(sp/pack-i8(127), [127])
+}
+
+test "pack-i8 out of range throws" {
+    assert-throws!(fn() { sp/pack-i8(128) })
+    assert-throws!(fn() { sp/pack-i8(-129) })
+}
+
+test "unpack-u8 / unpack-i8" {
+    assert-eq!(sp/unpack-u8([200], 0), 200)
+    assert-eq!(sp/unpack-i8([255], 0), -1)
+    assert-eq!(sp/unpack-i8([128], 0), -128)
+    assert-eq!(sp/unpack-i8([127], 0), 127)
+    // read at non-zero offset
+    assert-eq!(sp/unpack-u8([10, 20, 30], 2), 30)
+}
+
+test "8-bit round trips" {
+    assert-eq!(sp/unpack-u8(sp/pack-u8(173), 0), 173)
+    assert-eq!(sp/unpack-i8(sp/pack-i8(-100), 0), -100)
+}
+
+// ---------------------------------------------------------------------------
+// 16-bit
+// ---------------------------------------------------------------------------
+
+test "pack-u16 be/le/default" {
+    assert-eq!(sp/pack-u16-be(0x0102), [1, 2])
+    assert-eq!(sp/pack-u16-le(0x0102), [2, 1])
+    assert-eq!(sp/pack-u16(0x0102), [1, 2])
+    assert-eq!(sp/pack-u16-be(0xFFFF), [255, 255])
+    assert-eq!(sp/pack-u16-be(0), [0, 0])
+}
+
+test "pack-u16 out of range throws" {
+    assert-throws!(fn() { sp/pack-u16-be(0x10000) })
+    assert-throws!(fn() { sp/pack-u16-le(-1) })
+}
+
+test "unpack-u16 be/le/default" {
+    assert-eq!(sp/unpack-u16-be([1, 2], 0), 0x0102)
+    assert-eq!(sp/unpack-u16-le([2, 1], 0), 0x0102)
+    assert-eq!(sp/unpack-u16([1, 2], 0), 0x0102)
+    // offset
+    assert-eq!(sp/unpack-u16-be([9, 1, 2], 1), 0x0102)
+}
+
+test "pack-i16 two's complement be/le/default" {
+    assert-eq!(sp/pack-i16-be(-1), [255, 255])
+    assert-eq!(sp/pack-i16-le(-1), [255, 255])
+    assert-eq!(sp/pack-i16-be(-2), [255, 254])
+    assert-eq!(sp/pack-i16-le(-2), [254, 255])
+    assert-eq!(sp/pack-i16(-1), [255, 255])
+    assert-eq!(sp/pack-i16-be(-32768), [128, 0])
+    assert-eq!(sp/pack-i16-be(32767), [127, 255])
+}
+
+test "pack-i16 out of range throws" {
+    assert-throws!(fn() { sp/pack-i16-be(32768) })
+    assert-throws!(fn() { sp/pack-i16-be(-32769) })
+}
+
+test "unpack-i16 sign extension" {
+    assert-eq!(sp/unpack-i16-be([255, 255], 0), -1)
+    assert-eq!(sp/unpack-i16-be([255, 254], 0), -2)
+    assert-eq!(sp/unpack-i16-be([1, 2], 0), 258)
+    assert-eq!(sp/unpack-i16-le([254, 255], 0), -2)
+    assert-eq!(sp/unpack-i16([128, 0], 0), -32768)
+}
+
+test "16-bit round trips" {
+    assert-eq!(sp/unpack-u16-be(sp/pack-u16-be(0x0102), 0), 0x0102)
+    assert-eq!(sp/unpack-u16-le(sp/pack-u16-le(0xABCD), 0), 0xABCD)
+    assert-eq!(sp/unpack-i16-be(sp/pack-i16-be(-12345), 0), -12345)
+}
+
+// ---------------------------------------------------------------------------
+// 32-bit
+// ---------------------------------------------------------------------------
+
+test "pack-u32 be/le/default" {
+    assert-eq!(sp/pack-u32-be(0x01020304), [1, 2, 3, 4])
+    assert-eq!(sp/pack-u32-le(0x01020304), [4, 3, 2, 1])
+    assert-eq!(sp/pack-u32(0x01020304), [1, 2, 3, 4])
+    assert-eq!(sp/pack-u32-be(0xFFFFFFFF), [255, 255, 255, 255])
+    assert-eq!(sp/pack-u32-be(0), [0, 0, 0, 0])
+}
+
+test "pack-u32 out of range throws" {
+    assert-throws!(fn() { sp/pack-u32-be(0x100000000) })
+    assert-throws!(fn() { sp/pack-u32-le(-1) })
+}
+
+test "unpack-u32 be/le/default + max" {
+    assert-eq!(sp/unpack-u32-be([1, 2, 3, 4], 0), 16909060)
+    assert-eq!(sp/unpack-u32-le([4, 3, 2, 1], 0), 16909060)
+    assert-eq!(sp/unpack-u32([1, 2, 3, 4], 0), 0x01020304)
+    assert-eq!(sp/unpack-u32-be([255, 255, 255, 255], 0), 0xFFFFFFFF)
+    // offset
+    assert-eq!(sp/unpack-u32-be([0, 1, 2, 3, 4], 1), 16909060)
+}
+
+test "pack-i32 two's complement be/le/default" {
+    assert-eq!(sp/pack-i32-be(-1), [255, 255, 255, 255])
+    assert-eq!(sp/pack-i32-le(-1), [255, 255, 255, 255])
+    assert-eq!(sp/pack-i32-be(-2), [255, 255, 255, 254])
+    assert-eq!(sp/pack-i32-le(-2), [254, 255, 255, 255])
+    assert-eq!(sp/pack-i32(-1), [255, 255, 255, 255])
+    assert-eq!(sp/pack-i32-be(-2147483648), [128, 0, 0, 0])
+    assert-eq!(sp/pack-i32-be(2147483647), [127, 255, 255, 255])
+}
+
+test "pack-i32 out of range throws" {
+    assert-throws!(fn() { sp/pack-i32-be(2147483648) })
+    assert-throws!(fn() { sp/pack-i32-be(-2147483649) })
+}
+
+test "unpack-i32 sign extension" {
+    assert-eq!(sp/unpack-i32-be([255, 255, 255, 255], 0), -1)
+    assert-eq!(sp/unpack-i32-be([255, 255, 255, 254], 0), -2)
+    assert-eq!(sp/unpack-i32-le([254, 255, 255, 255], 0), -2)
+    assert-eq!(sp/unpack-i32([128, 0, 0, 0], 0), -2147483648)
+}
+
+test "32-bit round trips" {
+    assert-eq!(sp/unpack-u32-be(sp/pack-u32-be(0xDEADBEEF), 0), 0xDEADBEEF)
+    assert-eq!(sp/unpack-u32-le(sp/pack-u32-le(0xDEADBEEF), 0), 0xDEADBEEF)
+    assert-eq!(sp/unpack-i32-le(sp/pack-i32-le(-1000000), 0), -1000000)
+}
+
+// ---------------------------------------------------------------------------
+// Format-string driven pack / unpack
+// ---------------------------------------------------------------------------
+
+test "pack/unpack format big-endian" {
+    assert-eq!(sp/pack(">HHB", [0x0102, 0x0304, 0x05]), [1, 2, 3, 4, 5])
+    assert-eq!(sp/unpack(">HHB", [1, 2, 3, 4, 5]), [258, 772, 5])
+}
+
+test "pack/unpack format little-endian" {
+    assert-eq!(sp/pack("<H", [0x0102]), [2, 1])
+    assert-eq!(sp/unpack("<H", [2, 1]), [258])
+}
+
+test "format default (no order char) is big-endian" {
+    assert-eq!(sp/pack("HB", [0x0102, 0x05]), [1, 2, 5])
+    assert-eq!(sp/unpack("HB", [1, 2, 5]), [258, 5])
+}
+
+test "format native '=' is little-endian, '!' is big-endian" {
+    assert-eq!(sp/pack("=H", [0x0102]), [2, 1])
+    assert-eq!(sp/unpack("=H", [2, 1]), [258])
+    assert-eq!(sp/pack("!H", [0x0102]), [1, 2])
+    assert-eq!(sp/unpack("!H", [1, 2]), [258])
+}
+
+test "format signed codes round-trip" {
+    assert-eq!(sp/pack(">hi", [-1, -2]), [255, 255, 255, 255, 255, 254])
+    assert-eq!(sp/unpack(">hi", [255, 255, 255, 255, 255, 254]), [-1, -2])
+    assert-eq!(sp/unpack(">iHb", sp/pack(">iHb", [-1000000, 0xBEEF, -5])), [-1000000, 0xBEEF, -5])
+}
+
+test "format whitespace is ignored" {
+    assert-eq!(sp/pack("> H H B", [0x0102, 0x0304, 0x05]), [1, 2, 3, 4, 5])
+    assert-eq!(sp/calcsize("> H H B"), 5)
+}
+
+test "pack empty format yields empty bytes" {
+    assert-eq!(sp/pack(">", []), [])
+    assert-eq!(sp/unpack(">", []), [])
+    assert-eq!(sp/pack("", []), [])
+}
+
+test "pack not enough values throws" {
+    assert-throws!(fn() { sp/pack(">HH", [1]) })
+}
+
+test "unpack not enough bytes throws" {
+    assert-throws!(fn() { sp/unpack(">I", [1, 2, 3]) })
+}
+
+test "unknown format code throws" {
+    assert-throws!(fn() { sp/pack(">Z", [1]) })
+    assert-throws!(fn() { sp/unpack(">Z", [1]) })
+    assert-throws!(fn() { sp/calcsize(">Z") })
+}
+
+test "format range checks propagate" {
+    assert-throws!(fn() { sp/pack(">H", [70000]) })
+    assert-throws!(fn() { sp/pack(">B", [-1]) })
+}
+
+// ---------------------------------------------------------------------------
+// calcsize
+// ---------------------------------------------------------------------------
+
+test "calcsize widths" {
+    assert-eq!(sp/calcsize(">HHB"), 5)
+    assert-eq!(sp/calcsize("<iiB"), 9)
+    assert-eq!(sp/calcsize(">"), 0)
+    assert-eq!(sp/calcsize("bBhHiI"), 14)
+    assert-eq!(sp/calcsize(""), 0)
+}

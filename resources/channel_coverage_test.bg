@@ -1,0 +1,158 @@
+namespace channel_coverage_test
+
+// Single-threaded, deterministic coverage of beagle.channel's public API.
+// The concurrent multi-producer path is already covered by stdlib_phase9_test;
+// here we pin down the exact sequential semantics of every public function:
+// FIFO order, the {:some v}/{:none true} option shape, counts/emptiness, the
+// mutex (including release-on-throw), and the atomic counter.
+
+use beagle.channel as chan
+
+test "fresh channel is empty" {
+    let c = chan/make-channel()
+    assert!(chan/channel-empty?(c))
+    assert-eq!(chan/channel-count(c), 0)
+}
+
+test "try-receive on empty returns {:none true}" {
+    let c = chan/make-channel()
+    let r = chan/try-receive(c)
+    assert-eq!(get(r, :none), true)
+    // :some is absent on a none result
+    assert-eq!(get(r, :some), null)
+}
+
+test "send! returns the value sent" {
+    let c = chan/make-channel()
+    assert-eq!(chan/send!(c, 42), 42)
+    assert-eq!(chan/send!(c, "hi"), "hi")
+}
+
+test "send! then try-receive yields {:some v} and drains" {
+    let c = chan/make-channel()
+    chan/send!(c, 7)
+    let r = chan/try-receive(c)
+    assert-eq!(get(r, :some), 7)
+    assert-eq!(get(r, :none), null)
+    // channel is empty again after draining the single element
+    assert!(chan/channel-empty?(c))
+}
+
+test "channel-count tracks buffered elements" {
+    let c = chan/make-channel()
+    chan/send!(c, 1)
+    chan/send!(c, 2)
+    chan/send!(c, 3)
+    assert-eq!(chan/channel-count(c), 3)
+    assert!(chan/channel-empty?(c) == false)
+    chan/try-receive(c)
+    assert-eq!(chan/channel-count(c), 2)
+}
+
+test "strict FIFO order across sends and receives" {
+    let c = chan/make-channel()
+    let mut i = 0
+    while i < 5 { chan/send!(c, i) i = i + 1 }
+    // receive (blocking, but never blocks since data is present) preserves order
+    assert-eq!(chan/receive(c), 0)
+    assert-eq!(chan/receive(c), 1)
+    assert-eq!(chan/receive(c), 2)
+    assert-eq!(chan/receive(c), 3)
+    assert-eq!(chan/receive(c), 4)
+    assert!(chan/channel-empty?(c))
+}
+
+test "interleaved send/receive keeps FIFO" {
+    let c = chan/make-channel()
+    chan/send!(c, 100)
+    chan/send!(c, 200)
+    assert-eq!(chan/receive(c), 100)
+    chan/send!(c, 300)
+    assert-eq!(chan/receive(c), 200)
+    assert-eq!(chan/receive(c), 300)
+    assert-eq!(chan/channel-count(c), 0)
+}
+
+test "channel carries heterogeneous and null values" {
+    let c = chan/make-channel()
+    chan/send!(c, null)
+    chan/send!(c, [1, 2])
+    let r0 = chan/try-receive(c)
+    // a sent null is still a present element: :some is null, :none is absent
+    assert-eq!(get(r0, :some), null)
+    assert-eq!(get(r0, :none), null)
+    assert-eq!(chan/receive(c), [1, 2])
+}
+
+test "make-counter starts at zero" {
+    let ctr = chan/make-counter()
+    assert-eq!(chan/counter-value(ctr), 0)
+}
+
+test "incr! returns the new value and accumulates" {
+    let ctr = chan/make-counter()
+    assert-eq!(chan/incr!(ctr), 1)
+    assert-eq!(chan/incr!(ctr), 2)
+    assert-eq!(chan/incr!(ctr), 3)
+    assert-eq!(chan/counter-value(ctr), 3)
+}
+
+test "add! applies arbitrary deltas including negatives" {
+    let ctr = chan/make-counter()
+    assert-eq!(chan/add!(ctr, 10), 10)
+    assert-eq!(chan/add!(ctr, 5), 15)
+    assert-eq!(chan/add!(ctr, -20), -5)
+    assert-eq!(chan/counter-value(ctr), -5)
+}
+
+test "independent counters do not share state" {
+    let a = chan/make-counter()
+    let b = chan/make-counter()
+    chan/incr!(a)
+    chan/incr!(a)
+    chan/incr!(b)
+    assert-eq!(chan/counter-value(a), 2)
+    assert-eq!(chan/counter-value(b), 1)
+}
+
+test "with-lock runs the thunk and returns its value" {
+    let m = chan/make-mutex()
+    let result = chan/with-lock(m, fn() { 1 + 2 })
+    assert-eq!(result, 3)
+}
+
+test "with-lock releases the lock so it can be re-acquired" {
+    let m = chan/make-mutex()
+    chan/with-lock(m, fn() { 1 })
+    // a second acquisition must succeed (would spin forever if not released)
+    let r = chan/with-lock(m, fn() { 99 })
+    assert-eq!(r, 99)
+}
+
+test "with-lock releases on throw and re-surfaces the exception" {
+    let m = chan/make-mutex()
+    assert-throws!(fn() {
+        chan/with-lock(m, fn() { throw("boom") })
+    })
+    // lock was released despite the throw: this must not deadlock
+    let r = chan/with-lock(m, fn() { 7 })
+    assert-eq!(r, 7)
+}
+
+test "explicit acquire!/release! protects and frees the mutex" {
+    let m = chan/make-mutex()
+    chan/acquire!(m)
+    chan/release!(m)
+    // re-acquire succeeds after release, then with-lock proves the lock is free
+    chan/acquire!(m)
+    chan/release!(m)
+    assert-eq!(chan/with-lock(m, fn() { 123 }), 123)
+}
+
+test "with-lock thunk can mutate a counter atomically" {
+    let m = chan/make-mutex()
+    let ctr = chan/make-counter()
+    chan/with-lock(m, fn() { chan/incr!(ctr) })
+    chan/with-lock(m, fn() { chan/incr!(ctr) })
+    assert-eq!(chan/counter-value(ctr), 2)
+}

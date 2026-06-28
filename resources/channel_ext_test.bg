@@ -1,0 +1,91 @@
+namespace channel_ext_test
+
+use beagle.channel as chan
+
+// Regression coverage for the channel completeness API:
+//   close!(ch) / closed?(ch) and the closed-channel read contract.
+//
+// Read contract (see beagle.channel.bg):
+//   try-receive on a closed+drained channel -> {:closed true}
+//   receive     on a closed+drained channel -> the :closed keyword sentinel
+//   send! on a closed channel               -> throws
+
+test "a fresh channel is open" {
+    let ch = chan/make-channel()
+    assert-eq!(chan/closed?(ch), false)
+}
+
+test "close! marks the channel closed" {
+    let ch = chan/make-channel()
+    chan/close!(ch)
+    assert-eq!(chan/closed?(ch), true)
+}
+
+test "close! is idempotent" {
+    let ch = chan/make-channel()
+    chan/close!(ch)
+    chan/close!(ch)
+    assert-eq!(chan/closed?(ch), true)
+}
+
+test "try-receive on a closed empty channel returns the closed marker" {
+    let ch = chan/make-channel()
+    chan/close!(ch)
+    let r = chan/try-receive(ch)
+    assert-eq!(get(r, :closed), true)
+    assert-eq!(get(r, :none), null)
+    assert-eq!(get(r, :some), null)
+}
+
+test "try-receive on an open empty channel still returns the none marker" {
+    let ch = chan/make-channel()
+    let r = chan/try-receive(ch)
+    assert-eq!(get(r, :none), true)
+    assert-eq!(get(r, :closed), null)
+}
+
+test "buffered values drain after close, then closed marker appears" {
+    let ch = chan/make-channel()
+    chan/send!(ch, 1)
+    chan/send!(ch, 2)
+    chan/close!(ch)
+    // closure does not discard already-buffered values
+    let a = chan/try-receive(ch)
+    assert-eq!(get(a, :some), 1)
+    let b = chan/try-receive(ch)
+    assert-eq!(get(b, :some), 2)
+    // now drained + closed
+    let c = chan/try-receive(ch)
+    assert-eq!(get(c, :closed), true)
+}
+
+test "receive returns the :closed sentinel instead of blocking" {
+    let ch = chan/make-channel()
+    chan/close!(ch)
+    assert-eq!(chan/receive(ch), :closed)
+}
+
+test "receive drains buffered values before signaling closed" {
+    let ch = chan/make-channel()
+    chan/send!(ch, 10)
+    chan/send!(ch, 20)
+    chan/close!(ch)
+    assert-eq!(chan/receive(ch), 10)
+    assert-eq!(chan/receive(ch), 20)
+    assert-eq!(chan/receive(ch), :closed)
+}
+
+test "send! on a closed channel throws" {
+    let ch = chan/make-channel()
+    chan/close!(ch)
+    assert-throws!(fn() { chan/send!(ch, 99) })
+}
+
+test "send!/receive on an open channel are unaffected" {
+    let ch = chan/make-channel()
+    chan/send!(ch, 42)
+    assert-eq!(chan/closed?(ch), false)
+    assert-eq!(chan/receive(ch), 42)
+    let r = chan/try-receive(ch)
+    assert-eq!(get(r, :none), true)
+}

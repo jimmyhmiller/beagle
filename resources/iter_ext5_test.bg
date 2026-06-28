@@ -1,0 +1,96 @@
+namespace iter_ext5_test
+
+use beagle.iter as it
+
+// Coverage for the group-by / chunk-by / frequencies functions in
+// beagle.iter. All three already existed in the module, so this file only
+// adds tests. Expected values derived by reading the implementations in
+// standard-library/beagle.iter.bg.
+
+// ----------------------------------------------------------------------------
+// group-by  (map key -> vector of elements, insertion order within groups)
+// ----------------------------------------------------------------------------
+
+test "group-by splits by key and preserves within-group order" {
+    let groups = it/group-by(fn(x) { x % 2 }, [1, 2, 3, 4, 5])
+    assert-eq!(get(groups, 1), [1, 3, 5])
+    assert-eq!(get(groups, 0), [2, 4])
+}
+
+test "group-by groups by computed string key" {
+    let groups = it/group-by(fn(s) { length(s) }, ["a", "bb", "cc", "d"])
+    assert-eq!(get(groups, 1), ["a", "d"])
+    assert-eq!(get(groups, 2), ["bb", "cc"])
+}
+
+test "group-by of empty collection is empty map" {
+    let groups = it/group-by(fn(x) { x }, [])
+    assert-eq!(get(groups, 0), null)
+    assert-eq!(get(groups, 1), null)
+}
+
+test "group-by single element yields one singleton group" {
+    let groups = it/group-by(fn(x) { x }, [42])
+    assert-eq!(get(groups, 42), [42])
+}
+
+// ----------------------------------------------------------------------------
+// chunk-by  (maximal runs of CONSECUTIVE elements sharing f(x))
+// ----------------------------------------------------------------------------
+
+test "chunk-by splits consecutive runs by key" {
+    assert-eq!(it/chunk-by(fn(x) { x % 2 }, [1, 3, 2, 4, 5]),
+        [[1, 3], [2, 4], [5]])
+}
+
+test "chunk-by only groups consecutive equal keys" {
+    // The two runs of even numbers are separated by the odd 3, so they stay
+    // in distinct chunks (this is the key difference from group-by).
+    assert-eq!(it/chunk-by(fn(x) { x % 2 }, [2, 4, 3, 6, 8]),
+        [[2, 4], [3], [6, 8]])
+}
+
+test "chunk-by all-same key is a single chunk" {
+    assert-eq!(it/chunk-by(fn(x) { 0 }, [1, 2, 3]), [[1, 2, 3]])
+}
+
+test "chunk-by all-distinct keys are singleton chunks" {
+    assert-eq!(it/chunk-by(fn(x) { x }, [1, 2, 3]), [[1], [2], [3]])
+}
+
+test "chunk-by of empty collection is empty vector" {
+    assert-eq!(it/chunk-by(fn(x) { x }, []), [])
+}
+
+test "chunk-by single element yields one chunk" {
+    assert-eq!(it/chunk-by(fn(x) { x }, [7]), [[7]])
+}
+
+// ----------------------------------------------------------------------------
+// frequencies  (map element -> count)
+// ----------------------------------------------------------------------------
+
+test "frequencies counts each distinct element" {
+    let freqs = it/frequencies([1, 1, 2, 3, 3, 3])
+    assert-eq!(get(freqs, 1), 2)
+    assert-eq!(get(freqs, 2), 1)
+    assert-eq!(get(freqs, 3), 3)
+}
+
+test "frequencies of strings" {
+    let freqs = it/frequencies(["a", "b", "a", "a"])
+    assert-eq!(get(freqs, "a"), 3)
+    assert-eq!(get(freqs, "b"), 1)
+}
+
+test "frequencies of empty collection is empty map" {
+    let freqs = it/frequencies([])
+    assert-eq!(get(freqs, 1), null)
+}
+
+test "frequencies of all-distinct elements are all one" {
+    let freqs = it/frequencies([10, 20, 30])
+    assert-eq!(get(freqs, 10), 1)
+    assert-eq!(get(freqs, 20), 1)
+    assert-eq!(get(freqs, 30), 1)
+}

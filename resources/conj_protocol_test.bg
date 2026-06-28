@@ -1,0 +1,54 @@
+namespace conj_protocol_test
+
+// Regression tests for the Conj protocol + into rewrite + new collection helpers
+// (vec / subvec / includes? / union / intersection / difference) and the O(n) reverse.
+
+test "conj dispatches per collection type" {
+    assert-eq!(conj([1, 2], 3), [1, 2, 3])
+    assert-eq!(conj(#{1, 2}, 2), #{1, 2})
+    assert-eq!(conj(#{1, 2}, 3), #{1, 2, 3})
+    assert-eq!(conj({:a 1}, [:b, 2]), {:a 1, :b 2})
+}
+
+test "into is reduce-conj over any target" {
+    assert-eq!(into([], [1, 2, 3]), [1, 2, 3])
+    assert-eq!(into([0], [1, 2]), [0, 1, 2])
+    assert-eq!(into(#{}, [1, 1, 2, 3]), #{1, 2, 3})
+    assert-eq!(into({}, [[:a, 1], [:b, 2]]), {:a 1, :b 2})
+}
+
+test "reverse is correct (O(n) rewrite)" {
+    assert-eq!(reverse([1, 2, 3]), [3, 2, 1])
+    assert-eq!(reverse([]), [])
+    assert-eq!(reverse([42]), [42])
+    // works over any seqable, materializing to a vector
+    assert-eq!(reverse(#{1}), [1])
+}
+
+test "vec materializes any collection" {
+    assert-eq!(vec([1, 2, 3]), [1, 2, 3])
+    assert-eq!(vec(#{7}), [7])
+    assert-eq!(length(vec(#{1, 2, 3})), 3)
+}
+
+test "subvec slices a vector" {
+    assert-eq!(subvec([10, 20, 30, 40], 1, 3), [20, 30])
+    assert-eq!(subvec([10, 20, 30], 0, 0), [])
+    assert-eq!(subvec([10, 20, 30], 0, 3), [10, 20, 30])
+}
+
+test "includes? is value membership (not index)" {
+    assert!(includes?([10, 20, 30], 20))
+    assert-eq!(includes?([10, 20, 30], 1), false)
+    assert!(includes?(["a", "b"], "b"))
+    // contrast: contains? on a vector tests the INDEX
+    assert!(contains?([10, 20, 30], 1))
+    assert-eq!(contains?([10, 20, 30], 20), false)
+}
+
+test "set algebra returns sets" {
+    assert-eq!(union(#{1, 2}, [2, 3]), #{1, 2, 3})
+    assert-eq!(intersection([1, 2, 3], [2, 3, 4]), #{2, 3})
+    assert-eq!(difference([1, 2, 3], [2]), #{1, 3})
+    assert-eq!(intersection([1, 2], [3, 4]), #{})
+}

@@ -1,0 +1,116 @@
+namespace cli_ext4_test
+
+use beagle.cli as cli
+
+// A spec exercising the typed accessors:
+//   count  (option, default null)  -> integer coercion
+//   ratio  (option, default null)  -> float coercion
+//   debug  (option, default null)  -> string-bool coercion
+//   level  (option, default "10")  -> a non-null default
+//   verbose (flag)                 -> a real Bool in the options map
+fn num-spec() {
+    let s = cli/make-spec("nums", "numbers")
+    let s = cli/add-option(s, "count", "c", "a count", false, null)
+    let s = cli/add-option(s, "ratio", "r", "a ratio", false, null)
+    let s = cli/add-option(s, "debug", "d", "a bool", false, null)
+    let s = cli/add-option(s, "level", "l", "level with default", false, "10")
+    cli/add-flag(s, "verbose", "v", "verbose")
+}
+
+// ---- get-int ----
+
+test "get-int coerces a present integer option" {
+    let r = cli/parse(["--count", "42"], num-spec())
+    assert-eq!(cli/get-int(r, "count"), 42)
+}
+
+test "get-int handles a negative integer value" {
+    let r = cli/parse(["--count", "-7"], num-spec())
+    assert-eq!(cli/get-int(r, "count"), -7)
+}
+
+test "get-int returns null when the option is absent" {
+    let r = cli/parse([], num-spec())
+    assert-eq!(cli/get-int(r, "count"), null)
+}
+
+test "get-int coerces a non-null option default" {
+    let r = cli/parse([], num-spec())
+    assert-eq!(cli/get-int(r, "level"), 10)
+}
+
+test "get-int throws on a non-integer value" {
+    let r = cli/parse(["--count", "abc"], num-spec())
+    assert-throws!(fn() { cli/get-int(r, "count") })
+}
+
+// ---- get-float ----
+
+test "get-float coerces a present float option" {
+    let r = cli/parse(["--ratio", "3.5"], num-spec())
+    assert-eq!(cli/get-float(r, "ratio"), 3.5)
+}
+
+test "get-float coerces an integer-looking value to a float" {
+    let r = cli/parse(["--ratio", "4"], num-spec())
+    assert-eq!(cli/get-float(r, "ratio"), 4.0)
+}
+
+test "get-float returns null when the option is absent" {
+    let r = cli/parse([], num-spec())
+    assert-eq!(cli/get-float(r, "ratio"), null)
+}
+
+test "get-float throws on a non-float value" {
+    let r = cli/parse(["--ratio", "xyz"], num-spec())
+    assert-throws!(fn() { cli/get-float(r, "ratio") })
+}
+
+// ---- get-bool ----
+
+test "get-bool returns a flag's true value" {
+    let r = cli/parse(["--verbose"], num-spec())
+    assert-eq!(cli/get-bool(r, "verbose"), true)
+}
+
+test "get-bool returns false for an unset flag" {
+    let r = cli/parse([], num-spec())
+    assert-eq!(cli/get-bool(r, "verbose"), false)
+}
+
+test "get-bool coerces a string option value of true" {
+    let r = cli/parse(["--debug", "true"], num-spec())
+    assert-eq!(cli/get-bool(r, "debug"), true)
+}
+
+test "get-bool coerces a string option value of false" {
+    let r = cli/parse(["--debug", "false"], num-spec())
+    assert-eq!(cli/get-bool(r, "debug"), false)
+}
+
+test "get-bool returns null when the option is absent" {
+    let r = cli/parse([], num-spec())
+    assert-eq!(cli/get-bool(r, "debug"), null)
+}
+
+test "get-bool throws on an uncoercible string value" {
+    let r = cli/parse(["--debug", "maybe"], num-spec())
+    assert-throws!(fn() { cli/get-bool(r, "debug") })
+}
+
+// ---- get-or ----
+
+test "get-or returns the default when the option is absent" {
+    let r = cli/parse([], num-spec())
+    assert-eq!(cli/get-or(r, "count", 99), 99)
+}
+
+test "get-or returns the raw stored value when present" {
+    let r = cli/parse(["--count", "5"], num-spec())
+    assert-eq!(cli/get-or(r, "count", 99), "5")
+}
+
+test "get-or prefers a non-null option default over the fallback" {
+    let r = cli/parse([], num-spec())
+    assert-eq!(cli/get-or(r, "level", "fallback"), "10")
+}

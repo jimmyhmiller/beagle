@@ -1,0 +1,72 @@
+namespace textwrap_ext5_test
+
+use beagle.textwrap as tw
+
+// Tests for the 2-arg `shorten` form (placeholder defaults to "...") and the
+// existing 3-arg form. Expected values were derived by reading
+// standard-library/beagle.textwrap.bg.
+
+test "2-arg shorten returns collapsed text when it already fits" {
+    // collapsed "Hello world" is 11 chars, fits in 20
+    assert-eq!(tw/shorten("Hello world", 20), "Hello world")
+}
+
+test "2-arg shorten collapses internal whitespace runs" {
+    // split-words drops/collapses whitespace; result "a b c" (5) fits in 20
+    assert-eq!(tw/shorten("a   b   c", 20), "a b c")
+}
+
+test "2-arg shorten truncates with default ... placeholder" {
+    // collapsed (24) > 12; "Hello"(5)+3 = 8 <= 12 keeps "Hello",
+    // adding "world" would be 11+3 = 14 > 12, so => "Hello..."
+    assert-eq!(tw/shorten("Hello world this is long", 12), "Hello...")
+}
+
+test "2-arg shorten agrees with explicit ... placeholder" {
+    assert-eq!(
+        tw/shorten("Hello world this is long", 12),
+        tw/shorten("Hello world this is long", 12, "...")
+    )
+}
+
+test "3-arg shorten keeps leading words plus placeholder" {
+    // collapsed (24) > 15; "Hello"(5)+6 = 11 <= 15 keeps "Hello",
+    // adding "world" => 11+6 = 17 > 15 => "Hello [...]"
+    assert-eq!(tw/shorten("Hello world this is long", 15, " [...]"), "Hello [...]")
+}
+
+test "3-arg shorten returns collapsed text when it fits" {
+    // leading/trailing/internal whitespace collapsed; "Hello world" (11) <= 20
+    assert-eq!(tw/shorten("  Hello   world  ", 20, "..."), "Hello world")
+}
+
+test "shorten on exact-width boundary keeps text unchanged" {
+    // "abc def" is exactly 7 chars, 7 <= 7
+    assert-eq!(tw/shorten("abc def", 7), "abc def")
+}
+
+test "shorten on empty input returns empty string" {
+    assert-eq!(tw/shorten("", 10), "")
+    assert-eq!(tw/shorten("   ", 10), "")
+}
+
+test "shorten returns lstripped placeholder when no word fits but it does" {
+    // collapsed "aaaa bbbb" (9) > 3; first word "aaaa"(4)+4 = 8 > 3 so nothing
+    // fits; trim-left-ws(" ...") = "..." (3) <= 3 => "..."
+    assert-eq!(tw/shorten("aaaa bbbb", 3, " ..."), "...")
+}
+
+test "shorten replaces an over-long single word with the placeholder" {
+    // collapsed (20) > 9; the lone long word does not fit, "..." (3) <= 9
+    assert-eq!(tw/shorten("supercalifragilistic", 9, "..."), "...")
+}
+
+test "shorten throws when width is not positive" {
+    assert-throws!(fn() { tw/shorten("hello", 0) })
+    assert-throws!(fn() { tw/shorten("hello", -1, "...") })
+}
+
+test "shorten throws when placeholder is too large for the width" {
+    // collapsed "aaaa bbbb" (9) > 2; no word fits; stripped "..." (3) > 2 => throw
+    assert-throws!(fn() { tw/shorten("aaaa bbbb", 2, "...") })
+}

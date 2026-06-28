@@ -1,0 +1,186 @@
+namespace bigint_coverage_test
+
+// Coverage tests for the beagle.bigint stdlib module (arbitrary-precision ints).
+// Expected values were derived by reading standard-library/beagle.bigint.bg and
+// confirmed by running the binary. Pure/deterministic module: no I/O, no time.
+
+use beagle.bigint as big
+
+// ----------------------------------------------------------------------------
+// zero / is-zero?
+// ----------------------------------------------------------------------------
+
+test "zero is canonical and prints 0" {
+    assert-eq!(big/to-string(big/zero()), "0")
+    assert!(big/is-zero?(big/zero()))
+    // canonical zero compares equal to from-int 0 and from-string "0"
+    assert-eq!(big/compare(big/zero(), big/from-int(0)), 0)
+    assert-eq!(big/compare(big/zero(), big/from-string("0")), 0)
+}
+
+test "is-zero? distinguishes zero from non-zero" {
+    assert!(big/is-zero?(big/from-string("0")))
+    assert!(big/is-zero?(big/from-string("-0")))
+    assert!(big/is-zero?(big/from-string("000")))
+    assert!(big/is-zero?(big/sub(big/from-string("7"), big/from-string("7"))))
+    assert!(!big/is-zero?(big/from-string("5")))
+    assert!(!big/is-zero?(big/from-string("-1")))
+}
+
+// ----------------------------------------------------------------------------
+// from-int
+// ----------------------------------------------------------------------------
+
+test "from-int handles zero, positive, negative" {
+    assert-eq!(big/to-string(big/from-int(0)), "0")
+    assert-eq!(big/to-string(big/from-int(123456789)), "123456789")
+    assert-eq!(big/to-string(big/from-int(0 - 987654321)), "-987654321")
+}
+
+test "from-int handles base-10000 limb boundaries" {
+    // BASE = 10000, exercise the carry into the next limb.
+    assert-eq!(big/to-string(big/from-int(9999)), "9999")
+    assert-eq!(big/to-string(big/from-int(10000)), "10000")
+    assert-eq!(big/to-string(big/from-int(10001)), "10001")
+    assert-eq!(big/to-string(big/from-int(99990000)), "99990000")
+}
+
+test "from-int handles the full 61-bit tagged-int range without overflow" {
+    let maxv = 1152921504606846975
+    let minv = -1152921504606846976
+    assert-eq!(big/to-string(big/from-int(maxv)), "1152921504606846975")
+    // most-negative int: its negation is not representable, must not wrap to 0.
+    assert-eq!(big/to-string(big/from-int(minv)), "-1152921504606846976")
+    assert-eq!(big/to-string(big/from-int(minv + 1)), "-1152921504606846975")
+}
+
+// ----------------------------------------------------------------------------
+// from-string parsing
+// ----------------------------------------------------------------------------
+
+test "from-string round-trips and normalizes" {
+    assert-eq!(big/to-string(big/from-string("0")), "0")
+    assert-eq!(big/to-string(big/from-string("00042")), "42")
+    assert-eq!(big/to-string(big/from-string("+12345")), "12345")
+    assert-eq!(big/to-string(big/from-string("-67890")), "-67890")
+    assert-eq!(big/to-string(big/from-string("-0")), "0")
+    assert-eq!(big/to-string(big/from-string("123456789012345678901234567890")),
+               "123456789012345678901234567890")
+}
+
+test "from-string throws on empty / sign-only / non-digit content" {
+    assert-throws!(fn() { big/from-string("") })
+    assert-throws!(fn() { big/from-string("+") })
+    assert-throws!(fn() { big/from-string("-") })
+    assert-throws!(fn() { big/from-string("12a34") })
+    assert-throws!(fn() { big/from-string("12 34") })
+    assert-throws!(fn() { big/from-string("abc") })
+}
+
+// ----------------------------------------------------------------------------
+// to-string rendering (zero-padded middle limbs)
+// ----------------------------------------------------------------------------
+
+test "to-string zero-pads non-top limbs to 4 digits" {
+    // 100000000 -> limbs [0, 0, 1]: top "1" then padded "0000" "0000".
+    assert-eq!(big/to-string(big/from-string("100000000")), "100000000")
+    // interior zeros must survive the round-trip.
+    assert-eq!(big/to-string(big/from-string("100000001")), "100000001")
+    assert-eq!(big/to-string(big/from-string("10000000000010000")), "10000000000010000")
+}
+
+// ----------------------------------------------------------------------------
+// add
+// ----------------------------------------------------------------------------
+
+test "add same-sign and with carry propagation" {
+    assert-eq!(big/to-string(big/add(big/from-string("12345"), big/from-string("67890"))), "80235")
+    assert-eq!(big/to-string(big/add(big/from-string("9999"), big/from-string("1"))), "10000")
+    assert-eq!(big/to-string(big/add(big/from-string("99999999999999999999"), big/from-string("1"))),
+               "100000000000000000000")
+    assert-eq!(big/to-string(big/add(big/from-string("-100"), big/from-string("-200"))), "-300")
+}
+
+test "add opposite-sign resolves to the larger magnitude" {
+    assert-eq!(big/to-string(big/add(big/from-string("100"), big/from-string("-30"))), "70")
+    assert-eq!(big/to-string(big/add(big/from-string("-100"), big/from-string("30"))), "-70")
+    assert-eq!(big/to-string(big/add(big/from-string("12345"), big/from-string("-12345"))), "0")
+}
+
+test "add with zero is identity" {
+    assert-eq!(big/to-string(big/add(big/zero(), big/from-string("42"))), "42")
+    assert-eq!(big/to-string(big/add(big/from-string("-42"), big/zero())), "-42")
+}
+
+// ----------------------------------------------------------------------------
+// sub
+// ----------------------------------------------------------------------------
+
+test "sub basic, sign-crossing, and borrow" {
+    assert-eq!(big/to-string(big/sub(big/from-string("80235"), big/from-string("67890"))), "12345")
+    assert-eq!(big/to-string(big/sub(big/from-string("30"), big/from-string("100"))), "-70")
+    assert-eq!(big/to-string(big/sub(big/from-string("10000"), big/from-string("1"))), "9999")
+    assert-eq!(big/to-string(big/sub(big/from-string("100000000000000000000"), big/from-string("1"))),
+               "99999999999999999999")
+    assert-eq!(big/to-string(big/sub(big/from-string("-50"), big/from-string("-80"))), "30")
+}
+
+test "add then sub is an inverse" {
+    let a = big/from-string("987654321987654321987654321")
+    let b = big/from-string("123456789123456789")
+    assert-eq!(big/to-string(big/sub(big/add(a, b), b)),
+               "987654321987654321987654321")
+}
+
+// ----------------------------------------------------------------------------
+// mul
+// ----------------------------------------------------------------------------
+
+test "mul handles signs, zero, and multi-limb products" {
+    assert-eq!(big/to-string(big/mul(big/from-string("12"), big/from-string("12"))), "144")
+    assert-eq!(big/to-string(big/mul(big/from-string("-12"), big/from-string("12"))), "-144")
+    assert-eq!(big/to-string(big/mul(big/from-string("-12"), big/from-string("-12"))), "144")
+    assert-eq!(big/to-string(big/mul(big/from-string("12345678901234567890"), big/from-string("0"))), "0")
+    assert-eq!(big/to-string(big/mul(big/from-string("123456789"), big/from-string("987654321"))),
+               "121932631112635269")
+}
+
+test "mul of 20-nines squared is exact" {
+    assert-eq!(big/to-string(big/mul(big/from-string("99999999999999999999"),
+                                     big/from-string("99999999999999999999"))),
+               "9999999999999999999800000000000000000001")
+    // 10^12 squared = 10^24
+    assert-eq!(big/to-string(big/mul(big/from-string("1000000000000"),
+                                     big/from-string("1000000000000"))),
+               "1000000000000000000000000")
+}
+
+// ----------------------------------------------------------------------------
+// compare
+// ----------------------------------------------------------------------------
+
+test "compare returns -1 / 0 / 1 across sign and magnitude" {
+    assert-eq!(big/compare(big/from-string("100"), big/from-string("100")), 0)
+    assert-eq!(big/compare(big/from-string("99"), big/from-string("100")), -1)
+    assert-eq!(big/compare(big/from-string("100"), big/from-string("99")), 1)
+    assert-eq!(big/compare(big/from-string("-1"), big/from-string("1")), -1)
+    assert-eq!(big/compare(big/from-string("-100"), big/from-string("-99")), -1)
+    assert-eq!(big/compare(big/from-string("0"), big/from-string("1")), -1)
+    assert-eq!(big/compare(big/from-string("-1"), big/from-string("0")), -1)
+    assert-eq!(big/compare(big/from-string("123456789012345678901"),
+                           big/from-string("123456789012345678900")), 1)
+}
+
+// ----------------------------------------------------------------------------
+// negate
+// ----------------------------------------------------------------------------
+
+test "negate flips sign and keeps zero canonical" {
+    assert-eq!(big/to-string(big/negate(big/from-string("42"))), "-42")
+    assert-eq!(big/to-string(big/negate(big/from-string("-42"))), "42")
+    assert-eq!(big/to-string(big/negate(big/zero())), "0")
+    assert!(big/is-zero?(big/negate(big/zero())))
+    // double negation is identity
+    let x = big/from-string("-12345678901234567890")
+    assert-eq!(big/to-string(big/negate(big/negate(x))), "-12345678901234567890")
+}

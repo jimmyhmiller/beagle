@@ -1,0 +1,38 @@
+namespace http_cookies_form_test
+use beagle.http as http
+
+fn req-with(headers, body) {
+    http/Request {
+        method: "POST", path: "/", query: "", version: "HTTP/1.1",
+        headers: headers, body: body, params: {}
+    }
+}
+
+test "cookies parse the Cookie header" {
+    let req = req-with({"cookie" "session=abc123; theme=dark; flag"}, "")
+    assert-eq!(http/cookie(req, "session"), "abc123")
+    assert-eq!(http/cookie(req, "theme"), "dark")
+    assert-eq!(http/cookie(req, "flag"), "")
+    assert-eq!(http/cookie(req, "missing"), null)
+    assert-eq!(length(http/cookies(req)), 3)
+}
+
+test "cookies empty when no Cookie header" {
+    let req = req-with({}, "")
+    assert-eq!(length(http/cookies(req)), 0)
+    assert-eq!(http/cookie(req, "x"), null)
+}
+
+test "form-params decode a urlencoded body" {
+    let req = req-with({"content-type" "application/x-www-form-urlencoded"},
+                       "name=Jane+Doe&age=30&email=j%40x.com")
+    assert-eq!(http/form-param(req, "name"), "Jane Doe")
+    assert-eq!(http/form-param(req, "age"), "30")
+    assert-eq!(http/form-param(req, "email"), "j@x.com")
+    assert-eq!(http/form-param(req, "missing"), null)
+    assert-eq!(length(http/form-params(req)), 3)
+}
+
+test "form-params empty for empty body" {
+    assert-eq!(length(http/form-params(req-with({}, ""))), 0)
+}

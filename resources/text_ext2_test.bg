@@ -1,0 +1,47 @@
+namespace text_ext2_test
+
+use beagle.text as t
+
+// commas: thousands separators on integers (string-builder rewrite must stay
+// byte-identical to the original immutable-concat version).
+
+test "commas basic grouping" {
+    assert-eq!(t/commas(1234567), "1,234,567")
+    assert-eq!(t/commas(1000000), "1,000,000")
+    assert-eq!(t/commas(100), "100")
+}
+
+test "commas small numbers need no separator" {
+    assert-eq!(t/commas(0), "0")
+    assert-eq!(t/commas(42), "42")
+    assert-eq!(t/commas(999), "999")
+    assert-eq!(t/commas(1000), "1,000")
+}
+
+test "commas negatives" {
+    assert-eq!(t/commas(-1000), "-1,000")
+    assert-eq!(t/commas(-1), "-1")
+    assert-eq!(t/commas(-1234567), "-1,234,567")
+}
+
+// replace-first: replace only the first occurrence; absent old returns s.
+
+test "replace-first replaces only the first occurrence" {
+    assert-eq!(t/replace-first("a.b.c", ".", "/"), "a/b.c")
+    assert-eq!(t/replace-first("hello", "l", "L"), "heLlo")
+    assert-eq!(t/replace-first("aaa", "a", "bb"), "bbaa")
+}
+
+test "replace-first with multi-char needle" {
+    assert-eq!(t/replace-first("foobar", "oo", "00"), "f00bar")
+    assert-eq!(t/replace-first("ababab", "ab", "X"), "Xabab")
+}
+
+test "replace-first leaves string unchanged when old is absent" {
+    assert-eq!(t/replace-first("abc", "x", "y"), "abc")
+    assert-eq!(t/replace-first("", "a", "b"), "")
+}
+
+test "replace-first throws on empty old" {
+    assert-throws!(fn() { t/replace-first("abc", "", "x") })
+}

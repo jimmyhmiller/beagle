@@ -1,0 +1,46 @@
+namespace seq_completeness_test
+
+// Regression for the core-sequence completeness additions:
+// map-indexed / remove / keep / keep-indexed / split-at / split-with, and Range Length.
+
+test "map-indexed pairs index with element" {
+    assert-eq!(map-indexed(fn(i, x) { [i, x] }, ["a", "b", "c"]), [[0, "a"], [1, "b"], [2, "c"]])
+    assert-eq!(map-indexed(fn(i, x) { i + x }, [10, 20, 30]), [10, 21, 32])
+    assert-eq!(map-indexed(fn(i, x) { x }, []), [])
+}
+
+test "remove is filter's complement" {
+    assert-eq!(remove(fn(x) { x > 2 }, [1, 2, 3, 4]), [1, 2])
+    assert-eq!(remove(fn(x) { true }, [1, 2, 3]), [])
+    assert-eq!(remove(fn(x) { false }, [1, 2, 3]), [1, 2, 3])
+}
+
+test "keep maps and drops nulls" {
+    assert-eq!(keep(fn(x) { if x > 2 { x * 10 } else { null } }, [1, 2, 3, 4]), [30, 40])
+    assert-eq!(keep(fn(x) { null }, [1, 2, 3]), [])
+    assert-eq!(keep(fn(x) { x }, [1, 2, 3]), [1, 2, 3])
+}
+
+test "keep-indexed maps (i,x) and drops nulls" {
+    assert-eq!(keep-indexed(fn(i, x) { if i % 2 == 0 { x } else { null } }, ["a", "b", "c", "d"]), ["a", "c"])
+}
+
+test "split-at splits at an index" {
+    assert-eq!(split-at(2, [1, 2, 3, 4]), [[1, 2], [3, 4]])
+    assert-eq!(split-at(0, [1, 2]), [[], [1, 2]])
+    assert-eq!(split-at(5, [1, 2]), [[1, 2], []])
+}
+
+test "split-with splits at first failing element" {
+    assert-eq!(split-with(fn(x) { x < 3 }, [1, 2, 3, 4, 1]), [[1, 2], [3, 4, 1]])
+    assert-eq!(split-with(fn(x) { false }, [1, 2]), [[], [1, 2]])
+}
+
+test "Range participates in Length/count" {
+    assert-eq!(count(range-step(0, 10, 1)), 10)
+    assert-eq!(count(range-step(0, 10, 2)), 5)
+    assert-eq!(count(range-step(0, 9, 2)), 5)   // 0,2,4,6,8
+    assert-eq!(count(range-step(5, 5, 1)), 0)
+    assert-eq!(empty?(range-step(5, 5, 1)), true)
+    assert-eq!(empty?(range-step(0, 3, 1)), false)
+}

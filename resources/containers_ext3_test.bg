@@ -1,0 +1,137 @@
+namespace containers_ext3_test
+
+use beagle.containers as c
+
+// ---------------------------------------------------------------------------
+// DefaultMap — dm-remove
+// ---------------------------------------------------------------------------
+
+test "dm-remove drops a present key (default returns for it afterward)" {
+    let mut dm = c/dm-new(0)
+    dm = c/dm-assoc(dm, :a, 1)
+    dm = c/dm-assoc(dm, :b, 2)
+    let dm2 = c/dm-remove(dm, :a)
+    assert-eq!(c/dm-count(dm2), 1)
+    assert-eq!(c/dm-get(dm2, :a), 0)   // absent now -> default
+    assert-eq!(c/dm-get(dm2, :b), 2)
+}
+
+test "dm-remove leaves the original default-map unchanged" {
+    let mut dm = c/dm-new(0)
+    dm = c/dm-assoc(dm, :a, 1)
+    dm = c/dm-assoc(dm, :b, 2)
+    let dm2 = c/dm-remove(dm, :a)
+    assert-eq!(c/dm-count(dm), 2)
+    assert-eq!(c/dm-get(dm, :a), 1)
+    assert-eq!(c/dm-count(dm2), 1)
+}
+
+test "dm-remove of an absent key yields an equivalent default-map" {
+    let dm = c/dm-assoc(c/dm-new(7), :a, 1)
+    let dm2 = c/dm-remove(dm, :z)
+    assert-eq!(c/dm-count(dm2), 1)
+    assert-eq!(c/dm-get(dm2, :a), 1)
+}
+
+test "dm-remove preserves the default value" {
+    let dm = c/dm-assoc(c/dm-new(7), :a, 1)
+    let dm2 = c/dm-remove(dm, :a)
+    assert-eq!(c/dm-get(dm2, :nope), 7)
+    assert-eq!(c/dm-get(dm2, :a), 7)   // removed -> falls back to default
+}
+
+test "dm-remove of a stored-null key reverts to the default" {
+    let dm = c/dm-assoc(c/dm-new(99), :a, null)
+    assert-eq!(c/dm-get(dm, :a), null)  // explicit null before removal
+    let dm2 = c/dm-remove(dm, :a)
+    assert-eq!(c/dm-get(dm2, :a), 99)   // absent now -> default
+    assert-eq!(c/dm-count(dm2), 0)
+}
+
+// ---------------------------------------------------------------------------
+// OrderedMap — om-remove / om-dissoc
+// ---------------------------------------------------------------------------
+
+test "om-remove drops a middle key from order and table" {
+    let mut om = c/om-new()
+    om = c/om-assoc(om, :a, 1)
+    om = c/om-assoc(om, :b, 2)
+    om = c/om-assoc(om, :c, 3)
+    let om2 = c/om-remove(om, :b)
+    assert-eq!(c/om-keys-in-order(om2), [:a, :c])
+    assert-eq!(c/om-vals-in-order(om2), [1, 3])
+    assert-eq!(c/om-pairs(om2), [[:a, 1], [:c, 3]])
+    assert-eq!(c/om-get(om2, :b), null)
+    assert-eq!(c/om-count(om2), 2)
+}
+
+test "om-remove leaves the original ordered map unchanged" {
+    let mut om = c/om-new()
+    om = c/om-assoc(om, :a, 1)
+    om = c/om-assoc(om, :b, 2)
+    om = c/om-assoc(om, :c, 3)
+    let om2 = c/om-remove(om, :b)
+    assert-eq!(c/om-keys-in-order(om), [:a, :b, :c])
+    assert-eq!(c/om-count(om), 3)
+    assert-eq!(c/om-get(om, :b), 2)
+    assert-eq!(c/om-count(om2), 2)
+}
+
+test "om-remove can drop the first and last keys" {
+    let mut om = c/om-new()
+    om = c/om-assoc(om, :a, 1)
+    om = c/om-assoc(om, :b, 2)
+    om = c/om-assoc(om, :c, 3)
+    assert-eq!(c/om-keys-in-order(c/om-remove(om, :a)), [:b, :c])
+    assert-eq!(c/om-keys-in-order(c/om-remove(om, :c)), [:a, :b])
+}
+
+test "om-remove of an absent key yields an equivalent ordered map" {
+    let mut om = c/om-new()
+    om = c/om-assoc(om, :a, 1)
+    om = c/om-assoc(om, :b, 2)
+    let om2 = c/om-remove(om, :z)
+    assert-eq!(c/om-keys-in-order(om2), [:a, :b])
+    assert-eq!(c/om-count(om2), 2)
+    assert-eq!(c/om-get(om2, :a), 1)
+}
+
+test "om-remove drops key from has-key membership" {
+    let mut om = c/om-new()
+    om = c/om-assoc(om, :a, 1)
+    om = c/om-assoc(om, :b, 2)
+    assert!(c/om-has-key?(om, :b))
+    let om2 = c/om-remove(om, :b)
+    assert!(c/om-has-key?(om2, :b) == false)
+    assert!(c/om-has-key?(om2, :a))
+}
+
+test "om-remove then re-assoc appends the key at the end" {
+    let mut om = c/om-new()
+    om = c/om-assoc(om, :a, 1)
+    om = c/om-assoc(om, :b, 2)
+    om = c/om-assoc(om, :c, 3)
+    let removed = c/om-remove(om, :a)
+    let readded = c/om-assoc(removed, :a, 9)
+    assert-eq!(c/om-keys-in-order(readded), [:b, :c, :a])
+    assert-eq!(c/om-vals-in-order(readded), [2, 3, 9])
+}
+
+test "om-dissoc is an alias for om-remove" {
+    let mut om = c/om-new()
+    om = c/om-assoc(om, :a, 1)
+    om = c/om-assoc(om, :b, 2)
+    om = c/om-assoc(om, :c, 3)
+    let om2 = c/om-dissoc(om, :b)
+    assert-eq!(c/om-keys-in-order(om2), [:a, :c])
+    assert-eq!(c/om-vals-in-order(om2), [1, 3])
+    assert-eq!(c/om-get(om2, :b), null)
+    assert-eq!(c/om-count(om2), 2)
+}
+
+test "om-remove on an empty ordered map is a no-op" {
+    let om = c/om-new()
+    let om2 = c/om-remove(om, :anything)
+    assert-eq!(c/om-count(om2), 0)
+    assert-eq!(c/om-keys-in-order(om2), [])
+}

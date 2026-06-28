@@ -1,0 +1,150 @@
+namespace json_coverage_test
+
+// Coverage for beagle.json public API: parse, parse-with-string-keys,
+// stringify, stringify-pretty. Pure/deterministic module.
+
+use beagle.json as json
+
+test "parse scalars" {
+    assert-eq!(json/parse("42"), 42)
+    assert-eq!(json/parse("-42"), -42)
+    assert-eq!(json/parse("0"), 0)
+    assert-eq!(json/parse("3.14"), 3.14)
+    assert-eq!(json/parse("0.5"), 0.5)
+    assert-eq!(json/parse("2.5e3"), 2500.0)
+    assert-eq!(json/parse("-2.5e3"), -2500.0)
+    assert-eq!(json/parse("true"), true)
+    assert-eq!(json/parse("false"), false)
+    assert-eq!(json/parse("null"), null)
+    assert-eq!(json/parse("\"hello\""), "hello")
+    assert-eq!(json/parse("\"\""), "")
+}
+
+test "parse ignores surrounding whitespace" {
+    assert-eq!(json/parse("  true  "), true)
+    assert-eq!(json/parse("\n\t 42 \r\n"), 42)
+}
+
+test "parse empty containers" {
+    assert-eq!(json/parse("[]"), [])
+    assert-eq!(json/parse("  [ ]  "), [])
+    assert-eq!(json/parse("{}"), {})
+    assert-eq!(json/parse("  { }  "), {})
+}
+
+test "parse arrays" {
+    assert-eq!(json/parse("[1, 2, 3]"), [1, 2, 3])
+    assert-eq!(json/parse("[1,2,3]"), [1, 2, 3])
+    assert-eq!(json/parse("[true, null, \"x\"]"), [true, null, "x"])
+    assert-eq!(json/parse("[[1],[2,3]]"), [[1], [2, 3]])
+}
+
+test "parse objects use keyword keys by default" {
+    assert-eq!(json/parse("{\"a\":1}"), {:a 1})
+    assert-eq!(json/parse("{\"a\":1,\"b\":2}"), {:a 1, :b 2})
+    let v = json/parse("{\"a\":[1,2,{\"b\":true}],\"c\":null}")
+    assert-eq!(get(v, :a), [1, 2, {:b true}])
+    assert-eq!(get(v, :c), null)
+    assert!(contains?(v, :c))
+}
+
+test "parse-with-string-keys keeps raw string keys" {
+    assert-eq!(json/parse-with-string-keys("{\"a\":1}"), {"a" 1})
+    let v = json/parse-with-string-keys("{\"name\":\"Jim\"}")
+    assert-eq!(get(v, "name"), "Jim")
+}
+
+test "parse string escapes" {
+    assert-eq!(json/parse("\"a\\nb\""), "a\nb")
+    assert-eq!(json/parse("\"a\\tb\""), "a\tb")
+    assert-eq!(json/parse("\"a\\\"b\""), "a\"b")
+    assert-eq!(json/parse("\"a\\\\b\""), "a\\b")
+    assert-eq!(json/parse("\"a\\/b\""), "a/b")
+}
+
+test "parse unicode escapes" {
+    assert-eq!(json/parse("\"\\u0041\""), "A")
+    assert-eq!(json/parse("\"caf\\u00e9\""), "café")
+    // surrogate pair -> single code point (U+1F600)
+    assert-eq!(length(json/parse("\"\\uD83D\\uDE00\"")), 1)
+}
+
+test "parse large integer degrades to float" {
+    // overflows the 2^60-1 tagged-int range -> float approximation
+    let n = json/parse("123456789012345678901234567890")
+    assert!(instance-of(n, Float))
+    // max in-range tagged int stays exact
+    assert-eq!(json/parse("1152921504606846975"), 1152921504606846975)
+}
+
+test "parse rejects malformed input" {
+    assert-throws!(fn() { json/parse("") })
+    assert-throws!(fn() { json/parse("  ") })
+    assert-throws!(fn() { json/parse("tru") })
+    assert-throws!(fn() { json/parse("nul") })
+    assert-throws!(fn() { json/parse("[1,2") })
+    assert-throws!(fn() { json/parse("[1 2]") })
+    assert-throws!(fn() { json/parse("{\"a\":1") })
+    assert-throws!(fn() { json/parse("{\"a\" 1}") })
+    assert-throws!(fn() { json/parse("{a:1}") })
+    assert-throws!(fn() { json/parse("\"unterminated") })
+    assert-throws!(fn() { json/parse("1 2") })
+    assert-throws!(fn() { json/parse("@") })
+    assert-throws!(fn() { json/parse("-") })
+    assert-throws!(fn() { json/parse("1.") })
+    assert-throws!(fn() { json/parse("\"\\x\"") })
+}
+
+test "stringify scalars" {
+    assert-eq!(json/stringify(42), "42")
+    assert-eq!(json/stringify(-42), "-42")
+    assert-eq!(json/stringify(3.14), "3.14")
+    assert-eq!(json/stringify(true), "true")
+    assert-eq!(json/stringify(false), "false")
+    assert-eq!(json/stringify(null), "null")
+    assert-eq!(json/stringify("hello"), "\"hello\"")
+    assert-eq!(json/stringify(""), "\"\"")
+}
+
+test "stringify escapes special characters" {
+    assert-eq!(json/stringify("he\"llo"), "\"he\\\"llo\"")
+    assert-eq!(json/stringify("a\\b"), "\"a\\\\b\"")
+    assert-eq!(json/stringify("a\nb"), "\"a\\nb\"")
+    assert-eq!(json/stringify("\t"), "\"\\t\"")
+}
+
+test "stringify containers compact" {
+    assert-eq!(json/stringify([]), "[]")
+    assert-eq!(json/stringify([1, 2, 3]), "[1,2,3]")
+    assert-eq!(json/stringify({}), "{}")
+    assert-eq!(json/stringify({:a 1}), "{\"a\":1}")
+    assert-eq!(json/stringify([true, null, "x"]), "[true,null,\"x\"]")
+}
+
+test "stringify keyword value becomes string" {
+    assert-eq!(json/stringify(:foo), "\"foo\"")
+}
+
+test "stringify rejects unsupported value types" {
+    assert-throws!(fn() { json/stringify(atom(1)) })
+}
+
+test "stringify-pretty indents with given spaces" {
+    assert-eq!(json/stringify-pretty({:a 1}, 2), "{\n  \"a\": 1\n}")
+    assert-eq!(json/stringify-pretty([1, 2], 2), "[\n  1,\n  2\n]")
+    // empty containers stay compact even in pretty mode
+    assert-eq!(json/stringify-pretty([], 2), "[]")
+    assert-eq!(json/stringify-pretty({}, 2), "{}")
+}
+
+test "round-trips preserve value" {
+    let cases = ["{\"name\":\"Jim\",\"age\":42,\"tags\":[\"a\",\"b\"],\"ok\":true,\"x\":null}",
+                 "[1,2.5,[3,[4,5]],{\"k\":\"v\"}]"]
+    let case0 = cases[0]
+    assert-eq!(json/parse(json/stringify(json/parse(case0))), json/parse(case0))
+    let case1 = cases[1]
+    assert-eq!(json/parse(json/stringify(json/parse(case1))), json/parse(case1))
+    // value -> string -> value identity for a constructed map
+    let v = {:name "Jim", :nums [1, 2, 3], :flag false}
+    assert-eq!(json/parse(json/stringify(v)), v)
+}

@@ -1,0 +1,82 @@
+namespace path_ext_test
+
+// Regression coverage for the completeness APIs added to beagle.path:
+// with-extension, is-relative?, and relative-to. All are deterministic pure
+// string transforms (no filesystem, time, or network), so these tests are
+// fully parallel-safe.
+
+use beagle.path as p
+
+test "with-extension happy paths" {
+    assert-eq!(p/with-extension("README", "md"), "README.md")
+    assert-eq!(p/with-extension("README", ".md"), "README.md")
+    assert-eq!(p/with-extension("notes.txt", "md"), "notes.md")
+    assert-eq!(p/with-extension("notes.txt", ".md"), "notes.md")
+    assert-eq!(p/with-extension("/a/b/file.c", "rs"), "/a/b/file.rs")
+}
+
+test "with-extension only replaces the final extension" {
+    assert-eq!(p/with-extension("archive.tar.gz", "md"), "archive.tar.md")
+    assert-eq!(p/with-extension("archive.tar.gz", ".bz2"), "archive.tar.bz2")
+}
+
+test "with-extension edge cases" {
+    // empty ext removes the extension
+    assert-eq!(p/with-extension("notes.txt", ""), "notes")
+    assert-eq!(p/with-extension("README", ""), "README")
+    // a leading-dot dotfile has no extension to replace, so ext is appended
+    assert-eq!(p/with-extension(".bashrc", "txt"), ".bashrc.txt")
+    // no existing extension: ext is simply added
+    assert-eq!(p/with-extension("Makefile", "in"), "Makefile.in")
+}
+
+test "with-extension rejects invalid extensions" {
+    // a separator in the extension would change the path shape
+    assert-throws!(fn() { p/with-extension("x", "a/b") })
+    // all-dot extensions are not real extensions
+    assert-throws!(fn() { p/with-extension("x.y", ".") })
+    assert-throws!(fn() { p/with-extension("x.y", "..") })
+}
+
+test "is-relative?" {
+    assert!(p/is-relative?("a/b"))
+    assert!(p/is-relative?("./x"))
+    assert!(p/is-relative?(""))
+    assert!(p/is-relative?("."))
+    assert-eq!(p/is-relative?("/a"), false)
+    assert-eq!(p/is-relative?("/"), false)
+    assert-eq!(p/is-relative?("/a/b/c"), false)
+    // exact negation of is-absolute?
+    assert-eq!(p/is-relative?("a"), p/is-absolute?("a") == false)
+}
+
+test "relative-to absolute paths" {
+    assert-eq!(p/relative-to("/a/b/c", "/a/b"), "c")
+    assert-eq!(p/relative-to("/usr/local/bin", "/usr/local"), "bin")
+    assert-eq!(p/relative-to("/a/b", "/a/b/c"), "..")
+    assert-eq!(p/relative-to("/a/b/c", "/a/x/y"), "../../b/c")
+    assert-eq!(p/relative-to("/usr/bin", "/usr/local/bin"), "../../bin")
+    assert-eq!(p/relative-to("/a/b", "/a/b"), ".")
+}
+
+test "relative-to relative paths" {
+    assert-eq!(p/relative-to("a/b/c", "a/b"), "c")
+    assert-eq!(p/relative-to("a", "."), "a")
+    assert-eq!(p/relative-to(".", "a"), "..")
+    assert-eq!(p/relative-to("", ""), ".")
+    // p may legitimately contain ".." even when base does not
+    assert-eq!(p/relative-to("../x", "a"), "../../x")
+}
+
+test "relative-to normalizes both arguments first" {
+    assert-eq!(p/relative-to("/a/./b/../c", "/a"), "c")
+    assert-eq!(p/relative-to("/a//b//c", "/a/b"), "c")
+}
+
+test "relative-to rejects unresolvable cases" {
+    // mixing absolute and relative needs a working directory
+    assert-throws!(fn() { p/relative-to("/a/b", "a") })
+    assert-throws!(fn() { p/relative-to("a", "/a/b") })
+    // a base that escapes above its root cannot be inverted
+    assert-throws!(fn() { p/relative-to("x", "..") })
+}

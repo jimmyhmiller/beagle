@@ -1,0 +1,58 @@
+namespace csv_ext4_test
+
+use beagle.csv as csv
+
+test "write-row basic comma separation" {
+    assert-eq!(csv/write-row(["a", "b", "c"]), "a,b,c")
+}
+
+test "write-row empty vector yields empty string" {
+    assert-eq!(csv/write-row([]), "")
+}
+
+test "write-row single empty field yields empty string" {
+    assert-eq!(csv/write-row([""]), "")
+}
+
+test "write-row quotes a field containing the delimiter" {
+    assert-eq!(csv/write-row(["x,y", "z"]), "\"x,y\",z")
+}
+
+test "write-row doubles embedded quotes" {
+    assert-eq!(csv/write-row(["he said \"hi\""]), "\"he said \"\"hi\"\"\"")
+}
+
+test "write-row quotes a field containing a newline" {
+    assert-eq!(csv/write-row(["a\nb"]), "\"a\nb\"")
+}
+
+test "write-row leaves clean fields unquoted" {
+    assert-eq!(csv/write-row(["plain", "value"]), "plain,value")
+}
+
+test "write-rows joins rows with CRLF and no trailing terminator" {
+    assert-eq!(csv/write-rows([["a", "b"], ["c", "d"]]), "a,b\r\nc,d")
+}
+
+test "write-rows of empty input is empty string" {
+    assert-eq!(csv/write-rows([]), "")
+}
+
+test "write-rows single row has no terminator" {
+    assert-eq!(csv/write-rows([["one", "two"]]), "one,two")
+}
+
+test "round trip simple rows through parse" {
+    let rows = [["a", "b"], ["1", "2"]]
+    assert-eq!(csv/parse(csv/write-rows(rows)), rows)
+}
+
+test "round trip rows with delimiters quotes and newlines" {
+    let rows = [["x,y", "he \"q\""], ["line1\nline2", "z"]]
+    assert-eq!(csv/parse(csv/write-rows(rows)), rows)
+}
+
+test "round trip a single multi-field row" {
+    let rows = [["alpha", "beta", "gamma"]]
+    assert-eq!(csv/parse(csv/write-rows(rows)), rows)
+}

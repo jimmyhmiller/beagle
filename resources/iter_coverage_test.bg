@@ -1,0 +1,237 @@
+namespace iter_coverage_test
+
+use beagle.iter as it
+
+// Regression coverage for beagle.iter. All functions are pure/deterministic and
+// return persistent vectors (or maps where noted). Expected values derived from
+// the doc examples in standard-library/beagle.iter.bg and confirmed by running.
+
+// ----------------------------------------------------------------------------
+// Core itertools
+// ----------------------------------------------------------------------------
+
+test "mapcat concatenates produced collections" {
+    assert-eq!(it/mapcat(fn(x) { [x, x] }, [1, 2]), [1, 1, 2, 2])
+    assert-eq!(it/mapcat(fn(x) { [x] }, []), [])
+    assert-eq!(it/mapcat(fn(x) { [] }, [1, 2, 3]), [])
+    assert-eq!(it/mapcat(fn(x) { it/range(0, x) }, [1, 2, 3]), [0, 0, 1, 0, 1, 2])
+}
+
+test "reductions includes the initial value" {
+    assert-eq!(it/reductions(fn(a, x) { a + x }, 0, [1, 2, 3]), [0, 1, 3, 6])
+    assert-eq!(it/reductions(fn(a, x) { a + x }, 0, []), [0])
+    assert-eq!(it/reductions(fn(a, x) { a * x }, 1, [2, 3, 4]), [1, 2, 6, 24])
+}
+
+test "take-while stops at first failing element" {
+    assert-eq!(it/take-while(fn(x) { x < 3 }, [1, 2, 3, 1]), [1, 2])
+    assert-eq!(it/take-while(fn(x) { x < 3 }, [3, 1, 2]), [])
+    assert-eq!(it/take-while(fn(x) { true }, [1, 2, 3]), [1, 2, 3])
+    assert-eq!(it/take-while(fn(x) { x < 3 }, []), [])
+}
+
+test "drop-while skips leading elements then returns rest" {
+    assert-eq!(it/drop-while(fn(x) { x < 3 }, [1, 2, 3, 1]), [3, 1])
+    assert-eq!(it/drop-while(fn(x) { x < 3 }, [3, 1, 2]), [3, 1, 2])
+    assert-eq!(it/drop-while(fn(x) { true }, [1, 2, 3]), [])
+    assert-eq!(it/drop-while(fn(x) { x < 3 }, []), [])
+}
+
+test "partition drops the trailing partial group" {
+    assert-eq!(it/partition(2, [1, 2, 3, 4, 5]), [[1, 2], [3, 4]])
+    assert-eq!(it/partition(2, [1, 2, 3, 4]), [[1, 2], [3, 4]])
+    assert-eq!(it/partition(3, [1, 2]), [])
+    assert-eq!(it/partition(1, [1, 2, 3]), [[1], [2], [3]])
+    // n <= 0 has no valid chunk size, so [] is returned (no throw).
+    assert-eq!(it/partition(0, [1, 2, 3]), [])
+    assert-eq!(it/partition(-1, [1, 2, 3]), [])
+}
+
+test "partition-all keeps the trailing partial group" {
+    assert-eq!(it/partition-all(2, [1, 2, 3, 4, 5]), [[1, 2], [3, 4], [5]])
+    assert-eq!(it/partition-all(2, [1, 2, 3, 4]), [[1, 2], [3, 4]])
+    assert-eq!(it/partition-all(3, [1, 2]), [[1, 2]])
+    assert-eq!(it/partition-all(2, []), [])
+    assert-eq!(it/partition-all(0, [1, 2, 3]), [])
+}
+
+test "chunk-by groups consecutive equal-key runs" {
+    assert-eq!(it/chunk-by(fn(x) { x % 2 }, [1, 3, 2, 4, 5]), [[1, 3], [2, 4], [5]])
+    assert-eq!(it/chunk-by(fn(x) { x }, []), [])
+    assert-eq!(it/chunk-by(fn(x) { x }, [7]), [[7]])
+    assert-eq!(it/chunk-by(fn(x) { x }, [1, 1, 1]), [[1, 1, 1]])
+    assert-eq!(it/chunk-by(fn(x) { x }, [1, 2, 3]), [[1], [2], [3]])
+}
+
+test "zip stops at the shorter input" {
+    assert-eq!(it/zip([1, 2, 3], ["a", "b"]), [[1, "a"], [2, "b"]])
+    assert-eq!(it/zip([1, 2], [10, 20, 30]), [[1, 10], [2, 20]])
+    assert-eq!(it/zip([], [1, 2]), [])
+    assert-eq!(it/zip([1, 2], []), [])
+}
+
+test "zip-with combines elementwise" {
+    assert-eq!(it/zip-with(fn(x, y) { x + y }, [1, 2, 3], [10, 20, 30]), [11, 22, 33])
+    assert-eq!(it/zip-with(fn(x, y) { x * y }, [1, 2, 3], [4, 5]), [4, 10])
+    assert-eq!(it/zip-with(fn(x, y) { x + y }, [], [1, 2]), [])
+}
+
+test "interpose inserts separator between elements" {
+    assert-eq!(it/interpose(0, [1, 2, 3]), [1, 0, 2, 0, 3])
+    assert-eq!(it/interpose(0, [1]), [1])
+    assert-eq!(it/interpose(0, []), [])
+    assert-eq!(it/interpose("-", ["a", "b"]), ["a", "-", "b"])
+}
+
+test "flatten fully flattens nested vectors, strings are leaves" {
+    assert-eq!(it/flatten([1, [2, [3, 4]], 5]), [1, 2, 3, 4, 5])
+    assert-eq!(it/flatten([]), [])
+    assert-eq!(it/flatten([[], [], []]), [])
+    assert-eq!(it/flatten([1, 2, 3]), [1, 2, 3])
+    assert-eq!(it/flatten(["ab", ["cd"]]), ["ab", "cd"])
+    assert-eq!(it/flatten([[1], [[2]], [[[3]]]]), [1, 2, 3])
+}
+
+test "distinct keeps first-occurrence order" {
+    assert-eq!(it/distinct([1, 2, 1, 3, 2]), [1, 2, 3])
+    assert-eq!(it/distinct([]), [])
+    assert-eq!(it/distinct([1, 1, 1]), [1])
+    assert-eq!(it/distinct([3, 2, 1]), [3, 2, 1])
+}
+
+test "frequencies counts occurrences" {
+    let f = it/frequencies([1, 1, 2, 3, 3, 3])
+    assert-eq!(get(f, 1), 2)
+    assert-eq!(get(f, 2), 1)
+    assert-eq!(get(f, 3), 3)
+    assert-eq!(get(f, 9), null)
+    assert-eq!(count(it/frequencies([])), 0)
+}
+
+test "group-by buckets elements by key" {
+    let g = it/group-by(fn(x) { x % 2 }, [1, 2, 3, 4])
+    assert-eq!(get(g, 1), [1, 3])
+    assert-eq!(get(g, 0), [2, 4])
+    assert-eq!(count(it/group-by(fn(x) { x }, [])), 0)
+}
+
+test "count-by counts elements by key" {
+    let c = it/count-by(fn(x) { x % 2 }, [1, 2, 3, 4, 5])
+    assert-eq!(get(c, 1), 3)
+    assert-eq!(get(c, 0), 2)
+    assert-eq!(count(it/count-by(fn(x) { x }, [])), 0)
+}
+
+// ----------------------------------------------------------------------------
+// Generators
+// ----------------------------------------------------------------------------
+
+test "range builds integer vectors" {
+    assert-eq!(it/range(0, 5), [0, 1, 2, 3, 4])
+    assert-eq!(it/range(0, 10, 2), [0, 2, 4, 6, 8])
+    assert-eq!(it/range(5, 0, -1), [5, 4, 3, 2, 1])
+    assert-eq!(it/range(0, 0), [])
+    assert-eq!(it/range(5, 0), [])
+    assert-eq!(it/range(0, 5, 2), [0, 2, 4])
+}
+
+test "range throws on zero step" {
+    assert-throws!(fn() { it/range(0, 5, 0) })
+}
+
+test "repeat produces n copies" {
+    assert-eq!(it/repeat(3, "a"), ["a", "a", "a"])
+    assert-eq!(it/repeat(0, "a"), [])
+    assert-eq!(it/repeat(-1, "a"), [])
+    assert-eq!(it/repeat(2, 7), [7, 7])
+}
+
+test "cycle-take cycles through coll" {
+    assert-eq!(it/cycle-take(7, [1, 2, 3]), [1, 2, 3, 1, 2, 3, 1])
+    assert-eq!(it/cycle-take(0, [1, 2, 3]), [])
+    assert-eq!(it/cycle-take(2, [9]), [9, 9])
+    assert-eq!(it/cycle-take(0, []), [])
+}
+
+test "cycle-take throws on cycling an empty collection" {
+    assert-throws!(fn() { it/cycle-take(1, []) })
+}
+
+test "enumerate pairs elements with index" {
+    assert-eq!(it/enumerate(["a", "b", "c"]), [[0, "a"], [1, "b"], [2, "c"]])
+    assert-eq!(it/enumerate([]), [])
+    assert-eq!(it/enumerate([42]), [[0, 42]])
+}
+
+// ----------------------------------------------------------------------------
+// Aggregations
+// ----------------------------------------------------------------------------
+
+test "sum and product over collections" {
+    assert-eq!(it/sum([1, 2, 3, 4]), 10)
+    assert-eq!(it/sum([]), 0)
+    assert-eq!(it/product([1, 2, 3, 4]), 24)
+    assert-eq!(it/product([]), 1)
+    assert-eq!(it/product([5, 0, 9]), 0)
+}
+
+test "min-by and max-by pick by f value, first on ties" {
+    assert-eq!(it/min-by(fn(s) { length(s) }, ["abc", "a", "ab"]), "a")
+    assert-eq!(it/max-by(fn(s) { length(s) }, ["a", "abc", "ab"]), "abc")
+    assert-eq!(it/min-by(fn(x) { x }, []), null)
+    assert-eq!(it/max-by(fn(x) { x }, []), null)
+    // Ties keep the first qualifying element (strict comparison).
+    assert-eq!(it/min-by(fn(s) { length(s) }, ["xx", "yy"]), "xx")
+    assert-eq!(it/max-by(fn(s) { length(s) }, ["xx", "yy"]), "xx")
+    assert-eq!(it/min-by(fn(x) { x }, [5]), 5)
+}
+
+// ----------------------------------------------------------------------------
+// Combinatorics
+// ----------------------------------------------------------------------------
+
+test "accumulate is an alias of reductions" {
+    assert-eq!(it/accumulate(fn(a, x) { a + x }, 0, [1, 2, 3]), [0, 1, 3, 6])
+    assert-eq!(it/accumulate(fn(a, x) { a + x }, 10, []), [10])
+}
+
+test "cartesian-product matches itertools.product order" {
+    assert-eq!(it/cartesian-product([[1, 2], [3, 4]]), [[1, 3], [1, 4], [2, 3], [2, 4]])
+    assert-eq!(it/cartesian-product([]), [[]])
+    assert-eq!(it/cartesian-product([[1, 2], []]), [])
+    assert-eq!(it/cartesian-product([[1], [2], [3]]), [[1, 2, 3]])
+    assert-eq!(it/cartesian-product([[1, 2, 3]]), [[1], [2], [3]])
+}
+
+test "combinations in lexicographic index order" {
+    assert-eq!(it/combinations([1, 2, 3, 4], 2),
+        [[1, 2], [1, 3], [1, 4], [2, 3], [2, 4], [3, 4]])
+    assert-eq!(it/combinations([1, 2, 3], 0), [[]])
+    assert-eq!(it/combinations([1, 2], 3), [])
+    assert-eq!(it/combinations([1, 2, 3], 3), [[1, 2, 3]])
+    assert-eq!(it/combinations([1, 2, 3], 1), [[1], [2], [3]])
+}
+
+test "combinations throws on negative k" {
+    assert-throws!(fn() { it/combinations([1, 2, 3], -1) })
+}
+
+test "permutations full-length and k-length" {
+    assert-eq!(length(it/permutations([1, 2, 3])), 6)
+    assert-eq!(get(it/permutations([1, 2, 3]), 0), [1, 2, 3])
+    assert-eq!(length(it/permutations([1, 2, 3, 4], 2)), 12)
+    assert-eq!(it/permutations([1, 2], 2), [[1, 2], [2, 1]])
+    assert-eq!(it/permutations([1, 2, 3], 0), [[]])
+    assert-eq!(it/permutations([]), [[]])
+    assert-eq!(it/permutations([1, 2, 3], 4), [])
+}
+
+test "permutations throws on negative k" {
+    assert-throws!(fn() { it/permutations([1, 2, 3], -1) })
+}
+
+test "iter combinators work over any seqable (range input)" {
+    assert-eq!(it/sum(it/range(1, 5)), 10)
+    assert-eq!(it/distinct(it/range(0, 3)), [0, 1, 2])
+    assert-eq!(it/partition-all(2, it/range(0, 5)), [[0, 1], [2, 3], [4]])
+}

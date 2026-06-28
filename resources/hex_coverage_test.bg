@@ -1,0 +1,89 @@
+namespace hex_coverage_test
+
+use beagle.hex as hex
+
+// Regression coverage for beagle.hex (encode / decode).
+// Bytes are modeled as a Vec<Int> with each element in 0..255.
+
+test "encode basic byte vector" {
+    assert-eq!(hex/encode([255, 0, 16, 171]), "ff0010ab")
+}
+
+test "encode empty input" {
+    assert-eq!(hex/encode([]), "")
+    assert-eq!(hex/encode(""), "")
+}
+
+test "encode is lowercase and exactly two chars per byte" {
+    assert-eq!(hex/encode([0]), "00")
+    assert-eq!(hex/encode([15]), "0f")
+    assert-eq!(hex/encode([16]), "10")
+    assert-eq!(hex/encode([255]), "ff")
+    // every byte produces exactly 2 chars
+    assert-eq!(length(hex/encode([1, 2, 3])), 6)
+}
+
+test "encode of a string uses its UTF-8 bytes" {
+    // ASCII: 'a'=0x61 'b'=0x62 'c'=0x63
+    assert-eq!(hex/encode("abc"), "616263")
+    // 'é' (U+00E9) -> UTF-8 0xC3 0xA9
+    assert-eq!(hex/encode("é"), "c3a9")
+}
+
+test "encode masks each byte to its low 8 bits" {
+    // b & 0xFF: 257 -> 1 -> "01", 256 -> 0 -> "00"
+    assert-eq!(hex/encode([257]), "01")
+    assert-eq!(hex/encode([256]), "00")
+}
+
+test "decode basic hex string" {
+    assert-eq!(hex/decode("ff0010ab"), [255, 0, 16, 171])
+}
+
+test "decode empty string" {
+    assert-eq!(hex/decode(""), [])
+}
+
+test "decode is case-insensitive" {
+    assert-eq!(hex/decode("FF"), [255])
+    assert-eq!(hex/decode("ff"), [255])
+    assert-eq!(hex/decode("AbCd"), [171, 205])
+}
+
+test "decode single byte boundaries" {
+    assert-eq!(hex/decode("00"), [0])
+    assert-eq!(hex/decode("0f"), [15])
+    assert-eq!(hex/decode("10"), [16])
+}
+
+test "decode throws on odd-length string" {
+    assert-throws!(fn() { hex/decode("f") })
+    assert-throws!(fn() { hex/decode("ff0") })
+}
+
+test "decode throws on invalid hex digit" {
+    assert-throws!(fn() { hex/decode("xy") })
+    assert-throws!(fn() { hex/decode("gg") })
+    // invalid in the low nibble position too
+    assert-throws!(fn() { hex/decode("0z") })
+    // space is not a hex digit
+    assert-throws!(fn() { hex/decode("  ") })
+}
+
+test "encode then decode round-trips a byte vector" {
+    let bytes = [0, 1, 127, 128, 200, 255]
+    assert-eq!(hex/decode(hex/encode(bytes)), bytes)
+}
+
+test "decode then encode round-trips a normalized hex string" {
+    let s = "00ff10aa"
+    assert-eq!(hex/encode(hex/decode(s)), s)
+    // uppercase input normalizes to lowercase through the round-trip
+    assert-eq!(hex/encode(hex/decode("00FF10AA")), "00ff10aa")
+}
+
+test "encode of a string matches its decoded bytes" {
+    assert-eq!(hex/encode("hello"), "68656c6c6f")
+    assert-eq!(hex/decode("68656c6c6f"), [104, 101, 108, 108, 111])
+    assert-eq!(hex/decode(hex/encode("hello")), [104, 101, 108, 108, 111])
+}

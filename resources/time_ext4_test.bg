@@ -1,0 +1,54 @@
+namespace time_ext4_test
+
+use beagle.time as time
+
+test "ms-of-seconds converts whole seconds to milliseconds" {
+    assert-eq!(time/ms-of-seconds(0), 0)
+    assert-eq!(time/ms-of-seconds(1), 1000)
+    assert-eq!(time/ms-of-seconds(5), 5000)
+}
+
+test "ms-of-minutes converts whole minutes to milliseconds" {
+    assert-eq!(time/ms-of-minutes(0), 0)
+    assert-eq!(time/ms-of-minutes(1), 60000)
+    assert-eq!(time/ms-of-minutes(2), 120000)
+}
+
+test "ms-of-hours converts whole hours to milliseconds" {
+    assert-eq!(time/ms-of-hours(0), 0)
+    assert-eq!(time/ms-of-hours(1), 3600000)
+    assert-eq!(time/ms-of-hours(3), 10800000)
+}
+
+test "format-duration handles zero and sub-second" {
+    assert-eq!(time/format-duration(0), "0ms")
+    assert-eq!(time/format-duration(500), "500ms")
+    assert-eq!(time/format-duration(999), "999ms")
+    assert-eq!(time/format-duration(1), "1ms")
+}
+
+test "format-duration formats seconds and milliseconds" {
+    assert-eq!(time/format-duration(1000), "1s")
+    assert-eq!(time/format-duration(1500), "1s500ms")
+    assert-eq!(time/format-duration(59000), "59s")
+}
+
+test "format-duration formats minutes" {
+    assert-eq!(time/format-duration(60000), "1m")
+    assert-eq!(time/format-duration(3599000), "59m59s")
+}
+
+test "format-duration formats hours and omits zero components" {
+    assert-eq!(time/format-duration(3600000), "1h")
+    assert-eq!(time/format-duration(3661000), "1h1m1s")
+}
+
+test "format-duration composes with ms-of helpers" {
+    let total = time/ms-of-hours(1) + time/ms-of-minutes(1) + time/ms-of-seconds(1)
+    assert-eq!(total, 3661000)
+    assert-eq!(time/format-duration(total), "1h1m1s")
+}
+
+test "format-duration throws on negative input" {
+    assert-throws!(fn() { time/format-duration(-1) })
+}

@@ -1,0 +1,66 @@
+namespace textwrap_ext3_test
+
+use beagle.textwrap as tw
+
+// Tests for the existing beagle.textwrap indent/dedent APIs.
+// Expected values derived by reading standard-library/beagle.textwrap.bg.
+
+test "indent basic two lines" {
+    assert-eq!(tw/indent("a\nb", "> "), "> a\n> b")
+}
+
+test "indent preserves empty middle line" {
+    // lines ["a", "", "b"] — the empty middle line is left untouched.
+    assert-eq!(tw/indent("a\n\nb", "> "), "> a\n\n> b")
+}
+
+test "indent preserves trailing newline" {
+    // lines ["a", "b", ""] — trailing empty segment stays empty.
+    assert-eq!(tw/indent("a\nb\n", "> "), "> a\n> b\n")
+}
+
+test "indent leaves whitespace-only line untouched" {
+    // The "  " line is blank (all whitespace) so no prefix is added.
+    assert-eq!(tw/indent("a\n  \nb", "#"), "#a\n  \n#b")
+}
+
+test "indent empty string yields empty string" {
+    // lines [""] — single blank line, prefix not applied.
+    assert-eq!(tw/indent("", "> "), "")
+}
+
+test "indent single non-empty line" {
+    assert-eq!(tw/indent("hello", ">>"), ">>hello")
+}
+
+test "dedent uniform prefix" {
+    assert-eq!(tw/dedent("    a\n    b"), "a\nb")
+}
+
+test "dedent uneven prefix keeps relative indent" {
+    // common prefix across "  a", "   b", "  c" is "  " (length 2).
+    assert-eq!(tw/dedent("  a\n   b\n  c"), "a\n b\nc")
+}
+
+test "dedent empty string" {
+    assert-eq!(tw/dedent(""), "")
+}
+
+test "dedent single indented line" {
+    assert-eq!(tw/dedent("  hello"), "hello")
+}
+
+test "dedent with no common prefix is unchanged" {
+    assert-eq!(tw/dedent("a\nb"), "a\nb")
+}
+
+test "dedent normalizes whitespace-only line and ignores it for prefix" {
+    // middle "    " is blank: ignored when computing prefix, emitted as "".
+    assert-eq!(tw/dedent("    a\n    \n    b"), "a\n\nb")
+}
+
+test "indent then dedent round trips" {
+    let original = "x\ny\nz"
+    let indented = tw/indent(original, "    ")
+    assert-eq!(tw/dedent(indented), original)
+}

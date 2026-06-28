@@ -1,0 +1,130 @@
+namespace hash_coverage_test
+
+use beagle.hash as hash
+
+// Regression coverage for beagle.hash (pure MD5/SHA-1/SHA-256/SHA-512/HMAC).
+// Reference values verified against macOS md5/shasum and openssl dgst.
+
+test "md5 canonical vectors" {
+    assert-eq!(hash/md5(""), "d41d8cd98f00b204e9800998ecf8427e")
+    assert-eq!(hash/md5("abc"), "900150983cd24fb0d6963f7d28e17f72")
+    // 55-byte input (one extra padding edge: 55 + 0x80 fits in one 64 block)
+    assert-eq!(
+        hash/md5("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+        "8215ef0796a20bcaaae116d3876c664a")
+}
+
+test "sha1 canonical vectors" {
+    assert-eq!(hash/sha1(""), "da39a3ee5e6b4b0d3255bfef95601890afd80709")
+    assert-eq!(hash/sha1("abc"), "a9993e364706816aba3e25717850c26c9cd0d89d")
+}
+
+test "sha256 canonical vectors" {
+    assert-eq!(hash/sha256(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    assert-eq!(hash/sha256("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    // 55-byte input spanning the padding boundary, single block
+    assert-eq!(
+        hash/sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")
+    // 64-byte input forces padding into a SECOND block (multi-block path)
+    assert-eq!(
+        hash/sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb")
+}
+
+test "sha512 canonical vectors" {
+    assert-eq!(
+        hash/sha512(""),
+        "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e")
+    assert-eq!(
+        hash/sha512("abc"),
+        "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f")
+}
+
+test "vec-of-int input matches equivalent string" {
+    // The byte vector [97, 98, 99] is the UTF-8 of "abc".
+    assert-eq!(hash/md5([97, 98, 99]), hash/md5("abc"))
+    assert-eq!(hash/sha1([97, 98, 99]), hash/sha1("abc"))
+    assert-eq!(hash/sha256([97, 98, 99]), hash/sha256("abc"))
+    assert-eq!(hash/sha512([97, 98, 99]), hash/sha512("abc"))
+    // Empty vector hashes identically to the empty string.
+    assert-eq!(hash/sha256([]), hash/sha256(""))
+}
+
+test "vec-of-int input is masked to a byte" {
+    // to-bytes masks each element with & 0xFF, so 97+256 collapses to 97.
+    assert-eq!(hash/md5([97 + 256, 98, 99]), hash/md5("abc"))
+    assert-eq!(hash/sha256([97 + 512, 98 + 256, 99]), hash/sha256("abc"))
+}
+
+test "multibyte utf-8 string hashed as bytes not codepoints" {
+    // "héllo" must hash its UTF-8 bytes (é = 0xC3 0xA9), not masked codepoints.
+    assert-eq!(
+        hash/sha256("héllo"),
+        "3c48591d8d098a4538f5e013dfcf406e948eac4d3277b10bf614e295d6068179")
+}
+
+test "digest hex length and charset" {
+    assert-eq!(length(hash/md5("anything")), 32)
+    assert-eq!(length(hash/sha1("anything")), 40)
+    assert-eq!(length(hash/sha256("anything")), 64)
+    assert-eq!(length(hash/sha512("anything")), 128)
+    // Output is lowercase hex only (exact match against a lowercase literal).
+    assert-eq!(
+        hash/sha256("Hello, World!"),
+        "dffd6021bb2bd5b0af676290809ec3a53191dd81c7f70a4b28688a362182986f")
+}
+
+test "hashing is deterministic" {
+    assert-eq!(hash/md5("repeat"), hash/md5("repeat"))
+    assert-eq!(hash/sha256("repeat me twice"), hash/sha256("repeat me twice"))
+    // Distinct inputs give distinct digests.
+    assert-ne!(hash/sha256("a"), hash/sha256("b"))
+}
+
+test "hmac-md5 vectors" {
+    assert-eq!(
+        hash/hmac-md5("key", "The quick brown fox jumps over the lazy dog"),
+        "80070713463e7749b90c2dc24911e275")
+    // Long key (>64-byte block size) is hashed down first.
+    assert-eq!(
+        hash/hmac-md5("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "message"),
+        "f202dbe9e82129c70ca76e421f882aec")
+}
+
+test "hmac-sha256 vectors" {
+    assert-eq!(
+        hash/hmac-sha256("key", "The quick brown fox jumps over the lazy dog"),
+        "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")
+    // Empty key and empty message.
+    assert-eq!(
+        hash/hmac-sha256("", ""),
+        "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad")
+    // Long key (>64) hashed down first.
+    assert-eq!(
+        hash/hmac-sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "message"),
+        "5d6dec63ceb9204725536c0672fc6fa66a6043d319a8ea291e1c126e2edfb700")
+}
+
+test "hmac-sha512 vectors" {
+    assert-eq!(
+        hash/hmac-sha512("key", "The quick brown fox jumps over the lazy dog"),
+        "b42af09057bac1e2d41708e48a902e09b5ff7f12ab428a4fe86653c73dd248fb82f948a549f7b791a5b41915ee4d1ec3935357e4e2317250d0372afa2ebeeb3a")
+    // Long key (>128-byte block size) hashed down first.
+    assert-eq!(
+        hash/hmac-sha512("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "message"),
+        "ccbace8cb116d4363d02526a3466bc4a1bf1f86697a7a8641dd509dd4d652c0931bc1870ef60a5429283ca512a7dbbeda94aa104bc7551ccb0ea83d5019455c2")
+}
+
+test "hmac accepts vec-of-int key and message" {
+    // "key" = [107, 101, 121]; reusing the canonical fox vector.
+    assert-eq!(
+        hash/hmac-sha256([107, 101, 121], "The quick brown fox jumps over the lazy dog"),
+        "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")
+}
+
+test "non-collection input throws" {
+    assert-throws!(fn() { hash/md5(42) })
+    assert-throws!(fn() { hash/sha256(3.14) })
+    assert-throws!(fn() { hash/sha1(true) })
+}

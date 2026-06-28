@@ -1,0 +1,41 @@
+namespace quickwins_test
+
+use beagle.json as json
+use beagle.ansi as ansi
+
+// Regression tests for the production-readiness quick-wins batch.
+
+test "json refuses non-finite floats (B4)" {
+    assert-throws!(fn() { json/stringify(infinity) })
+    assert-throws!(fn() { json/stringify(-infinity) })
+    assert-throws!(fn() { json/stringify(0.0 / 0.0) })   // NaN
+    // finite floats still serialize
+    assert-eq!(json/stringify(3.5), "3.5")
+}
+
+test "ansi honors a disable toggle (B10/NO_COLOR)" {
+    ansi/set-enabled!(false)
+    assert-eq!(ansi/red("x"), "x")
+    assert-eq!(ansi/bold(ansi/green("hi")), "hi")
+    assert-eq!(ansi/style("y", [1, 31]), "y")
+    assert-eq!(ansi/enabled?(), false)
+    ansi/set-enabled!(true)
+    assert-ne!(ansi/red("x"), "x")     // escapes emitted again
+    assert-eq!(ansi/enabled?(), true)
+}
+
+test "last is correct (O(1) vector fast path)" {
+    assert-eq!(last([1, 2, 3]), 3)
+    assert-eq!(last([42]), 42)
+    assert-eq!(last([]), null)
+    assert-eq!(last(#{7}), 7)          // non-vector still works
+}
+
+test "contains-key? matches contains? on maps" {
+    let m = {:a 1, :b 2}
+    assert-eq!(contains-key?(m, :a), true)
+    assert-eq!(contains-key?(m, :z), false)
+    // stored-null key is still present
+    let m2 = assoc(m, :c, null)
+    assert-eq!(contains-key?(m2, :c), true)
+}

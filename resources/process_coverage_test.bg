@@ -1,0 +1,60 @@
+namespace process_coverage_test
+
+use beagle.process as proc
+
+// Coverage for beagle.process: the pure status decoder, plus light but real
+// smoke tests that drive deterministic shell builtins (true/false/echo/printf).
+// No network, no wall-clock, no machine-specific state.
+
+test "exit-status decodes a normal exit code from the high byte" {
+    // WEXITSTATUS == (status >> 8) & 0xFF when the low 7 bits are clear.
+    assert-eq!(proc/exit-status(0), 0)
+    assert-eq!(proc/exit-status(768), 3)    // 3 << 8
+    assert-eq!(proc/exit-status(1280), 5)   // 5 << 8
+    assert-eq!(proc/exit-status(65280), 255) // 255 << 8, masked to a byte
+}
+
+test "exit-status returns -1 when the child was killed by a signal" {
+    // Low 7 bits non-zero => terminated by signal, not a clean exit.
+    assert-eq!(proc/exit-status(9), -1)
+    assert-eq!(proc/exit-status(134), -1)   // SIGABRT (6) | 0x80 core-dump flag
+}
+
+test "system returns 0 for a clean exit and non-zero otherwise" {
+    assert-eq!(proc/system("true"), 0)
+    assert-ne!(proc/system("false"), 0)
+}
+
+test "system status round-trips through exit-status" {
+    assert-eq!(proc/exit-status(proc/system("exit 3")), 3)
+    assert-eq!(proc/exit-status(proc/system("exit 7")), 7)
+    assert-eq!(proc/exit-status(proc/system("true")), 0)
+}
+
+test "success? reflects a zero exit status" {
+    assert!(proc/success?("true"))
+    assert-eq!(proc/success?("false"), false)
+}
+
+test "run-capture returns stdout with newlines intact" {
+    assert-eq!(proc/run-capture("echo hello"), "hello\n")
+    // printf without a trailing newline keeps the embedded one only.
+    assert-eq!(proc/run-capture("printf 'a\nb'"), "a\nb")
+}
+
+test "run-capture-trim strips surrounding whitespace" {
+    assert-eq!(proc/run-capture-trim("echo hello"), "hello")
+    assert-eq!(proc/run-capture-trim("printf '  x  '"), "x")
+}
+
+test "run-capture does not capture stderr unless redirected" {
+    // stderr is dropped by default...
+    assert-eq!(proc/run-capture("echo oops 1>&2"), "")
+    // ...but 2>&1 folds it into the captured stdout.
+    assert-eq!(proc/run-capture("(echo oops 1>&2) 2>&1"), "oops\n")
+}
+
+test "run-capture of a non-zero command still yields its stdout" {
+    // A failing command has a valid FILE*; its stdout is still captured.
+    assert-eq!(proc/run-capture("echo hi; exit 1"), "hi\n")
+}

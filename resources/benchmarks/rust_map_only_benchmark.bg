@@ -1,6 +1,6 @@
 namespace rust-map-only-benchmark
 use beagle.core as core
-use beagle.collections as rust
+use beagle._collections as rust
 
 fn elapsed-ms(start, end) {
     (end - start) / 1000000

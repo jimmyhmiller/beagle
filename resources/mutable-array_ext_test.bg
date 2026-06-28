@@ -1,0 +1,81 @@
+namespace mutable-array_ext_test
+use beagle.mutable-array as arr
+
+test "fill sets every slot and returns the array" {
+    let a = arr/new-array(3)
+    let r = arr/fill(a, 7)
+    assert-eq!(arr/read-field(a, 0), 7)
+    assert-eq!(arr/read-field(a, 1), 7)
+    assert-eq!(arr/read-field(a, 2), 7)
+    // returns the same array, so reads through r match
+    assert-eq!(arr/read-field(r, 0), 7)
+    assert-eq!(arr/count(r), 3)
+}
+
+test "fill on an empty array is a no-op returning the array" {
+    let e = arr/new-array(0)
+    assert-eq!(arr/count(arr/fill(e, 1)), 0)
+}
+
+test "fill overwrites existing values" {
+    let a = arr/new-array(2)
+    arr/write-field(a, 0, 1)
+    arr/write-field(a, 1, 2)
+    arr/fill(a, 0)
+    assert-eq!(arr/read-field(a, 0), 0)
+    assert-eq!(arr/read-field(a, 1), 0)
+}
+
+test "index-of returns first matching index or -1" {
+    let a = arr/new-array(3)
+    arr/write-field(a, 0, 10)
+    arr/write-field(a, 1, 20)
+    arr/write-field(a, 2, 30)
+    assert-eq!(arr/index-of(a, 10), 0)
+    assert-eq!(arr/index-of(a, 20), 1)
+    assert-eq!(arr/index-of(a, 30), 2)
+    assert-eq!(arr/index-of(a, 99), -1)
+}
+
+test "index-of returns the first index on duplicates" {
+    let a = arr/new-array(3)
+    arr/write-field(a, 0, 5)
+    arr/write-field(a, 1, 5)
+    arr/write-field(a, 2, 9)
+    assert-eq!(arr/index-of(a, 5), 0)
+}
+
+test "index-of uses structural equality, not identity" {
+    let a = arr/new-array(2)
+    arr/write-field(a, 0, [1, 2])
+    arr/write-field(a, 1, [3, 4])
+    assert-eq!(arr/index-of(a, [1, 2]), 0)
+    assert-eq!(arr/index-of(a, [3, 4]), 1)
+    assert-eq!(arr/index-of(a, [9, 9]), -1)
+}
+
+test "index-of on an empty array is -1" {
+    assert-eq!(arr/index-of(arr/new-array(0), 1), -1)
+}
+
+test "to-vec materializes elements in order" {
+    let a = arr/new-array(3)
+    arr/write-field(a, 0, 1)
+    arr/write-field(a, 1, 2)
+    arr/write-field(a, 2, 3)
+    assert-eq!(arr/to-vec(a), [1, 2, 3])
+}
+
+test "to-vec of an empty array is the empty vector" {
+    assert-eq!(arr/to-vec(arr/new-array(0)), [])
+}
+
+test "to-vec preserves null slots" {
+    assert-eq!(arr/to-vec(arr/new-array(2)), [null, null])
+}
+
+test "new operations throw on non-array input" {
+    assert-throws!(fn() { arr/fill(5, 0) })
+    assert-throws!(fn() { arr/index-of(5, 0) })
+    assert-throws!(fn() { arr/to-vec(5) })
+}

@@ -1,7 +1,7 @@
 namespace gc_root_invariant_deep_test
 // gc-always
 
-use beagle.collections as collections
+use beagle._collections as collections
 
 struct Box { value }
 

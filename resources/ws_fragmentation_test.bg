@@ -1,0 +1,58 @@
+namespace ws_fragmentation_test
+use beagle.ws as ws
+
+fn frame(fin, opcode, payload) {
+    ws/Frame { fin: fin, opcode: opcode, masked: false, payload: payload }
+}
+
+test "reassemble: a single fin frame is one message" {
+    let msgs = ws/reassemble([frame(true, ws/opcode-text(), "Hello")])
+    assert-eq!(length(msgs), 1)
+    assert-eq!(get(msgs[0], :payload), "Hello")
+    assert-eq!(get(msgs[0], :opcode), ws/opcode-text())
+}
+
+test "reassemble: fragmented text + continuations concatenate (B7 fix)" {
+    let frames = [
+        frame(false, ws/opcode-text(), "Hel"),
+        frame(false, ws/opcode-continuation(), "lo, "),
+        frame(true, ws/opcode-continuation(), "World")
+    ]
+    let msgs = ws/reassemble(frames)
+    assert-eq!(length(msgs), 1)
+    assert-eq!(get(msgs[0], :payload), "Hello, World")
+    assert-eq!(get(msgs[0], :opcode), ws/opcode-text())
+}
+
+test "reassemble: multiple messages, some fragmented" {
+    let frames = [
+        frame(true, ws/opcode-text(), "one"),
+        frame(false, ws/opcode-binary(), "tw"),
+        frame(true, ws/opcode-continuation(), "o"),
+        frame(true, ws/opcode-text(), "three")
+    ]
+    let msgs = ws/reassemble(frames)
+    assert-eq!(length(msgs), 3)
+    assert-eq!(get(msgs[0], :payload), "one")
+    assert-eq!(get(msgs[1], :payload), "two")
+    assert-eq!(get(msgs[1], :opcode), ws/opcode-binary())
+    assert-eq!(get(msgs[2], :payload), "three")
+}
+
+test "reassemble: an incomplete final message is not emitted" {
+    let msgs = ws/reassemble([
+        frame(false, ws/opcode-text(), "incom"),
+        frame(false, ws/opcode-continuation(), "plete")
+    ])
+    assert-eq!(length(msgs), 0)
+}
+
+test "frag-step folds one frame at a time" {
+    let s1 = ws/frag-step(null, "", frame(false, ws/opcode-text(), "ab"))
+    assert-eq!(s1[0], ws/opcode-text())
+    assert-eq!(s1[1], "ab")
+    assert-eq!(s1[2], null)
+    let s2 = ws/frag-step(s1[0], s1[1], frame(true, ws/opcode-continuation(), "cd"))
+    assert-eq!(s2[2] == null, false)
+    assert-eq!(get(s2[2], :payload), "abcd")
+}

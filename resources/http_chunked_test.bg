@@ -1,0 +1,32 @@
+namespace http_chunked_test
+use beagle.http as http
+
+test "parse-chunk-size parses hex, stops at ext/CR" {
+    assert-eq!(http/parse-chunk-size("a"), 10)
+    assert-eq!(http/parse-chunk-size("1a"), 26)
+    assert-eq!(http/parse-chunk-size("FF"), 255)
+    assert-eq!(http/parse-chunk-size("0"), 0)
+    assert-eq!(http/parse-chunk-size("1a;ext=1"), 26)
+    assert-eq!(http/parse-chunk-size("10\r"), 16)
+}
+
+test "decode-chunked: single chunk" {
+    assert-eq!(http/decode-chunked("5\r\nhello\r\n0\r\n\r\n"), "hello")
+}
+
+test "decode-chunked: multi-chunk with CRLF inside data (Wikipedia example)" {
+    let encoded = "4\r\nWiki\r\n5\r\npedia\r\nE\r\n in\r\n\r\nchunks.\r\n0\r\n\r\n"
+    assert-eq!(http/decode-chunked(encoded), "Wikipedia in\r\n\r\nchunks.")
+}
+
+test "decode-chunked: empty body (immediate 0 chunk)" {
+    assert-eq!(http/decode-chunked("0\r\n\r\n"), "")
+}
+
+test "decode-chunked: ignores chunk extensions" {
+    assert-eq!(http/decode-chunked("5;foo=bar\r\nhello\r\n0\r\n\r\n"), "hello")
+}
+
+test "decode-chunked: many small chunks" {
+    assert-eq!(http/decode-chunked("1\r\na\r\n1\r\nb\r\n1\r\nc\r\n0\r\n\r\n"), "abc")
+}

@@ -1,0 +1,65 @@
+namespace comparable_test
+
+use beagle.bigint as big
+use beagle.semver as sv
+use beagle.date as date
+
+// Regression for the Comparable protocol + polymorphic compare/sort/min/max.
+
+test "compare on primitives (fast path)" {
+    assert-eq!(compare(3, 5), -1)
+    assert-eq!(compare(5, 3), 1)
+    assert-eq!(compare(4, 4), 0)
+    assert-eq!(compare(1.5, 2.5), -1)
+    assert-eq!(compare(2.5, 2.5), 0)
+    assert-eq!(compare("a", "b"), -1)   // strings take the < path, not the protocol
+    assert-eq!(compare("b", "a"), 1)
+    assert-eq!(compare("x", "x"), 0)
+    assert-eq!(compare(true, false), 1)
+}
+
+test "sort / sort-by / min / max on primitives (unchanged behavior)" {
+    assert-eq!(sort([3, 1, 4, 1, 5, 9, 2, 6]), [1, 1, 2, 3, 4, 5, 6, 9])
+    assert-eq!(sort(["banana", "apple", "cherry"]), ["apple", "banana", "cherry"])
+    assert-eq!(sort([]), [])
+    assert-eq!(sort([42]), [42])
+    assert-eq!(min-of([3, 1, 4, 1, 5]), 1)
+    assert-eq!(max-of([3, 1, 4, 1, 5]), 5)
+    assert-eq!(sort-by(fn(x) { 0 - x }, [1, 2, 3]), [3, 2, 1])
+}
+
+test "BigInt participates in compare/sort/min/max" {
+    let a = big/from-string("100")
+    let b = big/from-string("99999999999999999999")
+    let c = big/from-string("500")
+    assert-eq!(compare(a, b), -1)
+    assert-eq!(compare(b, a), 1)
+    assert-eq!(compare(a, big/from-string("100")), 0)
+    let sorted = sort([b, a, c])
+    assert-eq!(big/to-string(sorted[0]), "100")
+    assert-eq!(big/to-string(sorted[1]), "500")
+    assert-eq!(big/to-string(sorted[2]), "99999999999999999999")
+    assert-eq!(big/to-string(min-of([b, a, c])), "100")
+    assert-eq!(big/to-string(max-of([a, c, b])), "99999999999999999999")
+}
+
+test "SemVer participates in compare/sort" {
+    let v1 = sv/parse("1.2.0")
+    let v2 = sv/parse("1.10.0")
+    assert-eq!(compare(v1, v2), -1)   // 1.2.0 precedes 1.10.0 (numeric, not lexical)
+    assert-eq!(compare(v2, v1), 1)
+    // sort orders ascending: verify each adjacent pair is non-decreasing
+    let sorted = sort([sv/parse("2.0.0"), sv/parse("1.0.0"), sv/parse("1.5.0")])
+    assert!(compare(sorted[0], sorted[1]) <= 0)
+    assert!(compare(sorted[1], sorted[2]) <= 0)
+    assert-eq!(compare(sorted[0], sv/parse("1.0.0")), 0)
+}
+
+test "DateTime participates in compare/sort" {
+    let d1 = date/parse-iso8601("2020-01-15T00:00:00")
+    let d2 = date/parse-iso8601("2021-06-01T12:30:00")
+    assert-eq!(compare(d1, d2), -1)
+    assert-eq!(compare(d2, d1), 1)
+    let sorted = sort([d2, d1])
+    assert-eq!(compare(sorted[0], d1), 0)   // earliest first
+}

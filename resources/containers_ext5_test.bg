@@ -1,0 +1,124 @@
+namespace containers_ext5_test
+
+use beagle.containers as c
+
+// ---------------------------------------------------------------------------
+// Deque — deque-peek-front / deque-peek-back (non-destructive inspection)
+// ---------------------------------------------------------------------------
+
+test "deque-peek-front/back on a back-only deque" {
+    let mut d = c/deque-new()
+    d = c/push-back(d, 1)
+    d = c/push-back(d, 2)
+    d = c/push-back(d, 3)
+    // logical order = [1, 2, 3]
+    assert-eq!(c/deque-peek-front(d), 1)
+    assert-eq!(c/deque-peek-back(d), 3)
+}
+
+test "deque-peek-front/back on a front-only deque" {
+    let mut d = c/deque-new()
+    d = c/push-front(d, 1)
+    d = c/push-front(d, 2)
+    // front = [1, 2], logical order = reverse(front) = [2, 1]
+    assert-eq!(c/deque-peek-front(d), 2)
+    assert-eq!(c/deque-peek-back(d), 1)
+}
+
+test "deque-peek-front/back on a mixed deque" {
+    let mut d = c/deque-new()
+    d = c/push-back(d, 1)
+    d = c/push-back(d, 2)
+    d = c/push-front(d, 0)
+    // logical order = [0, 1, 2]
+    assert-eq!(c/deque-to-vec(d), [0, 1, 2])
+    assert-eq!(c/deque-peek-front(d), 0)
+    assert-eq!(c/deque-peek-back(d), 2)
+}
+
+test "deque-peek on a single-element deque returns that element both ends" {
+    let d = c/push-back(c/deque-new(), 5)
+    assert-eq!(c/deque-peek-front(d), 5)
+    assert-eq!(c/deque-peek-back(d), 5)
+}
+
+test "deque-peek is non-destructive" {
+    let mut d = c/deque-new()
+    d = c/push-back(d, 1)
+    d = c/push-back(d, 2)
+    let f = c/deque-peek-front(d)
+    let b = c/deque-peek-back(d)
+    assert-eq!(f, 1)
+    assert-eq!(b, 2)
+    // count and contents are unchanged after peeking
+    assert-eq!(c/deque-count(d), 2)
+    assert-eq!(c/deque-to-vec(d), [1, 2])
+}
+
+test "deque-peek-front/back agree with pop on the same deque" {
+    let mut d = c/deque-new()
+    d = c/push-back(d, 10)
+    d = c/push-back(d, 20)
+    d = c/push-back(d, 30)
+    let popped-front = c/pop-front(d)
+    let popped-back = c/pop-back(d)
+    assert-eq!(c/deque-peek-front(d), get(popped-front, 0))
+    assert-eq!(c/deque-peek-back(d), get(popped-back, 0))
+}
+
+test "deque-peek-front throws on an empty deque" {
+    assert-throws!(fn() { c/deque-peek-front(c/deque-new()) })
+}
+
+test "deque-peek-back throws on an empty deque" {
+    assert-throws!(fn() { c/deque-peek-back(c/deque-new()) })
+}
+
+// ---------------------------------------------------------------------------
+// OrderedMap — om-update
+// ---------------------------------------------------------------------------
+
+test "om-update applies f to an existing value" {
+    let mut om = c/om-new()
+    om = c/om-assoc(om, :a, 1)
+    let om2 = c/om-update(om, :a, fn(v) { v + 10 })
+    assert-eq!(c/om-get(om2, :a), 11)
+    assert-eq!(c/om-keys-in-order(om2), [:a])
+    assert-eq!(c/om-count(om2), 1)
+}
+
+test "om-update on an absent key applies f to null and appends" {
+    let om = c/om-new()
+    let om2 = c/om-update(om, :b, fn(v) { if v == null { 7 } else { v } })
+    assert-eq!(c/om-get(om2, :b), 7)
+    assert-eq!(c/om-keys-in-order(om2), [:b])
+    assert-eq!(c/om-count(om2), 1)
+}
+
+test "om-update preserves the position of an existing key" {
+    let mut om = c/om-new()
+    om = c/om-assoc(om, :a, 1)
+    om = c/om-assoc(om, :b, 2)
+    om = c/om-assoc(om, :c, 3)
+    let om2 = c/om-update(om, :a, fn(v) { v * 100 })
+    assert-eq!(c/om-keys-in-order(om2), [:a, :b, :c])
+    assert-eq!(c/om-vals-in-order(om2), [100, 2, 3])
+}
+
+test "om-update appends a new key at the end" {
+    let mut om = c/om-new()
+    om = c/om-assoc(om, :a, 1)
+    om = c/om-assoc(om, :b, 2)
+    let om2 = c/om-update(om, :z, fn(v) { if v == null { 0 } else { v } })
+    assert-eq!(c/om-keys-in-order(om2), [:a, :b, :z])
+    assert-eq!(c/om-vals-in-order(om2), [1, 2, 0])
+}
+
+test "om-update leaves the original ordered map unchanged" {
+    let mut om = c/om-new()
+    om = c/om-assoc(om, :a, 1)
+    let om2 = c/om-update(om, :a, fn(v) { v + 5 })
+    assert-eq!(c/om-get(om, :a), 1)
+    assert-eq!(c/om-get(om2, :a), 6)
+    assert-eq!(c/om-count(om), 1)
+}

@@ -1,0 +1,195 @@
+namespace semver_coverage_test
+
+use beagle.semver as sv
+
+// Regression coverage for the pure beagle.semver module (SemVer 2.0.0).
+// Public API: parse, valid?, compare, satisfies?.
+
+test "parse basic core version" {
+    let v = sv/parse("1.2.3")
+    assert-ne!(v, null)
+    assert-eq!(v.major, 1)
+    assert-eq!(v.minor, 2)
+    assert-eq!(v.patch, 3)
+    assert-eq!(v.prerelease, null)
+    assert-eq!(v.build, null)
+}
+
+test "parse with prerelease and build" {
+    let v = sv/parse("1.2.3-alpha.1+build.7")
+    assert-eq!(v.major, 1)
+    assert-eq!(v.minor, 2)
+    assert-eq!(v.patch, 3)
+    assert-eq!(v.prerelease, "alpha.1")
+    assert-eq!(v.build, "build.7")
+}
+
+test "parse prerelease only (no build)" {
+    let v = sv/parse("0.0.0-rc.1")
+    assert-eq!(v.major, 0)
+    assert-eq!(v.prerelease, "rc.1")
+    assert-eq!(v.build, null)
+}
+
+test "parse build only (no prerelease)" {
+    let v = sv/parse("1.0.0+20130313144700")
+    assert-eq!(v.prerelease, null)
+    assert-eq!(v.build, "20130313144700")
+}
+
+test "parse rejects malformed cores" {
+    // missing patch
+    assert-eq!(sv/parse("1.2"), null)
+    // empty
+    assert-eq!(sv/parse(""), null)
+    // too many parts
+    assert-eq!(sv/parse("1.2.3.4"), null)
+    // non-numeric core
+    assert-eq!(sv/parse("a.b.c"), null)
+}
+
+test "parse rejects leading zeros in numeric core parts" {
+    assert-eq!(sv/parse("01.2.3"), null)
+    assert-eq!(sv/parse("1.02.3"), null)
+    assert-eq!(sv/parse("1.2.03"), null)
+    // a single zero is fine
+    assert-ne!(sv/parse("0.0.0"), null)
+}
+
+test "parse prerelease leading-zero numeric identifier is rejected" {
+    // numeric prerelease identifier with leading zero is invalid
+    assert-eq!(sv/parse("1.2.3-01"), null)
+    // but alphanumeric identifier starting with zero is fine
+    assert-ne!(sv/parse("1.2.3-0a"), null)
+    // a plain numeric "0" identifier is fine
+    assert-ne!(sv/parse("1.2.3-0"), null)
+}
+
+test "parse build identifiers permit leading zeros" {
+    // build metadata leading zeros ARE allowed by the spec
+    assert-ne!(sv/parse("1.2.3+001"), null)
+    assert-eq!(sv/parse("1.2.3+001").build, "001")
+}
+
+test "parse rejects empty prerelease / build markers" {
+    assert-eq!(sv/parse("1.2.3-"), null)
+    assert-eq!(sv/parse("1.2.3+"), null)
+    // empty dot-separated identifier
+    assert-eq!(sv/parse("1.2.3-alpha..1"), null)
+}
+
+test "valid? mirrors parse" {
+    assert!(sv/valid?("1.2.3"))
+    assert!(sv/valid?("1.2.3-alpha+build"))
+    assert-eq!(sv/valid?("1.2"), false)
+    assert-eq!(sv/valid?("nope"), false)
+}
+
+test "compare orders by numeric precedence" {
+    assert-eq!(sv/compare("1.0.0", "2.0.0"), -1)
+    assert-eq!(sv/compare("2.0.0", "1.0.0"), 1)
+    assert-eq!(sv/compare("1.0.0", "1.0.0"), 0)
+    assert-eq!(sv/compare("1.2.0", "1.1.9"), 1)
+    assert-eq!(sv/compare("1.0.1", "1.0.2"), -1)
+}
+
+test "compare: release outranks prerelease" {
+    assert-eq!(sv/compare("1.0.0-alpha", "1.0.0"), -1)
+    assert-eq!(sv/compare("1.0.0", "1.0.0-alpha"), 1)
+}
+
+test "compare: SemVer spec prerelease precedence chain" {
+    // 1.0.0-alpha < alpha.1 < alpha.beta < beta < beta.2 < beta.11 < rc.1 < 1.0.0
+    assert-eq!(sv/compare("1.0.0-alpha", "1.0.0-alpha.1"), -1)
+    assert-eq!(sv/compare("1.0.0-alpha.1", "1.0.0-alpha.beta"), -1)
+    assert-eq!(sv/compare("1.0.0-alpha.beta", "1.0.0-beta"), -1)
+    assert-eq!(sv/compare("1.0.0-beta", "1.0.0-beta.2"), -1)
+    assert-eq!(sv/compare("1.0.0-beta.2", "1.0.0-beta.11"), -1)
+    assert-eq!(sv/compare("1.0.0-beta.11", "1.0.0-rc.1"), -1)
+    assert-eq!(sv/compare("1.0.0-rc.1", "1.0.0"), -1)
+}
+
+test "compare ignores build metadata" {
+    assert-eq!(sv/compare("1.0.0+build.1", "1.0.0+build.2"), 0)
+    assert-eq!(sv/compare("1.0.0-alpha+x", "1.0.0-alpha+y"), 0)
+}
+
+test "compare throws on invalid version strings" {
+    assert-throws!(fn() { sv/compare("1.2", "1.0.0") })
+    assert-throws!(fn() { sv/compare("1.0.0", "bogus") })
+}
+
+test "satisfies? caret on positive major" {
+    // ^1.2.0 := >=1.2.0 <2.0.0
+    assert!(sv/satisfies?("1.2.0", "^1.2.0"))
+    assert!(sv/satisfies?("1.2.5", "^1.2.0"))
+    assert!(sv/satisfies?("1.9.9", "^1.2.0"))
+    assert-eq!(sv/satisfies?("1.1.9", "^1.2.0"), false)
+    assert-eq!(sv/satisfies?("2.0.0", "^1.2.0"), false)
+}
+
+test "satisfies? caret on zero major preserves minor" {
+    // ^0.2.3 := >=0.2.3 <0.3.0
+    assert!(sv/satisfies?("0.2.3", "^0.2.3"))
+    assert!(sv/satisfies?("0.2.5", "^0.2.3"))
+    assert-eq!(sv/satisfies?("0.3.0", "^0.2.3"), false)
+    assert-eq!(sv/satisfies?("0.2.2", "^0.2.3"), false)
+}
+
+test "satisfies? caret on zero minor preserves patch" {
+    // ^0.0.3 := >=0.0.3 <0.0.4
+    assert!(sv/satisfies?("0.0.3", "^0.0.3"))
+    assert-eq!(sv/satisfies?("0.0.4", "^0.0.3"), false)
+    assert-eq!(sv/satisfies?("0.0.2", "^0.0.3"), false)
+}
+
+test "satisfies? tilde allows patch changes only" {
+    // ~1.2.3 := >=1.2.3 <1.3.0
+    assert!(sv/satisfies?("1.2.3", "~1.2.3"))
+    assert!(sv/satisfies?("1.2.9", "~1.2.3"))
+    assert-eq!(sv/satisfies?("1.3.0", "~1.2.3"), false)
+    assert-eq!(sv/satisfies?("1.2.2", "~1.2.3"), false)
+}
+
+test "satisfies? comparator operators" {
+    assert!(sv/satisfies?("1.5.0", ">=1.2.0"))
+    assert!(sv/satisfies?("1.2.0", ">=1.2.0"))
+    assert-eq!(sv/satisfies?("1.1.0", ">=1.2.0"), false)
+
+    assert!(sv/satisfies?("1.2.0", "<=1.2.0"))
+    assert!(sv/satisfies?("1.1.0", "<=1.2.0"))
+    assert-eq!(sv/satisfies?("1.3.0", "<=1.2.0"), false)
+
+    assert!(sv/satisfies?("1.3.0", ">1.2.0"))
+    assert-eq!(sv/satisfies?("1.2.0", ">1.2.0"), false)
+
+    assert!(sv/satisfies?("1.1.0", "<1.2.0"))
+    assert-eq!(sv/satisfies?("1.2.0", "<1.2.0"), false)
+}
+
+test "satisfies? exact match (bare and =)" {
+    assert!(sv/satisfies?("1.2.3", "1.2.3"))
+    assert!(sv/satisfies?("1.2.3", "=1.2.3"))
+    assert-eq!(sv/satisfies?("1.2.4", "1.2.3"), false)
+    assert-eq!(sv/satisfies?("1.2.4", "=1.2.3"), false)
+}
+
+test "satisfies? prerelease leak rule" {
+    // a prerelease of the NEXT tuple must not satisfy a stable range
+    assert-eq!(sv/satisfies?("2.0.0-alpha", "^1.2.0"), false)
+    // prerelease only satisfies when the comparator's tuple also has a prerelease
+    assert!(sv/satisfies?("1.2.3-beta", "^1.2.3-alpha"))
+    // a prerelease version against a stable comparator (same tuple) is rejected
+    assert-eq!(sv/satisfies?("1.2.4-alpha", ">=1.2.0"), false)
+    // stable versions are always allowed by the rule
+    assert!(sv/satisfies?("1.2.4", ">=1.2.0"))
+}
+
+test "satisfies? whitespace trimming on range" {
+    assert!(sv/satisfies?("1.2.5", "  ^1.2.0  "))
+}
+
+test "satisfies? throws on invalid inputs" {
+    assert-throws!(fn() { sv/satisfies?("nope", "^1.0.0") })
+    assert-throws!(fn() { sv/satisfies?("1.0.0", "^bogus") })
+}
