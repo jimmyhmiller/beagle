@@ -4,6 +4,8 @@ use beagle.builtin as builtin
 
 
 // Probably should move this stuff to an ffi namespace
+/// Handle to a dynamically loaded shared library; `id` is the runtime's
+/// internal library identifier.
 struct Library {
     id
 }
@@ -13,11 +15,15 @@ fn __make_lib_struct(id) {
 }
 
 
+/// A raw C pointer split into low and high 32-bit halves (`lo`, `hi`).
 struct Pointer {
     lo
     hi
 }
 
+/// An off-heap byte buffer: `ptr` is the raw address, `size` its byte length.
+/// Registered with the GC finalizer so the backing allocation is freed when
+/// the Buffer becomes unreachable.
 struct Buffer {
     ptr
     size
@@ -36,6 +42,8 @@ fn __make_buffer_struct(ptr, size) {
 // A typed one-element off-heap cell. Layout convention matches Buffer:
 // field 0 = raw pointer, field 1 = byte size. The shared finalizer frees
 // the backing allocation when the Cell becomes GC-unreachable.
+/// A typed one-element off-heap cell: `ptr` raw address, `size` byte length,
+/// `ty` the FFI element Type. GC-finalized like Buffer.
 struct Cell {
     ptr
     size
@@ -44,6 +52,8 @@ struct Cell {
 
 // A typed fixed-length off-heap array. Same layout convention:
 // field 0 = raw pointer, field 1 = byte size = stride(ty) * length.
+/// A typed fixed-length off-heap array: `ptr` raw address, `size` total bytes,
+/// `ty` the element Type, `length` the element count. GC-finalized like Buffer.
 struct TypedArray {
     ptr
     size
@@ -53,6 +63,8 @@ struct TypedArray {
 
 // Struct for holding raw C struct returns (up to 16 bytes)
 // low = first 8 bytes, high = second 8 bytes
+/// Holds a by-value C struct return of up to 16 bytes: `low` is the first
+/// 8 bytes, `high` the second 8 bytes.
 struct StructReturn {
     low
     high
@@ -62,6 +74,9 @@ fn __make_struct_return(low, high) {
     StructReturn { low: low, high: high }
 }
 
+/// Enumeration of FFI value types: the fixed-width integers (U8..U64, I8..I64),
+/// floats (F32/F64), Pointer/MutablePointer, String, Void, and a nested
+/// `Structure { types }` for aggregate layouts.
 enum Type {
     U8,
     U16,
@@ -96,6 +111,9 @@ fn __create_ffi_function(ffi-info) {
 
 // Call a raw function pointer with per-call type specification.
 // Wraps the raw builtin with GC-safe register/unregister C call.
+/// Call raw function pointer `func_ptr` with `args` whose per-argument FFI
+/// types are given in `types`, returning a value of `return_type`. Registers
+/// the C call with the GC for the duration.
 fn call-variadic(func_ptr, args, types, return_type) {
     builtin/__register_c_call()
     let result = call-variadic-raw(func_ptr, args, types, return_type)
@@ -105,6 +123,8 @@ fn call-variadic(func_ptr, args, types, return_type) {
 
 // Byte size of a primitive FFI type. Used by cell/array helpers to
 // translate element indices into byte offsets.
+/// Return the byte size of a primitive FFI `ty`. Throws for String, Void, and
+/// Structure, which have no fixed primitive size.
 fn size-of(ty) {
     match ty {
         Type.I8 => 1,
@@ -126,6 +146,9 @@ fn size-of(ty) {
 }
 
 // Typed read at a byte offset. Dispatches to the primitive get-* builtin.
+/// Read a value of type `ty` from `ptr` at byte `offset`, dispatching to the
+/// matching get-* builtin. Throws for Pointer/MutablePointer/String/Void/
+/// Structure, which are not supported here.
 fn read-at(ptr, offset, ty) {
     match ty {
         Type.I8 => get-i8(ptr, offset),
@@ -147,6 +170,9 @@ fn read-at(ptr, offset, ty) {
 }
 
 // Typed write at a byte offset.
+/// Write `value` of type `ty` to `ptr` at byte `offset`, dispatching to the
+/// matching set-* builtin. Throws for Pointer/MutablePointer/String/Void/
+/// Structure, which are not supported here.
 fn write-at(ptr, offset, ty, value) {
     match ty {
         Type.I8 => set-i8(ptr, offset, value),
@@ -176,6 +202,9 @@ fn write-at(ptr, offset, ty, value) {
 // disown the Buffer via `forget` so ONLY the Cell owns the allocation.
 // Without the forget the Buffer and Cell would both be on the finalizer list
 // for the same pointer → double free.
+/// Allocate a GC-managed typed `Cell` of type `ty` initialized to `initial`.
+/// Its raw address can be passed directly to C; the backing memory is freed
+/// when the Cell is collected.
 fn cell(ty, initial) {
     let n = size-of(ty)
     let buf = allocate(n)
@@ -186,10 +215,12 @@ fn cell(ty, initial) {
     c
 }
 
+/// Read the current value out of cell `c`, using the cell's stored type.
 fn cell-get(c) {
     read-at(c, 0, c.ty)
 }
 
+/// Store `value` into cell `c`, using the cell's stored type.
 fn cell-set(c, value) {
     write-at(c, 0, c.ty, value)
 }
@@ -197,6 +228,9 @@ fn cell-set(c, value) {
 // Allocate a typed array of `length` elements. Same ownership-transfer dance
 // as cell(): Buffer-allocated, then forgotten so the TypedArray is the sole
 // finalizable owner.
+/// Allocate a GC-managed `TypedArray` of `length` elements of type `ty`. The
+/// raw address can be passed directly to C; the backing memory is freed when
+/// the array is collected.
 fn array(ty, length) {
     let stride = size-of(ty)
     let bytes = stride * length
@@ -207,10 +241,12 @@ fn array(ty, length) {
     a
 }
 
+/// Read element `i` from typed array `a` (offset = `i` * element stride).
 fn array-get(a, i) {
     read-at(a, i * size-of(a.ty), a.ty)
 }
 
+/// Write `value` to element `i` of typed array `a` (offset = `i` * stride).
 fn array-set(a, i, value) {
     write-at(a, i * size-of(a.ty), a.ty, value)
 }
@@ -219,6 +255,9 @@ fn array-set(a, i, value) {
 // TypedArray), handing ownership to C. After this, the GC finalizer no-ops
 // and any beagle-side read/write raises a resumable FFIError. Use this when a
 // C function takes ownership of the allocation and will free it itself.
+/// Disown the off-heap memory held by finalizable FFI struct `x` (Buffer,
+/// Cell, or TypedArray), handing ownership to C. Afterward the GC finalizer
+/// no-ops and beagle-side reads/writes raise a resumable FFIError.
 fn forget(x) {
     __ffi-forget(x)
 }

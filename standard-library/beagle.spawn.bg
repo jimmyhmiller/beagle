@@ -22,6 +22,9 @@ use beagle.effect as effect
 // Spawn Effect Enum
 // ============================================================================
 
+/// Effect operations for spawning tasks. `Spawn` carries a thunk to run;
+/// `SpawnWithToken` also carries a cancellation token. Performed via the
+/// `spawn`/`spawn-with-token` helpers and interpreted by an installed handler.
 enum Spawn {
     Spawn { thunk },
     SpawnWithToken { thunk, token }
@@ -35,6 +38,8 @@ enum Spawn {
 
 // Spawn a task to execute the thunk
 // Returns: Future that resolves to the thunk's result
+/// Perform the `Spawn` effect to run `thunk` as a task; returns a Future
+/// resolving to its result. Must run inside a `handle Handler(Spawn)` block.
 fn spawn(thunk) {
     perform Spawn.Spawn { thunk: thunk }
 }
@@ -42,6 +47,8 @@ fn spawn(thunk) {
 // Spawn a task with a cancellation token
 // The task will check the token periodically and exit early if cancelled
 // Returns: Future that resolves to the thunk's result
+/// Perform the `SpawnWithToken` effect to run `thunk` as a cancellable task
+/// guarded by `token`; returns a Future. Must run inside a `Handler(Spawn)` block.
 fn spawn-with-token(thunk, token) {
     perform Spawn.SpawnWithToken { thunk: thunk, token: token }
 }
@@ -61,9 +68,13 @@ use beagle.async as async
 // ============================================================================
 // In blocking mode, spawned tasks execute immediately and synchronously.
 
+/// Spawn handler that runs tasks immediately and synchronously on the current
+/// thread, so spawned futures are already settled when returned.
 struct BlockingSpawnHandler {}
 
 extend BlockingSpawnHandler with effect/Handler(Spawn) {
+    /// Interpret a `Spawn` operation synchronously and `resume` with the
+    /// resulting (already-settled) Future.
     fn handle(self, op, resume) {
         let result = match op {
             Spawn.Spawn { thunk } => {
@@ -77,6 +88,8 @@ extend BlockingSpawnHandler with effect/Handler(Spawn) {
     }
 }
 
+/// Run `thunk` synchronously, returning a Future already resolved with its
+/// result or rejected with any thrown exception.
 fn handle-spawn-blocking(thunk) {
     // Create a future and immediately execute the thunk synchronously
     let future = async/make-future(async/FutureState.Running {})
@@ -89,6 +102,8 @@ fn handle-spawn-blocking(thunk) {
     future
 }
 
+/// Run `thunk` synchronously unless `token` is cancelled before or after it
+/// completes; returns a Future that is resolved, cancelled, or rejected.
 fn handle-spawn-with-token-blocking(thunk, token) {
     // Create a future and immediately execute the thunk synchronously
     let future = async/make-future(async/FutureState.Running {})
@@ -116,9 +131,13 @@ fn handle-spawn-with-token-blocking(thunk, token) {
 // ============================================================================
 // Spawns actual threads for parallel execution.
 
+/// Spawn handler that runs each task on its own OS thread for parallel
+/// execution, returning a Future that settles when the thread finishes.
 struct ThreadedSpawnHandler {}
 
 extend ThreadedSpawnHandler with effect/Handler(Spawn) {
+    /// Interpret a `Spawn` operation by launching a thread and `resume` with
+    /// the pending Future.
     fn handle(self, op, resume) {
         let result = match op {
             Spawn.Spawn { thunk } => {
@@ -132,6 +151,8 @@ extend ThreadedSpawnHandler with effect/Handler(Spawn) {
     }
 }
 
+/// Run `thunk` on a new thread, updating the returned Future's state atom to
+/// Resolved with its result or Rejected with any thrown exception.
 fn handle-spawn-threaded(thunk) {
     let future = async/make-future(async/FutureState.Running {})
     // Capture the atom for the closure
@@ -150,6 +171,8 @@ fn handle-spawn-threaded(thunk) {
     future
 }
 
+/// Run `thunk` on a new thread that checks `token` before and after execution,
+/// settling the Future as Cancelled, Resolved, or Rejected and notifying waiters.
 fn handle-spawn-with-token-threaded(thunk, token) {
     let future = async/make-future(async/FutureState.Running {})
     let state_atom = future.state_atom
@@ -184,6 +207,8 @@ fn handle-spawn-with-token-threaded(thunk, token) {
 // Blocking Convenience Functions
 // ============================================================================
 
+/// Run `thunk` with a `BlockingSpawnHandler` installed so any `Spawn` effects
+/// performed inside execute synchronously; returns the thunk's value.
 fn run-blocking(thunk) {
     let handler = BlockingSpawnHandler {}
     handle effect/Handler(Spawn) with handler {
@@ -191,10 +216,13 @@ fn run-blocking(thunk) {
     }
 }
 
+/// Spawn `thunk` under a blocking handler; returns its already-settled Future.
 fn blocking-spawn(thunk) {
     run-blocking(fn() { spawn(thunk) })
 }
 
+/// Spawn `thunk` with cancellation `token` under a blocking handler; returns
+/// its already-settled Future (Resolved, Cancelled, or Rejected).
 fn blocking-spawn-with-token(thunk, token) {
     run-blocking(fn() { spawn-with-token(thunk, token) })
 }

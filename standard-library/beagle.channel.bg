@@ -19,9 +19,11 @@ namespace beagle.channel
 //
 // CONTENTS
 //   make-channel()            -> Channel    (unbounded FIFO over an atom)
-//   send!(ch, v)              -> v          (lock-free enqueue)
-//   try-receive(ch)           -> {:some v} | {:none}   (non-blocking)
-//   receive(ch)               -> v          (blocks/spins until available)
+//   send!(ch, v)              -> v          (lock-free enqueue; throws if closed)
+//   try-receive(ch)           -> {:some v} | {:none true} | {:closed true}
+//   receive(ch)               -> v | :closed   (blocks; :closed when closed+drained)
+//   close!(ch)                -> null       (mark channel closed)
+//   closed?(ch)               -> bool       (is the channel closed?)
 //   make-mutex()              -> Mutex
 //   with-lock(mutex, thunk)   -> thunk()    (CAS-acquired critical section)
 //   make-counter()            -> Counter
@@ -46,20 +48,97 @@ namespace beagle.channel
 // or another receiver can't clobber it. Order is strict FIFO: index 0 is
 // always the oldest unread element.
 
+/// Unbounded FIFO channel: an atom holding a persistent-vector queue plus an
+/// atom holding a `closed` flag (false until close! flips it true).
 struct Channel {
-    queue   // atom of persistent-vector
+    queue   // atom of _ChannelQueue (amortized-O(1) FIFO)
+    closed  // atom of bool: false = open, true = closed
+}
+
+// Internal amortized-O(1) FIFO queue.
+//
+// `sendq` holds elements in send order — send! appends here (O(log n) push).
+// `recvq` holds elements REVERSED, so the oldest unreceived element is the LAST
+// element of recvq; dequeue is therefore `butlast(recvq)`, an O(log n) native
+// pop (NOT an O(n) front-drop). When recvq empties we flip `reverse(sendq)` into
+// it — O(k) once per k dequeues, i.e. amortized O(1). This replaces the old
+// single-vector queue whose `drop(1, q)` dequeue was O(n) (=> O(n^2) drain, and
+// redone on every CAS retry).
+struct _ChannelQueue {
+    sendq
+    recvq
+}
+
+/// Internal: an empty channel queue.
+fn _empty-queue() {
+    _ChannelQueue { sendq: [], recvq: [] }
+}
+
+/// Internal: total buffered element count across both sides.
+fn _queue-count(q) {
+    length(q.sendq) + length(q.recvq)
+}
+
+/// Internal: enqueue v at the tail, returning a new queue.
+fn _queue-enqueue(q, v) {
+    _ChannelQueue { sendq: push(q.sendq, v), recvq: q.recvq }
+}
+
+/// Internal: dequeue the oldest element. Returns [head, new-queue], or null if
+/// the queue is empty. Flips sendq into recvq (reversed) when recvq is empty.
+fn _queue-dequeue(q) {
+    if length(q.recvq) > 0 {
+        let head = get(q.recvq, length(q.recvq) - 1)
+        [head, _ChannelQueue { sendq: q.sendq, recvq: butlast(q.recvq) }]
+    } else {
+        if length(q.sendq) > 0 {
+            let flipped = reverse(q.sendq)
+            let head = get(flipped, length(flipped) - 1)
+            [head, _ChannelQueue { sendq: [], recvq: butlast(flipped) }]
+        } else {
+            null
+        }
+    }
 }
 
 // Create a new empty unbounded channel.
+/// Create a new empty, open, unbounded channel.
 fn make-channel() {
-    Channel { queue: atom([]) }
+    Channel { queue: atom(_empty-queue()), closed: atom(false) }
+}
+
+// ---------------------------------------------------------------------------
+// Closing a channel
+// ---------------------------------------------------------------------------
+//
+// close! flips the channel's `closed` atom to true. Closing is permanent and
+// idempotent. A closed channel can still be DRAINED: try-receive/receive keep
+// returning buffered values until the queue empties, then report closure (the
+// {:closed true} marker / the :closed sentinel) instead of blocking forever.
+// Sending on a closed channel throws.
+
+/// Mark `ch` closed (permanent, idempotent). Returns null. Buffered values can still be drained.
+fn close!(ch) {
+    reset!(ch.closed, true)
+    null
+}
+
+/// True iff `ch` has been closed via close!. A snapshot; may be stale under concurrency.
+fn closed?(ch) {
+    deref(ch.closed)
 }
 
 // Enqueue v at the tail. Lock-free via an inlined CAS retry loop. Returns
 // the value sent. O(retry) under contention; each attempt builds a new vector
 // with v appended (persistent => structural sharing, no copy of existing
 // elements).
+/// Enqueue `v` at the tail of `ch` and return `v`. Lock-free (inlined CAS retry). Throws if `ch` is closed.
 fn send!(ch, v) {
+    if closed?(ch) {
+        throw("send! on a closed channel")
+    } else {
+        null
+    }
     send-loop(ch, v)
     v
 }
@@ -67,9 +146,10 @@ fn send!(ch, v) {
 // Inlined CAS retry (instead of swap! with a closure) so the hot send path
 // allocates no per-call closure — only the new tail vector. Fewer allocations
 // = far less GC pressure when many producers hammer one channel.
+/// Internal CAS retry helper for send!: append `v`, install, retry on contention. Returns null.
 fn send-loop(ch, v) {
     let q = deref(ch.queue)
-    let next = push(q, v)
+    let next = _queue-enqueue(q, v)
     let ok = compare-and-swap!(ch.queue, q, next)
     if ok {
         null
@@ -82,18 +162,26 @@ fn send-loop(ch, v) {
 // or {:none} if the channel was empty at the moment we looked. Runs its own
 // CAS loop because it must read the head element AND atomically install the
 // tail (drop index 0) without losing a concurrent send.
+/// Non-blocking dequeue. Returns {:some value} if an element was removed, {:closed true} if closed and drained, or {:none true} if empty and open.
 fn try-receive(ch) {
     try-receive-loop(ch)
 }
 
+/// Internal CAS retry helper for try-receive: read head, install tail (drop index 0), retry on contention.
 fn try-receive-loop(ch) {
     let q = deref(ch.queue)
-    if length(q) == 0 {
-        {:none true}
+    let deq = _queue-dequeue(q)
+    if deq == null {
+        // Drain buffered values first; only report closure once empty.
+        if closed?(ch) {
+            {:closed true}
+        } else {
+            {:none true}
+        }
     } else {
-        let head = get(q, 0)
-        let tail = drop(1, q)
-        // Install the tail iff the queue is still exactly the q we read.
+        let head = deq[0]
+        let tail = deq[1]
+        // Install the new queue iff the atom still holds exactly the q we read.
         // If a concurrent send! or receive changed it, retry from the top.
         let ok = compare-and-swap!(ch.queue, q, tail)
         if ok {
@@ -114,28 +202,42 @@ fn try-receive-loop(ch) {
 //   round and is capped, then resets the moment work appears. This keeps a
 //   hot channel low-latency while an empty channel doesn't spin at full tilt.
 //   On a single-consumer channel there is no thundering herd to worry about.
+// Blocking dequeue. Returns the next buffered value. If the channel is closed
+// AND fully drained it returns the `:closed` keyword sentinel instead of
+// spinning forever. NOTE: a successful receive yields the raw value, so the
+// only way to observe closure is the distinct `:closed` keyword — callers that
+// might legitimately send the literal keyword `:closed` should use try-receive
+// (which uses the unambiguous {:closed true} marker) instead.
+/// Blocking dequeue: spins with growing backoff until a value is available. Returns the value, or the `:closed` keyword if the channel is closed and drained.
 fn receive(ch) {
     receive-spin(ch, 1)
 }
 
+/// Internal spin loop for receive: polls try-receive, backing off (capped at 256) while empty; returns `:closed` once closed and drained.
 fn receive-spin(ch, backoff) {
     let r = try-receive(ch)
-    // r is {:some v} on success or {:none true} when empty. We test for the
-    // :none marker rather than map-pattern matching (keyword map patterns are
-    // not supported by the matcher), reading :some otherwise.
-    if get(r, :none) == true {
-        spin-backoff(backoff)
-        // grow backoff up to a cap (256), then hold
-        let next-backoff = if backoff < 256 { backoff * 2 } else { backoff }
-        receive-spin(ch, next-backoff)
+    // r is {:some v} on success, {:none true} when empty-and-open, or
+    // {:closed true} when closed-and-drained. We test the markers rather than
+    // map-pattern matching (keyword map patterns are not supported by the
+    // matcher), reading :some otherwise.
+    if get(r, :closed) == true {
+        :closed
     } else {
-        get(r, :some)
+        if get(r, :none) == true {
+            spin-backoff(backoff)
+            // grow backoff up to a cap (256), then hold
+            let next-backoff = if backoff < 256 { backoff * 2 } else { backoff }
+            receive-spin(ch, next-backoff)
+        } else {
+            get(r, :some)
+        }
     }
 }
 
 // Burn `n` iterations of pure work so we are not re-polling the atom as fast
 // as the CPU can issue loads. Returns null. Kept deliberately trivial (a
 // counting loop) so it has no allocation and no GC interaction.
+/// Busy-burn `n` iterations of pure work (no allocation) to throttle re-polling. Returns null.
 fn spin-backoff(n) {
     let mut i = 0
     let mut acc = 0
@@ -148,11 +250,13 @@ fn spin-backoff(n) {
 
 // Current number of buffered (unreceived) elements. Snapshot — may be stale
 // the instant it returns under concurrency. Useful for tests / draining.
+/// Number of buffered (unreceived) elements. A snapshot; may be stale under concurrency.
 fn channel-count(ch) {
-    length(deref(ch.queue))
+    _queue-count(deref(ch.queue))
 }
 
 // True iff the channel had no buffered elements at the moment we looked.
+/// True iff the channel had no buffered elements at the moment we looked.
 fn channel-empty?(ch) {
     channel-count(ch) == 0
 }
@@ -167,19 +271,23 @@ fn channel-empty?(ch) {
 // even if the thunk throws (try/catch), so a panicking critical section can't
 // permanently wedge the lock.
 
+/// CAS-acquired lock: wraps an atom holding a bool (false = unlocked, true = locked).
 struct Mutex {
     locked   // atom of bool
 }
 
+/// Create a new unlocked mutex.
 fn make-mutex() {
     Mutex { locked: atom(false) }
 }
 
 // Spin until we win the CAS that flips false -> true.
+/// Acquire the lock, spinning with growing backoff until the CAS false -> true wins. Returns null.
 fn acquire!(mutex) {
     acquire-spin(mutex, 1)
 }
 
+/// Internal spin loop for acquire!: retries the CAS, backing off (capped at 256) until acquired.
 fn acquire-spin(mutex, backoff) {
     let got = compare-and-swap!(mutex.locked, false, true)
     if got {
@@ -192,6 +300,7 @@ fn acquire-spin(mutex, backoff) {
 }
 
 // Release the lock. Unconditional — only the holder should call this.
+/// Release the lock by resetting it to false. Only the holder should call this. Returns null.
 fn release!(mutex) {
     reset!(mutex.locked, false)
     null
@@ -199,6 +308,7 @@ fn release!(mutex) {
 
 // Run thunk while holding the mutex, releasing on both normal return and
 // exception. Returns the thunk's value.
+/// Run `thunk` while holding `mutex`, releasing on both normal return and exception (re-thrown). Returns thunk's value.
 fn with-lock(mutex, thunk) {
     acquire!(mutex)
     try {
@@ -216,21 +326,25 @@ fn with-lock(mutex, thunk) {
 // Counter: atomic integer
 // ---------------------------------------------------------------------------
 
+/// Atomic integer counter: wraps an atom holding an int.
 struct Counter {
     value   // atom of int
 }
 
+/// Create a new counter starting at 0.
 fn make-counter() {
     Counter { value: atom(0) }
 }
 
 // Atomically add 1 and return the NEW value. Inlined CAS loop (no closure
 // allocation) to minimize GC pressure on a hot counter.
+/// Atomically add 1 and return the new value. Thin wrapper over add!(counter, 1).
 fn incr!(counter) {
     add!(counter, 1)
 }
 
 // Atomically add a delta and return the NEW value.
+/// Atomically add `delta` and return the new value. Inlined CAS retry loop.
 fn add!(counter, delta) {
     let cur = deref(counter.value)
     let next = cur + delta
@@ -243,6 +357,7 @@ fn add!(counter, delta) {
 }
 
 // Read the current value (snapshot).
+/// Read the current counter value (snapshot).
 fn counter-value(counter) {
     deref(counter.value)
 }

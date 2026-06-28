@@ -1,7 +1,7 @@
 namespace beagle.core;
 use beagle.primitive as primitive
 use beagle.builtin as builtin
-use beagle.collections as rust-coll
+use beagle._collections as rust-coll
 
 // ============================================================================
 
@@ -20,14 +20,17 @@ use beagle.collections as rust-coll
 
 // TODO: This is hack because 0 is making the fast path cache activate
 // fix by changing id or filling the cache
+/// Internal sentinel struct (workaround for id 0 activating the fast-path cache).
 struct NEVER {}
 
+/// Runtime descriptor for a struct type: its name and numeric id.
 struct Struct {
     name
     id
 }
 
 extend Struct with Format {
+    /// Format a Struct descriptor as its name.
     fn format(self, depth) {
         self.name
     }
@@ -121,6 +124,7 @@ let TAU = 6.283185307179586
 // Protocol Definitions
 // ============================================================================
 
+/// Runtime descriptor for a protocol, identified by name.
 struct Protocol {
     name
 }
@@ -143,14 +147,53 @@ protocol Push {
     fn push(coll, value)
 }
 
+// Polymorphic "add one element", dispatching on the collection's type:
+//   - PersistentVector => append to the tail
+//   - PersistentSet    => add the element
+//   - PersistentMap    => conjoin a [key, value] pair
+//   - any container extending Conj (Deque, ...) => its natural add
+// `into(to, from)` is defined as `reduce(conj, to, from)`.
+protocol Conj {
+    fn conj(coll, value)
+}
+
+// Total ordering for value types. A type implements `compare-to(self, other)`
+// returning -1/0/1; the public `compare(a, b)` (below) dispatches here for heap
+// value types (BigInt, SemVer, DateTime, user types) and uses </> directly for
+// primitives. `sort`/`min-of`/`max-of` route through `compare`.
+protocol Comparable {
+    fn compare-to(self, other)
+}
+
+// Resources that hold an OS handle (files, sockets, streams, ...) implement
+// `close(self)` to release it. `with-open` (below) uses this to guarantee the
+// resource is closed on every exit path, including a thrown exception.
+protocol Closeable {
+    fn close(self)
+}
+
 protocol Length {
     fn length(coll)
 }
 
 protocol Format {
     fn format(self, depth) {
-        to-string(self)
+        // Default leaf: raw representation. Must NOT call to-string, which now
+        // routes back through format (that would infinite-loop).
+        __raw-repr(self)
     }
+}
+
+/// Convert any value to its display string. Routes through the `Format` protocol,
+/// so a type's `extend T with Format` impl is honored — `to-string(x)`, `${x}`
+/// interpolation, and `println(x)` all produce the SAME output. Equivalent to
+/// `format(x, 0)`.
+///
+/// Examples:
+///   to-string(42)     // => "42"
+///   to-string([1, 2])  // => "[1, 2]"
+fn to-string(x) {
+    format(x, 0)
 }
 
 protocol Associable {
@@ -182,6 +225,7 @@ protocol Contains {
 }
 
 extend String with Format {
+    /// Format a string; quote it when nested (depth > 0).
     fn format(self, depth) {
         if depth > 0 {
             "\"" ++ self ++ "\""
@@ -192,6 +236,7 @@ extend String with Format {
 }
 
 extend String with Contains {
+    /// Test whether substr occurs within s.
     fn contains?(s, substr) {
         string-contains?(s, substr)
     }
@@ -204,6 +249,7 @@ extend String with Contains {
 extend PersistentVector with Indexed {
     // Explicit 3-arg form: the protocol's default 3-arg does not route through
     // primitive-type dispatch, so each primitive Indexed type defines its own.
+    /// Get the element at index, or default (2-arg form returns null when out of range).
     fn get {
         (vec, index) => rust-coll/vec-get(vec, index)
         (vec, index, default) => if index >= 0 && index < rust-coll/vec-count(vec) {
@@ -217,36 +263,42 @@ extend PersistentVector with Indexed {
 // Like Clojure, contains? on a vector tests whether an INDEX is in range,
 // not whether a value is present.
 extend PersistentVector with Contains {
+    /// Test whether index is a valid in-range index of vec.
     fn contains?(vec, index) {
         index >= 0 && index < rust-coll/vec-count(vec)
     }
 }
 
 extend PersistentSet with Contains {
+    /// Test whether element is a member of set.
     fn contains?(set, element) {
         rust-coll/set-contains?(set, element)
     }
 }
 
 extend PersistentVector with Length {
+    /// Return the number of elements in vec.
     fn length(vec) {
         rust-coll/vec-count(vec)
     }
 }
 
 extend PersistentVector with Push {
+    /// Return a new vector with value appended.
     fn push(vec, value) {
         rust-coll/vec-push(vec, value)
     }
 }
 
 extend PersistentVector with Format {
+    /// Format vec as a bracketed, comma-separated list.
     fn format(vec, depth) {
         let len = rust-coll/vec-count(vec)
         format-rust-vec-helper(vec, 0, len, "[")
     }
 }
 
+/// Helper: recursively format a Rust-backed vector's elements into acc.
 fn format-rust-vec-helper(vec, idx, len, acc) {
     if idx >= len {
         acc ++ "]"
@@ -263,6 +315,7 @@ fn format-rust-vec-helper(vec, idx, len, acc) {
 }
 
 extend PersistentVector with Associable {
+    /// Return a new vector with value at index.
     fn assoc(vec, index, value) {
         rust-coll/vec-assoc(vec, index, value)
     }
@@ -273,6 +326,7 @@ extend PersistentVector with Associable {
 // ============================================================================
 
 extend PersistentMap with Indexed {
+    /// Look up key in the map; the 3-arg form returns default for a missing key.
     fn get {
         (map, key) => rust-coll/map-get(map, key)
         // 3-arg form must distinguish a stored null from a missing key, so it
@@ -283,30 +337,35 @@ extend PersistentMap with Indexed {
 }
 
 extend PersistentMap with Contains {
+    /// Test whether key is present in the map (even if its value is null).
     fn contains?(map, key) {
         rust-coll/map-contains?(map, key)
     }
 }
 
 extend PersistentMap with Length {
+    /// Return the number of entries in the map.
     fn length(map) {
         rust-coll/map-count(map)
     }
 }
 
 extend PersistentMap with Associable {
+    /// Return a new map with key mapped to value.
     fn assoc(map, key, value) {
         rust-coll/map-assoc(map, key, value)
     }
 }
 
 extend PersistentMap with Keys {
+    /// Return a vector of the map's keys.
     fn keys(map) {
         rust-coll/map-keys(map)
     }
 }
 
 extend PersistentMap with Format {
+    /// Format the map as brace-enclosed key/value pairs.
     fn format(map, depth) {
         let ks = rust-coll/map-keys(map)
         let len = rust-coll/vec-count(ks)
@@ -318,6 +377,22 @@ extend PersistentMap with Format {
     }
 }
 
+extend PersistentVector with Conj {
+    /// Conjoin onto a vector: append to the tail.
+    fn conj(vec, value) { rust-coll/vec-push(vec, value) }
+}
+
+extend PersistentSet with Conj {
+    /// Conjoin onto a set: add the element (no-op if already present).
+    fn conj(set, value) { rust-coll/set-add(set, value) }
+}
+
+extend PersistentMap with Conj {
+    /// Conjoin a [key, value] pair onto a map.
+    fn conj(map, kv) { rust-coll/map-assoc(map, rust-coll/vec-get(kv, 0), rust-coll/vec-get(kv, 1)) }
+}
+
+/// Helper: recursively format a Rust-backed map's key/value entries into acc.
 fn format-rust-map-entries(map, keys-vec, idx, len, acc) {
     if idx >= len {
         acc ++ "}"
@@ -357,6 +432,7 @@ fn __reset__(thunk) { thunk() }
 // Thread struct - holds the closure to be executed and serves as a GC root
 // for running threads. The Thread object keeps the closure alive while the
 // thread is running.
+/// Holds a thread's closure and acts as a GC root while the thread runs.
 struct Thread {
     closure
 }
@@ -382,6 +458,7 @@ fn __run_thread_closure(thread-obj) {
     f()
 }
 
+/// Thread-safe mutable reference cell holding a single value.
 struct Atom {
     value
 }
@@ -391,8 +468,8 @@ struct Atom {
 /// Atoms provide thread-safe mutable state. Use `deref` to read the value.
 ///
 /// Examples:
-///   (let a (atom 0))
-///   (deref a)  ; => 0
+///   let a = atom(0)
+///   deref(a)  // => 0
 fn deref(atom) {
     // Guard: the primitive untags + reads the value slot, so a non-object
     // (Int/null/...) would dereference a raw value and segfault.
@@ -409,8 +486,8 @@ fn deref(atom) {
 /// Retries if another thread changed the value concurrently.
 ///
 /// Examples:
-///   (let counter (atom 0))
-///   (swap! counter fn(x) { x + 1 })  ; => 1
+///   let counter = atom(0)
+///   swap!(counter, fn(x) { x + 1 })  // => 1
 fn swap!(atom, f) {
     let initial = deref(atom);
     let new = f(initial);
@@ -427,9 +504,9 @@ fn swap!(atom, f) {
 /// Unlike `swap!`, this does not read the current value first.
 ///
 /// Examples:
-///   (let a (atom 0))
-///   (reset! a 42)
-///   (deref a)  ; => 42
+///   let a = atom(0)
+///   reset!(a, 42)
+///   deref(a)  // => 42
 fn reset!(atom, value) {
     if primitive/is-object(atom) {
         primitive/reset!(atom, value)
@@ -444,9 +521,9 @@ fn reset!(atom, value) {
 /// Otherwise return false without changing the value.
 ///
 /// Examples:
-///   (let a (atom 0))
-///   (compare-and-swap! a 0 1)  ; => true, a is now 1
-///   (compare-and-swap! a 0 2)  ; => false, a is still 1
+///   let a = atom(0)
+///   compare-and-swap!(a, 0, 1)  // => true, a is now 1
+///   compare-and-swap!(a, 0, 2)  // => false, a is still 1
 fn compare-and-swap!(atom, old, new) {
     if primitive/is-object(atom) {
         primitive/compare-and-swap!(atom, old, new)
@@ -460,9 +537,9 @@ fn compare-and-swap!(atom, old, new) {
 /// Atoms provide thread-safe mutable state.
 ///
 /// Examples:
-///   (let counter (atom 0))
-///   (swap! counter fn(x) { x + 1 })
-///   (deref counter)  ; => 1
+///   let counter = atom(0)
+///   swap!(counter, fn(x) { x + 1 })
+///   deref(counter)  // => 1
 fn atom(value) {
     // TODO: Allow punning
     Atom { value: value }
@@ -472,6 +549,8 @@ fn atom(value) {
 // my parser is unhappy
 // TODO: Need to make sure type is instance-of Struct
 // but how do I do that in a reasonable way?
+/// Test whether a value is an instance of the given type descriptor.
+/// Handles both primitive types (negative id) and custom structs (by struct-id).
 fn instance-of(value, type) {
     if type.id < 0 {
         // Primitive type - use type-of equality
@@ -482,8 +561,20 @@ fn instance-of(value, type) {
     }
 }
 
+/// True if `value` is an instance of a user-defined struct (e.g. a record, or a
+/// value type like BigInt/SemVer/DateTime). False for every built-in type —
+/// numbers, strings, keywords, booleans, vectors, maps, sets, functions, null.
+///
+/// Built-in types are assigned negative type ids; user structs get non-negative
+/// ones, which is exactly this test. Used by `compare`/`sort` to decide between
+/// the native `<` ordering and the `Comparable` protocol.
+fn struct?(value) {
+    type-of(value).id >= 0
+}
+
 
 extend String with Indexed {
+    /// Get the character at index i, or default when out of range.
     fn get {
         (str, i) => builtin/get-string-index(str, i)
         (str, i, default) => if i >= 0 && i < builtin/get-string-length(str) {
@@ -495,6 +586,7 @@ extend String with Indexed {
 }
 
 extend String with Length {
+    /// Return the number of characters in str.
     fn length(str) {
         builtin/get-string-length(str)
     }
@@ -503,6 +595,7 @@ extend String with Length {
 // Array protocol extensions for variadic function arguments
 // Arrays are raw mutable arrays with type-id = 1
 extend Array with Indexed {
+    /// Get the element at index i, returning null/default when out of range.
     fn get {
         (arr, i) => if i < 0 || i >= primitive/size(arr) {
             null
@@ -518,12 +611,14 @@ extend Array with Indexed {
 }
 
 extend Array with Length {
+    /// Return the number of elements in arr.
     fn length(arr) {
         primitive/size(arr)
     }
 }
 
 extend Array with Seqable {
+    /// Return an ArraySeq over arr, or null if empty.
     fn seq(arr) {
         if primitive/size(arr) == 0 {
             null
@@ -533,16 +628,19 @@ extend Array with Seqable {
     }
 }
 
+/// Seq view over a raw Array, tracking the current index.
 struct ArraySeq {
     arr
     index
 }
 
 extend ArraySeq with Seq {
+    /// Return the element at the seq's current index.
     fn first(seq) {
         primitive/read-field(seq.arr, seq.index)
     }
 
+    /// Advance to the next element, or null at the end.
     fn next(seq) {
         let next-index = seq.index + 1
         if next-index >= primitive/size(seq.arr) {
@@ -559,21 +657,25 @@ extend ArraySeq with Seq {
 // seq-driven function like reduce/map/stats crashes with "Function not
 // implemented for Struct value: ...Seq".
 extend ArraySeq with Seqable {
+    /// A live seq is its own seq (idempotent).
     fn seq(s) { s }
 }
 
 extend ArraySeq with Length {
+    /// Return the number of elements remaining in the seq.
     fn length(s) { primitive/size(s.arr) - s.index }
 }
 
 // PersistentVector protocol extensions (Rust-backed vector from literals)
 extend PersistentVector with Length {
+    /// Return the number of elements in vec.
     fn length(vec) {
         rust-coll/vec-count(vec)
     }
 }
 
 extend PersistentVector with Indexed {
+    /// Get the element at index i, or default when out of range.
     fn get {
         (vec, i) => rust-coll/vec-get(vec, i)
         (vec, i, default) => if i >= 0 && i < rust-coll/vec-count(vec) {
@@ -585,12 +687,14 @@ extend PersistentVector with Indexed {
 }
 
 extend PersistentVector with Push {
+    /// Return a new vector with value appended.
     fn push(vec, value) {
         rust-coll/vec-push(vec, value)
     }
 }
 
 extend PersistentVector with Seqable {
+    /// Return a PersistentVectorSeq over vec, or null if empty.
     fn seq(vec) {
         if rust-coll/vec-count(vec) == 0 {
             null
@@ -602,12 +706,14 @@ extend PersistentVector with Seqable {
 
 // PersistentMap protocol extensions (Rust-backed map from literals)
 extend PersistentMap with Length {
+    /// Return the number of entries in the map.
     fn length(m) {
         rust-coll/map-count(m)
     }
 }
 
 extend PersistentMap with Indexed {
+    /// Look up key; the 3-arg form returns default for a missing key.
     fn get {
         (m, key) => rust-coll/map-get(m, key)
         (m, key, default) => rust-coll/map-get-default(m, key, default)
@@ -615,22 +721,26 @@ extend PersistentMap with Indexed {
 }
 
 extend PersistentMap with Associable {
+    /// Return a new map with key mapped to value.
     fn assoc(m, key, value) {
         rust-coll/map-assoc(m, key, value)
     }
 }
 
 // Sequence type for iterating over PersistentVector
+/// Seq view over a PersistentVector, tracking the current index.
 struct PersistentVectorSeq {
     vec
     index
 }
 
 extend PersistentVectorSeq with Seq {
+    /// Return the element at the seq's current index.
     fn first(seq) {
         rust-coll/vec-get(seq.vec, seq.index)
     }
 
+    /// Advance to the next element, or null at the end.
     fn next(seq) {
         let next-index = seq.index + 1
         if next-index >= rust-coll/vec-count(seq.vec) {
@@ -642,14 +752,17 @@ extend PersistentVectorSeq with Seq {
 }
 
 extend PersistentVectorSeq with Seqable {
+    /// A live seq is its own seq (idempotent).
     fn seq(s) { s }
 }
 
 extend PersistentVectorSeq with Length {
+    /// Return the number of elements remaining in the seq.
     fn length(s) { rust-coll/vec-count(s.vec) - s.index }
 }
 
 // Helper for formatting PersistentVector
+/// Helper: recursively format a PersistentVector's elements into acc.
 fn format-persistent-vector-helper(vec, idx, acc, depth) {
     if idx >= rust-coll/vec-count(vec) {
         acc
@@ -666,6 +779,7 @@ fn format-persistent-vector-helper(vec, idx, acc, depth) {
 }
 
 extend PersistentVector with Format {
+    /// Format vec as a bracketed, comma-separated list.
     fn format(self, depth) {
         "[" ++ format-persistent-vector-helper(self, 0, "", depth) ++ "]"
     }
@@ -680,12 +794,13 @@ extend PersistentVector with Format {
 /// Works with any collection that implements Indexed and Length protocols.
 ///
 /// Examples:
-///   (join [1 2 3] ", ")  ; => "1, 2, 3"
-///   (join ["a" "b"] "-") ; => "a-b"
+///   join([1, 2, 3], ", ")  // => "1, 2, 3"
+///   join(["a", "b"], "-") // => "a-b"
 fn join(coll, sep) {
     join-helper(coll, sep, 0, "")
 }
 
+/// Helper: recursively join a collection's elements into acc, separated by sep.
 fn join-helper(coll, sep, idx, acc) {
     let len = length(coll)
     if idx >= len {
@@ -708,9 +823,9 @@ fn join-helper(coll, sep, idx, acc) {
 /// Supports negative numbers with leading '-'.
 ///
 /// Examples:
-///   (parse-int "42")   ; => 42
-///   (parse-int "-5")   ; => -5
-///   (parse-int "abc")  ; => null
+///   parse-int("42")   // => 42
+///   parse-int("-5")   // => -5
+///   parse-int("abc")  // => null
 fn parse-int(s) {
     let len = length(s)
     if len == 0 {
@@ -737,6 +852,7 @@ fn parse-int(s) {
     }
 }
 
+/// Helper: accumulate digits of s from idx into acc; null on a non-digit or overflow.
 fn parse-int-helper(s, idx, acc) {
     if idx >= length(s) {
         acc
@@ -776,10 +892,12 @@ protocol Writer {
 }
 
 // Default stdout writer struct
+/// Default Writer that sends output to standard out.
 struct Stdout {}
 
 // Stdout implementation - calls builtin printer directly
 extend Stdout with Writer {
+    /// Write s directly to standard out.
     fn write(self, s) {
         _print(s)
         null
@@ -788,11 +906,13 @@ extend Stdout with Writer {
 
 // StringBuffer - mutable accumulator for captured output
 // With cons strings, each write() is O(1) concatenation.
+/// Mutable Writer that accumulates written output into a string.
 struct StringBuffer {
     mut content
 }
 
 // Factory function to create a new StringBuffer
+/// Create a new empty StringBuffer.
 fn new-string-buffer() {
     StringBuffer {
         content: ""
@@ -801,6 +921,7 @@ fn new-string-buffer() {
 
 // StringBuffer implementation - concatenates to content string
 extend StringBuffer with Writer {
+    /// Append s to the buffer's accumulated content.
     fn write(self, s) {
         self.content = self.content ++ s
         null
@@ -818,7 +939,7 @@ let dynamic out = Stdout {}
 /// Returns the last argument.
 ///
 /// Examples:
-///   (print "Hello" "World")  ; prints: Hello World
+///   print("Hello", "World")  // prints: Hello World
 fn print(...args) {
     let len = length(args)
     if len == 0 {
@@ -844,8 +965,8 @@ fn print(...args) {
 /// Returns the last argument.
 ///
 /// Examples:
-///   (println "Hello" "World")  ; prints: Hello World\n
-///   (println 1 2 3)            ; prints: 1 2 3\n
+///   println("Hello", "World")  // prints: Hello World\n
+///   println(1, 2, 3)            // prints: 1 2 3\n
 fn println(...args) {
     let len = length(args)
     if len == 0 {
@@ -870,8 +991,8 @@ fn println(...args) {
 /// Check if a value is a keyword.
 ///
 /// Examples:
-///   (keyword? :foo)  ; => true
-///   (keyword? "foo") ; => false
+///   keyword?(:foo)  // => true
+///   keyword?("foo") // => false
 fn keyword?(value) {
     builtin/is-keyword(value)
 }
@@ -879,7 +1000,7 @@ fn keyword?(value) {
 /// Convert a keyword to a string.
 ///
 /// Examples:
-///   (keyword->string :foo)  ; => "foo"
+///   keyword->string(:foo)  // => "foo"
 fn keyword->string(kw) {
     builtin/keyword-to-string(kw)
 }
@@ -887,7 +1008,7 @@ fn keyword->string(kw) {
 /// Convert a string to a keyword.
 ///
 /// Examples:
-///   (string->keyword "foo")  ; => :foo
+///   string->keyword("foo")  // => :foo
 fn string->keyword(str) {
     builtin/string-to-keyword(str)
 }
@@ -898,6 +1019,7 @@ struct __Box__ {
 }
 
 // System error enum for exception handling
+/// Built-in error variants raised by the runtime; each carries a message and location.
 enum SystemError {
     StructError { message, location }
     ParseError { message, location }
@@ -928,6 +1050,7 @@ enum SystemError {
 }
 
 // Diagnostic severity levels
+/// Severity levels for compiler diagnostics: error, warning, info, hint.
 enum DiagnosticSeverity {
     error,
     warning,
@@ -937,6 +1060,7 @@ enum DiagnosticSeverity {
 
 // Diagnostic information for programmatic inspection
 // Returned by (diagnostics), (diagnostics-for-file path), etc.
+/// A compiler diagnostic (severity, kind, location, message) for programmatic inspection.
 struct Diagnostic {
     severity         // DiagnosticSeverity enum variant
     kind             // String: diagnostic type identifier (e.g., "NonExhaustiveMatch")
@@ -949,6 +1073,7 @@ struct Diagnostic {
 }
 
 // Range type for iteration
+/// Lazy numeric range with current value, exclusive end, and step.
 struct Range {
     current
     end
@@ -960,8 +1085,8 @@ struct Range {
 /// Ranges are iterable and can be used with for loops and seq functions.
 ///
 /// Examples:
-///   (for i in (range 0 5) { println(i) })  ; prints 0, 1, 2, 3, 4
-///   (reduce (range 1 5) 0 fn(a x) { a + x })  ; => 10
+///   for i in range(0, 5) { println(i) }  // prints 0, 1, 2, 3, 4
+///   reduce(fn(a, x) { a + x }, 0, range(1, 5))  // => 10
 fn range(start, end) {
     Range { current: start, end: end, step: 1 }
 }
@@ -969,12 +1094,13 @@ fn range(start, end) {
 /// Create a range with a custom step value.
 ///
 /// Examples:
-///   (range-step 0 10 2)  ; => 0, 2, 4, 6, 8
+///   range-step(0, 10, 2)  // => 0, 2, 4, 6, 8
 fn range-step(start, end, step) {
     Range { current: start, end: end, step: step }
 }
 
 extend Range with Seqable {
+    /// Return the range as a seq, or null if exhausted.
     fn seq(r) {
         if r.current >= r.end {
             null
@@ -985,10 +1111,12 @@ extend Range with Seqable {
 }
 
 extend Range with Seq {
+    /// Return the range's current value.
     fn first(r) {
         r.current
     }
 
+    /// Advance by step, or null once at or past the end.
     fn next(r) {
         let next-val = r.current + r.step
         if next-val >= r.end {
@@ -999,13 +1127,32 @@ extend Range with Seq {
     }
 }
 
+extend Range with Length {
+    /// The number of elements the range will yield (so count/empty? work on it).
+    fn length(r) {
+        if r.step <= 0 {
+            0
+        } else {
+            let span = r.end - r.current
+            if span <= 0 {
+                0
+            } else {
+                // ceil(span / step)
+                (span + r.step - 1) / r.step
+            }
+        }
+    }
+}
+
 // String sequence for iteration
+/// Seq view over a String's characters, tracking the current index.
 struct StringSeq {
     str
     index
 }
 
 extend String with Seqable {
+    /// Return a StringSeq over str's characters, or null if empty.
     fn seq(str) {
         if length(str) == 0 {
             null
@@ -1016,10 +1163,12 @@ extend String with Seqable {
 }
 
 extend StringSeq with Seq {
+    /// Return the character at the seq's current index.
     fn first(seq) {
         get(seq.str, seq.index)
     }
 
+    /// Advance to the next character, or null at the end.
     fn next(seq) {
         let next-index = seq.index + 1
         if next-index >= length(seq.str) {
@@ -1031,10 +1180,12 @@ extend StringSeq with Seq {
 }
 
 extend StringSeq with Seqable {
+    /// A live seq is its own seq (idempotent).
     fn seq(s) { s }
 }
 
 extend StringSeq with Length {
+    /// Return the number of characters remaining in the seq.
     fn length(s) { length(s.str) - s.index }
 }
 
@@ -1048,8 +1199,8 @@ extend StringSeq with Length {
 /// Works with any Seqable type.
 ///
 /// Examples:
-///   (reduce fn(acc x) { acc + x } 0 [1 2 3])  ; => 6
-///   (reduce fn(acc x) { push acc (* x 2) } [] [1 2 3])  ; => [2 4 6]
+///   reduce(fn(acc, x) { acc + x }, 0, [1, 2, 3])  // => 6
+///   reduce(fn(acc, x) { push(acc, x * 2) }, [], [1, 2, 3])  // => [2, 4, 6]
 fn reduce(f, init, coll) {
     let mut s = seq(coll)
     let mut acc = init
@@ -1066,8 +1217,8 @@ fn reduce(f, init, coll) {
 /// Returns a new vector with the transformed elements.
 ///
 /// Examples:
-///   (map fn(x) { x * 2 } [1 2 3])  ; => [2 4 6]
-///   (map uppercase ["a" "b"])      ; => ["A" "B"]
+///   map(fn(x) { x * 2 }, [1, 2, 3])  // => [2, 4, 6]
+///   map(uppercase, ["a", "b"])      // => ["A", "B"]
 fn map(f, coll) {
     let mut s = seq(coll)
     let mut acc = []
@@ -1079,13 +1230,87 @@ fn map(f, coll) {
     acc
 }
 
+/// Map `f`, which receives (index, element), over `coll`.
+///
+/// Examples:
+///   map-indexed(fn(i, x) { [i, x] }, ["a", "b"])  // => [[0, "a"], [1, "b"]]
+fn map-indexed(f, coll) {
+    let mut s = seq(coll)
+    let mut idx = 0
+    let mut acc = []
+    while s != null {
+        acc = push(acc, f(idx, first(s)))
+        s = next(s)
+        idx = idx + 1
+    }
+    acc
+}
+
+/// Remove the elements for which `pred` is true — the complement of `filter`.
+///
+/// Examples:
+///   remove(fn(x) { x > 2 }, [1, 2, 3, 4])  // => [1, 2]
+fn remove(pred, coll) {
+    filter(fn(x) { not(pred(x)) }, coll)
+}
+
+/// Map `f` over `coll`, keeping only the non-null results (map + drop-nulls).
+///
+/// Examples:
+///   keep(fn(x) { if x > 2 { x * 10 } else { null } }, [1, 2, 3, 4])  // => [30, 40]
+fn keep(f, coll) {
+    let mut s = seq(coll)
+    let mut acc = []
+    while s != null {
+        let r = f(first(s))
+        if r != null {
+            acc = push(acc, r)
+        }
+        s = next(s)
+    }
+    acc
+}
+
+/// Like `keep`, but `f` receives (index, element); keeps non-null results.
+fn keep-indexed(f, coll) {
+    let mut s = seq(coll)
+    let mut idx = 0
+    let mut acc = []
+    while s != null {
+        let r = f(idx, first(s))
+        if r != null {
+            acc = push(acc, r)
+        }
+        s = next(s)
+        idx = idx + 1
+    }
+    acc
+}
+
+/// Split `coll` at index `n`: returns [take(n, coll), drop(n, coll)].
+///
+/// Examples:
+///   split-at(2, [1, 2, 3, 4])  // => [[1, 2], [3, 4]]
+fn split-at(n, coll) {
+    [take(n, coll), drop(n, coll)]
+}
+
+/// Split `coll` at the first element failing `pred`:
+/// returns [take-while(pred, coll), drop-while(pred, coll)].
+///
+/// Examples:
+///   split-with(fn(x) { x < 3 }, [1, 2, 3, 4, 1])  // => [[1, 2], [3, 4, 1]]
+fn split-with(pred, coll) {
+    [take-while(pred, coll), drop-while(pred, coll)]
+}
+
 /// Keep elements where the predicate returns true.
 ///
 /// Returns a new vector containing only matching elements.
 ///
 /// Examples:
-///   (filter even? [1 2 3 4])  ; => [2 4]
-///   (filter fn(s) { length(s) > 0 } ["" "a" ""])  ; => ["a"]
+///   filter(even?, [1, 2, 3, 4])  // => [2, 4]
+///   filter(fn(s) { length(s) > 0 }, ["", "a", ""])  // => ["a"]
 fn filter(pred, coll) {
     let mut s = seq(coll)
     let mut acc = []
@@ -1104,8 +1329,8 @@ fn filter(pred, coll) {
 /// Returns true if pred returns true for at least one element.
 ///
 /// Examples:
-///   (any? even? [1 2 3])  ; => true
-///   (any? even? [1 3 5])  ; => false
+///   any?(even?, [1, 2, 3])  // => true
+///   any?(even?, [1, 3, 5])  // => false
 fn any?(pred, coll) {
     let mut s = seq(coll)
     let mut found = false
@@ -1123,8 +1348,8 @@ fn any?(pred, coll) {
 /// Returns true if pred returns true for every element.
 ///
 /// Examples:
-///   (all? even? [2 4 6])  ; => true
-///   (all? even? [1 2 3])  ; => false
+///   all?(even?, [2, 4, 6])  // => true
+///   all?(even?, [1, 2, 3])  // => false
 fn all?(pred, coll) {
     let mut s = seq(coll)
     let mut all-match = true
@@ -1142,8 +1367,8 @@ fn all?(pred, coll) {
 /// Returns true if pred returns false for every element.
 ///
 /// Examples:
-///   (none? even? [1 3 5])  ; => true
-///   (none? even? [1 2 3])  ; => false
+///   none?(even?, [1, 3, 5])  // => true
+///   none?(even?, [1, 2, 3])  // => false
 fn none?(pred, coll) {
     let mut s = seq(coll)
     let mut none-match = true
@@ -1161,8 +1386,8 @@ fn none?(pred, coll) {
 /// Equivalent to (not (all? coll pred)).
 ///
 /// Examples:
-///   (not-every? even? [1 2 3])  ; => true
-///   (not-every? even? [2 4 6])  ; => false
+///   not-every?(even?, [1, 2, 3])  // => true
+///   not-every?(even?, [2, 4, 6])  // => false
 fn not-every?(pred, coll) {
     not(all?(pred, coll))
 }
@@ -1172,8 +1397,8 @@ fn not-every?(pred, coll) {
 /// Returns the element or null if no match.
 ///
 /// Examples:
-///   (find even? [1 2 3 4])  ; => 2
-///   (find even? [1 3 5])    ; => null
+///   find(even?, [1, 2, 3, 4])  // => 2
+///   find(even?, [1, 3, 5])    // => null
 fn find(pred, coll) {
     let mut s = seq(coll)
     let mut result = null
@@ -1194,8 +1419,8 @@ fn find(pred, coll) {
 /// Returns the index or -1 if no match.
 ///
 /// Examples:
-///   (find-index even? [1 2 3 4])  ; => 1
-///   (find-index even? [1 3 5])    ; => -1
+///   find-index(even?, [1, 2, 3, 4])  // => 1
+///   find-index(even?, [1, 3, 5])    // => -1
 fn find-index(pred, coll) {
     let mut s = seq(coll)
     let mut idx = 0
@@ -1217,8 +1442,8 @@ fn find-index(pred, coll) {
 /// Returns a new vector with at most n elements.
 ///
 /// Examples:
-///   (take 3 [1 2 3 4 5])  ; => [1 2 3]
-///   (take 5 [1 2])        ; => [1 2]
+///   take(3, [1, 2, 3, 4, 5])  // => [1, 2, 3]
+///   take(5, [1, 2])        // => [1, 2]
 fn take(n, coll) {
     let mut s = seq(coll)
     let mut remaining = n
@@ -1236,8 +1461,8 @@ fn take(n, coll) {
 /// Returns a new vector with the remaining elements.
 ///
 /// Examples:
-///   (drop 2 [1 2 3 4 5])  ; => [3 4 5]
-///   (drop 5 [1 2])        ; => []
+///   drop(2, [1, 2, 3, 4, 5])  // => [3, 4, 5]
+///   drop(5, [1, 2])        // => []
 fn drop(n, coll) {
     let mut s = seq(coll)
     let mut remaining = n
@@ -1258,7 +1483,7 @@ fn drop(n, coll) {
 /// Stops at the first element where pred returns false.
 ///
 /// Examples:
-///   (take-while fn(x) { x < 4 } [1 2 3 4 1])  ; => [1 2 3]
+///   take-while(fn(x) { x < 4 }, [1, 2, 3, 4, 1])  // => [1, 2, 3]
 fn take-while(pred, coll) {
     let mut s = seq(coll)
     let mut acc = []
@@ -1280,7 +1505,7 @@ fn take-while(pred, coll) {
 /// Returns elements starting from the first where pred returns false.
 ///
 /// Examples:
-///   (drop-while fn(x) { x < 3 } [1 2 3 4 1])  ; => [3 4 1]
+///   drop-while(fn(x) { x < 3 }, [1, 2, 3, 4, 1])  // => [3, 4, 1]
 fn drop-while(pred, coll) {
     let mut s = seq(coll)
     while s != null && pred(first(s)) {
@@ -1297,7 +1522,7 @@ fn drop-while(pred, coll) {
 /// Get a sub-collection from start (inclusive) to end (exclusive).
 ///
 /// Examples:
-///   (slice [0 1 2 3 4] 1 4)  ; => [1 2 3]
+///   slice([0, 1, 2, 3, 4], 1, 4)  // => [1, 2, 3]
 fn slice(coll, start, end) {
     take(end - start, drop(start, coll))
 }
@@ -1305,7 +1530,7 @@ fn slice(coll, start, end) {
 /// Return pairs of [index, element] for each element.
 ///
 /// Examples:
-///   (enumerate ["a" "b" "c"])  ; => [[0 "a"] [1 "b"] [2 "c"]]
+///   enumerate(["a", "b", "c"])  // => [[0, "a"], [1, "b"], [2, "c"]]
 fn enumerate(coll) {
     let mut s = seq(coll)
     let mut idx = 0
@@ -1323,7 +1548,7 @@ fn enumerate(coll) {
 /// Returns the collection unchanged if index is out of bounds.
 ///
 /// Examples:
-///   (remove-at [1 2 3 4] 1)  ; => [1 3 4]
+///   remove-at([1, 2, 3, 4], 1)  // => [1, 3, 4]
 fn remove-at(coll, idx) {
     let len = length(coll)
     if idx < 0 || idx >= len {
@@ -1342,8 +1567,8 @@ fn remove-at(coll, idx) {
 /// Alias for length, more idiomatic for collections.
 ///
 /// Examples:
-///   (count [1 2 3])  ; => 3
-///   (count "hello")  ; => 5
+///   count([1, 2, 3])  // => 3
+///   count("hello")  // => 5
 fn count(coll) {
     length(coll)
 }
@@ -1351,9 +1576,9 @@ fn count(coll) {
 /// Check if a collection has no elements.
 ///
 /// Examples:
-///   (empty? [])    ; => true
-///   (empty? [1])   ; => false
-///   (empty? "")    ; => true
+///   empty?([])    // => true
+///   empty?([1])   // => false
+///   empty?("")    // => true
 fn empty?(coll) {
     length(coll) == 0
 }
@@ -1364,8 +1589,8 @@ fn empty?(coll) {
 /// Named differently to avoid conflict with Seq protocol's first.
 ///
 /// Examples:
-///   (first-of [1 2 3])  ; => 1
-///   (first-of [])       ; => null
+///   first-of([1, 2, 3])  // => 1
+///   first-of([])       // => null
 fn first-of(coll) {
     let s = seq(coll)
     if s == null {
@@ -1380,23 +1605,30 @@ fn first-of(coll) {
 /// Returns null if the collection is empty.
 ///
 /// Examples:
-///   (last [1 2 3])  ; => 3
-///   (last [])       ; => null
+///   last([1, 2, 3])  // => 3
+///   last([])       // => null
 fn last(coll) {
-    let mut s = seq(coll)
-    let mut prev = null
-    while s != null {
-        prev = first(s)
-        s = next(s)
+    // O(1) for vectors (index the tail) instead of an O(n) seq walk that also
+    // allocates a seq node per element.
+    if instance-of(coll, PersistentVector) {
+        let n = length(coll)
+        if n == 0 { null } else { get(coll, n - 1) }
+    } else {
+        let mut s = seq(coll)
+        let mut prev = null
+        while s != null {
+            prev = first(s)
+            s = next(s)
+        }
+        prev
     }
-    prev
 }
 
 /// Get all elements except the first.
 ///
 /// Examples:
-///   (rest [1 2 3])  ; => [2 3]
-///   (rest [1])      ; => []
+///   rest([1, 2, 3])  // => [2, 3]
+///   rest([1])      // => []
 fn rest(coll) {
     drop(1, coll)
 }
@@ -1404,14 +1636,19 @@ fn rest(coll) {
 /// Get all elements except the last one.
 ///
 /// Examples:
-///   (butlast [1 2 3])  ; => [1 2]
-///   (butlast [1])      ; => []
+///   butlast([1, 2, 3])  // => [1, 2]
+///   butlast([1])      // => []
 fn butlast(coll) {
-    let len = length(coll)
-    if len <= 1 {
-        []
+    if instance-of(coll, PersistentVector) {
+        // O(log32 n) native pop (empty for 0/1 elements), not an O(n) rebuild.
+        rust-coll/vec-pop(coll)
     } else {
-        take(len - 1, coll)
+        let len = length(coll)
+        if len <= 1 {
+            []
+        } else {
+            take(len - 1, coll)
+        }
     }
 }
 
@@ -1420,8 +1657,8 @@ fn butlast(coll) {
 /// Returns null if index is out of bounds.
 ///
 /// Examples:
-///   (nth [1 2 3] 1)   ; => 2
-///   (nth [1 2 3] 10)  ; => null
+///   nth([1, 2, 3], 1)   // => 2
+///   nth([1, 2, 3], 10)  // => null
 fn nth(coll, n) {
     get(coll, n)
 }
@@ -1429,7 +1666,7 @@ fn nth(coll, n) {
 /// Get the second element of a collection.
 ///
 /// Examples:
-///   (second [1 2 3])  ; => 2
+///   second([1, 2, 3])  // => 2
 fn second(coll) {
     nth(coll, 1)
 }
@@ -1437,7 +1674,7 @@ fn second(coll) {
 /// Get the third element of a collection.
 ///
 /// Examples:
-///   (third [1 2 3])  ; => 3
+///   third([1, 2, 3])  // => 3
 fn third(coll) {
     nth(coll, 2)
 }
@@ -1446,13 +1683,40 @@ fn third(coll) {
 // Min/Max Functions
 // ============================================================================
 
-/// Return the minimum element in a collection.
+/// Three-way comparison: returns -1 if a < b, 0 if equal, 1 if a > b.
 ///
-/// Elements must be comparable with <.
+/// Works directly on primitives (numbers, strings, booleans) and on any heap
+/// value type implementing the `Comparable` protocol (BigInt, SemVer, DateTime,
+/// user types via `extend T with Comparable`). Mixed-type comparisons are
+/// undefined. Backs `sort`/`sort-by`/`min-of`/`max-of`.
 ///
 /// Examples:
-///   (min-of [3 1 4 1 5])  ; => 1
-///   (min-of [])           ; => null
+///   compare(3, 5)      // => -1
+///   compare("b", "a")  // => 1
+fn compare(a, b) {
+    // Value-type structs (BigInt/SemVer/DateTime/...) can't be ordered with `<`,
+    // so they dispatch to their `Comparable` impl. Everything built-in — numbers,
+    // strings (any representation), keywords, booleans — orders with `<` directly.
+    if struct?(a) {
+        compare-to(a, b)
+    } else {
+        if a < b {
+            -1
+        } else {
+            if a > b {
+                1
+            } else {
+                0
+            }
+        }
+    }
+}
+
+/// Return the minimum element in a collection (by `compare`, so value types work).
+///
+/// Examples:
+///   min-of([3, 1, 4, 1, 5])  // => 1
+///   min-of([])           // => null
 fn min-of(coll) {
     let mut s = seq(coll)
     if s == null {
@@ -1462,7 +1726,7 @@ fn min-of(coll) {
         s = next(s)
         while s != null {
             let elem = first(s)
-            if elem < min-val {
+            if compare(elem, min-val) < 0 {
                 min-val = elem
             }
             s = next(s)
@@ -1476,8 +1740,8 @@ fn min-of(coll) {
 /// Elements must be comparable with >.
 ///
 /// Examples:
-///   (max-of [3 1 4 1 5])  ; => 5
-///   (max-of [])           ; => null
+///   max-of([3, 1, 4, 1, 5])  // => 5
+///   max-of([])           // => null
 fn max-of(coll) {
     let mut s = seq(coll)
     if s == null {
@@ -1487,7 +1751,7 @@ fn max-of(coll) {
         s = next(s)
         while s != null {
             let elem = first(s)
-            if elem > max-val {
+            if compare(elem, max-val) > 0 {
                 max-val = elem
             }
             s = next(s)
@@ -1501,7 +1765,7 @@ fn max-of(coll) {
 /// Compares elements by applying f to each and using < on the results.
 ///
 /// Examples:
-///   (min-by length ["abc" "a" "ab"])  ; => "a"
+///   min-by(length, ["abc", "a", "ab"])  // => "a"
 fn min-by(f, coll) {
     let mut s = seq(coll)
     if s == null {
@@ -1513,7 +1777,7 @@ fn min-by(f, coll) {
         while s != null {
             let elem = first(s)
             let val = f(elem)
-            if val < min-val {
+            if compare(val, min-val) < 0 {
                 min-elem = elem
                 min-val = val
             }
@@ -1528,7 +1792,7 @@ fn min-by(f, coll) {
 /// Compares elements by applying f to each and using > on the results.
 ///
 /// Examples:
-///   (max-by length ["a" "abc" "ab"])  ; => "abc"
+///   max-by(length, ["a", "abc", "ab"])  // => "abc"
 fn max-by(f, coll) {
     let mut s = seq(coll)
     if s == null {
@@ -1540,7 +1804,7 @@ fn max-by(f, coll) {
         while s != null {
             let elem = first(s)
             let val = f(elem)
-            if val > max-val {
+            if compare(val, max-val) > 0 {
                 max-elem = elem
                 max-val = val
             }
@@ -1555,7 +1819,7 @@ fn max-by(f, coll) {
 /// Like reduce, but processes elements in reverse order.
 ///
 /// Examples:
-///   (reduce-right fn(acc x) { push(acc, x) } [] [1 2 3])  ; => [3 2 1]
+///   reduce-right(fn(acc, x) { push(acc, x) }, [], [1, 2, 3])  // => [3, 2, 1]
 fn reduce-right(f, init, coll) {
     // Convert to vector and iterate backwards
     let v = if instance-of(coll, PersistentVector) {
@@ -1582,7 +1846,7 @@ fn reduce-right(f, init, coll) {
 /// Returns a new vector with elements from both collections.
 ///
 /// Examples:
-///   (concat [1 2] [3 4])  ; => [1 2 3 4]
+///   concat([1, 2], [3, 4])  // => [1, 2, 3, 4]
 fn concat(coll1, coll2) {
     let mut acc = []
     let mut s = seq(coll1)
@@ -1601,7 +1865,7 @@ fn concat(coll1, coll2) {
 /// Flatten one level of nesting in a collection.
 ///
 /// Examples:
-///   (flatten [[1 2] [3 4]])  ; => [1 2 3 4]
+///   flatten([[1, 2], [3, 4]])  // => [1, 2, 3, 4]
 fn flatten(coll) {
     let mut s = seq(coll)
     let mut acc = []
@@ -1616,7 +1880,7 @@ fn flatten(coll) {
 /// Map a function over a collection then flatten the result.
 ///
 /// Examples:
-///   (flat-map fn(x) { [x, x] } [1 2 3])  ; => [1 1 2 2 3 3]
+///   flat-map(fn(x) { [x, x] }, [1, 2, 3])  // => [1, 1, 2, 2, 3, 3]
 fn flat-map(f, coll) {
     flatten(map(f, coll))
 }
@@ -1624,7 +1888,7 @@ fn flat-map(f, coll) {
 /// Pair up elements from two collections into a vector of pairs.
 ///
 /// Examples:
-///   (zip [1 2 3] ["a" "b" "c"])  ; => [[1 "a"] [2 "b"] [3 "c"]]
+///   zip([1, 2, 3], ["a", "b", "c"])  // => [[1, "a"], [2, "b"], [3, "c"]]
 fn zip(coll1, coll2) {
     let mut s1 = seq(coll1)
     let mut s2 = seq(coll2)
@@ -1642,7 +1906,7 @@ fn zip(coll1, coll2) {
 /// Like zip, but applies f to each pair instead of creating tuples.
 ///
 /// Examples:
-///   (zip-with fn(a b) { a + b } [1 2 3] [10 20 30])  ; => [11 22 33]
+///   zip-with(fn(a, b) { a + b }, [1, 2, 3], [10, 20, 30])  // => [11, 22, 33]
 fn zip-with(f, coll1, coll2) {
     let mut s1 = seq(coll1)
     let mut s2 = seq(coll2)
@@ -1660,7 +1924,7 @@ fn zip-with(f, coll1, coll2) {
 /// Pairs up keys[i] with vals[i] to form map entries.
 ///
 /// Examples:
-///   (zipmap [:a :b :c] [1 2 3])  ; => {:a 1, :b 2, :c 3}
+///   zipmap([:a, :b, :c], [1, 2, 3])  // => {:a 1, :b 2, :c 3}
 fn zipmap(keys-coll, vals-coll) {
     let mut ks = seq(keys-coll)
     let mut vs = seq(vals-coll)
@@ -1678,7 +1942,7 @@ fn zipmap(keys-coll, vals-coll) {
 /// Returns a vector alternating between elements of coll1 and coll2.
 ///
 /// Examples:
-///   (interleave [1 2 3] [:a :b :c])  ; => [1 :a 2 :b 3 :c]
+///   interleave([1, 2, 3], [:a, :b, :c])  // => [1, :a, 2, :b, 3, :c]
 fn interleave(coll1, coll2) {
     let mut s1 = seq(coll1)
     let mut s2 = seq(coll2)
@@ -1695,7 +1959,7 @@ fn interleave(coll1, coll2) {
 /// Insert a separator between each element of a collection.
 ///
 /// Examples:
-///   (interpose 0 [1 2 3])  ; => [1 0 2 0 3]
+///   interpose(0, [1, 2, 3])  // => [1, 0, 2, 0, 3]
 fn interpose(sep, coll) {
     let mut s = seq(coll)
     let mut acc = []
@@ -1723,23 +1987,14 @@ fn interpose(sep, coll) {
 /// For sets: adds elements.
 ///
 /// Examples:
-///   (into [1 2] [3 4])          ; => [1 2 3 4]
-///   (into {} [[:a 1] [:b 2]])   ; => {:a 1, :b 2}
-///   (into #{1 2} [2 3 4])       ; => #{1 2 3 4}
+///   into([1, 2], [3, 4])          // => [1, 2, 3, 4]
+///   into({}, [[:a, 1], [:b, 2]])   // => {:a 1, :b 2}
+///   into(#{1, 2}, [2, 3, 4])       // => #{1, 2, 3, 4}
 fn into(target, source) {
-    if set?(target) {
-        reduce(fn(acc, elem) { set-add(acc, elem) }, target, source)
-    } else {
-        if instance-of(target, PersistentMap) {
-            // Source elements should be [key, value] pairs
-            reduce(fn(acc, pair) {
-                assoc(acc, get(pair, 0), get(pair, 1))
-            }, target, source)
-        } else {
-            // Assume vector-like target
-            reduce(fn(acc, elem) { push(acc, elem) }, target, source)
-        }
-    }
+    // Polymorphic via the Conj protocol: vectors append, sets add, maps take
+    // [k v] pairs, and any container extending Conj works as an accumulation
+    // target. This is exactly Clojure's `(into to from)` == `(reduce conj to from)`.
+    reduce(fn(acc, x) { conj(acc, x) }, target, source)
 }
 
 /// Reverse the order of elements in a collection.
@@ -1747,20 +2002,24 @@ fn into(target, source) {
 /// Returns a new vector with elements in reverse order.
 ///
 /// Examples:
-///   (reverse [1 2 3])  ; => [3 2 1]
+///   reverse([1, 2, 3])  // => [3, 2, 1]
 fn reverse(coll) {
-    reduce(fn(acc, x) {
-        // Build reversed by prepending - but since we only have push,
-        // we reduce to a list and then build a new vector
-        // Actually, simpler: just collect in reverse order
-        concat([x], acc)
-    }, [], coll)
+    // O(n) backward index walk over a materialized vector (the old version was
+    // O(n^2): it prepended via concat([x], acc) on every element).
+    let v = vec(coll)
+    let mut acc = []
+    let mut i = length(v) - 1
+    while i >= 0 {
+        acc = push(acc, get(v, i))
+        i = i - 1
+    }
+    acc
 }
 
 /// Create a vector with a value repeated n times.
 ///
 /// Examples:
-///   (repeat "x" 3)  ; => ["x" "x" "x"]
+///   repeat("x", 3)  // => ["x", "x", "x"]
 fn repeat(value, n) {
     let mut remaining = n
     let mut acc = []
@@ -1774,7 +2033,7 @@ fn repeat(value, n) {
 /// Call a function n times and collect the results.
 ///
 /// Examples:
-///   (repeatedly fn() { random() } 3)  ; => [0.1 0.7 0.4] (random values)
+///   repeatedly(fn() { random() }, 3)  // => [0.1, 0.7, 0.4] (random values)
 fn repeatedly(f, n) {
     let mut remaining = n
     let mut acc = []
@@ -1790,7 +2049,7 @@ fn repeatedly(f, n) {
 /// Starts with init, then f(init), f(f(init)), etc. for n values.
 ///
 /// Examples:
-///   (iterate fn(x) { x * 2 } 1 5)  ; => [1 2 4 8 16]
+///   iterate(fn(x) { x * 2 }, 1, 5)  // => [1, 2, 4, 8, 16]
 fn iterate(f, init, n) {
     let mut remaining = n
     let mut current = init
@@ -1806,7 +2065,7 @@ fn iterate(f, init, n) {
 /// Split a collection into groups of n elements.
 ///
 /// Examples:
-///   (partition 2 [1 2 3 4 5 6])  ; => [[1 2] [3 4] [5 6]]
+///   partition(2, [1, 2, 3, 4, 5, 6])  // => [[1, 2], [3, 4], [5, 6]]
 fn partition(n, coll) {
     let mut remaining = coll
     let mut acc = []
@@ -1823,7 +2082,7 @@ fn partition(n, coll) {
 /// Groups consecutive elements with the same key value.
 ///
 /// Examples:
-///   (partition-by identity [1 1 2 2 1])  ; => [[1 1] [2 2] [1]]
+///   partition-by(identity, [1, 1, 2, 2, 1])  // => [[1, 1], [2, 2], [1]]
 fn partition-by(f, coll) {
     let mut s = seq(coll)
     if s == null {
@@ -1854,7 +2113,7 @@ fn partition-by(f, coll) {
 /// Returns a map from keys to vectors of elements with that key.
 ///
 /// Examples:
-///   (group-by even? [1 2 3 4 5])  ; => {true: [2 4], false: [1 3 5]}
+///   group-by(even?, [1, 2, 3, 4, 5])  // => {true: [2, 4], false: [1, 3, 5]}
 fn group-by(f, coll) {
     let mut s = seq(coll)
     let mut groups = {}
@@ -1878,7 +2137,7 @@ fn group-by(f, coll) {
 /// Returns a map from values to their counts.
 ///
 /// Examples:
-///   (frequencies [1 2 1 3 1 2])  ; => {1: 3, 2: 2, 3: 1}
+///   frequencies([1, 2, 1, 3, 1, 2])  // => {1: 3, 2: 2, 3: 1}
 fn frequencies(coll) {
     let mut s = seq(coll)
     let mut counts = {}
@@ -1901,7 +2160,7 @@ fn frequencies(coll) {
 /// Keeps the first occurrence of each value.
 ///
 /// Examples:
-///   (distinct [1 2 1 3 2 1])  ; => [1 2 3]
+///   distinct([1, 2, 1, 3, 2, 1])  // => [1, 2, 3]
 fn distinct(coll) {
     let mut s = seq(coll)
     let mut seen = {}
@@ -1923,7 +2182,7 @@ fn distinct(coll) {
 /// Keeps the first occurrence of each run of duplicates.
 ///
 /// Examples:
-///   (dedupe [1 1 2 2 2 1 1])  ; => [1 2 1]
+///   dedupe([1, 1, 2, 2, 2, 1, 1])  // => [1, 2, 1]
 fn dedupe(coll) {
     let mut s = seq(coll)
     if s == null {
@@ -1956,6 +2215,7 @@ fn dedupe(coll) {
 
 // Allocate a raw mutable array (type_id = 1) filled with null. primitive/write-field
 // emits a write barrier, so this array can safely hold heap pointers across GCs.
+/// Allocate a raw mutable array of the given size, filled with null (write-barrier safe).
 fn tim-allocate-array(size) {
     let a = builtin/allocate(size)
     builtin/fill-object-fields(a, null)
@@ -1964,6 +2224,7 @@ fn tim-allocate-array(size) {
 }
 
 // Reverse arr[lo..=hi] in place.
+/// Reverse arr[lo..=hi] in place.
 fn tim-reverse(arr, lo, hi) {
     let mut l = lo
     let mut h = hi
@@ -1980,6 +2241,7 @@ fn tim-reverse(arr, lo, hi) {
 // Scan a natural run starting at `start`. Strictly-descending runs are
 // reversed in place — using strict less (not less-or-equal) when detecting
 // descending keeps equal-keyed elements from being flipped, preserving stability.
+/// Scan a natural run at start (reversing it if strictly descending); return its length.
 fn tim-count-run-and-make-ascending(arr, start, n, less) {
     if start + 1 >= n {
         1
@@ -2004,6 +2266,7 @@ fn tim-count-run-and-make-ascending(arr, start, n, less) {
 // Binary-insertion sort arr[lo..hi], with arr[lo..start] already sorted.
 // Strict-less in the binary search puts the pivot after any equal elements,
 // preserving stability.
+/// Binary-insertion-sort arr[lo..hi], with arr[lo..start] already sorted (stable).
 fn tim-binary-insertion-sort(arr, lo, hi, start, less) {
     let mut s = if start <= lo { lo + 1 } else { start }
     while s < hi {
@@ -2032,6 +2295,7 @@ fn tim-binary-insertion-sort(arr, lo, hi, start, less) {
 // Timsort minrun: pick a value in [32, 64) so that n / minrun is just below
 // a power of two (keeps the merge tree balanced). Implemented without bitwise
 // ops because Beagle has none — (m - (m/2)*2) is m mod 2.
+/// Compute Timsort's minrun in [32,64) so n/minrun is just below a power of two.
 fn tim-calc-min-run(n) {
     let mut r = 0
     let mut m = n
@@ -2047,6 +2311,7 @@ fn tim-calc-min-run(n) {
 // Merge adjacent runs arr[base1..base1+len1] and arr[base2..base2+len2],
 // where base2 == base1 + len1. Copy the smaller side into temp to bound
 // scratch usage.
+/// Merge two adjacent runs, copying the smaller side into temp.
 fn tim-merge(arr, temp, base1, len1, base2, len2, less) {
     if len1 <= len2 {
         tim-merge-lo(arr, temp, base1, len1, base2, len2, less)
@@ -2057,6 +2322,7 @@ fn tim-merge(arr, temp, base1, len1, base2, len2, less) {
 
 // Left run copied to temp, merge forward. On ties prefer temp (left) so
 // equal-keyed elements keep their original relative order.
+/// Merge two runs with the left run buffered in temp, scanning forward (stable on ties).
 fn tim-merge-lo(arr, temp, base1, len1, base2, len2, less) {
     let mut i = 0
     while i < len1 {
@@ -2090,6 +2356,7 @@ fn tim-merge-lo(arr, temp, base1, len1, base2, len2, less) {
 
 // Right run copied to temp, merge backward. On ties prefer temp (right) —
 // writing it at the higher dest keeps it after any equal left-run elements.
+/// Merge two runs with the right run buffered in temp, scanning backward (stable on ties).
 fn tim-merge-hi(arr, temp, base1, len1, base2, len2, less) {
     let mut i = 0
     while i < len2 {
@@ -2121,6 +2388,7 @@ fn tim-merge-hi(arr, temp, base1, len1, base2, len2, less) {
 
 // Merge runs at stack[i] and stack[i+1], compacting the stack down by one.
 // Returns the new stack size.
+/// Merge the pending runs at stack[i] and stack[i+1]; return the new stack size.
 fn tim-merge-at(arr, temp, stack-base, stack-len, stack-size, i, less) {
     let base1 = primitive/read-field(stack-base, i)
     let len1 = primitive/read-field(stack-len, i)
@@ -2140,6 +2408,7 @@ fn tim-merge-at(arr, temp, stack-base, stack-len, stack-size, i, less) {
 // A, B, C (C on top):
 //   A > B + C   AND   B > C
 // If violated, merge B with whichever neighbor is smaller until balanced.
+/// Merge pending runs until Timsort's stack invariants hold; return the new stack size.
 fn tim-merge-collapse(arr, temp, stack-base, stack-len, stack-size, less) {
     let mut size = stack-size
     let mut done = false
@@ -2163,6 +2432,7 @@ fn tim-merge-collapse(arr, temp, stack-base, stack-len, stack-size, less) {
 }
 
 // Final sweep at end of sort: merge every remaining pending run.
+/// Merge all remaining pending runs at the end of the sort.
 fn tim-merge-force-collapse(arr, temp, stack-base, stack-len, stack-size, less) {
     let mut size = stack-size
     while size > 1 {
@@ -2176,6 +2446,7 @@ fn tim-merge-force-collapse(arr, temp, stack-base, stack-len, stack-size, less) 
 }
 
 // Sort a raw array in place using Timsort (no galloping).
+/// Sort a raw array of n elements in place using Timsort and the given less comparator.
 fn tim-sort-array(arr, n, less) {
     if n < 2 {
         null
@@ -2239,7 +2510,20 @@ fn sort-with(less, coll) {
 /// Examples:
 ///   sort([3, 1, 4, 1, 5])  // => [1, 1, 3, 4, 5]
 fn sort(coll) {
-    sort-with(fn(a, b) { a < b }, coll)
+    // Primitives sort via the direct `<` (unchanged fast path); collections of
+    // heap value types (BigInt/SemVer/DateTime/...) sort via `compare`, which
+    // dispatches to their Comparable impl. The element kind is checked ONCE on
+    // the first element rather than per comparison.
+    let v = vec(coll)
+    if length(v) < 2 {
+        v
+    } else {
+        if struct?(get(v, 0)) {
+            sort-with(fn(a, b) { compare(a, b) < 0 }, v)
+        } else {
+            sort-with(fn(a, b) { a < b }, v)
+        }
+    }
 }
 
 /// Sort a collection by a key function.
@@ -2251,20 +2535,52 @@ fn sort(coll) {
 ///   sort-by(fn(x) { x.age }, [{ name: "bob", age: 30 }, { name: "alice", age: 25 }])
 ///   // => [{ name: "alice", age: 25 }, { name: "bob", age: 30 }]
 fn sort-by(f, coll) {
-    sort-with(fn(a, b) { f(a) < f(b) }, coll)
+    // Same primitive-vs-value-type split as `sort`, checked once on f(first).
+    let v = vec(coll)
+    if length(v) < 2 {
+        v
+    } else {
+        if struct?(f(get(v, 0))) {
+            sort-with(fn(a, b) { compare(f(a), f(b)) < 0 }, v)
+        } else {
+            sort-with(fn(a, b) { f(a) < f(b) }, v)
+        }
+    }
 }
 
 // ============================================================================
 // Function Utilities
 // ============================================================================
 
+/// Run `body(resource)` and guarantee `close(resource)` runs afterwards on EVERY
+/// exit path — normal return OR a thrown exception — then return body's value (or
+/// re-raise). `resource` must implement the `Closeable` protocol (e.g. an io/File).
+/// This is Beagle's RAII / try-with-resources: no more leaked handles on a throw.
+///
+/// Examples:
+///   with-open(unwrap(io/open("/tmp/x", "r")), fn(f) {
+///       io/read-line(f)
+///   })
+fn with-open(resource, body) {
+    let result = try {
+        body(resource)
+    } catch (e) {
+        // Close on the error path, then re-raise the original error.
+        close(resource)
+        throw(e)
+    }
+    // Normal path: close after a successful body.
+    close(resource)
+    result
+}
+
 /// Return the input unchanged.
 ///
 /// Useful as a default function argument.
 ///
 /// Examples:
-///   (identity 42)  ; => 42
-///   (map identity [1 2 3])  ; => [1 2 3]
+///   identity(42)  // => 42
+///   map(identity, [1, 2, 3])  // => [1, 2, 3]
 fn identity(x) {
     x
 }
@@ -2274,8 +2590,8 @@ fn identity(x) {
 /// Ignores any arguments passed to the returned function.
 ///
 /// Examples:
-///   (let always-42 (constantly 42))
-///   (always-42 "ignored")  ; => 42
+///   let always-42 = constantly(42)
+///   always-42("ignored")  // => 42
 fn constantly(value) {
     fn(ignored) { value }
 }
@@ -2283,8 +2599,8 @@ fn constantly(value) {
 /// Return a function that negates a predicate.
 ///
 /// Examples:
-///   (let not-even? (complement even?))
-///   (not-even? 3)  ; => true
+///   let not-even? = complement(even?)
+///   not-even?(3)  // => true
 fn complement(pred) {
     fn(x) { not(pred(x)) }
 }
@@ -2294,8 +2610,8 @@ fn complement(pred) {
 /// The second function is applied first, then the first.
 ///
 /// Examples:
-///   (let add1-then-double (compose fn(x) { x * 2 } fn(x) { x + 1 }))
-///   (add1-then-double 3)  ; => 8  (3+1=4, 4*2=8)
+///   let add1-then-double = compose(fn(x) { x * 2 }, fn(x) { x + 1 })
+///   add1-then-double(3)  // => 8  (3+1=4, 4*2=8)
 fn compose(f, g) {
     fn(x) { f(g(x)) }
 }
@@ -2303,8 +2619,8 @@ fn compose(f, g) {
 /// Partially apply a function by fixing its first argument.
 ///
 /// Examples:
-///   (let add10 (partial fn(a b) { a + b } 10))
-///   (add10 5)  ; => 15
+///   let add10 = partial(fn(a, b) { a + b }, 10)
+///   add10(5)  // => 15
 fn partial(f, a) {
     fn(b) { f(a, b) }
 }
@@ -2318,9 +2634,9 @@ fn partial(f, a) {
 /// Returns true if x is falsy, false if x is truthy.
 ///
 /// Examples:
-///   (not true)   ; => false
-///   (not false)  ; => true
-///   (not null)   ; => true
+///   not(true)   // => false
+///   not(false)  // => true
+///   not(null)   // => true
 fn not(x) {
     if x {
         false
@@ -2332,9 +2648,9 @@ fn not(x) {
 /// Check if a value is truthy (not null and not false).
 ///
 /// Examples:
-///   (truthy? 1)      ; => true
-///   (truthy? null)   ; => false
-///   (truthy? false)  ; => false
+///   truthy?(1)      // => true
+///   truthy?(null)   // => false
+///   truthy?(false)  // => false
 fn truthy?(x) {
     x != null && x != false
 }
@@ -2342,9 +2658,9 @@ fn truthy?(x) {
 /// Check if a value is falsy (null or false).
 ///
 /// Examples:
-///   (falsy? null)   ; => true
-///   (falsy? false)  ; => true
-///   (falsy? 0)      ; => false
+///   falsy?(null)   // => true
+///   falsy?(false)  // => true
+///   falsy?(0)      // => false
 fn falsy?(x) {
     x == null || x == false
 }
@@ -2356,8 +2672,8 @@ fn falsy?(x) {
 /// Check if a value is null.
 ///
 /// Examples:
-///   (nil? null)  ; => true
-///   (nil? 0)     ; => false
+///   nil?(null)  // => true
+///   nil?(0)     // => false
 fn nil?(x) {
     x == null
 }
@@ -2365,8 +2681,8 @@ fn nil?(x) {
 /// Check if a value is not null.
 ///
 /// Examples:
-///   (some? 0)     ; => true
-///   (some? null)  ; => false
+///   some?(0)     // => true
+///   some?(null)  // => false
 fn some?(x) {
     x != null
 }
@@ -2378,7 +2694,7 @@ fn some?(x) {
 /// Get all values from a map as a vector.
 ///
 /// Examples:
-///   (vals {:a 1 :b 2})  ; => [1 2]
+///   vals({:a 1, :b 2})  // => [1, 2]
 fn vals(m) {
     let ks = keys(m)
     map(fn(k) { get(m, k) }, ks)
@@ -2392,9 +2708,9 @@ fn vals(m) {
 /// is null (returns `[key null]`).
 ///
 /// Examples:
-///   (find-entry {:a 1} :a)     ; => [:a 1]
-///   (find-entry {:a 1} :b)     ; => null
-///   (find-entry {:a null} :a)  ; => [:a null]
+///   find-entry({:a 1}, :a)     // => [:a, 1]
+///   find-entry({:a 1}, :b)     // => null
+///   find-entry({:a null}, :a)  // => [:a, null]
 fn find-entry(m, key) {
     rust-coll/map-find(m, key)
 }
@@ -2404,11 +2720,10 @@ fn find-entry(m, key) {
 /// Returns a new map without the specified key.
 ///
 /// Examples:
-///   (dissoc {:a 1 :b 2} :a)  ; => {:b 2}
+///   dissoc({:a 1, :b 2}, :a)  // => {:b 2}
 fn dissoc(m, key) {
-    let ks = keys(m)
-    let filtered-keys = filter(fn(k) { k != key }, ks)
-    reduce(fn(acc, k) { assoc(acc, k, get(m, k)) }, {}, filtered-keys)
+    // O(log n) native HAMT remove (was an O(n log n) filter-keys + re-assoc rebuild).
+    rust-coll/map-dissoc(m, key)
 }
 
 /// Merge two maps together.
@@ -2416,7 +2731,7 @@ fn dissoc(m, key) {
 /// m2's values take precedence for duplicate keys.
 ///
 /// Examples:
-///   (merge {:a 1 :b 2} {:b 3 :c 4})  ; => {:a 1 :b 3 :c 4}
+///   merge({:a 1, :b 2}, {:b 3, :c 4})  // => {:a 1, :b 3, :c 4}
 fn merge(m1, m2) {
     let ks = keys(m2)
     reduce(fn(acc, k) { assoc(acc, k, get(m2, k)) }, m1, ks)
@@ -2427,11 +2742,12 @@ fn merge(m1, m2) {
 /// When a key exists in both maps, calls f(v1, v2) to get the merged value.
 ///
 /// Examples:
-///   (merge-with fn(a b) { a + b } {:a 1} {:a 2 :b 3})  ; => {:a 3, :b 3}
+///   merge-with(fn(a, b) { a + b }, {:a 1}, {:a 2, :b 3})  // => {:a 3, :b 3}
 fn merge-with(f, m1, m2) {
     merge-with-helper(f, m1, m2, keys(m2), 0, m1)
 }
 
+/// Helper: fold m2's keys into acc, resolving conflicts with f.
 fn merge-with-helper(f, m1, m2, ks, idx, acc) {
     if idx >= length(ks) {
         acc
@@ -2455,11 +2771,12 @@ fn merge-with-helper(f, m1, m2, ks, idx, acc) {
 /// Returns a new map with only the keys in ks.
 ///
 /// Examples:
-///   (select-keys {:a 1 :b 2 :c 3} [:a :c])  ; => {:a 1, :c 3}
+///   select-keys({:a 1, :b 2, :c 3}, [:a, :c])  // => {:a 1, :c 3}
 fn select-keys(m, ks) {
     select-keys-helper(m, ks, 0, {})
 }
 
+/// Helper: accumulate the entries of m whose keys are in ks.
 fn select-keys-helper(m, ks, idx, acc) {
     if idx >= length(ks) {
         acc
@@ -2481,7 +2798,7 @@ fn select-keys-helper(m, ks, idx, acc) {
 /// Applies f to the current value at key and associates the result.
 ///
 /// Examples:
-///   (update {:a 1} :a fn(x) { x + 1 })  ; => {:a 2}
+///   update({:a 1}, :a, fn(x) { x + 1 })  // => {:a 2}
 fn update(m, key, f) {
     let old-val = get(m, key)
     assoc(m, key, f(old-val))
@@ -2492,8 +2809,8 @@ fn update(m, key, f) {
 /// Returns null if any key in the path is not found.
 ///
 /// Examples:
-///   (get-in {:a {:b {:c 42}}} [:a :b :c])  ; => 42
-///   (get-in {:a {:b 1}} [:a :x])           ; => null
+///   get-in({:a {:b {:c 42}}}, [:a, :b, :c])  // => 42
+///   get-in({:a {:b 1}}, [:a, :x])           // => null
 fn get-in(m, path) {
     let mut current = m
     let mut s = seq(path)
@@ -2510,8 +2827,8 @@ fn get-in(m, path) {
 /// Creates intermediate maps as needed.
 ///
 /// Examples:
-///   (assoc-in {:a {:b 1}} [:a :b] 42)  ; => {:a {:b 42}}
-///   (assoc-in {} [:a :b :c] 1)         ; => {:a {:b {:c 1}}}
+///   assoc-in({:a {:b 1}}, [:a, :b], 42)  // => {:a {:b 42}}
+///   assoc-in({}, [:a, :b, :c], 1)         // => {:a {:b {:c 1}}}
 fn assoc-in(m, path, val) {
     let len = length(path)
     if len == 0 {
@@ -2538,7 +2855,7 @@ fn assoc-in(m, path, val) {
 /// Applies f to the current value at the path.
 ///
 /// Examples:
-///   (update-in {:a {:b 1}} [:a :b] fn(x) { x + 1 })  ; => {:a {:b 2}}
+///   update-in({:a {:b 1}}, [:a, :b], fn(x) { x + 1 })  // => {:a {:b 2}}
 fn update-in(m, path, f) {
     let len = length(path)
     if len == 0 {
@@ -2563,11 +2880,12 @@ fn update-in(m, path, f) {
 /// Check if a map contains a key.
 ///
 /// Examples:
-///   (contains-key? {:a 1 :b 2} :a)  ; => true
-///   (contains-key? {:a 1 :b 2} :c)  ; => false
+///   contains-key?({:a 1, :b 2}, :a)  // => true
+///   contains-key?({:a 1, :b 2}, :c)  // => false
 fn contains-key?(m, key) {
-    let ks = keys(m)
-    any?(fn(k) { k == key }, ks)
+    // Delegate to the native, O(log n) membership test (the old O(n) keys-scan
+    // was redundant with `contains?`).
+    contains?(m, key)
 }
 
 /// Swap keys and values in a map.
@@ -2575,7 +2893,7 @@ fn contains-key?(m, key) {
 /// Values become keys and keys become values.
 ///
 /// Examples:
-///   (invert {:a 1 :b 2})  ; => {1: :a, 2: :b}
+///   invert({:a 1, :b 2})  // => {1: :a, 2: :b}
 fn invert(m) {
     let ks = keys(m)
     reduce(fn(acc, k) {
@@ -2589,11 +2907,12 @@ fn invert(m) {
 /// Returns a new map with transformed keys, same values.
 ///
 /// Examples:
-///   (map-keys {:a 1 :b 2} keyword->string)  ; => {"a": 1, "b": 2}
+///   map-keys({:a 1, :b 2}, keyword->string)  // => {"a": 1, "b": 2}
 fn map-keys(m, f) {
     map-keys-helper(m, f, keys(m), 0, {})
 }
 
+/// Helper: rebuild a map applying f to each key.
 fn map-keys-helper(m, f, ks, idx, acc) {
     if idx >= length(ks) {
         acc
@@ -2610,11 +2929,12 @@ fn map-keys-helper(m, f, ks, idx, acc) {
 /// Returns a new map with same keys, transformed values.
 ///
 /// Examples:
-///   (map-vals {:a 1 :b 2} fn(x) { x * 2 })  ; => {:a 2, :b 4}
+///   map-vals({:a 1, :b 2}, fn(x) { x * 2 })  // => {:a 2, :b 4}
 fn map-vals(m, f) {
     map-vals-helper(m, f, keys(m), 0, {})
 }
 
+/// Helper: rebuild a map applying f to each value.
 fn map-vals-helper(m, f, ks, idx, acc) {
     if idx >= length(ks) {
         acc
@@ -2629,12 +2949,13 @@ fn map-vals-helper(m, f, ks, idx, acc) {
 /// Keep only entries where the key satisfies the predicate.
 ///
 /// Examples:
-///   (filter-keys {:a 1 :ab 2 :abc 3} fn(k) { length(keyword->string(k)) > 1 })
+///   filter-keys({:a 1, :ab 2, :abc 3}, fn(k) { length(keyword->string(k)) > 1 })
 ///   ; => {:ab 2, :abc 3}
 fn filter-keys(m, pred) {
     filter-keys-helper(m, pred, keys(m), 0, {})
 }
 
+/// Helper: accumulate entries of m whose keys satisfy pred.
 fn filter-keys-helper(m, pred, ks, idx, acc) {
     if idx >= length(ks) {
         acc
@@ -2652,11 +2973,12 @@ fn filter-keys-helper(m, pred, ks, idx, acc) {
 /// Keep only entries where the value satisfies the predicate.
 ///
 /// Examples:
-///   (filter-vals {:a 1 :b 2 :c 3} fn(v) { v > 1 })  ; => {:b 2, :c 3}
+///   filter-vals({:a 1, :b 2, :c 3}, fn(v) { v > 1 })  // => {:b 2, :c 3}
 fn filter-vals(m, pred) {
     filter-vals-helper(m, pred, keys(m), 0, {})
 }
 
+/// Helper: accumulate entries of m whose values satisfy pred.
 fn filter-vals-helper(m, pred, ks, idx, acc) {
     if idx >= length(ks) {
         acc
@@ -2677,12 +2999,14 @@ fn filter-vals-helper(m, pred, ks, idx, acc) {
 // ============================================================================
 
 extend PersistentSet with Length {
+    /// Return the number of elements in set.
     fn length(set) {
         rust-coll/set-count(set)
     }
 }
 
 extend PersistentSet with Format {
+    /// Format set as #{...} with comma-separated elements.
     fn format(set, depth) {
         let elems = rust-coll/set-elements(set)
         let len = rust-coll/vec-count(elems)
@@ -2694,6 +3018,7 @@ extend PersistentSet with Format {
     }
 }
 
+/// Helper: recursively format a Rust-backed set's elements into acc.
 fn format-rust-set-elements(elems-vec, idx, len, acc) {
     if idx >= len {
         acc ++ "}"
@@ -2710,15 +3035,18 @@ fn format-rust-set-elements(elems-vec, idx, len, acc) {
 }
 
 // Sequence type for iterating over PersistentSet
+/// Seq view over a PersistentSet's elements, tracking the current index.
 struct PersistentSetSeq {
     elements
     index
 }
 
 extend PersistentSetSeq with Seq {
+    /// Return the element at the seq's current index.
     fn first(seq) {
         rust-coll/vec-get(seq.elements, seq.index)
     }
+    /// Advance to the next element, or null at the end.
     fn next(seq) {
         let next-idx = seq.index + 1
         if next-idx >= rust-coll/vec-count(seq.elements) {
@@ -2730,14 +3058,17 @@ extend PersistentSetSeq with Seq {
 }
 
 extend PersistentSetSeq with Seqable {
+    /// A live seq is its own seq (idempotent).
     fn seq(s) { s }
 }
 
 extend PersistentSetSeq with Length {
+    /// Return the number of elements remaining in the seq.
     fn length(s) { rust-coll/vec-count(s.elements) - s.index }
 }
 
 extend PersistentSet with Seqable {
+    /// Return a PersistentSetSeq over set, or null if empty.
     fn seq(set) {
         let elems = rust-coll/set-elements(set)
         if rust-coll/vec-count(elems) == 0 {
@@ -2752,6 +3083,7 @@ extend PersistentSet with Seqable {
 // [key value] entry vector, mirroring Clojure's (seq {:a 1}) => ([:a 1]). This
 // makes every seq-library function (map/filter/reduce/into/count/…) and the
 // beagle.iter combinators work over maps.
+/// Seq view over a PersistentMap, yielding [key value] entry pairs.
 struct PersistentMapSeq {
     map
     keys
@@ -2759,10 +3091,12 @@ struct PersistentMapSeq {
 }
 
 extend PersistentMapSeq with Seq {
+    /// Return the current [key value] entry pair.
     fn first(seq) {
         let k = rust-coll/vec-get(seq.keys, seq.index)
         [k, rust-coll/map-get(seq.map, k)]
     }
+    /// Advance to the next entry, or null at the end.
     fn next(seq) {
         let next-idx = seq.index + 1
         if next-idx >= rust-coll/vec-count(seq.keys) {
@@ -2774,14 +3108,17 @@ extend PersistentMapSeq with Seq {
 }
 
 extend PersistentMapSeq with Seqable {
+    /// A live seq is its own seq (idempotent).
     fn seq(s) { s }
 }
 
 extend PersistentMapSeq with Length {
+    /// Return the number of entries remaining in the seq.
     fn length(s) { rust-coll/vec-count(s.keys) - s.index }
 }
 
 extend PersistentMap with Seqable {
+    /// Return a PersistentMapSeq over map yielding [key value] pairs, or null if empty.
     fn seq(map) {
         let ks = rust-coll/map-keys(map)
         if rust-coll/vec-count(ks) == 0 {
@@ -2799,8 +3136,8 @@ extend PersistentMap with Seqable {
 /// Check if a value is a PersistentSet.
 ///
 /// Examples:
-///   (set? #{1 2 3})  ; => true
-///   (set? [1 2 3])   ; => false
+///   set?(#{1, 2, 3})  // => true
+///   set?([1, 2, 3])   // => false
 fn set?(x) {
     instance-of(x, PersistentSet)
 }
@@ -2808,8 +3145,8 @@ fn set?(x) {
 /// Check if an element is in a set.
 ///
 /// Examples:
-///   (set-contains? #{1 2 3} 2)  ; => true
-///   (set-contains? #{1 2 3} 5)  ; => false
+///   set-contains?(#{1, 2, 3}, 2)  // => true
+///   set-contains?(#{1, 2, 3}, 5)  // => false
 fn set-contains?(set, elem) {
     rust-coll/set-contains?(set, elem)
 }
@@ -2819,8 +3156,8 @@ fn set-contains?(set, elem) {
 /// Returns a new set with the element added (no-op if already present).
 ///
 /// Examples:
-///   (set-add #{1 2} 3)  ; => #{1 2 3}
-///   (set-add #{1 2} 2)  ; => #{1 2}
+///   set-add(#{1, 2}, 3)  // => #{1, 2, 3}
+///   set-add(#{1, 2}, 2)  // => #{1, 2}
 fn set-add(set, elem) {
     rust-coll/set-add(set, elem)
 }
@@ -2830,24 +3167,10 @@ fn set-add(set, elem) {
 /// Returns a new set without the element.
 ///
 /// Examples:
-///   (set-remove #{1 2 3} 2)  ; => #{1 3}
+///   set-remove(#{1, 2, 3}, 2)  // => #{1, 3}
 fn set-remove(set, elem) {
-    let elems = rust-coll/set-elements(set)
-    set-remove-helper(elems, elem, 0, rust-coll/vec-count(elems), #{})
-}
-
-fn set-remove-helper(elems, to-remove, idx, len, acc) {
-    if idx >= len {
-        acc
-    } else {
-        let elem = rust-coll/vec-get(elems, idx)
-        let new-acc = if elem == to-remove {
-            acc
-        } else {
-            rust-coll/set-add(acc, elem)
-        }
-        set-remove-helper(elems, to-remove, idx + 1, len, new-acc)
-    }
+    // O(log n) native remove (was an O(n) rebuild via set-elements + re-add).
+    rust-coll/set-disj(set, elem)
 }
 
 /// Return the union of two sets.
@@ -2855,12 +3178,13 @@ fn set-remove-helper(elems, to-remove, idx, len, acc) {
 /// Contains all elements from both sets.
 ///
 /// Examples:
-///   (set-union #{1 2} #{2 3})  ; => #{1 2 3}
+///   set-union(#{1, 2}, #{2, 3})  // => #{1, 2, 3}
 fn set-union(s1, s2) {
     let elems2 = rust-coll/set-elements(s2)
     set-union-helper(s1, elems2, 0, rust-coll/vec-count(elems2))
 }
 
+/// Helper: add each element of elems2 into s1.
 fn set-union-helper(s1, elems2, idx, len) {
     if idx >= len {
         s1
@@ -2876,12 +3200,13 @@ fn set-union-helper(s1, elems2, idx, len) {
 /// Contains only elements present in both sets.
 ///
 /// Examples:
-///   (set-intersection #{1 2 3} #{2 3 4})  ; => #{2 3}
+///   set-intersection(#{1, 2, 3}, #{2, 3, 4})  // => #{2, 3}
 fn set-intersection(s1, s2) {
     let elems1 = rust-coll/set-elements(s1)
     set-intersection-helper(elems1, s2, 0, rust-coll/vec-count(elems1), #{})
 }
 
+/// Helper: accumulate elements of elems1 that are also in s2.
 fn set-intersection-helper(elems1, s2, idx, len, acc) {
     if idx >= len {
         acc
@@ -2901,12 +3226,13 @@ fn set-intersection-helper(elems1, s2, idx, len, acc) {
 /// Contains elements in s1 but not in s2.
 ///
 /// Examples:
-///   (set-difference #{1 2 3} #{2 3 4})  ; => #{1}
+///   set-difference(#{1, 2, 3}, #{2, 3, 4})  // => #{1}
 fn set-difference(s1, s2) {
     let elems1 = rust-coll/set-elements(s1)
     set-difference-helper(elems1, s2, 0, rust-coll/vec-count(elems1), #{})
 }
 
+/// Helper: accumulate elements of elems1 that are not in s2.
 fn set-difference-helper(elems1, s2, idx, len, acc) {
     if idx >= len {
         acc
@@ -2926,13 +3252,14 @@ fn set-difference-helper(elems1, s2, idx, len, acc) {
 /// Returns true if all elements of s1 are also in s2.
 ///
 /// Examples:
-///   (set-subset? #{1 2} #{1 2 3})  ; => true
-///   (set-subset? #{1 4} #{1 2 3})  ; => false
+///   set-subset?(#{1, 2}, #{1, 2, 3})  // => true
+///   set-subset?(#{1, 4}, #{1, 2, 3})  // => false
 fn set-subset?(s1, s2) {
     let elems1 = rust-coll/set-elements(s1)
     set-subset-helper(elems1, s2, 0, rust-coll/vec-count(elems1))
 }
 
+/// Helper: return true if every element of elems1 is in s2.
 fn set-subset-helper(elems1, s2, idx, len) {
     if idx >= len {
         true
@@ -2951,9 +3278,91 @@ fn set-subset-helper(elems1, s2, idx, len) {
 /// Removes duplicates since sets only contain unique elements.
 ///
 /// Examples:
-///   (into-set [1 2 2 3 3 3])  ; => #{1 2 3}
+///   into-set([1, 2, 2, 3, 3, 3])  // => #{1, 2, 3}
 fn into-set(coll) {
     reduce(fn(acc, elem) { rust-coll/set-add(acc, elem) }, #{}, coll)
+}
+
+/// Materialize any collection into a persistent vector (identity on vectors).
+///
+/// Examples:
+///   vec(#{1, 2, 3})  // => [1, 2, 3]
+fn vec(coll) {
+    if instance-of(coll, PersistentVector) {
+        coll
+    } else {
+        reduce(fn(acc, x) { push(acc, x) }, [], coll)
+    }
+}
+
+/// Return the sub-vector coll[start:end] (end exclusive) as a new vector.
+///
+/// Examples:
+///   subvec([10, 20, 30, 40], 1, 3)  // => [20, 30]
+fn subvec(coll, start, end) {
+    let v = vec(coll)
+    let mut acc = []
+    let mut i = start
+    while i < end {
+        acc = push(acc, get(v, i))
+        i = i + 1
+    }
+    acc
+}
+
+/// Value membership: true if `x` is structurally equal to some element of `coll`.
+///
+/// Distinct from `contains?`, which tests keys/indices: `contains?([10,20], 1)`
+/// asks "is index 1 valid", whereas `includes?([10,20], 20)` asks "is 20 an element".
+///
+/// Examples:
+///   includes?([10, 20, 30], 20)  // => true
+///   includes?([10, 20, 30], 1)   // => false
+fn includes?(coll, x) {
+    any?(fn(e) { equal(e, x) }, coll)
+}
+
+/// Set union: a set containing every element of `a` and `b` (inputs may be any
+/// collections; the result is always a set).
+///
+/// Examples:
+///   union(#{1, 2}, [2, 3])  // => #{1, 2, 3}
+fn union(a, b) {
+    let mut acc = into-set(a)
+    for x in b {
+        acc = rust-coll/set-add(acc, x)
+    }
+    acc
+}
+
+/// Set intersection: a set of the elements present in both `a` and `b`.
+///
+/// Examples:
+///   intersection([1, 2, 3], [2, 3, 4])  // => #{2, 3}
+fn intersection(a, b) {
+    let bs = into-set(b)
+    let mut acc = #{}
+    for x in a {
+        if contains?(bs, x) {
+            acc = rust-coll/set-add(acc, x)
+        }
+    }
+    acc
+}
+
+/// Set difference: a set of the elements of `a` not present in `b`.
+///
+/// Examples:
+///   difference([1, 2, 3], [2])  // => #{1, 3}
+fn difference(a, b) {
+    let bs = into-set(b)
+    let mut acc = #{}
+    for x in a {
+        if contains?(bs, x) == false {
+            acc = rust-coll/set-add(acc, x)
+        }
+    }
+    acc
 }
 
 // ============================================================================
@@ -2961,6 +3370,7 @@ fn into-set(coll) {
 // ============================================================================
 
 extend Regex with Format {
+    /// Format a regex as the literal "#regex".
     fn format(regex, depth) {
         "#regex"
     }
@@ -2973,8 +3383,8 @@ extend Regex with Format {
 /// Get the Unicode code point of the first character in a string.
 ///
 /// Examples:
-///   (char-code "A")  ; => 65
-///   (char-code "a")  ; => 97
+///   char-code("A")  // => 65
+///   char-code("a")  // => 97
 fn char-code(s) {
     builtin/char-code(s)
 }
@@ -2982,8 +3392,8 @@ fn char-code(s) {
 /// Create a single-character string from a Unicode code point.
 ///
 /// Examples:
-///   (char-from-code 65)  ; => "A"
-///   (char-from-code 97)  ; => "a"
+///   char-from-code(65)  // => "A"
+///   char-from-code(97)  // => "a"
 fn char-from-code(code) {
     builtin/char-from-code(code)
 }
@@ -2994,6 +3404,7 @@ fn char-from-code(code) {
 // This is the canonical Error type used across all async and I/O operations.
 // Pattern match on specific error types to handle different failure cases.
 
+/// Canonical error type for async and I/O operations; pattern-match to handle each case.
 enum Error {
     NotFound { path },
     PermissionDenied { path },
@@ -3012,6 +3423,7 @@ enum Error {
 // This is the canonical Result type used across all async and I/O operations.
 // All namespaces (fs, timer, io, async) should use this type.
 
+/// Canonical Ok/Err result type used across async and I/O operations.
 enum Result {
     Ok { value },
     Err { error }
@@ -3020,7 +3432,7 @@ enum Result {
 /// Create a successful Result containing a value.
 ///
 /// Examples:
-///   (ok 42)  ; => Result.Ok { value: 42 }
+///   ok(42)  // => Result.Ok { value: 42 }
 fn ok(value) {
     Result.Ok { value: value }
 }
@@ -3028,17 +3440,19 @@ fn ok(value) {
 /// Create an error Result containing an Error.
 ///
 /// Examples:
-///   (err (Error.NotFound { path: "/missing" }))
+///   err(Error.NotFound { path: "/missing" })
 fn err(error) {
     Result.Err { error: error }
 }
 
 // Create an error result with code and message (convenience for legacy/IO errors)
+/// Create an Err Result wrapping an Error.IO with the given message.
 fn err-io(message) {
     Result.Err { error: Error.IO { message: message } }
 }
 
 // Create an error result with code (convenience for legacy code)
+/// Create an Err Result wrapping an Error.Other with code and message.
 fn err-code(code, message) {
     Result.Err { error: Error.Other { code: code, message: message } }
 }
@@ -3046,8 +3460,8 @@ fn err-code(code, message) {
 /// Check if a Result is successful (Ok variant).
 ///
 /// Examples:
-///   (ok? (ok 42))                      ; => true
-///   (ok? (err (Error.IO { message: "failed" })))  ; => false
+///   ok?(ok(42))                      // => true
+///   ok?(err(Error.IO { message: "failed" }))  // => false
 fn ok?(result) {
     match result {
         Result.Ok { value } => true,
@@ -3060,8 +3474,8 @@ fn ok?(result) {
 /// Prints an error message if the result is an Err.
 ///
 /// Examples:
-///   (unwrap (ok 42))  ; => 42
-///   (unwrap (err (Error.NotFound { path: "/x" })))  ; prints error, returns null
+///   unwrap(ok(42))  // => 42
+///   unwrap(err(Error.NotFound { path: "/x" }))  // prints error, returns null
 fn unwrap(result) {
     match result {
         Result.Ok { value } => value,
@@ -3085,8 +3499,8 @@ fn unwrap(result) {
 /// Unwrap a Result, returning the value or a default on error.
 ///
 /// Examples:
-///   (unwrap-or (ok 42) 0)                        ; => 42
-///   (unwrap-or (err (Error.IO { message: "" })) 0)  ; => 0
+///   unwrap-or(ok(42), 0)                        // => 42
+///   unwrap-or(err(Error.IO { message: "" }), 0)  // => 0
 fn unwrap-or(result, default) {
     match result {
         Result.Ok { value } => value,
@@ -3095,6 +3509,7 @@ fn unwrap-or(result, default) {
 }
 
 // Check if a result is a timeout error
+/// Check whether a Result is an Err carrying a Timeout error.
 fn timeout?(result) {
     match result {
         Result.Err { error } => match error {
@@ -3106,6 +3521,7 @@ fn timeout?(result) {
 }
 
 // Check if a result is a not-found error
+/// Check whether a Result is an Err carrying a NotFound error.
 fn not-found?(result) {
     match result {
         Result.Err { error } => match error {
@@ -3117,6 +3533,7 @@ fn not-found?(result) {
 }
 
 // Get the error from a result (returns null if Ok)
+/// Return the error from an Err Result, or null if it is Ok.
 fn get-error(result) {
     match result {
         Result.Ok { value } => null,

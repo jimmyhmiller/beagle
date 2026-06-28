@@ -17,6 +17,8 @@ let MASK32 = 0xFFFFFFFF
 // ---- byte input normalization ----------------------------------------
 
 // Turn the input (String or Vec<Int>) into a Vec<Int> of byte values.
+/// Normalizes hash input into a Vec<Int> of byte values (0..255). A String is
+/// converted to its UTF-8 bytes; a Vec<Int> has each element masked to a byte.
 fn to-bytes(input) {
     if instance-of(input, String) {
         // A String is hashed as its UTF-8 bytes. We obtain those bytes by
@@ -48,14 +50,17 @@ fn to-bytes(input) {
 
 // ---- 32-bit helpers --------------------------------------------------
 
+/// Adds two 32-bit words modulo 2^32 (result masked to 32 bits).
 fn add32(a, b) {
     (a + b) & MASK32
 }
 
+/// Rotates the 32-bit word `x` left by `n` bits.
 fn rotl32(x, n) {
     ((x << n) | (x >>> (32 - n))) & MASK32
 }
 
+/// Rotates the 32-bit word `x` right by `n` bits.
 fn rotr32(x, n) {
     ((x >>> n) | (x << (32 - n))) & MASK32
 }
@@ -63,6 +68,7 @@ fn rotr32(x, n) {
 // lower-case hex of one 32-bit word, 8 digits, big-endian.
 let HEXCHARS = "0123456789abcdef"
 
+/// Appends `word` to `builder` as 8 lowercase big-endian hex digits. Returns the builder.
 fn append-hex32!(builder, word) {
     let mut shift = 28
     while shift >= 0 {
@@ -73,6 +79,7 @@ fn append-hex32!(builder, word) {
     builder
 }
 
+/// Appends `byte` to `builder` as 2 lowercase hex digits. Returns the builder.
 fn append-hex8!(builder, byte) {
     sb/append!(builder, HEXCHARS[(byte >>> 4) & 0xF])
     sb/append!(builder, HEXCHARS[byte & 0xF])
@@ -84,6 +91,8 @@ fn append-hex8!(builder, byte) {
 // Append SHA padding (the 0x80 byte, zero bytes, then the 64-bit
 // big-endian bit length) onto a copy of the byte vector. Returns a new
 // Vec<Int> whose length is a multiple of 64.
+/// Applies SHA-1/SHA-256 (big-endian) message padding to `bytes`, returning a
+/// new Vec<Int> whose length is a multiple of 64.
 fn pad-message(bytes) {
     let msg-len = length(bytes)
     let bit-len = msg-len * 8
@@ -111,11 +120,13 @@ fn pad-message(bytes) {
 }
 
 // Read a big-endian 32-bit word from bytes starting at index `i`.
+/// Reads a big-endian 32-bit word from `bytes` at index `i`.
 fn word-be(bytes, i) {
     ((bytes[i] << 24) | (bytes[i + 1] << 16) | (bytes[i + 2] << 8) | bytes[i + 3]) & MASK32
 }
 
 // Read a little-endian 32-bit word (MD5).
+/// Reads a little-endian 32-bit word from `bytes` at index `i` (used by MD5).
 fn word-le(bytes, i) {
     (bytes[i] | (bytes[i + 1] << 8) | (bytes[i + 2] << 16) | (bytes[i + 3] << 24)) & MASK32
 }
@@ -130,6 +141,7 @@ fn word-le(bytes, i) {
 // add32 / rotl32. 64 rounds, 4 working words.
 
 // Padding with LITTLE-endian 64-bit bit length. Block size is 64 bytes.
+/// MD5 message padding: like pad-message but with a little-endian 64-bit bit-length field.
 fn pad-message-le(bytes) {
     let msg-len = length(bytes)
     let bit-len = msg-len * 8
@@ -153,6 +165,7 @@ fn pad-message-le(bytes) {
 }
 
 // Per-round shift amounts s[0..63].
+/// Returns the 64 per-round left-rotate amounts for MD5.
 fn md5-s() {
     [
         7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
@@ -163,6 +176,7 @@ fn md5-s() {
 }
 
 // Per-round constants K[i] = floor(abs(sin(i+1)) * 2^32).
+/// Returns the 64 MD5 round constants K[i] = floor(abs(sin(i+1)) * 2^32).
 fn md5-k() {
     [
         0xD76AA478, 0xE8C7B756, 0x242070DB, 0xC1BDCEEE,
@@ -184,11 +198,17 @@ fn md5-k() {
     ]
 }
 
+// The MD5 round-shift and round-constant tables, built ONCE at load and reused
+// by every digest (the md5-s()/md5-k() helpers rebuilt them on every call).
+let MD5_S = md5-s()
+let MD5_K = md5-k()
+
+/// Runs the MD5 compression over `raw-bytes`, returning the digest as a Vec of 4 words.
 fn md5-digest-words(raw-bytes) {
     let bytes = pad-message-le(raw-bytes)
     let total = length(bytes)
-    let s = md5-s()
-    let k = md5-k()
+    let s = MD5_S
+    let k = MD5_K
 
     let mut a0 = 0x67452301
     let mut b0 = 0xEFCDAB89
@@ -251,6 +271,7 @@ fn md5-digest-words(raw-bytes) {
 }
 
 // Emit a 32-bit word byte-reversed (little-endian) as 8 hex digits.
+/// Appends `word` to `builder` byte-reversed (little-endian) as 8 hex digits. Returns the builder.
 fn append-hex32-le!(builder, word) {
     append-hex8!(builder, word & 0xFF)
     append-hex8!(builder, (word >>> 8) & 0xFF)
@@ -259,6 +280,7 @@ fn append-hex32-le!(builder, word) {
     builder
 }
 
+/// Computes the MD5 hash of `input` (String or Vec<Int>), returning a 32-char lowercase hex String.
 fn md5(input) {
     let words = md5-digest-words(to-bytes(input))
     let out = sb/new(32)
@@ -271,6 +293,7 @@ fn md5(input) {
 }
 
 // MD5 digest as a Vec of 16 bytes (little-endian per word), for HMAC.
+/// MD5 digest of `raw-bytes` as a Vec of 16 bytes (little-endian per word), for HMAC.
 fn md5-digest-bytes(raw-bytes) {
     let words = md5-digest-words(raw-bytes)
     let mut out = []
@@ -290,6 +313,7 @@ fn md5-digest-bytes(raw-bytes) {
 // SHA-1
 // =====================================================================
 
+/// Computes the SHA-1 hash of `input` (String or Vec<Int>), returning a 40-char lowercase hex String.
 fn sha1(input) {
     let bytes = pad-message(to-bytes(input))
     let total = length(bytes)
@@ -377,6 +401,7 @@ fn sha1(input) {
 // =====================================================================
 
 // Run SHA-256 over a Vec<Int> of bytes, returning a Vec of 8 words.
+/// Runs SHA-256 over a Vec<Int> of bytes, returning the digest as a Vec of 8 words.
 fn sha256-digest-words(raw-bytes) {
     let bytes = pad-message(raw-bytes)
     let total = length(bytes)
@@ -456,6 +481,7 @@ fn sha256-digest-words(raw-bytes) {
     [h0, h1, h2, h3, h4, h5, h6, h7]
 }
 
+/// Concatenates a Vec of 32-bit words into a big-endian lowercase hex String.
 fn words-to-hex(words) {
     let out = sb/new(64)
     let mut i = 0
@@ -466,11 +492,13 @@ fn words-to-hex(words) {
     sb/to-string(out)
 }
 
+/// Computes the SHA-256 hash of `input` (String or Vec<Int>), returning a 64-char lowercase hex String.
 fn sha256(input) {
     words-to-hex(sha256-digest-words(to-bytes(input)))
 }
 
 // SHA-256 round constants.
+/// Returns the 64 SHA-256 round constants.
 fn sha256-k() {
     [
         0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5,
@@ -511,27 +539,33 @@ fn sha256-k() {
 // The block is 128 bytes, words are big-endian, there are 80 rounds, and
 // the message-length field is 128 bits (we only fill the low 64).
 
+/// A 64-bit word emulated as two 32-bit halves (`hi` = upper 32 bits, `lo` = lower 32 bits).
 struct W64 {
     hi
     lo
 }
 
+/// Builds a W64 from `hi` and `lo`, masking each to 32 bits.
 fn w64(hi, lo) {
     W64 { hi: hi & MASK32, lo: lo & MASK32 }
 }
 
+/// Bitwise XOR of two W64 values.
 fn xor64(a, b) {
     W64 { hi: a.hi ^ b.hi, lo: a.lo ^ b.lo }
 }
 
+/// Bitwise AND of two W64 values.
 fn and64(a, b) {
     W64 { hi: a.hi & b.hi, lo: a.lo & b.lo }
 }
 
+/// Bitwise NOT (complement) of a W64 value.
 fn not64(a) {
     W64 { hi: a.hi ^ MASK32, lo: a.lo ^ MASK32 }
 }
 
+/// Adds two W64 values modulo 2^64, carrying the low-half overflow into the high half.
 fn add64(a, b) {
     let lo = a.lo + b.lo
     let carry = lo / 4294967296
@@ -540,6 +574,7 @@ fn add64(a, b) {
 }
 
 // logical right shift by n (0 <= n < 64).
+/// Logical right shift of a W64 by `n` bits (0 <= n < 64).
 fn shr64(x, n) {
     if n == 0 {
         x
@@ -558,6 +593,7 @@ fn shr64(x, n) {
 }
 
 // left shift by n (0 <= n < 64).
+/// Left shift of a W64 by `n` bits (0 <= n < 64).
 fn shl64(x, n) {
     if n == 0 {
         x
@@ -574,11 +610,13 @@ fn shl64(x, n) {
 }
 
 // rotate right by n (0 <= n < 64).
+/// Rotates a W64 right by `n` bits (0 <= n < 64).
 fn rotr64(x, n) {
     xor64(shr64(x, n), shl64(x, 64 - n))
 }
 
 // Read a big-endian 64-bit word from bytes at index i.
+/// Reads a big-endian 64-bit word from `bytes` at index `i` as a W64.
 fn word-be64(bytes, i) {
     let hi = ((bytes[i] << 24) | (bytes[i + 1] << 16) | (bytes[i + 2] << 8) | bytes[i + 3]) & MASK32
     let lo = ((bytes[i + 4] << 24) | (bytes[i + 5] << 16) | (bytes[i + 6] << 8) | bytes[i + 7]) & MASK32
@@ -587,6 +625,8 @@ fn word-be64(bytes, i) {
 
 // Padding for SHA-512: block size 128, 128-bit big-endian length field.
 // Our messages are well under 2^64 bits, so the top 64 bits are zero.
+/// SHA-512 message padding: block size 128 with a 128-bit big-endian length
+/// field (the high 64 bits are always zero for our inputs).
 fn pad-message-128(bytes) {
     let msg-len = length(bytes)
     let bit-len = msg-len * 8
@@ -616,6 +656,7 @@ fn pad-message-128(bytes) {
 }
 
 // The 80 round constants, as W64 [hi, lo] pairs.
+/// Returns the 80 SHA-512 round constants as W64 values.
 fn sha512-k() {
     [
         w64(0x428A2F98, 0xD728AE22), w64(0x71374491, 0x23EF65CD),
@@ -662,6 +703,7 @@ fn sha512-k() {
 }
 
 // Run SHA-512 over a Vec<Int> of bytes, returning a Vec of 8 W64.
+/// Runs SHA-512 over a Vec<Int> of bytes, returning the digest as a Vec of 8 W64.
 fn sha512-digest-words(raw-bytes) {
     let bytes = pad-message-128(raw-bytes)
     let total = length(bytes)
@@ -740,6 +782,7 @@ fn sha512-digest-words(raw-bytes) {
     [h0, h1, h2, h3, h4, h5, h6, h7]
 }
 
+/// Concatenates a Vec of W64 into a big-endian lowercase hex String.
 fn words64-to-hex(words) {
     let out = sb/new(128)
     let mut i = 0
@@ -751,11 +794,13 @@ fn words64-to-hex(words) {
     sb/to-string(out)
 }
 
+/// Computes the SHA-512 hash of `input` (String or Vec<Int>), returning a 128-char lowercase hex String.
 fn sha512(input) {
     words64-to-hex(sha512-digest-words(to-bytes(input)))
 }
 
 // SHA-512 digest as a Vec of 64 bytes (big-endian), for HMAC.
+/// SHA-512 digest of `raw-bytes` as a Vec of 64 bytes (big-endian), for HMAC.
 fn sha512-digest-bytes(raw-bytes) {
     let words = sha512-digest-words(raw-bytes)
     let mut out = []
@@ -781,6 +826,7 @@ fn sha512-digest-bytes(raw-bytes) {
 // =====================================================================
 
 // Convert 8 SHA-256 words into a Vec of 32 bytes (big-endian).
+/// Converts 8 SHA-256 words into a Vec of 32 bytes (big-endian).
 fn words-to-bytes(words) {
     let mut out = []
     let mut i = 0
@@ -795,6 +841,7 @@ fn words-to-bytes(words) {
     out
 }
 
+/// Returns a new byte Vec with the bytes of `b` appended to `a`.
 fn concat-bytes(a, b) {
     let mut out = a
     let mut i = 0
@@ -806,6 +853,7 @@ fn concat-bytes(a, b) {
 }
 
 // Hex of an arbitrary byte vector.
+/// Returns the lowercase hex String of an arbitrary byte Vec.
 fn bytes-to-hex(bytes) {
     let out = sb/new(length(bytes) * 2)
     let mut i = 0
@@ -819,6 +867,9 @@ fn bytes-to-hex(bytes) {
 // Generic HMAC over a raw-bytes digest function. `digest-bytes` maps
 // Vec<Int> -> Vec<Int> (the raw hash output); `block-size` is the hash's
 // internal block size in bytes. Returns the raw HMAC bytes.
+/// Generic HMAC over a raw-bytes digest function. `digest-bytes` maps
+/// Vec<Int> -> Vec<Int> (the raw hash output); `block-size` is the hash's
+/// internal block size in bytes. Returns the raw HMAC bytes.
 fn hmac-bytes(digest-bytes, block-size, key, msg) {
     let mut key-bytes = to-bytes(key)
     if length(key-bytes) > block-size {
@@ -842,6 +893,7 @@ fn hmac-bytes(digest-bytes, block-size, key, msg) {
     digest-bytes(concat-bytes(o-key-pad, inner))
 }
 
+/// Computes HMAC-SHA-256 of `msg` under `key`, returning a 64-char lowercase hex String.
 fn hmac-sha256(key, msg) {
     let block-size = 64
     let mut key-bytes = to-bytes(key)
@@ -870,24 +922,61 @@ fn hmac-sha256(key, msg) {
     words-to-hex(outer)
 }
 
+/// Computes HMAC-MD5 of `msg` under `key`, returning a 32-char lowercase hex String.
 fn hmac-md5(key, msg) {
     // MD5 block size is 64 bytes.
     bytes-to-hex(hmac-bytes(md5-digest-bytes, 64, key, msg))
 }
 
+/// Computes HMAC-SHA-512 of `msg` under `key`, returning a 128-char lowercase hex String.
 fn hmac-sha512(key, msg) {
     // SHA-512 block size is 128 bytes.
     bytes-to-hex(hmac-bytes(sha512-digest-bytes, 128, key, msg))
 }
 
-fn main() {
-    println(md5(""))
-    println(md5("abc"))
-    println(sha1("abc"))
-    println(sha256("abc"))
-    println(sha512(""))
-    println(sha512("abc"))
-    println(hmac-md5("key", "The quick brown fox jumps over the lazy dog"))
-    println(hmac-sha512("key", "The quick brown fox jumps over the lazy dog"))
-    "done"
+// =====================================================================
+// Non-cryptographic checksums (CRC-32, FNV-1a)
+// =====================================================================
+
+/// Computes the standard CRC-32 (IEEE 802.3, reflected polynomial 0xEDB88320)
+/// of `input` (a String, hashed as its UTF-8 bytes, or a Vec<Int> of byte
+/// values), returning the unsigned 32-bit checksum as an Int. crc32("") == 0.
+fn crc32(input) {
+    let bytes = to-bytes(input)
+    let n = length(bytes)
+    let mut crc = MASK32
+    let mut i = 0
+    while i < n {
+        crc = crc ^ bytes[i]
+        let mut k = 0
+        while k < 8 {
+            if (crc & 1) == 1 {
+                crc = (crc >>> 1) ^ 0xEDB88320
+            } else {
+                crc = crc >>> 1
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    (crc ^ MASK32) & MASK32
 }
+
+/// Computes the 32-bit FNV-1a hash of `input` (a String, hashed as its UTF-8
+/// bytes, or a Vec<Int> of byte values), returning the unsigned 32-bit hash as
+/// an Int. Offset basis 2166136261, prime 16777619: for each byte, XOR into the
+/// hash then multiply by the prime (masked to 32 bits). fnv1a-32("") == 2166136261.
+fn fnv1a-32(input) {
+    let bytes = to-bytes(input)
+    let n = length(bytes)
+    let mut hash = 2166136261
+    let mut i = 0
+    while i < n {
+        hash = (hash ^ bytes[i]) & MASK32
+        hash = (hash * 16777619) & MASK32
+        i = i + 1
+    }
+    hash
+}
+
+/// Demo entry point: prints sample MD5/SHA-1/SHA-256/SHA-512/HMAC digests.

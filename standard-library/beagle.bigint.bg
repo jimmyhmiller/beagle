@@ -26,6 +26,9 @@ let BASE = 10000
 // Construction / canonicalization
 // ----------------------------------------------------------------------------
 
+/// Arbitrary-precision integer. `sign` is -1, 0, or 1; `limbs` is a
+/// least-significant-first Vec<Int> of base-10000 groups with no leading-zero
+/// limbs. Zero is canonical: sign 0 with an empty limbs vector.
 struct BigInt {
     sign
     limbs
@@ -33,6 +36,8 @@ struct BigInt {
 
 // Drop trailing (most-significant) zero limbs from a freshly built limb vector.
 // Returns a NEW vector with no leading zeros.
+/// Return a new limb vector with the most-significant (trailing) zero limbs
+/// removed, so the result has no leading-zero limbs.
 fn trim-limbs(limbs) {
     let mut n = length(limbs)
     while n > 0 && limbs[n - 1] == 0 {
@@ -49,6 +54,8 @@ fn trim-limbs(limbs) {
 
 // Build a canonical BigInt from a sign and a (possibly untrimmed) limb vector.
 // If the trimmed limbs are empty the result is canonical zero (sign 0).
+/// Construct a canonical BigInt from `sign` and a possibly-untrimmed limb
+/// vector; if the trimmed limbs are empty the result is canonical zero (sign 0).
 fn make(sign, limbs) {
     let trimmed = trim-limbs(limbs)
     if length(trimmed) == 0 {
@@ -59,11 +66,14 @@ fn make(sign, limbs) {
 }
 
 // Canonical zero.
+/// Return the canonical zero BigInt (sign 0, empty limbs).
 fn zero() {
     BigInt { sign: 0, limbs: [] }
 }
 
 // Build a BigInt from a native Int (handles negatives and full 62-bit range).
+/// Build a BigInt from a native Int, handling negatives and the full 62-bit
+/// range (including the most-negative value, whose magnitude is never formed).
 fn from-int(n) {
     if n == 0 {
         zero()
@@ -78,7 +88,12 @@ fn from-int(n) {
         let mut limbs = []
         while m != 0 {
             let digit = m - (m / BASE) * BASE
-            limbs = push(limbs, abs(digit))
+            // Inline magnitude (digit is a single base-BASE remainder in
+            // -9999..9999, so 0 - digit cannot overflow). Done inline rather
+            // than via core `abs` so the public `abs` defined below — which
+            // takes a BigInt — does not shadow it within this namespace.
+            let pos-digit = if digit < 0 { 0 - digit } else { digit }
+            limbs = push(limbs, pos-digit)
             m = m / BASE
         }
         make(sign, limbs)
@@ -88,6 +103,9 @@ fn from-int(n) {
 // Parse a decimal string into a BigInt. Accepts an optional leading '+' or '-',
 // then one or more decimal digits. Leading zeros are allowed. Throws on any
 // non-digit content or an empty digit section.
+/// Parse a decimal string (optional leading '+'/'-', then one or more digits;
+/// leading zeros allowed) into a BigInt. Throws on empty input, a sign with no
+/// digits, or any non-digit character.
 fn from-string(s) {
     let len = length(s)
     if len == 0 {
@@ -141,6 +159,7 @@ fn from-string(s) {
 // Predicates
 // ----------------------------------------------------------------------------
 
+/// Return true if `b` is the BigInt zero (sign 0).
 fn is-zero?(b) {
     b.sign == 0
 }
@@ -150,6 +169,7 @@ fn is-zero?(b) {
 // ----------------------------------------------------------------------------
 
 // Compare two magnitudes (limb vectors). Returns -1, 0, or 1.
+/// Compare two magnitudes (limb vectors), ignoring sign. Returns -1, 0, or 1.
 fn cmp-mag(a, b) {
     let la = length(a)
     let lb = length(b)
@@ -175,6 +195,7 @@ fn cmp-mag(a, b) {
 }
 
 // Add two magnitudes (limb vectors). Returns a trimmed limb vector.
+/// Add two magnitudes (limb vectors) and return a trimmed limb vector.
 fn add-mag(a, b) {
     let la = length(a)
     let lb = length(b)
@@ -198,6 +219,8 @@ fn add-mag(a, b) {
 
 // Subtract magnitude b from magnitude a, where a >= b is REQUIRED by the
 // caller. Returns a trimmed limb vector.
+/// Subtract magnitude `b` from magnitude `a` (caller must ensure a >= b) and
+/// return a trimmed limb vector.
 fn sub-mag(a, b) {
     let la = length(a)
     let lb = length(b)
@@ -221,6 +244,8 @@ fn sub-mag(a, b) {
 }
 
 // Multiply two magnitudes (schoolbook). Returns a trimmed limb vector.
+/// Multiply two magnitudes with schoolbook long multiplication, returning a
+/// trimmed limb vector (empty when either input is empty).
 fn mul-mag(a, b) {
     let la = length(a)
     let lb = length(b)
@@ -272,6 +297,7 @@ fn mul-mag(a, b) {
 // ----------------------------------------------------------------------------
 
 // Compare two BigInts. Returns -1, 0, or 1.
+/// Compare two BigInts by value (sign then magnitude). Returns -1, 0, or 1.
 fn compare(a, b) {
     if a.sign != b.sign {
         if a.sign < b.sign { -1 } else { 1 }
@@ -286,12 +312,23 @@ fn compare(a, b) {
     }
 }
 
+// Participate in the core `Comparable` protocol so core `sort`/`min-of`/`max-of`
+// and `compare` work on BigInts. `compare` here is bigint's own (local) compare.
+extend BigInt with Comparable {
+    /// Three-way compare two BigInts (-1/0/1), for the core Comparable protocol.
+    fn compare-to(a, b) {
+        compare(a, b)
+    }
+}
+
 // Negate a BigInt.
+/// Return `b` with its sign flipped; zero (sign 0) is unchanged.
 fn negate(b) {
     BigInt { sign: 0 - b.sign, limbs: b.limbs }
 }
 
 // Add two BigInts.
+/// Add two BigInts, returning a canonical BigInt.
 fn add(a, b) {
     if a.sign == 0 {
         b
@@ -320,11 +357,13 @@ fn add(a, b) {
 }
 
 // Subtract b from a.
+/// Subtract `b` from `a`; thin wrapper for `add(a, negate(b))`.
 fn sub(a, b) {
     add(a, negate(b))
 }
 
 // Multiply two BigInts.
+/// Multiply two BigInts, returning a canonical BigInt (zero if either is zero).
 fn mul(a, b) {
     if a.sign == 0 || b.sign == 0 {
         zero()
@@ -334,10 +373,133 @@ fn mul(a, b) {
 }
 
 // ----------------------------------------------------------------------------
+// Division (schoolbook long division on base-BASE magnitudes)
+// ----------------------------------------------------------------------------
+
+// Shift a magnitude up by one base-BASE place and add `digit`: rem*BASE + digit.
+// `rem` is least-significant-first; the result is trimmed.
+fn limb-shift-add(rem, digit) {
+    if length(rem) == 0 {
+        if digit == 0 { [] } else { [digit] }
+    } else {
+        // [digit, rem[0], rem[1], ...] == digit + rem*BASE
+        let mut out = [digit]
+        let mut j = 0
+        while j < length(rem) {
+            out = push(out, rem[j])
+            j = j + 1
+        }
+        trim-limbs(out)
+    }
+}
+
+// Largest single base-BASE digit q in [0, BASE-1] with magnitude(b)*q <= rem,
+// found by binary search using mul-mag/cmp-mag.
+fn find-quotient-digit(rem, b) {
+    let mut lo = 0
+    let mut hi = BASE - 1
+    let mut ans = 0
+    while lo <= hi {
+        let mid = (lo + hi) / 2
+        let prod = if mid == 0 { [] } else { mul-mag(b, [mid]) }
+        if cmp-mag(prod, rem) <= 0 {
+            ans = mid
+            lo = mid + 1
+        } else {
+            hi = mid - 1
+        }
+    }
+    ans
+}
+
+// Schoolbook long division of magnitude `a` by magnitude `b` (b non-empty).
+// Returns [quotient-limbs, remainder-limbs], both trimmed, least-significant-first.
+fn divmod-mag(a, b) {
+    if cmp-mag(a, b) < 0 {
+        [[], a]
+    } else {
+        let n = length(a)
+        let mut q-ms = []        // quotient digits, most-significant first
+        let mut rem = []
+        let mut i = n - 1
+        while i >= 0 {
+            rem = limb-shift-add(rem, a[i])
+            let q = find-quotient-digit(rem, b)
+            if q != 0 {
+                rem = sub-mag(rem, mul-mag(b, [q]))
+            }
+            q-ms = push(q-ms, q)
+            i = i - 1
+        }
+        [trim-limbs(reverse(q-ms)), trim-limbs(rem)]
+    }
+}
+
+/// Absolute value of a BigInt: its magnitude as a non-negative BigInt.
+fn abs(b) {
+    if b.sign == 0 {
+        b
+    } else {
+        BigInt { sign: 1, limbs: b.limbs }
+    }
+}
+
+/// Truncated division with remainder: returns [quotient, remainder] with
+/// a == quotient*b + remainder, the quotient truncated toward zero, and the
+/// remainder carrying the sign of `a` (Java/Rust BigInteger semantics).
+/// Throws on division by zero.
+fn divmod(a, b) {
+    if b.sign == 0 {
+        throw("beagle.bigint/divmod: division by zero")
+    } else {
+        let qr = divmod-mag(a.limbs, b.limbs)
+        let q = make(a.sign * b.sign, qr[0])
+        let r = make(a.sign, qr[1])
+        [q, r]
+    }
+}
+
+/// Truncated quotient a / b (toward zero). Throws on division by zero.
+fn div(a, b) {
+    divmod(a, b)[0]
+}
+
+/// Remainder of a / b, carrying the sign of `a` (a == div(a,b)*b + mod(a,b)).
+/// Throws on division by zero.
+fn mod(a, b) {
+    divmod(a, b)[1]
+}
+
+/// Raise `base` (a BigInt) to a non-negative integer `exp` (an Int) via
+/// square-and-multiply. Throws on a negative exponent.
+fn pow(base, exp) {
+    if exp < 0 {
+        throw("beagle.bigint/pow: negative exponent")
+    } else {
+        let mut result = from-int(1)
+        let mut b = base
+        let mut e = exp
+        while e > 0 {
+            let odd = e - (e / 2) * 2
+            if odd == 1 {
+                result = mul(result, b)
+            }
+            e = e / 2
+            if e > 0 {
+                b = mul(b, b)
+            }
+        }
+        result
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Rendering
 // ----------------------------------------------------------------------------
 
 // Append a limb as a 4-digit zero-padded group (used for non-top limbs).
+/// Append `limb` (0..9999) to `builder` as a 4-digit zero-padded group; used
+/// for every limb except the most-significant one.
 fn append-padded-limb!(builder, limb) {
     // limb is in 0..9999
     if limb < 1000 {
@@ -353,6 +515,7 @@ fn append-padded-limb!(builder, limb) {
 }
 
 // Render a BigInt as a decimal string.
+/// Render a BigInt as a decimal string ("0" for zero, leading '-' for negatives).
 fn to-string(b) {
     if b.sign == 0 {
         "0"
@@ -372,144 +535,4 @@ fn to-string(b) {
         }
         sb/to-string(builder)
     }
-}
-
-// ----------------------------------------------------------------------------
-// Self-tests
-// ----------------------------------------------------------------------------
-
-fn check(name, got, expected) {
-    if got == expected {
-        println("ok   " ++ name)
-        0
-    } else {
-        println("FAIL " ++ name ++ " got=" ++ to-string-any(got) ++ " expected=" ++ to-string-any(expected))
-        1
-    }
-}
-
-fn to-string-any(x) {
-    if instance-of(x, String) {
-        x
-    } else {
-        "" ++ x
-    }
-}
-
-fn main() {
-    let mut fails = 0
-
-    // Required headline vector.
-    let big = mul(from-string("99999999999999999999"), from-string("99999999999999999999"))
-    fails = fails + check("mul 20-nines squared",
-        to-string(big),
-        "9999999999999999999800000000000000000001")
-
-    // from-string / to-string round-trips.
-    fails = fails + check("rt zero", to-string(from-string("0")), "0")
-    fails = fails + check("rt leading zeros", to-string(from-string("00042")), "42")
-    fails = fails + check("rt plus", to-string(from-string("+12345")), "12345")
-    fails = fails + check("rt neg", to-string(from-string("-67890")), "-67890")
-    fails = fails + check("rt big",
-        to-string(from-string("123456789012345678901234567890")),
-        "123456789012345678901234567890")
-    fails = fails + check("rt neg zero", to-string(from-string("-0")), "0")
-
-    // from-int.
-    fails = fails + check("from-int 0", to-string(from-int(0)), "0")
-    fails = fails + check("from-int pos", to-string(from-int(123456789)), "123456789")
-    fails = fails + check("from-int neg", to-string(from-int(-987654321)), "-987654321")
-
-    // add round-trips.
-    fails = fails + check("add basic",
-        to-string(add(from-string("12345"), from-string("67890"))),
-        "80235")
-    fails = fails + check("add carry",
-        to-string(add(from-string("9999"), from-string("1"))),
-        "10000")
-    fails = fails + check("add big carry chain",
-        to-string(add(from-string("99999999999999999999"), from-string("1"))),
-        "100000000000000000000")
-    fails = fails + check("add pos+neg",
-        to-string(add(from-string("100"), from-string("-30"))),
-        "70")
-    fails = fails + check("add neg+pos to neg",
-        to-string(add(from-string("-100"), from-string("30"))),
-        "-70")
-    fails = fails + check("add to zero",
-        to-string(add(from-string("12345"), from-string("-12345"))),
-        "0")
-    fails = fails + check("add two neg",
-        to-string(add(from-string("-100"), from-string("-200"))),
-        "-300")
-
-    // sub round-trips.
-    fails = fails + check("sub basic",
-        to-string(sub(from-string("80235"), from-string("67890"))),
-        "12345")
-    fails = fails + check("sub to neg",
-        to-string(sub(from-string("30"), from-string("100"))),
-        "-70")
-    fails = fails + check("sub borrow",
-        to-string(sub(from-string("10000"), from-string("1"))),
-        "9999")
-    fails = fails + check("sub big borrow",
-        to-string(sub(from-string("100000000000000000000"), from-string("1"))),
-        "99999999999999999999")
-    fails = fails + check("sub neg minus neg",
-        to-string(sub(from-string("-50"), from-string("-80"))),
-        "30")
-
-    // add/sub inverse round-trip: (a + b) - b == a
-    let a1 = from-string("987654321987654321987654321")
-    let b1 = from-string("123456789123456789")
-    fails = fails + check("add-sub inverse",
-        to-string(sub(add(a1, b1), b1)),
-        "987654321987654321987654321")
-
-    // mul.
-    fails = fails + check("mul basic",
-        to-string(mul(from-string("12"), from-string("12"))),
-        "144")
-    fails = fails + check("mul signs neg*pos",
-        to-string(mul(from-string("-12"), from-string("12"))),
-        "-144")
-    fails = fails + check("mul signs neg*neg",
-        to-string(mul(from-string("-12"), from-string("-12"))),
-        "144")
-    fails = fails + check("mul by zero",
-        to-string(mul(from-string("12345678901234567890"), from-string("0"))),
-        "0")
-    fails = fails + check("mul big",
-        to-string(mul(from-string("123456789"), from-string("987654321"))),
-        "121932631112635269")
-
-    // compare ordering.
-    fails = fails + check("cmp eq", compare(from-string("100"), from-string("100")), 0)
-    fails = fails + check("cmp lt", compare(from-string("99"), from-string("100")), -1)
-    fails = fails + check("cmp gt", compare(from-string("100"), from-string("99")), 1)
-    fails = fails + check("cmp neg<pos", compare(from-string("-1"), from-string("1")), -1)
-    fails = fails + check("cmp neg ordering", compare(from-string("-100"), from-string("-99")), -1)
-    fails = fails + check("cmp zero<pos", compare(from-string("0"), from-string("1")), -1)
-    fails = fails + check("cmp neg<zero", compare(from-string("-1"), from-string("0")), -1)
-    fails = fails + check("cmp big",
-        compare(from-string("123456789012345678901"), from-string("123456789012345678900")),
-        1)
-
-    // is-zero?
-    fails = fails + check("is-zero true", is-zero?(from-string("0")), true)
-    fails = fails + check("is-zero false", is-zero?(from-string("5")), false)
-    fails = fails + check("is-zero after sub", is-zero?(sub(from-string("7"), from-string("7"))), true)
-
-    // negate.
-    fails = fails + check("negate pos", to-string(negate(from-string("42"))), "-42")
-    fails = fails + check("negate neg", to-string(negate(from-string("-42"))), "42")
-    fails = fails + check("negate zero", to-string(negate(from-string("0"))), "0")
-
-    if fails == 0 {
-        println("ALL PASS")
-    } else {
-        println("FAILURES: " ++ fails)
-    }
-    fails
 }

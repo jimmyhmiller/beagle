@@ -16,6 +16,10 @@ let MASK32 = 0xFFFFFFFF
 // octet as OCTAL, so parsing it as decimal disagrees with the OS resolver — an
 // SSRF/octal-confusion vector (CVE-2021-29921). Python's ipaddress rejects
 // these; we match by returning null. Bare "0" is still valid.
+/// Parse a single decimal IPv4 octet string into an Int in [0,255].
+///
+/// Returns null for empty input, non-digit characters, more than 3 digits,
+/// values above 255, or a leading zero (octal-confusion guard); "0" is valid.
 fn parse-octet(s) {
     let len = length(s)
     if len == 0 {
@@ -56,8 +60,8 @@ fn parse-octet(s) {
 /// Returns null if the string is not a valid IPv4 address.
 ///
 /// Examples:
-///   (parse-ipv4 "192.168.1.1")  ; => 3232235777
-///   (parse-ipv4 "999.1.1.1")    ; => null
+///   parse-ipv4("192.168.1.1")   // => 3232235777
+///   parse-ipv4("999.1.1.1")     // => null
 fn parse-ipv4(s) {
     let parts = split(s, ".")
     if length(parts) != 4 {
@@ -78,7 +82,7 @@ fn parse-ipv4(s) {
 /// Convert a 32-bit Int into a dotted-quad IPv4 string.
 ///
 /// Examples:
-///   (ipv4-to-string 3232235777)  ; => "192.168.1.1"
+///   ipv4-to-string(3232235777)   // => "192.168.1.1"
 fn ipv4-to-string(n) {
     let m = n & MASK32
     let a = (m >> 24) & 0xFF
@@ -90,6 +94,9 @@ fn ipv4-to-string(n) {
 
 // Build a /prefix netmask as a 32-bit int. prefix in [0,32].
 // prefix 0 => 0; prefix 32 => 0xFFFFFFFF.
+/// Build a 32-bit IPv4 netmask Int from a prefix length in [0,32].
+///
+/// prefix 0 => 0; prefix 32 => 0xFFFFFFFF; values are clamped to that range.
 fn prefix-to-mask(prefix) {
     if prefix <= 0 {
         0
@@ -108,7 +115,7 @@ fn prefix-to-mask(prefix) {
 /// Returns null if the CIDR is malformed.
 ///
 /// Examples:
-///   (cidr-network "192.168.1.0/24")  ; => [3232235776, 4294967040]
+///   cidr-network("192.168.1.0/24")   // => [3232235776, 4294967040]
 fn cidr-network(cidr) {
     let parts = split(cidr, "/")
     if length(parts) != 2 {
@@ -133,8 +140,8 @@ fn cidr-network(cidr) {
 /// Check whether an IPv4 address string lies within a CIDR block.
 ///
 /// Examples:
-///   (ipv4-in-cidr? "192.168.1.5" "192.168.1.0/24")  ; => true
-///   (ipv4-in-cidr? "192.168.2.5" "192.168.1.0/24")  ; => false
+///   ipv4-in-cidr?("192.168.1.5", "192.168.1.0/24")   // => true
+///   ipv4-in-cidr?("192.168.2.5", "192.168.1.0/24")   // => false
 fn ipv4-in-cidr?(ip-str, cidr-str) {
     let ip = parse-ipv4(ip-str)
     let net = cidr-network(cidr-str)
@@ -153,17 +160,370 @@ fn ipv4-in-cidr?(ip-str, cidr-str) {
 /// and link-local (169.254/16). Returns false for invalid input.
 ///
 /// Examples:
-///   (is-private-ipv4? "10.0.0.1")     ; => true
-///   (is-private-ipv4? "8.8.8.8")      ; => false
+///   is-private-ipv4?("10.0.0.1")      // => true
+///   is-private-ipv4?("8.8.8.8")       // => false
 fn is-private-ipv4?(s) {
     let ip = parse-ipv4(s)
     if ip == null {
         false
     } else {
-        ipv4-in-cidr?(s, "10.0.0.0/8")
-            || ipv4-in-cidr?(s, "172.16.0.0/12")
-            || ipv4-in-cidr?(s, "192.168.0.0/16")
-            || ipv4-in-cidr?(s, "127.0.0.0/8")
-            || ipv4-in-cidr?(s, "169.254.0.0/16")
+        ipv4-in-cidr?(s, "10.0.0.0/8") || ipv4-in-cidr?(s, "172.16.0.0/12") || ipv4-in-cidr?(s, "192.168.0.0/16") || ipv4-in-cidr?(s, "127.0.0.0/8") || ipv4-in-cidr?(s, "169.254.0.0/16")
     }
+}
+
+/// Check whether an IPv4 address string is a loopback address (127.0.0.0/8).
+///
+/// Returns false for invalid input.
+///
+/// Examples:
+///   is-loopback?("127.0.0.1")         // => true
+///   is-loopback?("127.255.255.254")   // => true
+///   is-loopback?("128.0.0.1")         // => false
+fn is-loopback?(ip-str) {
+    ipv4-in-cidr?(ip-str, "127.0.0.0/8")
+}
+
+/// Check whether an IPv4 address string is in an RFC 1918 private range.
+///
+/// Covers only the three RFC 1918 blocks: 10.0.0.0/8, 172.16.0.0/12, and
+/// 192.168.0.0/16. Loopback and link-local are NOT considered private here
+/// (see is-private-ipv4? for the broader check). Returns false for invalid input.
+///
+/// Examples:
+///   is-private?("10.1.2.3")         // => true
+///   is-private?("172.16.0.1")       // => true
+///   is-private?("172.15.255.255")   // => false
+///   is-private?("192.168.1.1")      // => true
+///   is-private?("8.8.8.8")          // => false
+fn is-private?(ip-str) {
+    ipv4-in-cidr?(ip-str, "10.0.0.0/8") || ipv4-in-cidr?(ip-str, "172.16.0.0/12") || ipv4-in-cidr?(ip-str, "192.168.0.0/16")
+}
+
+/// Check whether an IPv4 address string is a multicast address (224.0.0.0/4).
+///
+/// The multicast range is 224.0.0.0 through 239.255.255.255. Returns false
+/// for invalid input.
+///
+/// Examples:
+///   is-multicast?("224.0.0.1")         // => true
+///   is-multicast?("239.255.255.255")   // => true
+///   is-multicast?("223.255.255.255")   // => false
+///   is-multicast?("240.0.0.0")         // => false
+fn is-multicast?(ip-str) {
+    ipv4-in-cidr?(ip-str, "224.0.0.0/4")
+}
+
+/// Compute the broadcast address string for an IPv4 CIDR block.
+///
+/// The broadcast address sets every host bit of the network. For /32 the
+/// broadcast equals the single host address; for /31 it is the upper of the
+/// two addresses. Throws on a malformed CIDR string.
+///
+/// Examples:
+///   broadcast-address("192.168.1.0/24")     // => "192.168.1.255"
+///   broadcast-address("192.168.1.130/26")   // => "192.168.1.191"
+///   broadcast-address("0.0.0.0/0")          // => "255.255.255.255"
+fn broadcast-address(cidr-str) {
+    let net = cidr-network(cidr-str)
+    if net == null {
+        throw("beagle.ip/broadcast-address: invalid CIDR: ${cidr-str}")
+    } else {
+        let network = net[0]
+        let mask = net[1]
+        let wildcard = MASK32 ^ mask
+        ipv4-to-string((network | wildcard) & MASK32)
+    }
+}
+
+/// Count the number of usable host addresses in an IPv4 CIDR block.
+///
+/// For prefixes /0 through /30 this is the total address count minus the
+/// network and broadcast addresses (2^(32-prefix) - 2). Following the
+/// standard small-subnet conventions, a /31 returns 2 (RFC 3021
+/// point-to-point) and a /32 returns 1 (single host). Throws on a malformed
+/// CIDR string.
+///
+/// Examples:
+///   host-count("192.168.1.0/24")   // => 254
+///   host-count("192.168.1.0/30")   // => 2
+///   host-count("192.168.1.0/31")   // => 2
+///   host-count("192.168.1.1/32")   // => 1
+fn host-count(cidr-str) {
+    let net = cidr-network(cidr-str)
+    if net == null {
+        throw("beagle.ip/host-count: invalid CIDR: ${cidr-str}")
+    } else {
+        let mask = net[1]
+        let total = (MASK32 ^ mask) + 1
+        if total <= 2 {
+            total
+        } else {
+            total - 2
+        }
+    }
+}
+
+// ===========================================================================
+// IPv6
+// ===========================================================================
+//
+// IPv6 addresses are represented as a vector of 8 ints, each a 16-bit group in
+// host order. Parsing handles "::" zero-compression. Embedded IPv4 forms (e.g.
+// "::ffff:1.2.3.4") are NOT yet supported and parse as null.
+
+// Value of a hex-digit char code, or -1 if not a hex digit.
+fn hex-digit-val(c) {
+    if c >= 48 && c <= 57 {
+        c - 48
+    } else if c >= 97 && c <= 102 {
+        c - 97 + 10
+    } else if c >= 65 && c <= 70 {
+        c - 65 + 10
+    } else {
+        -1
+    }
+}
+
+// Parse 1-4 hex digits into an Int in [0, 0xFFFF], or null.
+fn parse-hex-group(s) {
+    let n = length(s)
+    if n == 0 || n > 4 {
+        null
+    } else {
+        let mut val = 0
+        let mut i = 0
+        let mut ok = true
+        while i < n && ok {
+            let d = hex-digit-val(char-code(s[i]))
+            if d < 0 {
+                ok = false
+            } else {
+                val = val * 16 + d
+                i = i + 1
+            }
+        }
+        if ok { val } else { null }
+    }
+}
+
+// Split a string on a single-character separator, keeping empty pieces.
+fn split-on-char(s, sep) {
+    let mut parts = []
+    let mut rest = s
+    let mut go = true
+    while go {
+        let idx = index-of(rest, sep)
+        if idx < 0 {
+            parts = push(parts, rest)
+            go = false
+        } else {
+            parts = push(parts, substring(rest, 0, idx))
+            rest = substring(rest, idx + 1, length(rest))
+        }
+    }
+    parts
+}
+
+// Parse a ":"-separated run of hex groups into a vector of ints, or null on any
+// invalid group. Empty string -> [].
+fn parse-hex-run(s) {
+    if length(s) == 0 {
+        []
+    } else {
+        parse-hex-run-helper(split-on-char(s, ":"), 0, [])
+    }
+}
+
+fn parse-hex-run-helper(parts, i, acc) {
+    if i >= length(parts) {
+        acc
+    } else {
+        let g = parse-hex-group(parts[i])
+        if g == null {
+            null
+        } else {
+            parse-hex-run-helper(parts, i + 1, push(acc, g))
+        }
+    }
+}
+
+// Append all elements of b onto a, returning a new vector.
+fn vec-append(a, b) {
+    let mut acc = a
+    let mut i = 0
+    while i < length(b) {
+        acc = push(acc, b[i])
+        i = i + 1
+    }
+    acc
+}
+
+/// Parse an IPv6 address string into a vector of 8 16-bit group ints, or null if
+/// invalid. Handles "::" zero-compression. Embedded-IPv4 forms are unsupported.
+///
+/// Examples:
+///   parse-ipv6("::1")           // => [0, 0, 0, 0, 0, 0, 0, 1]
+///   parse-ipv6("2001:db8::1")   // => [8193, 3512, 0, 0, 0, 0, 0, 1]
+fn parse-ipv6(s) {
+    let dc = index-of(s, "::")
+    if dc >= 0 {
+        let left = substring(s, 0, dc)
+        let right = substring(s, dc + 2, length(s))
+        if index-of(right, "::") >= 0 {
+            null   // more than one "::" is illegal
+        } else {
+            let lg = parse-hex-run(left)
+            let rg = parse-hex-run(right)
+            if lg == null || rg == null {
+                null
+            } else {
+                let zeros = 8 - length(lg) - length(rg)
+                if zeros < 1 {
+                    null   // "::" must compress at least one group
+                } else {
+                    let mut groups = lg
+                    let mut z = 0
+                    while z < zeros {
+                        groups = push(groups, 0)
+                        z = z + 1
+                    }
+                    vec-append(groups, rg)
+                }
+            }
+        }
+    } else {
+        let g = parse-hex-run(s)
+        if g == null || length(g) != 8 {
+            null
+        } else {
+            g
+        }
+    }
+}
+
+/// True if `s` is a valid IPv6 address string.
+fn ipv6?(s) {
+    parse-ipv6(s) != null
+}
+
+// Lowercase hex (no leading zeros) of a non-negative Int.
+fn to-hex-lower(n) {
+    if n == 0 {
+        "0"
+    } else {
+        to-hex-lower-helper(n, "")
+    }
+}
+
+fn to-hex-lower-helper(n, acc) {
+    if n == 0 {
+        acc
+    } else {
+        let digit = n & 0xF
+        let ch = if digit < 10 {
+            char-from-code(48 + digit)
+        } else {
+            char-from-code(97 + digit - 10)
+        }
+        to-hex-lower-helper(n >> 4, ch ++ acc)
+    }
+}
+
+// Find the longest run of consecutive zero groups, returning [start, len]
+// (leftmost on a tie). [-1, 0] if no zeros.
+fn longest-zero-run(groups) {
+    let mut best-start = -1
+    let mut best-len = 0
+    let mut cur-start = -1
+    let mut cur-len = 0
+    let mut i = 0
+    while i < length(groups) {
+        if groups[i] == 0 {
+            if cur-start < 0 {
+                cur-start = i
+                cur-len = 1
+            } else {
+                cur-len = cur-len + 1
+            }
+            if cur-len > best-len {
+                best-len = cur-len
+                best-start = cur-start
+            }
+        } else {
+            cur-start = -1
+            cur-len = 0
+        }
+        i = i + 1
+    }
+    [best-start, best-len]
+}
+
+// Join groups[start, end) as lowercase hex separated by ":". "" if empty range.
+fn format-groups-range(groups, start, end) {
+    let mut acc = ""
+    let mut i = start
+    while i < end {
+        let piece = to-hex-lower(groups[i])
+        if i == start {
+            acc = piece
+        } else {
+            acc = acc ++ ":" ++ piece
+        }
+        i = i + 1
+    }
+    acc
+}
+
+/// Format a vector of 8 16-bit group ints as a canonical IPv6 string (RFC 5952:
+/// lowercase, the longest run of >=2 zero groups compressed to "::", leftmost on
+/// a tie).
+///
+/// Examples:
+///   ipv6-to-string([0, 0, 0, 0, 0, 0, 0, 1])       // => "::1"
+///   ipv6-to-string([8193, 3512, 0, 0, 0, 0, 0, 1])  // => "2001:db8::1"
+fn ipv6-to-string(groups) {
+    let run = longest-zero-run(groups)
+    let rs = run[0]
+    let rl = run[1]
+    if rl >= 2 {
+        format-groups-range(groups, 0, rs) ++ "::" ++ format-groups-range(groups, rs + rl, 8)
+    } else {
+        format-groups-range(groups, 0, 8)
+    }
+}
+
+// All 8 groups zero?
+fn ipv6-all-zero?(g) {
+    g[0] == 0 && g[1] == 0 && g[2] == 0 && g[3] == 0
+        && g[4] == 0 && g[5] == 0 && g[6] == 0 && g[7] == 0
+}
+
+/// True if `s` is the IPv6 loopback address (::1).
+fn is-ipv6-loopback?(s) {
+    let g = parse-ipv6(s)
+    g != null && ipv6-all-zero?([g[0], g[1], g[2], g[3], g[4], g[5], g[6], 0]) && g[7] == 1
+}
+
+/// True if `s` is the IPv6 unspecified address (::).
+fn is-ipv6-unspecified?(s) {
+    let g = parse-ipv6(s)
+    g != null && ipv6-all-zero?(g)
+}
+
+/// True if `s` is an IPv6 link-local address (fe80::/10).
+fn is-ipv6-link-local?(s) {
+    let g = parse-ipv6(s)
+    g != null && (g[0] & 0xFFC0) == 0xFE80
+}
+
+/// True if `s` is an IPv6 unique-local address (fc00::/7).
+fn is-ipv6-unique-local?(s) {
+    let g = parse-ipv6(s)
+    g != null && (g[0] & 0xFE00) == 0xFC00
+}
+
+/// True if `s` is an IPv6 multicast address (ff00::/8).
+fn is-ipv6-multicast?(s) {
+    let g = parse-ipv6(s)
+    g != null && (g[0] & 0xFF00) == 0xFF00
 }

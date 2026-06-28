@@ -2,6 +2,9 @@ namespace beagle.repl-interactive
 
 use beagle.builtin as builtin
 
+/// Entry point for the interactive REPL: switches to the "user" namespace,
+/// prints the banner, runs the read-eval-print loop until `:repl-exit` (or EOF),
+/// then saves the input history.
 fn main() {
     // Switch to "user" namespace so eval'd code lives there
     eval("namespace user")
@@ -19,6 +22,10 @@ fn main() {
     builtin/repl-save-history()
 }
 
+/// Reads one line at the namespace prompt and dispatches it: EOF exits, Ctrl-C
+/// re-prompts, `:`-prefixed lines run commands, otherwise the input is `eval`d
+/// (printing `=> result` or, on error, entering the resume prompt). Recurses
+/// until EOF or a `:repl-exit` throw.
 fn repl-loop() {
     let ns = current-namespace()
     let prompt = ns ++ "> "
@@ -55,6 +62,9 @@ fn repl-loop() {
     }
 }
 
+/// Prompts the user for a value to resume a thrown exception with. `:abort`/`:a`
+/// or EOF aborts (returns null); an empty line re-prompts; otherwise the input
+/// is `eval`d and passed to `resume`, re-prompting if that evaluation errors.
 fn resume-prompt(resume) {
     let input = builtin/repl-read-line("resume> ")
     if input == null || input == ":abort" || input == ":a" {
@@ -73,6 +83,10 @@ fn resume-prompt(resume) {
     }
 }
 
+/// Parses and executes a `:`-prefixed REPL command from `input` (command plus
+/// optional argument): `:quit`/`:q`/`:exit` throws `:repl-exit`, `:help` lists
+/// commands, `:clear` clears the screen, `:ns [name]` shows or switches the
+/// namespace; unknown commands print a hint.
 fn handle-command(input) {
     let space-idx = index-of(input, " ")
     let cmd = if space-idx == -1 {

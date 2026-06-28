@@ -55,11 +55,13 @@ let DEFAULT_SECTION = :default
 // Small string helpers (byte-based, ASCII whitespace)
 // ---------------------------------------------------------------------------
 
+/// True if byte `c` is ASCII whitespace (space, tab, CR, or LF).
 fn ws?(c) {
     c == SPACE || c == TAB || c == CR || c == LF
 }
 
 // Index of the first non-whitespace byte in s[start:end], or end if none.
+/// Index of the first non-whitespace byte in s[start:end], or `end` if none.
 fn skip-ws-forward(s, start, end) {
     let mut i = start
     while i < end && ws?(char-code(s[i])) {
@@ -70,6 +72,7 @@ fn skip-ws-forward(s, start, end) {
 
 // Index one past the last non-whitespace byte in s[start:end].
 // Returns `start` if the whole range is whitespace.
+/// Index one past the last non-whitespace byte in s[start:end]; `start` if the range is all whitespace.
 fn trim-ws-backward(s, start, end) {
     let mut i = end
     while i > start && ws?(char-code(s[i - 1])) {
@@ -79,6 +82,7 @@ fn trim-ws-backward(s, start, end) {
 }
 
 // Trim ASCII whitespace from s[start:end] and return the substring.
+/// Trim ASCII whitespace from s[start:end] and return that substring.
 fn trim-range(s, start, end) {
     let lo = skip-ws-forward(s, start, end)
     let hi = trim-ws-backward(s, lo, end)
@@ -91,6 +95,7 @@ fn trim-range(s, start, end) {
 
 // Strip a single pair of surrounding double quotes from an already-trimmed
 // value, returning the inner text. If not quoted, returns the value as-is.
+/// Strip one pair of surrounding double quotes from an already-trimmed value, returning the inner text; returns the value unchanged if it is not quoted.
 fn unquote-value(v) {
     let n = length(v)
     if n >= 2 && char-code(v[0]) == QUOTE && char-code(v[n - 1]) == QUOTE {
@@ -101,6 +106,7 @@ fn unquote-value(v) {
 }
 
 // Index of the first '=' or ':' in s[start:end], or -1 if neither occurs.
+/// Index of the first '=' or ':' in s[start:end], or -1 if neither occurs.
 fn find-separator(s, start, end) {
     let mut i = start
     let mut found = -1
@@ -115,6 +121,7 @@ fn find-separator(s, start, end) {
 }
 
 // Parse the full INI text into a map of section-keyword -> property map.
+/// Parse INI/.conf `text` into a map of section-keyword -> property map (string keys and string values). Keys before any [section] live under :default. Accepts both '\n' and '\r\n' line endings.
 fn parse(text) {
     let n = length(text)
     let mut result = {}
@@ -149,6 +156,7 @@ fn parse(text) {
 
 // Process one raw line (text[start:end], no terminator). Returns
 // [updated-result, updated-current-section].
+/// Process one raw line (text[start:end], no terminator) against the running parse state. Handles blank lines, ';'/'#' comments, [section] headers, and key=value / key:value properties; returns [updated-result, updated-current-section].
 fn parse-line(text, start, end, result, current) {
     let lo = skip-ws-forward(text, start, end)
     let hi = trim-ws-backward(text, lo, end)
@@ -200,6 +208,7 @@ fn parse-line(text, start, end, result, current) {
 // A value needs quoting on write if trimming it would change it (leading or
 // trailing whitespace) or if it contains a double quote. Quoting preserves
 // those values across a parse round-trip.
+/// True if writing `s` needs surrounding quotes to survive a parse round-trip — i.e. it has leading/trailing whitespace or contains a double quote. Empty strings never need quoting.
 fn value-needs-quoting?(s) {
     let n = length(s)
     if n == 0 {
@@ -223,6 +232,7 @@ fn value-needs-quoting?(s) {
     }
 }
 
+/// Append value `s` to the string builder, wrapping it in double quotes only when value-needs-quoting? is true. Returns null.
 fn write-value!(builder, s) {
     if value-needs-quoting?(s) {
         sb/append-byte!(builder, QUOTE)
@@ -235,6 +245,7 @@ fn write-value!(builder, s) {
 }
 
 // Append all "key=value" lines for one section's property map.
+/// Append one "key=value" line (LF-terminated) per entry of a section's property map to the builder, quoting values as needed. Returns null.
 fn write-section-body!(builder, section) {
     let ks = keys(section)
     let kn = length(ks)
@@ -255,6 +266,7 @@ fn write-section-body!(builder, section) {
 // present) is emitted first WITHOUT a header so its keys round-trip as
 // pre-section keys; all other sections get a [name] header. Uses '\n' line
 // endings and '=' as the separator.
+/// Serialize a parsed-shape map back into INI text. The :default section, if present, is emitted first without a header; every other section gets a [name] header. Uses '\n' line endings and '=' separators, and re-quotes values only when needed so stringify(parse(x)) re-parses equal.
 fn stringify(data) {
     let builder = sb/new(256)
     // Default section first, header-less.
@@ -285,4 +297,75 @@ fn stringify(data) {
         }
     }
     sb/to-string(builder)
+}
+
+// ---------------------------------------------------------------------------
+// Typed getters
+// ---------------------------------------------------------------------------
+//
+// INI stores everything as text, so these read a raw string value out of a
+// parsed-shape map (section-keyword -> string-key -> string-value) and convert
+// it to a typed value. `section` is given as a STRING (the bare [name] text,
+// e.g. "db" or "default"); it is converted to the keyword the parser uses.
+// Each getter returns null when the section or key is absent, and throws a
+// clear error when the value is present but does not parse as the wanted type.
+
+// Look up the raw string value for `section`/`key` in a parsed-shape map, or
+// null when the section or the key is absent. Parsed values are always
+// strings, so a null here unambiguously means "absent".
+/// Look up the raw string value for `section`/`key` in a parsed INI map, or null when the section or key is absent. `section` is the bare header string (e.g. "db").
+fn get-raw(ini, section, key) {
+    let section-map = get(ini, string->keyword(section))
+    if section-map == null {
+        null
+    } else {
+        get(section-map, key)
+    }
+}
+
+/// Read `section`/`key` from a parsed INI map as a Bool. Accepts (case-insensitively) true/false, yes/no, on/off, and 1/0. Returns null when absent; throws when the value is present but is not one of those.
+fn get-bool(ini, section, key) {
+    let raw = get-raw(ini, section, key)
+    if raw == null {
+        null
+    } else {
+        let v = lowercase(raw)
+        if v == "true" || v == "yes" || v == "on" || v == "1" {
+            true
+        } else if v == "false" || v == "no" || v == "off" || v == "0" {
+            false
+        } else {
+            throw("beagle.ini/get-bool: value \"${raw}\" for key \"${key}\" in section \"${section}\" is not a boolean (expected true/false/yes/no/on/off/1/0)")
+        }
+    }
+}
+
+/// Read `section`/`key` from a parsed INI map as an Int (optional leading '-'). Returns null when absent; throws when the value is present but is not a valid integer.
+fn get-int(ini, section, key) {
+    let raw = get-raw(ini, section, key)
+    if raw == null {
+        null
+    } else {
+        let parsed = parse-int(raw)
+        if parsed == null {
+            throw("beagle.ini/get-int: value \"${raw}\" for key \"${key}\" in section \"${section}\" is not an integer")
+        } else {
+            parsed
+        }
+    }
+}
+
+/// Read `section`/`key` from a parsed INI map as a Float (decimal/exponent forms accepted; an integer like "10" becomes 10.0). Returns null when absent; throws when the value is present but is not a valid number.
+fn get-float(ini, section, key) {
+    let raw = get-raw(ini, section, key)
+    if raw == null {
+        null
+    } else {
+        let parsed = parse-float-string(raw)
+        if parsed == null {
+            throw("beagle.ini/get-float: value \"${raw}\" for key \"${key}\" in section \"${section}\" is not a number")
+        } else {
+            parsed
+        }
+    }
 }

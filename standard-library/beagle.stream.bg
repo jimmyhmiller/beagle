@@ -135,6 +135,14 @@ fn close(stream) {
     ensure-closed(stream)
 }
 
+// Participate in the core `Closeable` protocol so `with-open` can manage a Stream.
+extend Stream with Closeable {
+    /// Close the stream, releasing its resources (idempotent; for `with-open`).
+    fn close(stream) {
+        ensure-closed(stream)
+    }
+}
+
 // ============================================================================
 // Stream Combinators - Lazy, Composable Transformations
 // ============================================================================
@@ -150,9 +158,11 @@ fn map(stream, f) {
     })
 }
 
+/// StreamSource that applies a mapper function to each upstream value.
 struct MapSource { upstream, mapper }
 
 extend MapSource with StreamSource {
+    /// Pull the next upstream value and apply the mapper; mapper errors become StreamResult.Error.
     fn source-next(self) {
         let result = next(self.upstream)
         match result {
@@ -167,6 +177,7 @@ extend MapSource with StreamSource {
         }
     }
 
+    /// Close the upstream stream.
     fn source-close(self) {
         close(self.upstream)
     }
@@ -184,9 +195,11 @@ fn filter(stream, pred) {
     })
 }
 
+/// StreamSource that yields only upstream values matching the predicate.
 struct FilterSource { upstream, predicate }
 
 extend FilterSource with StreamSource {
+    /// Pull upstream values until the predicate holds, yielding that value; predicate errors become StreamResult.Error.
     fn source-next(self) {
         let mut found = false
         let mut final_result = null
@@ -217,6 +230,7 @@ extend FilterSource with StreamSource {
         }
     }
 
+    /// Close the upstream stream.
     fn source-close(self) {
         close(self.upstream)
     }
@@ -232,9 +246,11 @@ fn take(stream, n) {
     })
 }
 
+/// StreamSource that yields at most a remaining number of upstream values.
 struct TakeSource { upstream, remaining }
 
 extend TakeSource with StreamSource {
+    /// Yield the next upstream value while the remaining count is positive, decrementing it; otherwise Done.
     fn source-next(self) {
         let count = deref(self.remaining)
         if count <= 0 {
@@ -251,6 +267,7 @@ extend TakeSource with StreamSource {
         }
     }
 
+    /// Close the upstream stream.
     fn source-close(self) {
         close(self.upstream)
     }
@@ -268,9 +285,11 @@ fn take-while(stream, pred) {
     })
 }
 
+/// StreamSource that yields upstream values while the predicate holds, then stops.
 struct TakeWhileSource { upstream, predicate, done }
 
 extend TakeWhileSource with StreamSource {
+    /// Yield the next value while the predicate is true; on the first false, close upstream and return Done. Predicate errors become StreamResult.Error.
     fn source-next(self) {
         if deref(self.done) {
             StreamResult.Done {}
@@ -304,6 +323,7 @@ extend TakeWhileSource with StreamSource {
         }
     }
 
+    /// Close the upstream stream.
     fn source-close(self) {
         close(self.upstream)
     }
@@ -319,9 +339,11 @@ fn skip(stream, n) {
     })
 }
 
+/// StreamSource that discards the first to_skip upstream values, then passes through.
 struct SkipSource { upstream, to_skip }
 
 extend SkipSource with StreamSource {
+    /// Discard the remaining skip count from upstream, then yield the next value; passes through once skipping is complete.
     fn source-next(self) {
         let skip_count = deref(self.to_skip)
         if skip_count > 0 {
@@ -352,6 +374,77 @@ extend SkipSource with StreamSource {
         }
     }
 
+    /// Close the upstream stream.
+    fn source-close(self) {
+        close(self.upstream)
+    }
+}
+
+/// Drop the leading prefix of values for which the predicate holds
+///
+/// Discards values while pred(value) is true. The FIRST value for which pred
+/// returns false — and every value after it — is yielded unchanged; the
+/// predicate is never consulted again once dropping stops. This is the mirror
+/// of take-while: drop-while keeps the tail that take-while discards.
+/// If the predicate throws while dropping, the error becomes a
+/// StreamResult.Error and the stream terminates.
+fn drop-while(stream, pred) {
+    from-source(DropWhileSource {
+        upstream: stream,
+        predicate: pred,
+        dropping: atom(true)
+    })
+}
+
+/// StreamSource that drops the leading prefix matching the predicate, then passes the rest through.
+struct DropWhileSource { upstream, predicate, dropping }
+
+extend DropWhileSource with StreamSource {
+    /// While still dropping, pull upstream values until pred(value) is false, yielding that value and turning dropping off; afterward pass values straight through. Predicate errors become StreamResult.Error.
+    fn source-next(self) {
+        if deref(self.dropping) == false {
+            next(self.upstream)
+        } else {
+            let mut found = false
+            let mut final_result = null
+            loop {
+                if found {
+                    break(final_result)
+                }
+                let result = next(self.upstream)
+                match result {
+                    StreamResult.Value { value } => {
+                        let pred_result = try {
+                            ok(self.predicate(value))
+                        } catch (e) {
+                            err(e)
+                        }
+                        match pred_result {
+                            Result.Ok { value } => {
+                                let still_dropping = value
+                                if still_dropping == false {
+                                    reset!(self.dropping, false)
+                                    final_result = result
+                                    found = true
+                                }
+                                // else: within the dropped prefix — discard and continue loop
+                            },
+                            Result.Err { error } => {
+                                final_result = StreamResult.Error { error: error }
+                                found = true
+                            }
+                        }
+                    },
+                    _ => {
+                        final_result = result
+                        found = true
+                    }
+                }
+            }
+        }
+    }
+
+    /// Close the upstream stream.
     fn source-close(self) {
         close(self.upstream)
     }
@@ -369,9 +462,11 @@ fn flat-map(stream, f) {
     })
 }
 
+/// StreamSource that maps each upstream value to a stream and flattens the results.
 struct FlatMapSource { upstream, mapper, current_inner }
 
 extend FlatMapSource with StreamSource {
+    /// Yield values from the current inner stream; when exhausted, pull the next upstream value, build a new inner stream via the mapper, and continue. Mapper errors become StreamResult.Error.
     fn source-next(self) {
         let mut done = false
         let mut final_result = null
@@ -423,6 +518,7 @@ extend FlatMapSource with StreamSource {
         }
     }
 
+    /// Close the current inner stream (if any) and the upstream stream.
     fn source-close(self) {
         let inner = deref(self.current_inner)
         if inner != null {
@@ -629,6 +725,7 @@ fn file-stream-sized(path, chunk_size) {
     })
 }
 
+/// StreamSource that reads a file as raw byte chunks using async I/O.
 struct FileChunkSource {
     path
     chunk_size
@@ -637,6 +734,7 @@ struct FileChunkSource {
 }
 
 extend FileChunkSource with StreamSource {
+    /// Lazily open the file, read up to chunk_size bytes via async I/O, and yield them; Done at EOF, Error on open/read failure.
     fn source-next(self) {
         let is_eof = deref(self.eof)
         if is_eof {
@@ -682,6 +780,7 @@ extend FileChunkSource with StreamSource {
         }
     }
 
+    /// Close the underlying async file handle if open.
     fn source-close(self) {
         let handle = deref(self.file_handle)
         if handle != null {
@@ -701,109 +800,6 @@ extend FileChunkSource with StreamSource {
 
 use beagle.io as io
 use beagle.ffi as ffi
-
-/// Stream file using synchronous (blocking) I/O
-///
-/// Much faster than async for files since it avoids thread pool overhead.
-/// Uses direct fread() calls instead of the async event loop.
-///
-/// Performance: ~10x faster than async/file-stream for local files.
-///
-/// Use this for:
-/// - Local files where blocking is acceptable
-/// - Batch processing scripts
-/// - Log file analysis
-///
-/// Use async/file-stream for:
-/// - Network-mounted filesystems
-/// - When you need to interleave with other async operations
-///
-/// Example:
-///   stream/file-stream-sync("/var/log/app.log")
-///     |> stream/lines()
-///     |> stream/filter(fn(line) { contains(line, "ERROR") })
-///     |> stream/count()
-fn file-stream-sync(path) {
-    file-stream-sync-sized(path, 65536)  // 64KB chunks
-}
-
-/// Stream file with custom chunk size (synchronous)
-fn file-stream-sync-sized(path, chunk_size) {
-    from-source(FileChunkSourceSync {
-        path: path,
-        chunk_size: chunk_size,
-        file_handle: atom(null),
-        eof: atom(false)
-    })
-}
-
-struct FileChunkSourceSync {
-    path
-    chunk_size
-    file_handle
-    eof
-}
-
-extend FileChunkSourceSync with StreamSource {
-    fn source-next(self) {
-        let is_eof = deref(self.eof)
-        if is_eof {
-            StreamResult.Done {}
-        } else {
-            let handle = deref(self.file_handle)
-            let open_result = if handle == null {
-                io/open(self.path, "r")
-            } else {
-                ok(handle)
-            }
-
-            match open_result {
-                Result.Ok { value } => {
-                    let file = value
-                    if handle == null {
-                        reset!(self.file_handle, file)
-                    }
-
-                    // Read chunk synchronously (NO async overhead!)
-                    let read_result = io/read-bytes(file, self.chunk_size)
-                    match read_result {
-                        Result.Ok { value } => {
-                            if value.length == 0 {
-                                reset!(self.eof, true)
-                                StreamResult.Done {}
-                            } else {
-                                // Convert buffer to string
-                                let str_value = ffi/get-string(value.buffer, 0, value.length)
-                                ffi/deallocate(value.buffer)
-                                StreamResult.Value { value: str_value }
-                            }
-                        },
-                        Result.Err { error } => {
-                            reset!(self.eof, true)
-                            StreamResult.Error { error: error }
-                        }
-                    }
-                },
-                Result.Err { error } => {
-                    reset!(self.eof, true)
-                    StreamResult.Error { error: error }
-                }
-            }
-        }
-    }
-
-    fn source-close(self) {
-        let handle = deref(self.file_handle)
-        if handle != null {
-            try {
-                io/close(handle)
-            } catch (e) {
-                null
-            }
-            reset!(self.file_handle, null)
-        }
-    }
-}
 
 /// Stream file using synchronous (blocking) I/O
 ///
@@ -830,6 +826,7 @@ fn file-stream-sync-sized(path, chunk_size) {
     })
 }
 
+/// StreamSource that reads a file as raw byte chunks using synchronous I/O.
 struct FileChunkSourceSync {
     path
     chunk_size
@@ -838,6 +835,7 @@ struct FileChunkSourceSync {
 }
 
 extend FileChunkSourceSync with StreamSource {
+    /// Lazily open the file, read up to chunk_size bytes via synchronous io, convert the buffer to a string, and yield it; Done at EOF, Error on failure.
     fn source-next(self) {
         let is_eof = deref(self.eof)
         if is_eof {
@@ -885,6 +883,7 @@ extend FileChunkSourceSync with StreamSource {
         }
     }
 
+    /// Close the underlying file handle if open.
     fn source-close(self) {
         let handle = deref(self.file_handle)
         if handle != null {
@@ -920,6 +919,7 @@ fn read-dir-stream(path) {
     })
 }
 
+/// StreamSource that lazily iterates directory entry names.
 struct DirSource {
     path
     entries        // Atom holding the entries vector
@@ -928,6 +928,7 @@ struct DirSource {
 }
 
 extend DirSource with StreamSource {
+    /// Lazily load directory entries on first pull, then yield each entry name by index; Done when exhausted, Error on read failure.
     fn source-next(self) {
         // Lazy load directory entries on first call
         let is_loaded = deref(self.loaded)
@@ -966,6 +967,7 @@ extend DirSource with StreamSource {
         }
     }
 
+    /// No resources to release (entries are plain data).
     fn source-close(self) {
         // No resources to clean up (entries are just data)
         null
@@ -999,6 +1001,7 @@ fn split-on(stream, delimiter) {
     })
 }
 
+/// StreamSource that buffers bytes and yields messages split on a delimiter.
 struct SplitOnSource {
     upstream
     delimiter
@@ -1006,6 +1009,7 @@ struct SplitOnSource {
 }
 
 extend SplitOnSource with StreamSource {
+    /// Yield the next delimiter-separated message from the buffer, pulling more upstream data as needed; emits trailing buffered data when upstream ends.
     fn source-next(self) {
         let mut found = false
         let mut final_result = null
@@ -1056,6 +1060,7 @@ extend SplitOnSource with StreamSource {
         }
     }
 
+    /// Close the upstream stream.
     fn source-close(self) {
         close(self.upstream)
     }
@@ -1091,6 +1096,7 @@ fn by-size(stream, size) {
     })
 }
 
+/// StreamSource that buffers bytes and yields fixed-size chunks.
 struct BySizeSource {
     upstream
     size
@@ -1098,6 +1104,7 @@ struct BySizeSource {
 }
 
 extend BySizeSource with StreamSource {
+    /// Yield a chunk of exactly size bytes from the buffer, pulling more upstream data as needed; emits the leftover when upstream ends.
     fn source-next(self) {
         let mut found = false
         let mut final_result = null
@@ -1144,6 +1151,7 @@ extend BySizeSource with StreamSource {
         }
     }
 
+    /// Close the upstream stream.
     fn source-close(self) {
         close(self.upstream)
     }
@@ -1164,12 +1172,14 @@ fn from-generator(gen) {
     })
 }
 
+/// StreamSource that pulls values from a generator function.
 struct GeneratorSource {
     generator
     stopped        // Atom tracking if generator stopped
 }
 
 extend GeneratorSource with StreamSource {
+    /// Call the generator; yield its value, return Done when it returns null, or Error if it throws.
     fn source-next(self) {
         if deref(self.stopped) {
             StreamResult.Done {}
@@ -1189,6 +1199,7 @@ extend GeneratorSource with StreamSource {
         }
     }
 
+    /// Mark the generator as stopped.
     fn source-close(self) {
         reset!(self.stopped, true)
     }
@@ -1257,11 +1268,13 @@ fn merge(stream1, stream2) {
     })
 }
 
+/// StreamSource that interleaves two upstream streams round-robin.
 struct MergeSource { left, right, left_done, right_done, turn }
 
 // Pull one side of a merge. On Done, mark that side finished and pull the OTHER
 // side (so we never yield Done while a side still has elements). On Error, mark
 // the side finished and propagate. `from-left` selects the side.
+/// Pull one side of a merge, advancing to the other side on Done and propagating Error.
 fn merge-pull(self, from-left) {
     let s = if from-left { self.left } else { self.right }
     let result = next(s)
@@ -1284,6 +1297,7 @@ fn merge-pull(self, from-left) {
 }
 
 extend MergeSource with StreamSource {
+    /// Alternate pulling from the two streams via a turn flag, skipping a finished side; Done when both are exhausted.
     fn source-next(self) {
         let l_done = deref(self.left_done)
         let r_done = deref(self.right_done)
@@ -1303,6 +1317,7 @@ extend MergeSource with StreamSource {
         }
     }
 
+    /// Close both upstream streams.
     fn source-close(self) {
         close(self.left)
         close(self.right)
@@ -1320,9 +1335,11 @@ fn zip(stream1, stream2) {
     })
 }
 
+/// StreamSource that pairs values from two upstream streams.
 struct ZipSource { left, right }
 
 extend ZipSource with StreamSource {
+    /// Pull one value from each side and yield them as a [left, right] pair; ends when either side ends.
     fn source-next(self) {
         let left_result = next(self.left)
         match left_result {
@@ -1340,6 +1357,7 @@ extend ZipSource with StreamSource {
         }
     }
 
+    /// Close both upstream streams.
     fn source-close(self) {
         close(self.left)
         close(self.right)
@@ -1357,25 +1375,30 @@ fn buffered(stream, size) {
     from-source(BufferedSource {
         upstream: stream,
         buffer_size: size,
-        buffer: atom([])
+        buffer: atom([]),
+        pos: atom(0)
     })
 }
 
+/// StreamSource that batches upstream values into an internal buffer.
 struct BufferedSource {
     upstream
     buffer_size
-    buffer         // Atom holding queued values
+    buffer         // Atom holding the current batch (PersistentVector)
+    pos            // Atom: index of the next element to emit (avoids O(n) front-drop)
 }
 
 extend BufferedSource with StreamSource {
+    /// Return the next buffered value, refilling the buffer with up to buffer_size upstream values when empty; Done when upstream is exhausted.
     fn source-next(self) {
         let buf = deref(self.buffer)
-        if core/length(buf) > 0 {
-            // Return buffered value. The buffer is a PersistentVector (built with
-            // push), which is Seqable but not itself a Seq — so use indexed get,
-            // not first (the Seq protocol method, which needs a live seq).
-            let value = core/get(buf, 0)
-            reset!(self.buffer, core/rest(buf))
+        let pos = deref(self.pos)
+        if pos < core/length(buf) {
+            // Emit by index (O(1)) and advance the cursor, rather than rebuilding
+            // the buffer with rest()/drop(1) per emit (which made a full drain
+            // O(n^2)). The batch vector is replaced wholesale on the next refill.
+            let value = core/get(buf, pos)
+            reset!(self.pos, pos + 1)
             StreamResult.Value { value: value }
         } else {
             // Fill buffer
@@ -1402,13 +1425,110 @@ extend BufferedSource with StreamSource {
             if core/length(new_buf) == 0 {
                 StreamResult.Done {}
             } else {
-                let value = core/get(new_buf, 0)
-                reset!(self.buffer, core/rest(new_buf))
-                StreamResult.Value { value: value }
+                // Install the new batch; emit its first element, cursor -> 1.
+                reset!(self.buffer, new_buf)
+                reset!(self.pos, 1)
+                StreamResult.Value { value: core/get(new_buf, 0) }
             }
         }
     }
 
+    /// Close the upstream stream.
+    fn source-close(self) {
+        close(self.upstream)
+    }
+}
+
+/// Yield only the first occurrence of each value, dropping later duplicates
+///
+/// Tracks previously-seen values in an atom-held set, so equality (==) decides
+/// duplication. Lazy: pulls upstream until a not-yet-seen value appears.
+fn distinct(stream) {
+    from-source(DistinctSource {
+        upstream: stream,
+        seen: atom(#{})
+    })
+}
+
+/// StreamSource that yields each upstream value only the first time it is seen.
+struct DistinctSource { upstream, seen }
+
+extend DistinctSource with StreamSource {
+    /// Pull upstream values until one has not been seen before, record it, and yield it; Done/Error pass through.
+    fn source-next(self) {
+        let mut found = false
+        let mut final_result = null
+        loop {
+            if found {
+                break(final_result)
+            }
+            let result = next(self.upstream)
+            match result {
+                StreamResult.Value { value } => {
+                    let seen_set = deref(self.seen)
+                    if core/set-contains?(seen_set, value) == false {
+                        reset!(self.seen, core/set-add(seen_set, value))
+                        final_result = result
+                        found = true
+                    }
+                    // else: duplicate — continue loop to pull the next value
+                },
+                _ => {
+                    final_result = result
+                    found = true
+                }
+            }
+        }
+    }
+
+    /// Close the upstream stream.
+    fn source-close(self) {
+        close(self.upstream)
+    }
+}
+
+/// Yield each intermediate accumulator of a left fold, starting with init
+///
+/// Like reduce, but emits every step: first init, then f(acc, value) for each
+/// upstream value. So scan(s, 0, +) over [1, 2, 3] yields 0, 1, 3, 6.
+/// If f throws, the error becomes a StreamResult.Error and the stream ends.
+fn scan(stream, init, f) {
+    from-source(ScanSource {
+        upstream: stream,
+        accumulator: atom(init),
+        reducer: f,
+        emitted_init: atom(false)
+    })
+}
+
+/// StreamSource that emits init then each running accumulator of a left fold.
+struct ScanSource { upstream, accumulator, reducer, emitted_init }
+
+extend ScanSource with StreamSource {
+    /// Emit the initial accumulator once, then for each upstream value fold it in and yield the new accumulator; reducer errors become StreamResult.Error.
+    fn source-next(self) {
+        if deref(self.emitted_init) == false {
+            reset!(self.emitted_init, true)
+            StreamResult.Value { value: deref(self.accumulator) }
+        } else {
+            let result = next(self.upstream)
+            match result {
+                StreamResult.Value { value } => {
+                    let acc = deref(self.accumulator)
+                    try {
+                        let new_acc = self.reducer(acc, value)
+                        reset!(self.accumulator, new_acc)
+                        StreamResult.Value { value: new_acc }
+                    } catch (e) {
+                        StreamResult.Error { error: e }
+                    }
+                },
+                _ => result
+            }
+        }
+    }
+
+    /// Close the upstream stream.
     fn source-close(self) {
         close(self.upstream)
     }
@@ -1429,9 +1549,11 @@ fn catch-default(stream, default_value) {
     })
 }
 
+/// StreamSource that replaces an upstream error with a default value.
 struct CatchSource { upstream, default }
 
 extend CatchSource with StreamSource {
+    /// Pass through upstream results, substituting the default value for any StreamResult.Error.
     fn source-next(self) {
         let result = next(self.upstream)
         match result {
@@ -1443,6 +1565,7 @@ extend CatchSource with StreamSource {
         }
     }
 
+    /// Close the upstream stream.
     fn source-close(self) {
         close(self.upstream)
     }
@@ -1461,9 +1584,11 @@ fn retry(stream, max_retries) {
     })
 }
 
+/// StreamSource that retries the upstream on error up to max_retries times.
 struct RetrySource { upstream, max_retries, retries }
 
 extend RetrySource with StreamSource {
+    /// Pull from upstream, retrying on error up to max_retries; resets the retry count on success and propagates the error once retries are exhausted.
     fn source-next(self) {
         loop {
             let result = next(self.upstream)
@@ -1485,6 +1610,7 @@ extend RetrySource with StreamSource {
         }
     }
 
+    /// Close the upstream stream.
     fn source-close(self) {
         close(self.upstream)
     }
@@ -1514,6 +1640,7 @@ fn socket-stream-sized(sock, chunk_size) {
     })
 }
 
+/// StreamSource that reads a TCP socket as raw byte chunks.
 struct SocketChunkSource {
     socket
     chunk_size
@@ -1521,6 +1648,7 @@ struct SocketChunkSource {
 }
 
 extend SocketChunkSource with StreamSource {
+    /// Read up to chunk_size bytes from the socket and yield them; Done on EOF/empty read, Error on read failure.
     fn source-next(self) {
         let is_eof = deref(self.eof)
         if is_eof {
@@ -1550,6 +1678,7 @@ extend SocketChunkSource with StreamSource {
         }
     }
 
+    /// Mark the source as EOF; the socket is owned by the caller.
     fn source-close(self) {
         // Socket is managed by caller, just mark as EOF
         reset!(self.eof, true)

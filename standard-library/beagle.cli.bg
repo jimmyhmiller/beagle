@@ -1,5 +1,7 @@
 namespace beagle.cli
 
+use beagle.text as text
+
 // ============================================================================
 // beagle.cli — spec-driven command-line argument parsing (pure Beagle)
 // ============================================================================
@@ -77,21 +79,25 @@ fn add-positional(spec, name, help, required) {
 // ----------------------------------------------------------------------------
 
 // Find a flag entry by its long name. Returns the entry map or null.
+/// Find a flag entry by its long `:name`. Returns the entry map or null.
 fn find-flag-by-name(spec, name) {
     find(fn(e) { get(e, :name) == name }, get(spec, :flags))
 }
 
 // Find an option entry by its long name. Returns the entry map or null.
+/// Find an option entry by its long `:name`. Returns the entry map or null.
 fn find-option-by-name(spec, name) {
     find(fn(e) { get(e, :name) == name }, get(spec, :options))
 }
 
 // Find a flag entry by its single-character short name. Returns entry or null.
+/// Find a flag entry by its single-character `:short` name. Returns entry or null.
 fn find-flag-by-short(spec, short) {
     find(fn(e) { get(e, :short) == short }, get(spec, :flags))
 }
 
 // Find an option entry by its single-character short name. Returns entry or null.
+/// Find an option entry by its single-character `:short` name. Returns entry or null.
 fn find-option-by-short(spec, short) {
     find(fn(e) { get(e, :short) == short }, get(spec, :options))
 }
@@ -102,6 +108,8 @@ fn find-option-by-short(spec, short) {
 
 // Seed the result options map: every flag defaults to false, every option to
 // its declared :default (or null), and :help to false.
+/// Build the initial options map: each flag and `:help` default to false, each
+/// option to its declared `:default` (or null). Returns the seeded map.
 fn seed-defaults(spec) {
     let with-flags = reduce(fn(acc, e) {
         assoc(acc, get(e, :name), false)
@@ -117,24 +125,28 @@ fn seed-defaults(spec) {
 
 // Mutable parse state lives in an atom holding a map:
 //   {:options map :positionals vector :errors vector}
+/// Create a fresh parse-state atom holding {:options seeded :positionals [] :errors []}.
 fn st-new(spec) {
     atom({:options seed-defaults(spec)
           :positionals []
           :errors []})
 }
 
+/// Set `name` to `value` in the state atom's `:options` map (mutates via swap!).
 fn st-set-option(state, name, value) {
     swap!(state, fn(s) {
         assoc(s, :options, assoc(get(s, :options), name, value))
     })
 }
 
+/// Append `value` to the state atom's `:positionals` vector (mutates via swap!).
 fn st-add-positional(state, value) {
     swap!(state, fn(s) {
         assoc(s, :positionals, push(get(s, :positionals), value))
     })
 }
 
+/// Append error string `msg` to the state atom's `:errors` vector (mutates via swap!).
 fn st-add-error(state, msg) {
     swap!(state, fn(s) {
         assoc(s, :errors, push(get(s, :errors), msg))
@@ -175,12 +187,15 @@ fn parse(argv, spec) {
 }
 
 // An argument is a long option if it begins with "--" and is longer than 2.
+/// True if `arg` is a long option: begins with "--" and is longer than 2 chars.
 fn is-long-arg(arg) {
     length(arg) > 2 && starts-with?(arg, "--")
 }
 
 // An argument is a short option if it begins with "-", is longer than 1, and
 // is not "--" and not a negative number like "-5".
+/// True if `arg` is a short option: starts with a single "-", longer than 1,
+/// not "--", and not a negative number (char after "-" is not a digit).
 fn is-short-arg(arg) {
     if length(arg) < 2 {
         false
@@ -200,6 +215,8 @@ fn is-short-arg(arg) {
 }
 
 // Handle a "--..." token. Returns the next index to read.
+/// Handle a "--..." token (flag, --help, --name=value, or --name value option),
+/// updating state and returning the next argv index to read.
 fn parse-long(state, spec, argv, arg, i, n) {
     // Strip leading "--".
     let body = substring(arg, 2, length(arg))
@@ -240,6 +257,9 @@ fn parse-long(state, spec, argv, arg, i, n) {
 }
 
 // Apply a "--name=value" where the option type is resolved by name.
+/// Apply a "--name=value": set the option if `name` is an option; if it is a
+/// flag, record an error (flags take no value) but still mark it true; else
+/// record an unknown-option error.
 fn apply-long-option(state, spec, name, value) {
     let opt = find-option-by-name(spec, name)
     if opt != null {
@@ -257,6 +277,8 @@ fn apply-long-option(state, spec, name, value) {
 }
 
 // Handle a "-..." token (possibly a cluster of short flags). Returns next index.
+/// Handle a "-..." token (single short flag/option or a cluster), updating
+/// state and returning the next argv index to read.
 fn parse-short(state, spec, argv, arg, i, n) {
     // Strip leading "-".
     let cluster = substring(arg, 1, length(arg))
@@ -271,6 +293,9 @@ fn parse-short(state, spec, argv, arg, i, n) {
 // Walk each char in a short cluster. A flag char sets its flag true; an option
 // char consumes either the remainder of the cluster (e.g. -ovalue) or the next
 // argv token (-o value).
+/// Walk each char of a short cluster: flag chars set their flag true; an option
+/// char consumes the rest of the cluster (-ovalue) or the next argv token
+/// (-o value). Records errors for unknown chars / missing values. Returns next index.
 fn parse-short-cluster(state, spec, argv, cluster, i, n) {
     let clen = length(cluster)
     let mut j = 0
@@ -319,6 +344,8 @@ fn parse-short-cluster(state, spec, argv, cluster, i, n) {
 // Finalization: check required options / positionals
 // ----------------------------------------------------------------------------
 
+/// Finish parsing: if --help was given, skip validation; otherwise check
+/// required options and positionals. Returns the dereferenced result map.
 fn finalize(state, spec) {
     let s = deref(state)
     let help-requested = get(get(s, :options), :help)
@@ -332,6 +359,7 @@ fn finalize(state, spec) {
     }
 }
 
+/// Record a "missing required option" error for each required option left null. Returns null.
 fn check-required-options(state, spec) {
     let opts = get(deref(state), :options)
     for e in get(spec, :options) {
@@ -345,6 +373,8 @@ fn check-required-options(state, spec) {
     null
 }
 
+/// Record a "missing required positional" error for each required positional
+/// not supplied (by position). Returns null.
 fn check-required-positionals(state, spec) {
     let positionals = get(deref(state), :positionals)
     let given = length(positionals)
@@ -356,6 +386,91 @@ fn check-required-positionals(state, spec) {
         idx = idx + 1
     }
     null
+}
+
+// ----------------------------------------------------------------------------
+// Typed parsed-result accessors
+// ----------------------------------------------------------------------------
+//
+// `parse` returns {:options map ...}. An option holds its raw string value (or
+// its declared default); a flag holds a Bool. These helpers read an option by
+// `name` out of that map and coerce it, returning null when the option is
+// absent (its stored value is null) and throwing a clear error when a present
+// value cannot be coerced to the requested type. They use the same
+// option-lookup style as the rest of the module: get(get(parsed, :options), name).
+
+/// Read option `name` from a parsed result, coercing its value to an Int.
+/// Returns null when the option is absent (its stored value is null). Throws a
+/// clear error when the value is present but is not a valid integer.
+fn get-int(parsed, name) {
+    let value = get(get(parsed, :options), name)
+    if value == null {
+        null
+    } else {
+        let n = parse-int(value)
+        if n == null {
+            throw("beagle.cli/get-int: option ${name} value ${value} is not a valid integer")
+        } else {
+            n
+        }
+    }
+}
+
+/// Read option `name` from a parsed result, coercing its value to a Float.
+/// Returns null when the option is absent (its stored value is null). Throws a
+/// clear error when the value is present but is not a valid float.
+fn get-float(parsed, name) {
+    let value = get(get(parsed, :options), name)
+    if value == null {
+        null
+    } else {
+        let f = text/parse-float(value)
+        if f == null {
+            throw("beagle.cli/get-float: option ${name} value ${value} is not a valid float")
+        } else {
+            f
+        }
+    }
+}
+
+/// Read option `name` from a parsed result, coercing its value to a Bool.
+/// A flag stored as true/false is returned as-is; a string option value must be
+/// "true" or "false". Returns null when the option is absent (its stored value
+/// is null). Throws a clear error on any other present value.
+fn get-bool(parsed, name) {
+    let value = get(get(parsed, :options), name)
+    if value == null {
+        null
+    } else {
+        if value == true {
+            true
+        } else {
+            if value == false {
+                false
+            } else {
+                if value == "true" {
+                    true
+                } else {
+                    if value == "false" {
+                        false
+                    } else {
+                        throw("beagle.cli/get-bool: option ${name} value ${value} is not a valid boolean")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Read option `name` from a parsed result, returning `default` when the option
+/// is absent (its stored value is null) and the stored value otherwise.
+fn get-or(parsed, name, default) {
+    let value = get(get(parsed, :options), name)
+    if value == null {
+        default
+    } else {
+        value
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -375,6 +490,7 @@ fn help-text(spec) {
         ++ flags-section
 }
 
+/// Build the "Usage: prog [options] <required> [optional]" line from the spec.
 fn build-usage-line(spec) {
     let prog = get(spec, :prog)
     let has-flags = length(get(spec, :flags)) > 0
@@ -395,6 +511,7 @@ fn build-usage-line(spec) {
     }, with-opts, get(spec, :positionals))
 }
 
+/// Build the "Arguments:" help section listing positionals, or "" if none.
 fn build-positionals-section(spec) {
     let ps = get(spec, :positionals)
     if length(ps) == 0 {
@@ -406,6 +523,8 @@ fn build-positionals-section(spec) {
     }
 }
 
+/// Build the "Options:" help section listing each option (short/long, help,
+/// and a "(required)" marker), or "" if there are no options.
 fn build-options-section(spec) {
     let os = get(spec, :options)
     if length(os) == 0 {
@@ -425,6 +544,8 @@ fn build-options-section(spec) {
     }
 }
 
+/// Build the "Flags:" help section listing each flag plus the always-present
+/// "-h, --help" line.
 fn build-flags-section(spec) {
     let fs = get(spec, :flags)
     let help-line = "\n  " ++ pad-right("-h, --help", 26, " ") ++ "Show this help message"

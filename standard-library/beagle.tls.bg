@@ -1,0 +1,67 @@
+namespace beagle.tls
+
+// TLS client over rustls (the Mozilla webpki root store, ring crypto).
+//
+// These are SYNCHRONOUS/blocking calls: each connect/read/write blocks the
+// calling OS thread for the duration of the network I/O. That is fine for a
+// client request on the cooperative scheduler (the program is waiting on the
+// response anyway); run on a dedicated `thread()` if you need concurrency.
+
+use beagle._tls as tls
+use beagle.string-builder as sb
+
+/// Open a TLS connection to `host`:`port`, returning an opaque connection
+/// handle. Throws if the TCP connect, TLS handshake, or certificate
+/// verification fails.
+///
+/// Examples:
+///   let c = connect("example.com", 443)
+fn connect(host, port) {
+    let h = tls/connect(host, port)
+    if h == -1 {
+        throw("beagle.tls/connect: failed to connect to ${host}:${port} (DNS, refused, or certificate error)")
+    } else {
+        h
+    }
+}
+
+/// Write `data` (a string, byte-faithful) over the TLS connection. Returns the
+/// number of bytes written. Throws on a write error.
+fn write(conn, data) {
+    let n = tls/write(conn, data)
+    if n == -1 {
+        throw("beagle.tls/write: write failed (connection closed?)")
+    } else {
+        n
+    }
+}
+
+/// Read up to `n` bytes of plaintext from the TLS connection, returning them as
+/// a byte-faithful string. Returns "" at end-of-stream.
+fn read(conn, n) {
+    tls/read(conn, n)
+}
+
+/// Read everything until end-of-stream, returning the full body as a string.
+/// (Suitable for HTTP responses sent with `Connection: close`.)
+fn read-all(conn) {
+    let builder = sb/new(4096)
+    read-all-into(conn, builder)
+    sb/to-string(builder)
+}
+
+/// Internal: append successive reads into `builder` until end-of-stream.
+fn read-all-into(conn, builder) {
+    let chunk = read(conn, 65536)
+    if chunk == "" {
+        null
+    } else {
+        sb/append!(builder, chunk)
+        read-all-into(conn, builder)
+    }
+}
+
+/// Close the TLS connection (sends a close_notify and releases the handle).
+fn close(conn) {
+    tls/close(conn)
+}

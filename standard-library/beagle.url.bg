@@ -20,6 +20,8 @@ use beagle.string-builder as sb
 
 // Uppercase hex digit (0..15 -> "0".."F"). Errors loudly on out-of-range input
 // so codec bugs surface immediately rather than producing silent garbage.
+/// Map a nibble value 0..15 to its uppercase hex character ("0".."9", "A".."F").
+/// Throws if `n` is outside 0..15 so codec bugs surface immediately.
 fn hex-digit(n) {
     if n >= 0 && n <= 9 {
         char-from-code(48 + n)        // '0'..'9'
@@ -34,6 +36,8 @@ fn hex-digit(n) {
 
 // Parse a single hex character (its char code) into 0..15, or -1 if it is not
 // a hex digit. Accepts both upper and lower case.
+/// Convert a hex-digit char code into its value 0..15 (upper or lower case),
+/// or -1 if `code` is not a hex digit.
 fn hex-value(code) {
     if code >= 48 && code <= 57 {
         code - 48                     // '0'..'9'
@@ -51,6 +55,8 @@ fn hex-value(code) {
 }
 
 // True for the RFC 3986 "unreserved" set: A-Z a-z 0-9 - _ . ~
+/// True if byte `b` is in the RFC 3986 unreserved set (A-Z a-z 0-9 - _ . ~),
+/// i.e. a byte that need not be percent-encoded.
 fn unreserved-byte?(b) {
     let upper = b >= 65 && b <= 90
     let lower = b >= 97 && b <= 122
@@ -66,6 +72,9 @@ fn unreserved-byte?(b) {
 // `bytes-out` (a string-builder used purely as a byte scratch buffer), then
 // percent-encode/copy each byte into `result` according to whether it is
 // unreserved.
+/// Percent-encode a single character `ch` into the `result` byte-builder:
+/// unreserved bytes are copied verbatim, all others emitted as %XX (uppercase
+/// hex) over the character's UTF-8 bytes. Returns null.
 fn encode-char-into(result, ch) {
     let scratch = sb/new(4)
     sb/append-char!(scratch, ch)
@@ -93,6 +102,8 @@ fn encode-char-into(result, ch) {
 // unreserved set A-Za-z0-9-_.~ is encoded as %XX (uppercase hex).
 //
 //   (encode-component "a b&c")  => "a%20b%26c"
+/// Percent-encode string `s` as a URI component: every byte outside the
+/// unreserved set A-Za-z0-9-_.~ becomes %XX (uppercase hex). Returns a new string.
 fn encode-component(s) {
     let result = sb/new(length(s) * 2 + 8)
     let n = length(s)
@@ -110,12 +121,17 @@ fn encode-component(s) {
 // followed by two hex digits) is left verbatim.
 //
 //   (decode-component "a%20b%26c")  => "a b&c"
+/// Decode a percent-encoded component string: %XX -> byte, '+' kept literal,
+/// malformed '%' left verbatim. For form decoding (where '+' is a space) use
+/// decode-form/parse-query instead. Returns a new string.
 fn decode-component(s) {
     decode-into(s, false)
 }
 
 // Decode with form semantics: '+' decodes to a space (0x20). Used by parse-query
 // for application/x-www-form-urlencoded values.
+/// Decode `s` with application/x-www-form-urlencoded semantics: '+' becomes a
+/// space and %XX becomes its byte. Returns a new string.
 fn decode-form(s) {
     decode-into(s, true)
 }
@@ -123,6 +139,9 @@ fn decode-form(s) {
 // Shared decode driver. `plus-is-space` selects form vs component handling of '+'.
 // Bytes are accumulated in a byte-level builder so the final to-string
 // reinterprets the decoded byte stream as UTF-8.
+/// Shared decode driver for decode-component/decode-form. When `plus-is-space`
+/// is true, '+' decodes to a space; otherwise it stays literal. Decoded bytes
+/// are reassembled as UTF-8. Returns a new string.
 fn decode-into(s, plus-is-space) {
     let result = sb/new(length(s) + 8)
     let n = length(s)
@@ -160,6 +179,8 @@ fn decode-into(s, plus-is-space) {
 }
 
 // Append the UTF-8 bytes of a single character to a byte builder.
+/// Append the raw UTF-8 bytes of a single character `ch` onto the `result`
+/// byte-builder. Returns null.
 fn append-char-bytes(result, ch) {
     let scratch = sb/new(4)
     sb/append-char!(scratch, ch)
@@ -183,6 +204,10 @@ fn append-char-bytes(result, ch) {
 // are skipped. On duplicate keys, the last value wins.
 //
 //   (parse-query "x=1&y=hello%20world")  => {"x" "1", "y" "hello world"}
+/// Parse an x-www-form-urlencoded query string into a map of string keys to
+/// string values (both form-decoded). A leading '?' is stripped, empty pairs
+/// from "&&" are skipped, a key without '=' maps to "", and on duplicate keys
+/// the last value wins.
 fn parse-query(s) {
     let trimmed = if length(s) > 0 && char-code(s[0]) == 63 {   // '?'
         substring(s, 1, length(s))
@@ -209,6 +234,8 @@ fn parse-query(s) {
 }
 
 // Parse one "key=value" pair and assoc it into the map.
+/// Form-decode one "key=value" pair (or bare "key", which yields "") and assoc
+/// it into map `m`, returning the updated map.
 fn parse-pair-into(m, pair) {
     let eq = index-of-char(pair, 61)                           // '='
     if eq < 0 {
@@ -221,6 +248,8 @@ fn parse-pair-into(m, pair) {
 }
 
 // Index of the first character with char-code `code`, or -1.
+/// Return the index of the first character in `s` whose char-code equals `code`,
+/// or -1 if none is found.
 fn index-of-char(s, code) {
     let n = length(s)
     let mut i = 0
@@ -240,6 +269,9 @@ fn index-of-char(s, code) {
 // cleanly through parse-query). Key order follows the map's key iteration.
 //
 //   (build-query {"x" "1", "y" "hello world"})  => "x=1&y=hello%20world"
+/// Build an x-www-form-urlencoded query string from map `m`. Keys and values are
+/// coerced to strings and percent-encoded with component rules (space -> %20),
+/// joined by '&' in the map's key-iteration order. Round-trips through parse-query.
 fn build-query(m) {
     let ks = keys(m)
     let kn = length(ks)
@@ -261,6 +293,8 @@ fn build-query(m) {
 
 // Coerce a key/value to a string. Keywords are converted to their name; other
 // non-strings go through to-string.
+/// Coerce a query key/value to a string: keywords become their name, existing
+/// strings pass through, everything else goes through to-string.
 fn coerce-string(x) {
     if keyword?(x) {
         keyword->string(x)
@@ -273,8 +307,248 @@ fn coerce-string(x) {
     }
 }
 
-fn main() {
-    println(encode-component("a b&c"))
-    println(decode-component("a%20b%26c"))
-    "ok"
+// ---------------------------------------------------------------------------
+// Query string parse — duplicate-preserving variant
+// ---------------------------------------------------------------------------
+
+// Like parse-query but never drops repeated keys. Where parse-query keeps only
+// the last value for a duplicated key, parse-query-multi collects every value
+// in encounter order. Each map value is therefore always a vector of strings.
+/// Parse an x-www-form-urlencoded query string into a map of string keys to
+/// vectors of string values, preserving duplicate keys in encounter order
+/// (the complement of parse-query, which is last-wins). A leading '?' is
+/// stripped, empty pairs from "&&" are skipped, and a bare key (no '=') yields
+/// a single empty-string value. "a=1&a=2" => {"a" ["1", "2"]}.
+fn parse-query-multi(s) {
+    let trimmed = if length(s) > 0 && char-code(s[0]) == 63 {   // '?'
+        substring(s, 1, length(s))
+    } else {
+        s
+    }
+    let mut result = {}
+    let n = length(trimmed)
+    let mut start = 0
+    let mut i = 0
+    while i <= n {
+        if i == n || char-code(trimmed[i]) == 38 {             // '&' or end
+            if i > start {
+                let pair = substring(trimmed, start, i)
+                result = parse-pair-multi-into(result, pair)
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    result
 }
+
+// Form-decode one "key=value" pair and append its value onto the key's vector,
+// creating a fresh single-element vector for a key seen for the first time.
+/// Form-decode one "key=value" pair (or bare "key", which yields "") and append
+/// its value onto the existing vector for that key in map `m`, creating a new
+/// one-element vector for a first-seen key. Returns the updated map.
+fn parse-pair-multi-into(m, pair) {
+    let eq = index-of-char(pair, 61)                           // '='
+    let k = if eq < 0 {
+        decode-form(pair)
+    } else {
+        decode-form(substring(pair, 0, eq))
+    }
+    let v = if eq < 0 {
+        ""
+    } else {
+        decode-form(substring(pair, eq + 1, length(pair)))
+    }
+    if contains?(m, k) {
+        assoc(m, k, push(get(m, k), v))
+    } else {
+        assoc(m, k, [v])
+    }
+}
+
+// ---------------------------------------------------------------------------
+// URL parse / format
+// ---------------------------------------------------------------------------
+
+// A parsed URL, as produced by parse-url. `port` is null when the authority
+// carries no numeric port; `query` and `fragment` are null when their leading
+// delimiter ('?' / '#') was absent (an empty string means the delimiter was
+// present but nothing followed it). `query` is kept as the raw, undecoded
+// string — feed it to parse-query / parse-query-multi to decode.
+/// A parsed URL with fields scheme, host, port, path, query and fragment, as
+/// returned by parse-url. port is an Int or null; query/fragment are the raw
+/// strings after '?'/'#' or null when absent; path is "" when none is present.
+struct Url {
+    scheme
+    host
+    port
+    path
+    query
+    fragment
+}
+
+// Index of the LAST character whose char-code is `code`, or -1 if none.
+/// Return the index of the last character in `s` whose char-code equals `code`,
+/// or -1 if none is found.
+fn last-index-of-char(s, code) {
+    let n = length(s)
+    let mut i = 0
+    let mut found = -1
+    while i < n {
+        if char-code(s[i]) == code {
+            found = i
+        }
+        i = i + 1
+    }
+    found
+}
+
+// True only for a NON-EMPTY string consisting entirely of ASCII digits 0-9.
+/// True when `s` is non-empty and every character is an ASCII digit 0-9.
+fn all-digits?(s) {
+    let n = length(s)
+    if n == 0 {
+        false
+    } else {
+        let mut i = 0
+        let mut ok = true
+        while i < n {
+            let c = char-code(s[i])
+            if c < 48 || c > 57 {
+                ok = false
+            }
+            i = i + 1
+        }
+        ok
+    }
+}
+
+// Parse an absolute, hierarchical URL of the form
+//   scheme://host[:port][/path][?query][#fragment]
+// into a Url struct. The "://" separator is required; a missing separator or a
+// missing host is a hard error. The port is split off only when the text after
+// the LAST ':' in the authority is all digits, so userinfo ("user:pass@host")
+// and bracketed IPv6 ("[::1]") colons stay in `host`. The query and fragment
+// are returned raw (undecoded).
+/// Parse an absolute URL "scheme://host[:port][/path][?query][#fragment]" into
+/// a Url struct. Throws if the "://" separator or the host is missing. port is
+/// null unless a trailing all-digit port is present; query/fragment are the raw
+/// strings (null when their delimiter is absent); path is "" when none is given.
+fn parse-url(s) {
+    // Split off the fragment (everything after the first '#').
+    let hash = index-of-char(s, 35)                            // '#'
+    let fragment = if hash < 0 {
+        null
+    } else {
+        substring(s, hash + 1, length(s))
+    }
+    let no-frag = if hash < 0 {
+        s
+    } else {
+        substring(s, 0, hash)
+    }
+
+    // Split off the query (everything after the first '?').
+    let qmark = index-of-char(no-frag, 63)                     // '?'
+    let query = if qmark < 0 {
+        null
+    } else {
+        substring(no-frag, qmark + 1, length(no-frag))
+    }
+    let no-query = if qmark < 0 {
+        no-frag
+    } else {
+        substring(no-frag, 0, qmark)
+    }
+
+    // Require the "://" scheme separator.
+    let colon = index-of-char(no-query, 58)                    // ':'
+    let has-sep = colon >= 0 && colon + 2 < length(no-query) && char-code(no-query[colon + 1]) == 47 && char-code(no-query[colon + 2]) == 47  // ':' followed by '//'
+    if !has-sep {
+        throw("beagle.url/parse-url: missing scheme separator '://' in: " ++ s)
+    }
+    let scheme = substring(no-query, 0, colon)
+    if length(scheme) == 0 {
+        throw("beagle.url/parse-url: empty scheme in: " ++ s)
+    }
+
+    // Authority + path follow "://".
+    let after = substring(no-query, colon + 3, length(no-query))
+    let slash = index-of-char(after, 47)                       // '/'
+    let authority = if slash < 0 {
+        after
+    } else {
+        substring(after, 0, slash)
+    }
+    let path = if slash < 0 {
+        ""
+    } else {
+        substring(after, slash, length(after))
+    }
+    if length(authority) == 0 {
+        throw("beagle.url/parse-url: missing host in: " ++ s)
+    }
+
+    // Split host[:port] on a TRAILING all-digit port only.
+    let pcolon = last-index-of-char(authority, 58)             // ':'
+    let port-str = if pcolon < 0 {
+        ""
+    } else {
+        substring(authority, pcolon + 1, length(authority))
+    }
+    let port-is-numeric = pcolon >= 0 && all-digits?(port-str)
+    let host = if port-is-numeric {
+        substring(authority, 0, pcolon)
+    } else {
+        authority
+    }
+    let port = if port-is-numeric {
+        let p = parse-int(port-str)
+        if p == null {
+            throw("beagle.url/parse-url: invalid port: " ++ port-str)
+        }
+        p
+    } else {
+        null
+    }
+    if length(host) == 0 {
+        throw("beagle.url/parse-url: missing host in: " ++ s)
+    }
+
+    Url {
+        scheme: scheme,
+        host: host,
+        port: port,
+        path: path,
+        query: query,
+        fragment: fragment,
+    }
+}
+
+// Reconstruct a URL string from a Url struct. This is the inverse of parse-url
+// for any URL parse-url accepts: a null port/query/fragment drops its delimiter,
+// while an empty-string query/fragment re-emits the bare '?'/'#'.
+/// Reconstruct a URL string from a Url struct (the inverse of parse-url). Emits
+/// ":port" only when port is non-null, "?query" only when query is non-null,
+/// and "#fragment" only when fragment is non-null; an empty-string query or
+/// fragment still re-emits its leading '?' or '#'.
+fn format-url(u) {
+    let port-part = if u.port == null {
+        ""
+    } else {
+        ":" ++ to-string(u.port)
+    }
+    let query-part = if u.query == null {
+        ""
+    } else {
+        "?" ++ u.query
+    }
+    let frag-part = if u.fragment == null {
+        ""
+    } else {
+        "#" ++ u.fragment
+    }
+    u.scheme ++ "://" ++ u.host ++ port-part ++ u.path ++ query-part ++ frag-part
+}
+
+/// Demo entry point exercising encode-component/decode-component; returns "ok".

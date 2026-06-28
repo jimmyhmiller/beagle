@@ -17,10 +17,13 @@ let sessions_atom = atom({})
 // When non-null, holds {:error, :resume_atom}.
 let main_crash_atom = atom(null)
 
+/// Register the atom that repl-main uses to publish a main-thread crash.
+/// `a` becomes the value held by `main_crash_atom` (a holder atom of {:error, :resume_atom}).
 fn register-main-crash-atom(a) {
     reset!(main_crash_atom, a)
 }
 
+/// Return the existing session for `session_id`, or create, register, and return a new one.
 fn get-or-create-session(session_id) {
     let sessions = deref(sessions_atom)
     let existing = get(sessions, session_id)
@@ -36,17 +39,20 @@ fn get-or-create-session(session_id) {
     }
 }
 
+/// Remove `session_id` from the global session registry.
 fn remove-session(session_id) {
     swap!(sessions_atom, fn(sessions) {
         dissoc(sessions, session_id)
     })
 }
 
+/// JSON-encode `response` and write it as a newline-terminated line to the client socket.
 fn send-response(client, response) {
     let json = json-encode(response)
     socket/write(client, json ++ "\n")
 }
 
+/// Decode a single JSON `line`, returning the parsed value or null if it fails to parse.
 fn parse-json-line(line) {
     try {
         json-decode(line)
@@ -55,6 +61,9 @@ fn parse-json-line(line) {
     }
 }
 
+/// Handle an "eval" op: evaluate `code` in the session named by `msg`, blocking until the
+/// result atom is filled, then stream each response back to the client. Sends an error
+/// response if the session, id, or code fields are missing.
 fn handle-eval(client, msg) {
     let session_id = get(msg, "session")
     let request_id = get(msg, "id")
@@ -78,6 +87,9 @@ fn handle-eval(client, msg) {
     }
 }
 
+/// Handle a "resume" op: resume a suspended computation in the named session with `code`
+/// (defaulting to "null"), streaming responses back. Errors if session/id are missing or
+/// the session is not found.
 fn handle-resume(client, msg) {
     let session_id = get(msg, "session")
     let request_id = get(msg, "id")
@@ -109,6 +121,8 @@ fn handle-resume(client, msg) {
     }
 }
 
+/// Handle an "abort" op: abort the in-flight computation in the named session and stream
+/// responses back. Errors if the session field is missing or the session is not found.
 fn handle-abort(client, msg) {
     let session_id = get(msg, "session")
     let request_id = get(msg, "id")
@@ -138,6 +152,8 @@ fn handle-abort(client, msg) {
     }
 }
 
+/// Handle an "interrupt" op: signal the named session to interrupt and reply with a "done"
+/// status. Errors if the session field is missing or the session is not found.
 fn handle-interrupt(client, msg) {
     let session_id = get(msg, "session")
     let request_id = get(msg, "id")
@@ -160,6 +176,8 @@ fn handle-interrupt(client, msg) {
     }
 }
 
+/// Handle a "main-status" op: report whether the main thread is "running" or "suspended"
+/// (after a crash), including the crash error when suspended.
 fn handle-main-status(client, msg) {
     let request_id = get(msg, "id")
     let crash_holder = deref(main_crash_atom)
@@ -179,6 +197,8 @@ fn handle-main-status(client, msg) {
     }
 }
 
+/// Handle a "main-resume" op: resume a crashed main thread by writing {:op "resume", :code}
+/// to its resume atom. Errors if there is no main-thread crash to resume.
 fn handle-main-resume(client, msg) {
     let request_id = get(msg, "id")
     let code = get(msg, "code")
@@ -200,6 +220,8 @@ fn handle-main-resume(client, msg) {
     }
 }
 
+/// Handle a "main-abort" op: abort a crashed main thread by writing {:op "abort"} to its
+/// resume atom. Errors if there is no main-thread crash to abort.
 fn handle-main-abort(client, msg) {
     let request_id = get(msg, "id")
     let crash_holder = deref(main_crash_atom)
@@ -220,6 +242,7 @@ fn handle-main-abort(client, msg) {
     }
 }
 
+/// Handle a "describe" op: reply with the supported ops and beagle/protocol version info.
 fn handle-describe(client, msg) {
     let request_id = get(msg, "id")
     let ops = ["eval", "resume", "abort", "interrupt", "describe", "ls-sessions", "close", "main-status", "main-resume", "main-abort"]
@@ -228,6 +251,7 @@ fn handle-describe(client, msg) {
     send-response(client, {:id request_id, :ops ops, :versions versions, :status done_status})
 }
 
+/// Handle an "ls-sessions" op: reply with the list of currently registered session ids.
 fn handle-ls-sessions(client, msg) {
     let request_id = get(msg, "id")
     let sessions = deref(sessions_atom)
@@ -236,6 +260,8 @@ fn handle-ls-sessions(client, msg) {
     send-response(client, {:id request_id, :sessions session_ids, :status done_status})
 }
 
+/// Handle a "close" op: close and unregister the named session (if present) and reply with
+/// a "done" status. Errors if the session field is missing.
 fn handle-close(client, msg) {
     let session_id = get(msg, "session")
     let request_id = get(msg, "id")
@@ -257,6 +283,8 @@ fn handle-close(client, msg) {
     }
 }
 
+/// Dispatch a decoded request `msg` to the matching op handler based on its "op" field.
+/// Sends an error response if "op" is missing or unrecognized.
 fn handle-message(client, msg) {
     let op = get(msg, "op")
 
@@ -309,6 +337,8 @@ fn handle-message(client, msg) {
     }
 }
 
+/// Split `buffer ++ data` on newlines, returning {:lines complete-lines, :buffer leftover}
+/// where `leftover` is the trailing partial line to carry into the next read.
 fn extract-lines(data, buffer) {
     let combined = buffer ++ data
     let parts = core/split(combined, "\n")
@@ -329,6 +359,8 @@ fn extract-lines(data, buffer) {
     }
 }
 
+/// Read/parse loop for one connected client: accumulate socket data, decode each JSON line,
+/// dispatch via handle-message, and close the socket when the peer disconnects or errors.
 fn handle-client(client) {
     let mut buffer = ""
     let mut running = true
@@ -375,6 +407,7 @@ fn handle-client(client) {
     }
 }
 
+/// Start the REPL server on `host`:`port` and run its accept loop forever (production entry).
 fn start-repl-server(host, port) {
     // Production entry point: a stop atom that is never set, so the accept loop
     // runs forever exactly as before. The existing 2-arg callers (jim-editor,
@@ -394,6 +427,9 @@ fn start-repl-server(host, port) {
 //    disconnecting).
 //  - `quiet` suppresses the server's own stdout logging, so a snapshot test can
 //    drive it without nondeterministic cross-thread print interleaving.
+/// Start the REPL server with cooperative shutdown for tests/embedders: listen on
+/// `host`:`port`, set `ready-atom` true once listening, serve clients sequentially, and exit
+/// the accept loop after a session when `stop-atom` is true. `quiet` suppresses stdout logging.
 fn start-repl-server-stoppable(host, port, stop-atom, ready-atom, quiet) {
     if !quiet {
         println("Starting REPL server on " ++ host ++ ":" ++ to-string(port))

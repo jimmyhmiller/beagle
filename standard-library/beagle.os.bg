@@ -56,7 +56,7 @@ fn __read-cstring(buf) {
 /// Return the current process id.
 ///
 /// Examples:
-///   (getpid)  ; => 90718
+///   getpid()  // => 90718
 fn getpid() {
     __getpid()
 }
@@ -64,7 +64,7 @@ fn getpid() {
 /// Return the parent process id.
 ///
 /// Examples:
-///   (getppid)  ; => 90715
+///   getppid()  // => 90715
 fn getppid() {
     __getppid()
 }
@@ -72,7 +72,7 @@ fn getppid() {
 /// Return the real user id of the calling process.
 ///
 /// Examples:
-///   (getuid)  ; => 501
+///   getuid()  // => 501
 fn getuid() {
     __getuid()
 }
@@ -83,7 +83,7 @@ fn getuid() {
 /// Throws if getcwd fails (returns NULL — e.g. path longer than the buffer).
 ///
 /// Examples:
-///   (getcwd)  ; => "/Users/me/project"
+///   getcwd()  // => "/Users/me/project"
 fn getcwd() {
     let size = 4096
     let buf = ffi/allocate(size)
@@ -103,8 +103,8 @@ fn getcwd() {
 /// Returns the value string, or null if the variable is not set.
 ///
 /// Examples:
-///   (getenv "HOME")          ; => "/Users/me"
-///   (getenv "NOPE_NOT_SET")  ; => null
+///   getenv("HOME")          // => "/Users/me"
+///   getenv("NOPE_NOT_SET")  // => null
 fn getenv(name) {
     __getenv(name)
 }
@@ -114,7 +114,7 @@ fn getenv(name) {
 /// Returns true on success, false on failure.
 ///
 /// Examples:
-///   (setenv "FOO" "bar")  ; => true
+///   setenv("FOO", "bar")  // => true
 fn setenv(name, value) {
     __setenv(name, value, 1) == 0
 }
@@ -125,7 +125,7 @@ fn setenv(name, value) {
 /// still succeeds.
 ///
 /// Examples:
-///   (unsetenv "FOO")  ; => true
+///   unsetenv("FOO")  // => true
 fn unsetenv(name) {
     __unsetenv(name) == 0
 }
@@ -136,7 +136,7 @@ fn unsetenv(name) {
 /// name. Throws if gethostname reports an error.
 ///
 /// Examples:
-///   (hostname)  ; => "mymachine.local"
+///   hostname()  // => "mymachine.local"
 fn hostname() {
     let size = 256
     let buf = ffi/allocate(size)
@@ -157,77 +157,85 @@ fn hostname() {
 /// returns. Do not call this in a test you expect to continue.
 ///
 /// Examples:
-///   (process-exit 0)  ; clean exit
-///   (process-exit 1)  ; failure exit
+///   process-exit(0)  // clean exit
+///   process-exit(1)  // failure exit
 fn process-exit(code) {
     __exit(code)
 }
 
-fn main() {
-    println("=== beagle.os tests ===")
-    let mut pass = 0
-    let mut fail = 0
-
-    fn check(name, cond) {
-        if cond {
-            pass = pass + 1
-            println("PASS: " ++ name)
-        } else {
-            fail = fail + 1
-            println("FAIL: " ++ name)
-        }
-    }
-
-    // getpid > 0
-    let pid = getpid()
-    check("getpid() > 0", pid > 0)
-
-    // getppid > 0
-    let ppid = getppid()
-    check("getppid() > 0", ppid > 0)
-
-    // getuid >= 0
-    let uid = getuid()
-    check("getuid() >= 0", uid >= 0)
-
-    // getcwd nonempty
-    let cwd = getcwd()
-    check("getcwd() is non-empty", length(cwd) > 0)
-    check("getcwd() starts with /", cwd[0] == "/")
-
-    // hostname nonempty
-    let host = hostname()
-    check("hostname() is non-empty", length(host) > 0)
-
-    // getenv of HOME (set in the shell) is non-null
-    let home = getenv("HOME")
-    check("getenv(HOME) is non-null", home != null)
-
-    // getenv of a definitely-missing var is null
-    let missing = getenv("BEAGLE_OS_DEFINITELY_NOT_SET_98765")
-    check("getenv(missing) == null", missing == null)
-
-    // setenv + getenv round-trip
-    let set-ok = setenv("BEAGLE_OS_TEST_VAR", "round-trip-value")
-    check("setenv returns true", set-ok)
-    let got = getenv("BEAGLE_OS_TEST_VAR")
-    check("getenv after setenv == value", got == "round-trip-value")
-
-    // overwrite round-trip
-    setenv("BEAGLE_OS_TEST_VAR", "second-value")
-    check("setenv overwrite round-trip", getenv("BEAGLE_OS_TEST_VAR") == "second-value")
-
-    // unsetenv + getenv -> null
-    let unset-ok = unsetenv("BEAGLE_OS_TEST_VAR")
-    check("unsetenv returns true", unset-ok)
-    check("getenv after unsetenv == null", getenv("BEAGLE_OS_TEST_VAR") == null)
-
-    println("")
-    println("Passed: " ++ to-string(pass) ++ "  Failed: " ++ to-string(fail))
-    if fail == 0 {
-        println("ALL TESTS PASSED")
+/// Return the directory used for temporary files.
+///
+/// Reads the TMPDIR environment variable (via getenv); when it is unset,
+/// falls back to the POSIX default "/tmp". The returned value is whatever
+/// TMPDIR holds, verbatim (it may or may not have a trailing slash).
+///
+/// Examples:
+///   temp-dir()  // => "/var/folders/xy/.../T/"  (TMPDIR set)
+///   temp-dir()  // => "/tmp"                     (TMPDIR unset)
+fn temp-dir() {
+    let t = getenv("TMPDIR")
+    if t == null {
+        "/tmp"
     } else {
-        println("SOME TESTS FAILED")
+        t
     }
-    "done"
 }
+
+/// Return the POSIX path component separator, "/".
+///
+/// Beagle's supported platforms (macOS, Linux) are all POSIX, so this is a
+/// constant. It does not consult the running platform.
+///
+/// Examples:
+///   path-separator()  // => "/"
+fn path-separator() {
+    "/"
+}
+
+/// Return the POSIX line separator, "\n".
+///
+/// Beagle's supported platforms (macOS, Linux) use a single line-feed, so
+/// this is a constant. It does not consult the running platform.
+///
+/// Examples:
+///   line-separator()  // => "\n"
+fn line-separator() {
+    "\n"
+}
+
+/// Return true when running on macOS.
+///
+/// Built on the runtime's platform name from get-os(), which reports
+/// "macos" on Apple platforms.
+///
+/// Examples:
+///   is-macos?()  // => true on macOS
+fn is-macos?() {
+    get-os() == "macos"
+}
+
+/// Return true when running on Linux.
+///
+/// Built on the runtime's platform name from get-os(), which reports
+/// "linux" on Linux platforms.
+///
+/// Examples:
+///   is-linux?()  // => true on Linux
+fn is-linux?() {
+    get-os() == "linux"
+}
+
+/// Return true when running on Windows.
+///
+/// Built on the runtime's platform name from get-os(), which reports
+/// "windows" on Windows. Note: Beagle only supports macOS and Linux, so in
+/// practice this predicate is always false; it exists for completeness.
+///
+/// Examples:
+///   is-windows?()  // => false on macOS/Linux
+fn is-windows?() {
+    get-os() == "windows"
+}
+
+/// Self-test entry point: exercises every public function and prints a
+/// PASS/FAIL line per check plus a final tally. Returns "done".

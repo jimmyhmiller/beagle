@@ -27,16 +27,19 @@ use beagle.string-builder as sb
 // ---------------------------------------------------------------------------
 
 // char-code of s[i]
+/// Return the char-code (code point) of the character at index `i` in `s`.
 fn code-at(s, i) {
     char-code(s[i])
 }
 
 // Is the code point an ASCII whitespace character?
+/// True if code point `c` is ASCII whitespace (space, tab, LF, CR, FF, or VT).
 fn ws-code?(c) {
     c == 32 || c == 9 || c == 10 || c == 13 || c == 12 || c == 11
 }
 
 // Is the single-char string ch whitespace?
+/// True if the single-character string `ch` is ASCII whitespace.
 fn ws-char?(ch) {
     ws-code?(char-code(ch))
 }
@@ -48,6 +51,9 @@ fn ws-char?(ch) {
 // Split text into whitespace-delimited words. Runs of whitespace are
 // collapsed; leading/trailing whitespace is dropped. Returns a vector of
 // non-empty word strings.
+/// Split `text` into whitespace-delimited words. Whitespace runs are
+/// collapsed and leading/trailing whitespace is dropped. Returns a vector of
+/// non-empty word strings (empty vector for empty/whitespace-only input).
 fn split-words(text) {
     let len = length(text)
     let mut acc = []
@@ -86,9 +92,9 @@ fn split-words(text) {
 /// input). Throws on width <= 0.
 ///
 /// Examples:
-///   (wrap "the quick brown fox" 9)  ; => ["the quick", "brown fox"]
-///   (wrap "supercalifragilistic" 9) ; => ["supercalifragilistic"]
-///   (wrap "" 9)                      ; => []
+///   wrap("the quick brown fox", 9)  // => ["the quick", "brown fox"]
+///   wrap("supercalifragilistic", 9) // => ["supercalifragilistic"]
+///   wrap("", 9)                      // => []
 fn wrap(text, width) {
     if width <= 0 {
         throw("wrap: width must be > 0")
@@ -135,7 +141,7 @@ fn wrap(text, width) {
 /// Equivalent to `join(wrap(text, width), "\n")`. Returns "" for empty input.
 ///
 /// Examples:
-///   (fill "the quick brown fox" 9)  ; => "the quick\nbrown fox"
+///   fill("the quick brown fox", 9)  // => "the quick\nbrown fox"
 fn fill(text, width) {
     let lines = wrap(text, width)
     join(lines, "\n")
@@ -148,6 +154,8 @@ fn fill(text, width) {
 // Split text into lines on "\n", preserving empty lines and any trailing
 // empty segment (so "a\n" -> ["a", ""]). This is line-faithful, unlike the
 // whitespace-collapsing split-words above.
+/// Split `text` into lines on "\n", preserving empty lines and any trailing
+/// empty segment (so "a\n" => ["a", ""]). Returns a vector of line strings.
 fn split-lines-keep(text) {
     let len = length(text)
     let mut acc = []
@@ -165,6 +173,7 @@ fn split-lines-keep(text) {
 }
 
 // Length of the leading whitespace run of a line.
+/// Return the number of leading whitespace characters at the start of `line`.
 fn leading-ws-len(line) {
     let len = length(line)
     let mut i = 0
@@ -175,12 +184,15 @@ fn leading-ws-len(line) {
 }
 
 // Is the line entirely whitespace (or empty)?
+/// True if `line` is empty or consists entirely of whitespace.
 fn blank-line?(line) {
     leading-ws-len(line) == length(line)
 }
 
 // Length of the common leading-whitespace prefix shared by two whitespace
 // strings (compared char by char).
+/// Return the length of the longest common prefix of strings `a` and `b`,
+/// compared character by character.
 fn common-prefix-len(a, b) {
     let la = length(a)
     let lb = length(b)
@@ -202,9 +214,9 @@ fn common-prefix-len(a, b) {
 /// empty lines in the output. Mixed tabs/spaces are compared literally.
 ///
 /// Examples:
-///   (dedent "    a\n    b")    ; => "a\nb"
-///   (dedent "  a\n   b\n  c")  ; => "a\n b\nc"
-///   (dedent "")                ; => ""
+///   dedent("    a\n    b")    // => "a\nb"
+///   dedent("  a\n   b\n  c")  // => "a\n b\nc"
+///   dedent("")                // => ""
 fn dedent(text) {
     let lines = split-lines-keep(text)
     let n = length(lines)
@@ -256,9 +268,9 @@ fn dedent(text) {
 /// input is preserved.
 ///
 /// Examples:
-///   (indent "a\nb" "> ")     ; => "> a\n> b"
-///   (indent "a\n\nb" "> ")   ; => "> a\n\n> b"
-///   (indent "a\nb\n" "> ")   ; => "> a\n> b\n"
+///   indent("a\nb", "> ")     // => "> a\n> b"
+///   indent("a\n\nb", "> ")   // => "> a\n\n> b"
+///   indent("a\nb\n", "> ")   // => "> a\n> b\n"
 fn indent(text, prefix) {
     let lines = split-lines-keep(text)
     let n = length(lines)
@@ -296,64 +308,72 @@ fn indent(text, prefix) {
 /// Throws on width <= 0, and (like Python's textwrap.shorten) when the
 /// placeholder itself is larger than `width`.
 ///
+/// The 2-argument form defaults `placeholder` to "..." (matching Python's
+/// textwrap.shorten default).
+///
 /// Examples:
-///   (shorten "Hello world this is long" 15 " [...]") ; => "Hello [...]"
-///   (shorten "Hello world" 20 " [...]")              ; => "Hello world"
-fn shorten(text, width, placeholder) {
-    if width <= 0 {
-        throw("shorten: width must be > 0")
-    } else {
-        let words = split-words(text)
-        let n = length(words)
-        let collapsed = join(words, " ")
-        if length(collapsed) <= width {
-            collapsed
+///   shorten("Hello world this is long", 15, " [...]") // => "Hello [...]"
+///   shorten("Hello world", 20, " [...]")              // => "Hello world"
+///   shorten("Hello world this is long", 12)          // => "Hello..."
+fn shorten {
+    (text, width) => shorten(text, width, "...")
+    (text, width, placeholder) => {
+        if width <= 0 {
+            throw("shorten: width must be > 0")
         } else {
-            // Need to drop words and append the placeholder. Greedily pack
-            // words such that (words + placeholder) fits in width.
-            let plen = length(placeholder)
-            let mut cur = ""
-            let mut cur-len = 0
-            let mut i = 0
-            let mut done = false
-            while i < n && done == false {
-                let w = words[i]
-                let wlen = length(w)
-                let candidate-len = if cur-len == 0 { wlen } else { cur-len + 1 + wlen }
-                // Reserve room for the placeholder after this candidate.
-                if candidate-len + plen <= width {
-                    if cur-len == 0 {
-                        cur = w
-                        cur-len = wlen
-                    } else {
-                        cur = cur ++ " " ++ w
-                        cur-len = cur-len + 1 + wlen
-                    }
-                    i = i + 1
-                } else {
-                    done = true
-                }
-            }
-            if cur-len == 0 {
-                // Not even one word fits with the placeholder. Python returns
-                // just the (lstripped) placeholder if it fits, and otherwise
-                // raises ValueError("placeholder too large for max width").
-                // Returning a truncated placeholder fragment ("[..") would be a
-                // silently-wrong result that no longer reads as an ellipsis.
-                let stripped = trim-left-ws(placeholder)
-                if length(stripped) <= width {
-                    stripped
-                } else {
-                    throw("shorten: placeholder too large for max width")
-                }
+            let words = split-words(text)
+            let n = length(words)
+            let collapsed = join(words, " ")
+            if length(collapsed) <= width {
+                collapsed
             } else {
-                cur ++ placeholder
+                // Need to drop words and append the placeholder. Greedily pack
+                // words such that (words + placeholder) fits in width.
+                let plen = length(placeholder)
+                let mut cur = ""
+                let mut cur-len = 0
+                let mut i = 0
+                let mut done = false
+                while i < n && done == false {
+                    let w = words[i]
+                    let wlen = length(w)
+                    let candidate-len = if cur-len == 0 { wlen } else { cur-len + 1 + wlen }
+                    // Reserve room for the placeholder after this candidate.
+                    if candidate-len + plen <= width {
+                        if cur-len == 0 {
+                            cur = w
+                            cur-len = wlen
+                        } else {
+                            cur = cur ++ " " ++ w
+                            cur-len = cur-len + 1 + wlen
+                        }
+                        i = i + 1
+                    } else {
+                        done = true
+                    }
+                }
+                if cur-len == 0 {
+                    // Not even one word fits with the placeholder. Python returns
+                    // just the (lstripped) placeholder if it fits, and otherwise
+                    // raises ValueError("placeholder too large for max width").
+                    // Returning a truncated placeholder fragment ("[..") would be a
+                    // silently-wrong result that no longer reads as an ellipsis.
+                    let stripped = trim-left-ws(placeholder)
+                    if length(stripped) <= width {
+                        stripped
+                    } else {
+                        throw("shorten: placeholder too large for max width")
+                    }
+                } else {
+                    cur ++ placeholder
+                }
             }
         }
     }
 }
 
 // Trim only leading whitespace from a string.
+/// Return `s` with any leading whitespace removed (trailing whitespace kept).
 fn trim-left-ws(s) {
     let len = length(s)
     let mut i = 0

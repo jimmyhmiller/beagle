@@ -20,17 +20,22 @@ use beagle.string-builder as sb
 // ---------------------------------------------------------------------------
 
 // char-code of a single-character string s[i]
+/// Return the char-code (codepoint) of the character at index i in s.
+/// Thin wrapper over `char-code(s[i])`.
 fn code-at(s, i) {
     char-code(s[i])
 }
 
 // Is the code point an ASCII whitespace character?
+/// True if code point c is ASCII whitespace (space, tab, newline,
+/// carriage-return, form-feed, or vertical-tab).
 fn ws-code?(c) {
     // space, tab, newline, carriage-return, form-feed, vertical-tab
     c == 32 || c == 9 || c == 10 || c == 13 || c == 12 || c == 11
 }
 
 // Is the code point an ASCII decimal digit?
+/// True if code point c is an ASCII decimal digit ('0'..'9').
 fn digit-code?(c) {
     c >= 48 && c <= 57
 }
@@ -44,8 +49,8 @@ fn digit-code?(c) {
 /// Returns "" when n <= 0.
 ///
 /// Examples:
-///   (repeat-string "ab" 3)  ; => "ababab"
-///   (repeat-string "x" 0)   ; => ""
+///   repeat-string("ab", 3)  // => "ababab"
+///   repeat-string("x", 0)   // => ""
 fn repeat-string(s, n) {
     if n <= 0 {
         ""
@@ -76,10 +81,10 @@ fn repeat-string(s, n) {
 /// The 2-arg form pads with spaces.
 ///
 /// Examples:
-///   (pad-left "42" 5)        ; => "   42"
-///   (pad-left "42" 5 "0")    ; => "00042"
-///   (pad-left "42" 6 "ab")   ; => "abab42"
-///   (pad-left "hello" 3 "x") ; => "hello"
+///   pad-left("42", 5)        // => "   42"
+///   pad-left("42", 5, "0")    // => "00042"
+///   pad-left("42", 6, "ab")   // => "abab42"
+///   pad-left("hello", 3, "x") // => "hello"
 fn pad-left {
     (s, width) => pad-left(s, width, " ")
     (s, width, pad) => {
@@ -98,9 +103,9 @@ fn pad-left {
 /// The 2-arg form pads with spaces.
 ///
 /// Examples:
-///   (pad-right "42" 5)       ; => "42   "
-///   (pad-right "42" 5 ".")   ; => "42..."
-///   (pad-right "ab" 6 "12")  ; => "ab1212"
+///   pad-right("42", 5)       // => "42   "
+///   pad-right("42", 5, ".")   // => "42..."
+///   pad-right("ab", 6, "12")  // => "ab1212"
 fn pad-right {
     (s, width) => pad-right(s, width, " ")
     (s, width, pad) => {
@@ -116,11 +121,59 @@ fn pad-right {
 }
 
 // Build a fill string of exactly `n` chars by repeating `pad` and clipping.
+/// Build a fill string of exactly `n` characters by repeating `pad` and
+/// clipping the result to length n. Helper for pad-left/pad-right.
 fn clip-fill(pad, n) {
     let plen = length(pad)
     let reps = (n / plen) + 1
     let full = repeat-string(pad, reps)
     substring(full, 0, n)
+}
+
+/// Center `s` within `width` by padding both sides with `pad` (spaces in the
+/// 2-arg form). Returns `s` unchanged when it is already at least `width` wide.
+/// Any odd extra character goes on the right.
+///
+/// Examples:
+///   center("hi", 6)       // => "  hi  "
+///   center("hi", 7, ".")   // => "..hi..."
+fn center {
+    (s, width) => center(s, width, " ")
+    (s, width, pad) => {
+        let len = length(s)
+        if len >= width || length(pad) == 0 {
+            s
+        } else {
+            let total = width - len
+            let left = total / 2
+            let right = total - left
+            clip-fill(pad, left) ++ s ++ clip-fill(pad, right)
+        }
+    }
+}
+
+/// Return the characters of `s` as a vector of single-character strings.
+///
+/// Examples:
+///   chars("abc")  // => ["a", "b", "c"]
+fn chars(s) {
+    let mut acc = []
+    let mut i = 0
+    let n = length(s)
+    while i < n {
+        acc = push(acc, substring(s, i, i + 1))
+        i = i + 1
+    }
+    acc
+}
+
+/// Split `s` into a vector of lines on "\n" (a trailing newline yields a final
+/// empty string). Carriage returns are left intact.
+///
+/// Examples:
+///   lines("a\nb\nc")  // => ["a", "b", "c"]
+fn lines(s) {
+    split-with-limit(s, "\n", 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -130,8 +183,8 @@ fn clip-fill(pad, n) {
 /// Uppercase the first character, lowercase the rest.
 ///
 /// Examples:
-///   (capitalize "hELLO")  ; => "Hello"
-///   (capitalize "")       ; => ""
+///   capitalize("hELLO")  // => "Hello"
+///   capitalize("")       // => ""
 fn capitalize(s) {
     if length(s) == 0 {
         s
@@ -145,8 +198,8 @@ fn capitalize(s) {
 /// Collapses runs of whitespace to a single space in the output.
 ///
 /// Examples:
-///   (title-case "the quick brown fox")  ; => "The Quick Brown Fox"
-///   (title-case "  hELLO   wORLD ")      ; => "Hello World"
+///   title-case("the quick brown fox")  // => "The Quick Brown Fox"
+///   title-case("  hELLO   wORLD ")      // => "Hello World"
 fn title-case(s) {
     let parts = words(s)
     let n = length(parts)
@@ -167,6 +220,8 @@ fn title-case(s) {
 // ---------------------------------------------------------------------------
 
 // Does `chars` contain the single-char string ch?
+/// True if the single-character string `ch` appears in `chars` (treated as a
+/// set of characters). Thin wrapper over `index-of`.
 fn char-set-contains?(chars, ch) {
     index-of(chars, ch) >= 0
 }
@@ -177,9 +232,9 @@ fn char-set-contains?(chars, ch) {
 /// core's trim (whitespace only), this strips an arbitrary set.
 ///
 /// Examples:
-///   (trim-chars "xxhelloxx" "x")     ; => "hello"
-///   (trim-chars "[[data]]" "[]")     ; => "data"
-///   (trim-chars "--a-b--" "-")       ; => "a-b"
+///   trim-chars("xxhelloxx", "x")     // => "hello"
+///   trim-chars("[[data]]", "[]")     // => "data"
+///   trim-chars("--a-b--", "-")       // => "a-b"
 fn trim-chars(s, chars) {
     let len = length(s)
     let mut start = 0
@@ -224,8 +279,8 @@ fn trim-chars-right(s, chars) {
 /// otherwise loop forever).
 ///
 /// Examples:
-///   (replace-all "a.b.c" "." "/")   ; => "a/b/c"
-///   (replace-all "aaa" "a" "bb")    ; => "bbbbbb"
+///   replace-all("a.b.c", ".", "/")   // => "a/b/c"
+///   replace-all("aaa", "a", "bb")    // => "bbbbbb"
 fn replace-all(s, old, new) {
     if length(old) == 0 {
         throw("replace-all: `old` must be a non-empty string")
@@ -249,6 +304,33 @@ fn replace-all(s, old, new) {
 }
 
 // ---------------------------------------------------------------------------
+// replace-first
+// ---------------------------------------------------------------------------
+
+/// Replace only the FIRST occurrence of `old` with `new`.
+///
+/// If `old` does not occur in `s`, returns `s` unchanged. Companion to
+/// `replace-all`. Throws on an empty `old` (an empty needle has no
+/// well-defined single occurrence).
+///
+/// Examples:
+///   replace-first("a.b.c", ".", "/")   // => "a/b.c"
+///   replace-first("hello", "l", "L")   // => "heLlo"
+///   replace-first("abc", "x", "y")     // => "abc"
+fn replace-first(s, old, new) {
+    if length(old) == 0 {
+        throw("replace-first: `old` must be a non-empty string")
+    } else {
+        let idx = index-of(s, old)
+        if idx < 0 {
+            s
+        } else {
+            substring(s, 0, idx) ++ new ++ substring(s, idx + length(old), length(s))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // split-with-limit
 // ---------------------------------------------------------------------------
 
@@ -258,10 +340,10 @@ fn replace-all(s, old, new) {
 /// `limit` <= 0 means "no limit" (split fully). Returns a vector of strings.
 ///
 /// Examples:
-///   (split-with-limit "a,b,c,d" "," 2)  ; => ["a", "b,c,d"]
-///   (split-with-limit "a,b,c,d" "," 3)  ; => ["a", "b", "c,d"]
-///   (split-with-limit "a,b,c" "," 0)    ; => ["a", "b", "c"]
-///   (split-with-limit "abc" "," 2)      ; => ["abc"]
+///   split-with-limit("a,b,c,d", ",", 2)  // => ["a", "b,c,d"]
+///   split-with-limit("a,b,c,d", ",", 3)  // => ["a", "b", "c,d"]
+///   split-with-limit("a,b,c", ",", 0)    // => ["a", "b", "c"]
+///   split-with-limit("abc", ",", 2)      // => ["abc"]
 fn split-with-limit(s, delim, limit) {
     if length(delim) == 0 {
         throw("split-with-limit: `delim` must be a non-empty string")
@@ -301,8 +383,8 @@ fn split-with-limit(s, delim, limit) {
 /// `prefixes` is any seqable collection of strings.
 ///
 /// Examples:
-///   (starts-with-any? "http://x" ["http://", "https://"])  ; => true
-///   (starts-with-any? "ftp://x"  ["http://", "https://"])  ; => false
+///   starts-with-any?("http://x", ["http://", "https://"])  // => true
+///   starts-with-any?("ftp://x",  ["http://", "https://"])  // => false
 fn starts-with-any?(s, prefixes) {
     any?(fn(p) { starts-with?(s, p) }, prefixes)
 }
@@ -310,7 +392,7 @@ fn starts-with-any?(s, prefixes) {
 /// True if s ends with ANY of the given suffix strings.
 ///
 /// Examples:
-///   (ends-with-any? "a.png" [".png", ".jpg"])  ; => true
+///   ends-with-any?("a.png", [".png", ".jpg"])  // => true
 fn ends-with-any?(s, suffixes) {
     any?(fn(p) { ends-with?(s, p) }, suffixes)
 }
@@ -318,8 +400,8 @@ fn ends-with-any?(s, suffixes) {
 /// True if s contains ANY of the given substrings.
 ///
 /// Examples:
-///   (contains-any? "hello world" ["xyz", "wor"])  ; => true
-///   (contains-any? "hello" ["a", "b"])            ; => false
+///   contains-any?("hello world", ["xyz", "wor"])  // => true
+///   contains-any?("hello", ["a", "b"])            // => false
 fn contains-any?(s, subs) {
     any?(fn(sub) { contains?(s, sub) }, subs)
 }
@@ -335,13 +417,13 @@ fn contains-any?(s, subs) {
 /// digit must be present overall.
 ///
 /// Examples:
-///   (parse-float "3.14")    ; => 3.14
-///   (parse-float "-0.5")    ; => -0.5
-///   (parse-float "10")      ; => 10.0
-///   (parse-float "1e3")     ; => 1000.0
-///   (parse-float "2.5e-2")  ; => 0.025
-///   (parse-float "abc")     ; => null
-///   (parse-float "")        ; => null
+///   parse-float("3.14")    // => 3.14
+///   parse-float("-0.5")    // => -0.5
+///   parse-float("10")      // => 10.0
+///   parse-float("1e3")     // => 1000.0
+///   parse-float("2.5e-2")  // => 0.025
+///   parse-float("abc")     // => null
+///   parse-float("")        // => null
 fn parse-float(s) {
     let len = length(s)
     if len == 0 {
@@ -435,6 +517,8 @@ fn parse-float(s) {
 // Integer -> hex (helper for %x)
 // ---------------------------------------------------------------------------
 
+/// Return the hex digit character for value d (0..15) as a single-char string.
+/// When `upper` is true, letters are uppercase ('A'..'F'), otherwise lowercase.
 fn hex-digit(d, upper) {
     if d < 10 {
         char-from-code(48 + d)              // '0'..'9'
@@ -452,9 +536,9 @@ fn hex-digit(d, upper) {
 /// Negative inputs are rendered with a leading '-'.
 ///
 /// Examples:
-///   (int->hex 255 false)  ; => "ff"
-///   (int->hex 255 true)   ; => "FF"
-///   (int->hex 0 false)    ; => "0"
+///   int->hex(255, false)  // => "ff"
+///   int->hex(255, true)   // => "FF"
+///   int->hex(0, false)    // => "0"
 fn int->hex(n, upper) {
     if n == 0 {
         "0"
@@ -486,11 +570,11 @@ fn int->hex(n, upper) {
 /// the integer part (e.g. 9.999 -> "10.00"). Works on ints and floats.
 ///
 /// Examples:
-///   (fixed 3.14159 2)        ; => "3.14"
-///   (fixed 3.14159 6)        ; => "3.141590"
-///   (fixed 9.999 2)          ; => "10.00"
-///   (fixed (- 0.0 9.999) 2)  ; => "-10.00"
-///   (fixed 3.0 0)            ; => "3"
+///   fixed(3.14159, 2)        // => "3.14"
+///   fixed(3.14159, 6)        // => "3.141590"
+///   fixed(9.999, 2)          // => "10.00"
+///   fixed(0.0 - 9.999, 2)  // => "-10.00"
+///   fixed(3.0, 0)            // => "3"
 fn fixed(x, decimals) {
     // Coerce ints OR floats to a float. NOTE: `x + 0.0` is used rather than
     // to-float(x) because to-float currently mishandles an already-float arg;
@@ -534,8 +618,8 @@ fn fixed(x, decimals) {
 /// you want a string with a guaranteed number of decimals.
 ///
 /// Examples:
-///   (round-to 3.14159 2)  ; => 3.14
-///   (round-to 2.5 0)      ; => 3.0
+///   round-to(3.14159, 2)  // => 3.14
+///   round-to(2.5, 0)      // => 3.0
 fn round-to(x, n) {
     let mut scale = 1.0
     let mut k = 0
@@ -549,25 +633,29 @@ fn round-to(x, n) {
 /// Insert thousands separators into an integer, returning a string.
 ///
 /// Examples:
-///   (commas 1234567)  ; => "1,234,567"
-///   (commas -1000)    ; => "-1,000"
-///   (commas 42)       ; => "42"
+///   commas(1234567)  // => "1,234,567"
+///   commas(-1000)    // => "-1,000"
+///   commas(42)       // => "42"
 fn commas(n) {
     let negative = n < 0
     let digits = to-string(if negative { 0 - n } else { n })
     let len = length(digits)
-    let mut result = ""
+    // Build with a string-builder instead of repeated immutable `++` so this
+    // is O(len) rather than O(len^2) in the digit count. Capacity is a hint:
+    // len digits plus at most one separator per group of 3.
+    let builder = sb/new(len + len / 3 + 2)
     let mut i = 0
     while i < len {
         // A separator precedes every group of 3 digits counted from the right,
         // except at the very start of the number.
         if i > 0 && (len - i) % 3 == 0 {
-            result = result ++ ","
+            sb/append!(builder, ",")
         }
-        result = result ++ substring(digits, i, i + 1)
+        sb/append!(builder, substring(digits, i, i + 1))
         i = i + 1
     }
-    if negative { "-" ++ result } else { result }
+    let body = sb/to-string(builder)
+    if negative { "-" ++ body } else { body }
 }
 
 // ---------------------------------------------------------------------------
@@ -577,8 +665,8 @@ fn commas(n) {
 /// Count non-overlapping occurrences of `sub` in s.
 ///
 /// Examples:
-///   (count-occurrences "banana" "a")   ; => 3
-///   (count-occurrences "aaaa" "aa")    ; => 2
+///   count-occurrences("banana", "a")   // => 3
+///   count-occurrences("aaaa", "aa")    // => 2
 fn count-occurrences(s, sub) {
     if length(sub) == 0 {
         throw("count-occurrences: `sub` must be non-empty")
@@ -602,7 +690,7 @@ fn count-occurrences(s, sub) {
 /// Reverse the characters of a string.
 ///
 /// Examples:
-///   (reverse-string "abc")  ; => "cba"
+///   reverse-string("abc")  // => "cba"
 fn reverse-string(s) {
     let len = length(s)
     let builder = sb/new(len)
@@ -630,9 +718,9 @@ fn reverse-string(s) {
 /// [195, 169], not [233].
 ///
 /// Examples:
-///   (string->bytes "A")   ; => [65]
-///   (string->bytes "é")   ; => [195, 169]
-///   (string->bytes "")    ; => []
+///   string->bytes("A")   // => [65]
+///   string->bytes("é")   // => [195, 169]
+///   string->bytes("")    // => []
 fn string->bytes(s) {
     let builder = sb/new(length(s))
     sb/append!(builder, s)
@@ -651,9 +739,9 @@ fn string->bytes(s) {
 /// Inverse of `string->bytes`. The bytes must form valid UTF-8.
 ///
 /// Examples:
-///   (bytes->string [65])         ; => "A"
-///   (bytes->string [195, 169])   ; => "é"
-///   (bytes->string [])           ; => ""
+///   bytes->string([65])         // => "A"
+///   bytes->string([195, 169])   // => "é"
+///   bytes->string([])           // => ""
 fn bytes->string(vec) {
     let n = length(vec)
     let builder = sb/new(n)
@@ -671,8 +759,8 @@ fn bytes->string(vec) {
 /// smaller than the ellipsis, the ellipsis itself is truncated.
 ///
 /// Examples:
-///   (ellipsize "hello world" 8 "...")  ; => "hello..."
-///   (ellipsize "hi" 8 "...")            ; => "hi"
+///   ellipsize("hello world", 8, "...")  // => "hello..."
+///   ellipsize("hi", 8, "...")            // => "hi"
 fn ellipsize(s, n, ellipsis) {
     if length(s) <= n {
         s

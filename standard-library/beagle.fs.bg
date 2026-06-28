@@ -30,6 +30,9 @@ use beagle.effect as effect
 // ============================================================================
 // Each variant represents a filesystem operation.
 
+/// The filesystem effect. Each variant is a distinct file or directory
+/// operation that is dispatched to whatever Handler(Fs) is installed.
+/// Performed indirectly by the wrapper functions below (read-file, etc.).
 enum Fs {
     // File operations
     ReadFile { path },
@@ -72,7 +75,7 @@ enum Fs {
 ///
 /// Examples:
 ///   handle effect/Handler(Fs) with handler {
-///       match (fs/read-file "/tmp/test.txt") {
+///       match fs/read-file("/tmp/test.txt") {
 ///           Result.Ok { value } => println(value),
 ///           Result.Err { error } => println("Error:", error)
 ///       }
@@ -86,7 +89,7 @@ fn read-file(path) {
 /// Returns Result.Ok with bytes written, or Result.Err on failure.
 ///
 /// Examples:
-///   (fs/write-file "/tmp/test.txt" "Hello, World!")
+///   fs/write-file("/tmp/test.txt", "Hello, World!")
 fn write-file(path, content) {
     perform Fs.WriteFile { path: path, content: content }
 }
@@ -96,7 +99,7 @@ fn write-file(path, content) {
 /// Returns Result.Ok with bytes written, or Result.Err on failure.
 ///
 /// Examples:
-///   (fs/append-file "/tmp/log.txt" "New log entry\n")
+///   fs/append-file("/tmp/log.txt", "New log entry\n")
 fn append-file(path, content) {
     perform Fs.AppendFile { path: path, content: content }
 }
@@ -106,19 +109,22 @@ fn append-file(path, content) {
 /// Returns Result.Ok on success, or Result.Err if file doesn't exist.
 ///
 /// Examples:
-///   (fs/delete-file "/tmp/test.txt")
+///   fs/delete-file("/tmp/test.txt")
 fn delete-file(path) {
     perform Fs.DeleteFile { path: path }
 }
 
-/// Check if a file or directory exists.
-///
-/// Returns Result.Ok { value: true/false }.
+/// Check if a file or directory exists. Returns a plain `Bool` (a `?`-predicate
+/// must be directly usable in `if`); an error determining existence reads as false.
 ///
 /// Examples:
-///   (fs/exists? "/tmp/test.txt")  ; => Result.Ok { value: true }
+///   fs/exists?("/tmp/test.txt")  // => true
 fn exists?(path) {
-    perform Fs.FileExists { path: path }
+    let r = perform Fs.FileExists { path: path }
+    match r {
+        Result.Ok { value } => value,
+        Result.Err { error } => false
+    }
 }
 
 /// Get file size in bytes.
@@ -126,19 +132,22 @@ fn exists?(path) {
 /// Returns Result.Ok with the size, or Result.Err if file doesn't exist.
 ///
 /// Examples:
-///   (fs/file-size "/tmp/test.txt")  ; => Result.Ok { value: 1024 }
+///   fs/file-size("/tmp/test.txt")  // => Result.Ok { value: 1024 }
 fn file-size(path) {
     perform Fs.FileSize { path: path }
 }
 
-/// Check if path is a regular file (not a directory).
-///
-/// Returns Result.Ok { value: true/false }.
+/// Check if path is a regular file (not a directory). Returns a plain `Bool`;
+/// a missing path or stat error reads as false.
 ///
 /// Examples:
-///   (fs/is-file? "/tmp/test.txt")  ; => Result.Ok { value: true }
+///   fs/is-file?("/tmp/test.txt")  // => true
 fn is-file?(path) {
-    perform Fs.IsFile { path: path }
+    let r = perform Fs.IsFile { path: path }
+    match r {
+        Result.Ok { value } => value,
+        Result.Err { error } => false
+    }
 }
 
 /// Rename or move a file or directory.
@@ -146,7 +155,7 @@ fn is-file?(path) {
 /// Returns Result.Ok on success, or Result.Err on failure.
 ///
 /// Examples:
-///   (fs/rename "/tmp/old.txt" "/tmp/new.txt")
+///   fs/rename("/tmp/old.txt", "/tmp/new.txt")
 fn rename(old-path, new-path) {
     perform Fs.RenameFile { old_path: old-path, new_path: new-path }
 }
@@ -156,7 +165,7 @@ fn rename(old-path, new-path) {
 /// Returns Result.Ok on success, or Result.Err on failure.
 ///
 /// Examples:
-///   (fs/copy "/tmp/source.txt" "/tmp/dest.txt")
+///   fs/copy("/tmp/source.txt", "/tmp/dest.txt")
 fn copy(src-path, dest-path) {
     perform Fs.CopyFile { src_path: src-path, dest_path: dest-path }
 }
@@ -170,7 +179,7 @@ fn copy(src-path, dest-path) {
 /// Returns Result.Ok with vector of entry names, or Result.Err on failure.
 ///
 /// Examples:
-///   (fs/read-dir "/tmp")  ; => Result.Ok { value: ["file1.txt", "file2.txt"] }
+///   fs/read-dir("/tmp")  // => Result.Ok { value: ["file1.txt", "file2.txt"] }
 fn read-dir(path) {
     perform Fs.ReadDir { path: path }
 }
@@ -180,7 +189,7 @@ fn read-dir(path) {
 /// Parent directories must exist. Use create-dir-all for recursive creation.
 ///
 /// Examples:
-///   (fs/create-dir "/tmp/mydir")
+///   fs/create-dir("/tmp/mydir")
 fn create-dir(path) {
     perform Fs.CreateDir { path: path }
 }
@@ -190,7 +199,7 @@ fn create-dir(path) {
 /// Like mkdir -p. Creates any missing parent directories.
 ///
 /// Examples:
-///   (fs/create-dir-all "/tmp/a/b/c")
+///   fs/create-dir-all("/tmp/a/b/c")
 fn create-dir-all(path) {
     perform Fs.CreateDirAll { path: path }
 }
@@ -200,7 +209,7 @@ fn create-dir-all(path) {
 /// Fails if directory is not empty. Use remove-dir-all for recursive removal.
 ///
 /// Examples:
-///   (fs/remove-dir "/tmp/empty-dir")
+///   fs/remove-dir("/tmp/empty-dir")
 fn remove-dir(path) {
     perform Fs.RemoveDir { path: path }
 }
@@ -210,19 +219,22 @@ fn remove-dir(path) {
 /// Like rm -rf. Removes files and subdirectories.
 ///
 /// Examples:
-///   (fs/remove-dir-all "/tmp/mydir")
+///   fs/remove-dir-all("/tmp/mydir")
 fn remove-dir-all(path) {
     perform Fs.RemoveDirAll { path: path }
 }
 
-/// Check if path is a directory.
-///
-/// Returns Result.Ok { value: true/false }.
+/// Check if path is a directory. Returns a plain `Bool`; a missing path or stat
+/// error reads as false.
 ///
 /// Examples:
-///   (fs/is-directory? "/tmp")  ; => Result.Ok { value: true }
+///   fs/is-directory?("/tmp")  // => true
 fn is-directory?(path) {
-    perform Fs.IsDirectory { path: path }
+    let r = perform Fs.IsDirectory { path: path }
+    match r {
+        Result.Ok { value } => value,
+        Result.Err { error } => false
+    }
 }
 
 // ============================================================================
@@ -235,7 +247,7 @@ fn is-directory?(path) {
 /// Returns a File handle for low-level operations.
 ///
 /// Examples:
-///   (let file (unwrap (fs/open "/tmp/test.txt" "r")))
+///   let file = unwrap(fs/open("/tmp/test.txt", "r"))
 fn open(path, mode) {
     perform Fs.Open { path: path, mode: mode }
 }
@@ -245,7 +257,7 @@ fn open(path, mode) {
 /// Always close files when done to release resources.
 ///
 /// Examples:
-///   (fs/close file)
+///   fs/close(file)
 fn close(file) {
     perform Fs.Close { file: file }
 }
@@ -255,7 +267,7 @@ fn close(file) {
 /// Returns the data read as a string.
 ///
 /// Examples:
-///   (fs/read file 1024)
+///   fs/read(file, 1024)
 fn read(file, n) {
     perform Fs.Read { file: file, n: n }
 }
@@ -265,7 +277,7 @@ fn read(file, n) {
 /// Returns the number of bytes written.
 ///
 /// Examples:
-///   (fs/write file "Hello, World!")
+///   fs/write(file, "Hello, World!")
 fn write(file, content) {
     perform Fs.Write { file: file, content: content }
 }
@@ -275,7 +287,7 @@ fn write(file, content) {
 /// Reads until newline or end of file.
 ///
 /// Examples:
-///   (fs/read-line file)  ; => "First line\n"
+///   fs/read-line(file)  // => "First line\n"
 fn read-line(file) {
     perform Fs.ReadLine { file: file }
 }
@@ -285,7 +297,7 @@ fn read-line(file) {
 /// Ensures all buffered writes are actually written.
 ///
 /// Examples:
-///   (fs/flush file)
+///   fs/flush(file)
 fn flush(file) {
     perform Fs.Flush { file: file }
 }
@@ -305,6 +317,9 @@ use beagle.builtin as builtin
 // BlockingFsHandler - Synchronous filesystem handler
 // ============================================================================
 
+/// Synchronous (blocking) handler for the Fs effect. Its `handle`
+/// implementation executes each Fs operation immediately using the
+/// underlying beagle.io/beagle.core syscalls and resumes with the Result.
 struct BlockingFsHandler {}
 
 extend BlockingFsHandler with effect/Handler(Fs) {
@@ -382,6 +397,8 @@ extend BlockingFsHandler with effect/Handler(Fs) {
 // Handler Implementation Functions
 // ============================================================================
 
+/// Read a file's full contents, returning ok(content) or err(NotFound)
+/// if reading fails. Backing implementation for the ReadFile operation.
 fn handle-read-file(path) {
     try {
         let content = read-full-file(path)
@@ -391,6 +408,8 @@ fn handle-read-file(path) {
     }
 }
 
+/// Open the path in write mode, write content, and close it. Returns
+/// ok(bytes-written) or err on open/write failure. Backs WriteFile.
 fn handle-write-file(path, content) {
     let file-result = io/open(path, "w")
     match file-result {
@@ -409,6 +428,8 @@ fn handle-write-file(path, content) {
     }
 }
 
+/// Open the path in append mode, write content, and close it. Returns
+/// ok(bytes-written) or err on open/write failure. Backs AppendFile.
 fn handle-append-file(path, content) {
     let file-result = io/open(path, "a")
     match file-result {
@@ -427,6 +448,8 @@ fn handle-append-file(path, content) {
     }
 }
 
+/// Unlink the file at path. Returns ok(null) on success or err(NotFound)
+/// if the unlink syscall fails. Backs DeleteFile.
 fn handle-delete-file(path) {
     let result = core/fs-unlink(path)
     if result == 0 {
@@ -436,11 +459,15 @@ fn handle-delete-file(path) {
     }
 }
 
+/// Test path existence via access(F_OK). Always returns ok(true/false).
+/// Backs FileExists.
 fn handle-file-exists(path) {
     let result = core/fs-access(path, 0) // F_OK = 0
     ok(result == 0)
 }
 
+/// Return ok(size-in-bytes), or err(NotFound) when the size query
+/// returns a negative value. Backs FileSize.
 fn handle-file-size(path) {
     let size = core/fs-file-size(path)
     if size < 0 {
@@ -450,16 +477,22 @@ fn handle-file-size(path) {
     }
 }
 
+/// Return ok(true) when path is a regular file, ok(false) otherwise.
+/// Backs IsFile.
 fn handle-is-file(path) {
     let result = core/fs-is-file?(path)
     ok(result)
 }
 
+/// Return ok(true) when path is a directory, ok(false) otherwise.
+/// Backs IsDirectory.
 fn handle-is-directory(path) {
     let result = core/fs-is-directory?(path)
     ok(result)
 }
 
+/// Rename old-path to new-path. Returns ok(null) on success or err(IO)
+/// with a descriptive message on failure. Backs RenameFile.
 fn handle-rename-file(old-path, new-path) {
     let result = core/fs-rename(old-path, new-path)
     if result == 0 {
@@ -469,6 +502,9 @@ fn handle-rename-file(old-path, new-path) {
     }
 }
 
+/// Copy src-path to dest-path by reading the source fully then writing
+/// it out. Returns the write Result, or err if the read fails. Backs
+/// CopyFile.
 fn handle-copy-file(src-path, dest-path) {
     let read-result = handle-read-file(src-path)
     match read-result {
@@ -481,6 +517,8 @@ fn handle-copy-file(src-path, dest-path) {
     }
 }
 
+/// List directory entries. Returns ok(vector-of-names), or err(NotFound)
+/// when the path cannot be read. Backs ReadDir.
 fn handle-read-dir(path) {
     let entries = core/fs-readdir(path)
     if entries == null {
@@ -490,6 +528,9 @@ fn handle-read-dir(path) {
     }
 }
 
+/// Create a single directory with mode 0755. Returns ok(null), or
+/// err(AlreadyExists) on EEXIST (-17), or err(IO) otherwise. Backs
+/// CreateDir.
 fn handle-create-dir(path) {
     let result = core/fs-mkdir(path, 493) // 0755 in octal
     if result == 0 {
@@ -501,6 +542,10 @@ fn handle-create-dir(path) {
     }
 }
 
+/// Create path and all missing parent directories (like mkdir -p),
+/// splitting on "/" and creating each component with mode 0755. Treats
+/// EEXIST as success; returns ok(null) or the first err(IO). Backs
+/// CreateDirAll.
 fn handle-create-dir-all(path) {
     if path == "" || path == "/" {
         ok(null)
@@ -539,6 +584,8 @@ fn handle-create-dir-all(path) {
     }
 }
 
+/// Remove an empty directory. Returns ok(null) on success or err(IO) on
+/// failure (e.g. when the directory is not empty). Backs RemoveDir.
 fn handle-remove-dir(path) {
     let result = core/fs-rmdir(path)
     if result == 0 {
@@ -548,6 +595,11 @@ fn handle-remove-dir(path) {
     }
 }
 
+/// Recursively remove a directory and its contents (like rm -rf). If
+/// path is not a directory it is unlinked as a file; otherwise each
+/// entry is unlinked or recursively removed before the now-empty
+/// directory is removed. Returns ok(null) or the first err(IO). Backs
+/// RemoveDirAll.
 fn handle-remove-dir-all(path) {
     let entries = core/fs-readdir(path)
     if entries == null {
@@ -600,6 +652,8 @@ fn handle-remove-dir-all(path) {
     }
 }
 
+/// Open path with the given mode and return ok(file-handle) or err.
+/// Backs the Open operation.
 fn handle-open(path, mode) {
     let result = io/open(path, mode)
     match result {
@@ -608,6 +662,7 @@ fn handle-open(path, mode) {
     }
 }
 
+/// Close a file handle. Returns ok(null) on success or err. Backs Close.
 fn handle-close(file) {
     let result = io/close(file)
     match result {
@@ -616,6 +671,8 @@ fn handle-close(file) {
     }
 }
 
+/// Read up to n bytes from a file handle, decode them into a string and
+/// free the temporary buffer. Returns ok(string) or err. Backs Read.
 fn handle-read(file, n) {
     let result = io/read-bytes(file, n)
     match result {
@@ -628,6 +685,8 @@ fn handle-read(file, n) {
     }
 }
 
+/// Write content to a file handle. Returns ok(bytes-written) or err.
+/// Backs Write.
 fn handle-write(file, content) {
     let result = io/write-string(file, content)
     match result {
@@ -636,6 +695,8 @@ fn handle-write(file, content) {
     }
 }
 
+/// Read a line (up to a 4096-byte buffer) from a file handle. Returns
+/// ok(line) or err. Backs ReadLine.
 fn handle-read-line(file) {
     let result = io/read-line(file, 4096)
     match result {
@@ -644,6 +705,8 @@ fn handle-read-line(file) {
     }
 }
 
+/// Flush a file handle's buffered writes to disk. Returns ok(null) or
+/// err. Backs Flush.
 fn handle-flush(file) {
     let result = io/flush(file)
     match result {
@@ -657,6 +720,9 @@ fn handle-flush(file) {
 // ============================================================================
 // These wrap each operation in its own handler block for easy use.
 
+/// Run thunk with a fresh BlockingFsHandler installed, so any Fs effects
+/// it performs execute synchronously. Returns the thunk's value. Used by
+/// all the blocking-* convenience wrappers.
 fn run-blocking(thunk) {
     let handler = BlockingFsHandler {}
     handle effect/Handler(Fs) with handler {
@@ -669,7 +735,7 @@ fn run-blocking(thunk) {
 /// This is the simplest way to read a file. No handler required.
 ///
 /// Examples:
-///   match (fs/blocking-read-file "/tmp/test.txt") {
+///   match fs/blocking-read-file("/tmp/test.txt") {
 ///       Result.Ok { value } => println(value),
 ///       Result.Err { error } => println("Error:", error)
 ///   }
@@ -682,11 +748,13 @@ fn blocking-read-file(path) {
 /// This is the simplest way to write a file. No handler required.
 ///
 /// Examples:
-///   (fs/blocking-write-file "/tmp/test.txt" "Hello, World!")
+///   fs/blocking-write-file("/tmp/test.txt", "Hello, World!")
 fn blocking-write-file(path, content) {
     run-blocking(fn() { write-file(path, content) })
 }
 
+/// Append content to a file synchronously (creates it if missing).
+/// Returns Result.Ok with bytes written. No handler required.
 fn blocking-append-file(path, content) {
     run-blocking(fn() { append-file(path, content) })
 }
@@ -694,35 +762,45 @@ fn blocking-append-file(path, content) {
 /// Delete a file synchronously.
 ///
 /// Examples:
-///   (fs/blocking-delete-file "/tmp/test.txt")
+///   fs/blocking-delete-file("/tmp/test.txt")
 fn blocking-delete-file(path) {
     run-blocking(fn() { delete-file(path) })
 }
 
-/// Check if a file or directory exists synchronously.
+/// Check if a file or directory exists synchronously. Returns a plain `Bool`.
 ///
 /// Examples:
-///   (fs/blocking-exists? "/tmp/test.txt")  ; => Result.Ok { value: true }
+///   fs/blocking-exists?("/tmp/test.txt")  // => true
 fn blocking-exists?(path) {
     run-blocking(fn() { exists?(path) })
 }
 
+/// Get a file's size in bytes synchronously. Returns Result.Ok with the
+/// size or Result.Err if it doesn't exist. No handler required.
 fn blocking-file-size(path) {
     run-blocking(fn() { file-size(path) })
 }
 
+/// Check synchronously whether path is a regular file. Returns a plain `Bool`.
+/// No handler required.
 fn blocking-is-file?(path) {
     run-blocking(fn() { is-file?(path) })
 }
 
+/// Check synchronously whether path is a directory. Returns a plain `Bool`.
+/// No handler required.
 fn blocking-is-directory?(path) {
     run-blocking(fn() { is-directory?(path) })
 }
 
+/// Rename or move a file/directory synchronously. Returns Result.Ok on
+/// success or Result.Err on failure. No handler required.
 fn blocking-rename(old-path, new-path) {
     run-blocking(fn() { rename(old-path, new-path) })
 }
 
+/// Copy a file from source to destination synchronously. Returns
+/// Result.Ok on success or Result.Err on failure. No handler required.
 fn blocking-copy(src-path, dest-path) {
     run-blocking(fn() { copy(src-path, dest-path) })
 }
@@ -732,7 +810,7 @@ fn blocking-copy(src-path, dest-path) {
 /// Returns a Result containing a vector of filenames.
 ///
 /// Examples:
-///   (fs/blocking-read-dir "/tmp")  ; => Result.Ok { value: ["file1.txt", "file2.txt"] }
+///   fs/blocking-read-dir("/tmp")  // => Result.Ok { value: ["file1.txt", "file2.txt"] }
 fn blocking-read-dir(path) {
     run-blocking(fn() { read-dir(path) })
 }
@@ -740,19 +818,25 @@ fn blocking-read-dir(path) {
 /// Create a directory synchronously.
 ///
 /// Examples:
-///   (fs/blocking-create-dir "/tmp/mydir")
+///   fs/blocking-create-dir("/tmp/mydir")
 fn blocking-create-dir(path) {
     run-blocking(fn() { create-dir(path) })
 }
 
+/// Create a directory and all missing parents synchronously (mkdir -p).
+/// No handler required.
 fn blocking-create-dir-all(path) {
     run-blocking(fn() { create-dir-all(path) })
 }
 
+/// Remove an empty directory synchronously. Fails if not empty. No
+/// handler required.
 fn blocking-remove-dir(path) {
     run-blocking(fn() { remove-dir(path) })
 }
 
+/// Remove a directory and all its contents recursively, synchronously
+/// (rm -rf). No handler required.
 fn blocking-remove-dir-all(path) {
     run-blocking(fn() { remove-dir-all(path) })
 }

@@ -31,6 +31,9 @@ use beagle.string-builder as sb
 //    by length via get-string so they are preserved as far as Beagle strings
 //    allow.
 
+/// Return the platform's libc shared-library name to load via FFI.
+///
+/// "libSystem.B.dylib" on macos, "libc.so.6" on linux, else a bare "libc".
 fn get-libc-path() {
     let os = get-os()
     if os == "macos" {
@@ -60,6 +63,7 @@ let _system = ffi/get-function(libc, "system",
 // How many bytes we pull per fread call.
 let CHUNK-SIZE = 65536
 
+/// True if the FFI pointer `p` is null (its low word is 0).
 fn is-null-ptr(p) {
     p.lo == 0
 }
@@ -71,8 +75,8 @@ fn is-null-ptr(p) {
 /// The child's exit status is discarded — see `system` if you need it.
 ///
 /// Examples:
-///   (run-capture "echo hello")        ; => "hello\n"
-///   (run-capture "printf 'a\nb'")     ; => "a\nb"
+///   run-capture("echo hello")        // => "hello\n"
+///   run-capture("printf 'a\nb'")     // => "a\nb"
 fn run-capture(cmd) {
     let handle = _popen(cmd, "r")
     if is-null-ptr(handle) {
@@ -87,6 +91,11 @@ fn run-capture(cmd) {
 
 // Read the whole FILE* stream into a String, chunk by chunk.
 // A 0-byte fread is the only reliable EOF signal on a pipe.
+/// Read the entire FILE* stream `handle` into a String via chunked fread.
+///
+/// Loops reading CHUNK-SIZE bytes into an FFI buffer until fread returns 0
+/// (the only reliable pipe EOF), copying each chunk length-based so all byte
+/// values round-trip. Frees the buffer before returning.
 fn read-all(handle) {
     let builder = sb/new(CHUNK-SIZE)
     let buf = ffi/allocate(CHUNK-SIZE)
@@ -112,7 +121,7 @@ fn read-all(handle) {
 /// `pwd`, `whoami`, `git rev-parse HEAD`.
 ///
 /// Examples:
-///   (run-capture-trim "echo hello")   ; => "hello"
+///   run-capture-trim("echo hello")   // => "hello"
 fn run-capture-trim(cmd) {
     trim(run-capture(cmd))
 }
@@ -127,9 +136,9 @@ fn run-capture-trim(cmd) {
 /// Use `exit-status` to decode the actual exit code.
 ///
 /// Examples:
-///   (system "true")           ; => 0
-///   (system "exit 3")         ; => 768   (3 << 8)
-///   (exit-status (system "exit 3"))  ; => 3
+///   system("true")           // => 0
+///   system("exit 3")         // => 768   (3 << 8)
+///   exit-status(system("exit 3"))  // => 3
 fn system(cmd) {
     _system(cmd)
 }
@@ -141,8 +150,8 @@ fn system(cmd) {
 /// (was killed by a signal — low 7 bits non-zero).
 ///
 /// Examples:
-///   (exit-status (system "exit 5"))  ; => 5
-///   (exit-status 0)                  ; => 0
+///   exit-status(system("exit 5"))  // => 5
+///   exit-status(0)                  // => 0
 fn exit-status(status) {
     let sig = status & 127
     if sig != 0 {
@@ -155,8 +164,8 @@ fn exit-status(status) {
 /// Convenience: true if `system(cmd)` reported a clean zero exit.
 ///
 /// Examples:
-///   (success? "true")   ; => true
-///   (success? "false")  ; => false
+///   success?("true")   // => true
+///   success?("false")  // => false
 fn success?(cmd) {
     system(cmd) == 0
 }

@@ -41,7 +41,7 @@ enum Timer {
 /// Must be called within a Timer effect handler block.
 ///
 /// Examples:
-///   (timer/sleep 100)  ; Sleep for 100ms
+///   timer/sleep(100)  // => null
 fn sleep(ms) {
     perform Timer.Sleep { ms: ms }
 }
@@ -49,9 +49,9 @@ fn sleep(ms) {
 /// Get current time in nanoseconds since epoch.
 ///
 /// Examples:
-///   (let start (timer/now))
-///   ; ... do work ...
-///   (let elapsed (- (timer/now) start))
+///   let start = timer/now()
+///   // ... do work ...
+///   let elapsed = timer/now() - start
 fn now() {
     perform Timer.Now {}
 }
@@ -87,10 +87,10 @@ extend BlockingTimerHandler with effect/Handler(Timer) {
 /// Requires both Timer and Async handlers to be installed.
 ///
 /// Examples:
-///   (match (timer/timeout 1000 my-future) {
+///   match timer/timeout(1000, my-future) {
 ///       Result.Ok { value } => value,
 ///       Result.Err { error } => "timed out"
-///   })
+///   }
 fn timeout(ms, future) {
     // Import async module for future-state
     use beagle.async as async
@@ -133,7 +133,7 @@ fn timeout(ms, future) {
 /// Useful for setting a single deadline across multiple operations.
 ///
 /// Examples:
-///   (let d (timer/deadline 5000))  ; 5 second deadline
+///   let d = timer/deadline(5000)  // => 5000000000
 fn deadline(ms) {
     core/time-now() + (ms * 1000000)
 }
@@ -169,7 +169,7 @@ fn run-blocking(thunk) {
 /// No handler required. Blocks the current thread.
 ///
 /// Examples:
-///   (timer/blocking-sleep 100)  ; Sleep for 100ms
+///   timer/blocking-sleep(100)  // => null
 fn blocking-sleep(ms) {
     run-blocking(fn() { sleep(ms) })
 }

@@ -3,23 +3,37 @@ use beagle.builtin as builtin
 use beagle.primitive as primitive
 
 
+/// Allocate a raw object of `size` fields with every field set to `null`.
+/// Internal helper: the result has no array type-id yet, so it is not a
+/// valid array until `new-array` tags it. Returns the allocated object.
 fn allocate-array-unsafe(size) {
     let array = builtin/allocate(size)
     builtin/fill-object-fields(array, null)
 }
 
+/// Read field `index` directly via `primitive/read-field` with no type or
+/// bounds checking. Caller must guarantee `array` is an array and `index`
+/// is in range.
 fn read-field-unsafe(array, index) {
     primitive/read-field(array, index)
 }
 
+/// Write `value` to field `index` directly via `primitive/write-field` with
+/// no type or bounds checking. Caller must guarantee `array` is an array and
+/// `index` is in range.
 fn write-field-unsafe(array, index, value) {
     primitive/write-field(array, index, value)
 }
 
+/// Return true when `array` is a heap object carrying the array type-id (1),
+/// i.e. one produced by `new-array`. Returns false for any other value.
 fn is-array(array) {
     primitive/is-object(array) && primitive/read-type-id(array) == 1
 }
 
+/// Guard that `array` is a real array; otherwise print `message` and the
+/// offending value, then throw "Not an array". Returns null when the check
+/// passes.
 fn panic-if-not-array(message, array) {
     if is-array(array) == false {
         println(message)
@@ -28,7 +42,22 @@ fn panic-if-not-array(message, array) {
     }
 }
 
+/// Bounds- and type-checked write of `value` at `index`. Throws if `array`
+/// is not an array, and throws a (resumable) IndexError when `index` is out of
+/// range — a silently-dropped write is a programmer error, not a no-op.
 fn write-field(array, index, value) {
+    panic-if-not-array("write", array)
+    let size = primitive/size(array)
+    if index < 0 || index >= size {
+        throw("beagle.mutable-array/write-field: index ${index} out of bounds for array of size ${size}")
+    } else {
+        write-field-unsafe(array, index, value)
+    }
+}
+
+/// Like `write-field` but silently ignores an out-of-range `index` (returns
+/// null). Use only when an out-of-bounds write is genuinely expected/benign.
+fn write-field-or-ignore(array, index, value) {
     panic-if-not-array("write", array)
     if index < 0 || index >= primitive/size(array) {
         null
@@ -37,6 +66,8 @@ fn write-field(array, index, value) {
     }
 }
 
+/// Bounds- and type-checked read at `index`. Throws if `array` is not an
+/// array; returns null when `index` is out of range, otherwise the element.
 fn read-field(array, index) {
     panic-if-not-array("read", array)
     if index < 0 || index >= primitive/size(array)  {
@@ -76,6 +107,8 @@ fn swap(array, i, j) {
     }
 }
 
+/// Create a new array of `size` null-initialized elements and tag it with
+/// the array type-id. Throws "Negative size" when `size < 0`.
 fn new-array(size) {
     if size < 0 {
         throw("Negative size")
@@ -86,10 +119,14 @@ fn new-array(size) {
 }
 
 
+/// A trivial single-field struct used only by this module's demos/tests
+/// (`allocate-array-and-return` and `main`).
 struct ExampleStruct {
     value
 }
 
+/// Return a new array that is a shallow copy of `array`. Throws if `array`
+/// is not an array (and, redundantly, if it is null).
 fn copy-array(array) {
     panic-if-not-array("copy", array)
     if array == null {
@@ -100,10 +137,14 @@ fn copy-array(array) {
 }
 
 
+/// Copy the contents of `from` into `to` via `builtin/copy-from-to-object`
+/// with no type or size validation. Internal helper for `copy-from-array-to`.
 fn unsafe-copy-from-array-to(from, to) {
     builtin/copy-from-to-object(from, to)
 }
 
+/// Copy all of `from`'s elements into `to`. Both must be arrays; throws if
+/// `from` is larger than `to`.
 fn copy-from-array-to(from, to) {
     panic-if-not-array("copy from", from)
     panic-if-not-array("copy to", to)
@@ -113,6 +154,8 @@ fn copy-from-array-to(from, to) {
     unsafe-copy-from-array-to(from, to)
 }
 
+/// Copy `count` elements starting at index `start` from `from` into `to`
+/// via `builtin/copy-array-range`. Both arguments must be arrays.
 fn copy-range(from, to, start, count) {
     panic-if-not-array("copy-range from", from)
     panic-if-not-array("copy-range to", to)
@@ -120,6 +163,8 @@ fn copy-range(from, to, start, count) {
 }
 
 
+/// Demo helper: build a length-1 array holding a sample `ExampleStruct` and
+/// return it. Used by `main`.
 fn allocate-array-and-return() {
     let example-struct = ExampleStruct {
         value: "Example Struct Value2"
@@ -129,6 +174,8 @@ fn allocate-array-and-return() {
     array
 }
 
+/// Return the number of elements in `array`, or 0 when `array` is null.
+/// Throws if a non-null `array` is not actually an array.
 fn count(array) {
     if array == null {
         0
@@ -138,92 +185,54 @@ fn count(array) {
     }
 }
 
+/// Integer remainder of `a` divided by `b`, computed as `a - (a / b) * b`.
 fn mod(a, b) {
     a - (a / b) * b
 }
 
-fn main() {
-    let array = new-array(10)
-    primitive/write-type-id(array, 1)
-    primitive/write-field(array, 0, 1)
-    primitive/write-field(array, 1, 2)
-    primitive/write-field(array, 2, 3)
-    primitive/write-field(array, 3, 4)
-    primitive/write-field(array, 4, 5)
-    primitive/write-field(array, 5, 6)
-    primitive/write-field(array, 6, 7)
-    primitive/write-field(array, 7, 8)
-    primitive/write-field(array, 8, 9)
-    primitive/write-field(array, 9, 10)
-
-    println(is-array(array))
-
-
-    println(count(array))
-    println(count(null))
-
-    let copied-array = copy-array(array)
-    write-field(copied-array, 0, 42);
-    gc()
-    gc()
-    gc()
-    println(array)
-    println(copied-array)
-
-
-
-    let my-array = allocate-array-and-return()
-    println(primitive/read-field(array, 0))
-    println(array)
-    println(primitive/size(array))
-
-    let example-struct = ExampleStruct {
-        value: "Example Struct Value"
+/// Set every slot of `array` to `value` in place and return `array`.
+/// Throws if `array` is not an array.
+fn fill(array, value) {
+    panic-if-not-array("fill", array)
+    let size = primitive/size(array)
+    let mut i = 0
+    while i < size {
+        write-field-unsafe(array, i, value)
+        i = i + 1
     }
-    println(is-array(example-struct))
-
-    let array = builtin/allocate(1)
-    primitive/write-type-id(array, 1)
-    primitive/write-field(array, 0, example-struct)
-    println(primitive/read-field(array, 0).value)
-    println(array)
-    gc()
-    gc()
-    gc()
-    println(array)
-    println(my-array)
-
-
-    let my-small-array = new-array(1);
-    write-field(my-small-array, 0, 42)
-
-    let my-larger-array = new-array(2);
-    write-field(my-larger-array, 0, 1)
-
-    copy-from-array-to(my-small-array, my-larger-array)
-    write-field(my-larger-array, 1, 44)
-    write-field(my-small-array, 0, 43)
-    println(my-small-array)
-    println(my-larger-array)
-
-    read-field(array, 0)
-
-    "done"
+    array
 }
 
-// @beagle.core.snapshot
-// true
-// 10
-// 0
-// [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
-// [ 42, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
-// 1
-// [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ]
-// 10
-// false
-// Example Struct Value
-// [ ExampleStruct { value: "Example Struct Value" } ]
-// [ ExampleStruct { value: "Example Struct Value" } ]
-// [ ExampleStruct { value: "Example Struct Value2" } ]
-// [ 43 ]
-// [ 42, 44 ]
+/// Return the index of the first element structurally equal to `value`
+/// (compared with `equal`), or -1 when no element matches.
+/// Throws if `array` is not an array.
+fn index-of(array, value) {
+    panic-if-not-array("index-of", array)
+    let size = primitive/size(array)
+    let mut i = 0
+    let mut result = -1
+    while i < size && result == -1 {
+        if equal(read-field-unsafe(array, i), value) {
+            result = i
+        }
+        i = i + 1
+    }
+    result
+}
+
+/// Materialize `array` into a new persistent vector holding its elements in
+/// order (nulls preserved). Throws if `array` is not an array.
+fn to-vec(array) {
+    panic-if-not-array("to-vec", array)
+    let size = primitive/size(array)
+    let mut result = []
+    let mut i = 0
+    while i < size {
+        result = push(result, read-field-unsafe(array, i))
+        i = i + 1
+    }
+    result
+}
+
+/// Snapshot-test entry point exercising the array API (alloc, write/read,
+/// count, copy, copy-from-array-to, GC interaction). Returns "done".

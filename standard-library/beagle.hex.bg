@@ -14,6 +14,8 @@ use beagle.string-builder as sb
 // Convert the polymorphic input (String or Vec<Int>) into a Vec<Int> of bytes.
 // A String is converted to its UTF-8 bytes by appending it to a string-builder
 // (which stores the raw UTF-8 encoding) and reading the bytes back.
+/// Coerce `input` to a Vec<Int> of bytes: a String becomes its UTF-8 bytes
+/// (via a string-builder), any other value (a Vec<Int>) is returned unchanged.
 fn to-bytes(input) {
     if instance-of(input, String) {
         let builder = sb/new(length(input) + 1)
@@ -32,6 +34,7 @@ fn to-bytes(input) {
 }
 
 // Map a nibble (0..15) to its lowercase hex character code.
+/// Map a nibble `n` (0..15) to its lowercase hex character code ('0'-'9', 'a'-'f').
 fn nibble-to-code(n) {
     if n < 10 {
         char-code("0") + n
@@ -41,6 +44,8 @@ fn nibble-to-code(n) {
 }
 
 // Map a hex digit character code to its value (0..15), or -1 if not a hex digit.
+/// Map a hex digit character code `c` to its value (0..15), case-insensitive;
+/// returns -1 if `c` is not a hex digit.
 fn code-to-nibble(c) {
     if c >= char-code("0") && c <= char-code("9") {
         c - char-code("0")
@@ -59,6 +64,8 @@ fn code-to-nibble(c) {
 
 // Encode a Vec<Int> of byte values (or a String, by its UTF-8 bytes) into a
 // lowercase hex string.
+/// Encode `input` (a Vec<Int> of byte values, or a String by its UTF-8 bytes)
+/// as a lowercase hex string with exactly two characters per byte.
 fn encode(input) {
     let bytes = to-bytes(input)
     let n = count(bytes)
@@ -77,6 +84,8 @@ fn encode(input) {
 
 // Decode a hex string into a Vec<Int> of byte values.
 // Errors out on odd length or on a non-hex character.
+/// Decode hex string `s` into a Vec<Int> of byte values (case-insensitive).
+/// Throws on an odd-length string or any non-hex character.
 fn decode(s) {
     let n = length(s)
     if n - (n / 2) * 2 != 0 {

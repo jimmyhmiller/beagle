@@ -42,14 +42,17 @@ use beagle.channel as chan
 // slow-but-correct run" rule (a flaky watchdog is worse than none). A correct run
 // returns the instant the value is present (≪1s), so a larger default costs a
 // correct run NOTHING; it only delays surfacing a genuine hang, which is fine.
+/// Default watchdog budget in milliseconds (30000) used by every assertion; tunable per call.
 fn default-watchdog-ms() { 30000 }
 
 // core/time-now() is monotonic nanoseconds since process start. Convert a
 // millisecond budget into an absolute nanosecond deadline.
+/// Convert a millisecond watchdog budget into an absolute monotonic-nanosecond deadline.
 fn deadline-after(watchdog_ms) {
     core/time-now() + watchdog_ms * 1000000
 }
 
+/// True once the monotonic clock has passed the given nanosecond deadline.
 fn past-deadline?(deadline) {
     core/time-now() > deadline
 }
@@ -57,6 +60,7 @@ fn past-deadline?(deadline) {
 // Burn a small, growing amount of pure CPU between empty polls so we don't
 // re-load the atom as fast as the core can issue loads (mirrors
 // beagle.channel/spin-backoff). No allocation, no GC interaction.
+/// Burn n iterations of pure CPU (no allocation, no GC) to back off between empty polls; returns null.
 fn spin-burn(n) {
     let mut i = 0
     let mut acc = 0
@@ -73,10 +77,12 @@ fn spin-burn(n) {
 // watchdog fires. On the happy path this returns the instant a value is present
 // (happens-before the producer's send!), with ZERO dependence on watchdog_ms.
 // On a hang it throws (HARD FAIL) naming `what`.
+/// Busy-spin receive one value from ch, returning it as soon as present; throws (hard fail) naming `what` if the watchdog fires first.
 fn receive-within(ch, watchdog_ms, what) {
     receive-within-spin(ch, deadline-after(watchdog_ms), watchdog_ms, what, 1)
 }
 
+/// Recursive spin helper for receive-within: polls try-receive with growing backoff until a value arrives, else throws once past `deadline`.
 fn receive-within-spin(ch, deadline, watchdog_ms, what, backoff) {
     let r = chan/try-receive(ch)
     // r is {:none true} when empty, else {:some v}. (The some/none wrapper means
@@ -97,6 +103,7 @@ fn receive-within-spin(ch, deadline, watchdog_ms, what, backoff) {
 
 // Count elements of `coll` deeply-equal to `x`. Uses equal(...) (structural), so
 // it works for any value type — no hashability requirement.
+/// Count elements of coll structurally equal to x.
 fn count-equal(coll, x) {
     let mut c = 0
     for e in coll {
@@ -112,6 +119,7 @@ fn count-equal(coll, x) {
 // match and every element of `a` has equal counts in `a` and `b`, then `b`
 // cannot contain an element outside `a` (its mass would exceed |b| = |a|), so
 // the multisets are identical.
+/// True iff a and b are equal as multisets (same elements with the same multiplicities, order irrelevant).
 fn multiset-eq?(a, b) {
     if length(a) != length(b) {
         false
@@ -129,6 +137,7 @@ fn multiset-eq?(a, b) {
 // Assert two collections are equal as multisets (order-insensitive). PURE
 // comparison — zero timing. This is what makes "results arrived in any order"
 // a deterministic assertion once the count-barrier has collected them all.
+/// Assert actual and expected are equal as multisets (order-insensitive); throws on mismatch, returns null.
 fn assert-set-eq!(actual, expected) {
     if multiset-eq?(actual, expected) == false {
         throw("assert-set-eq! failed (unordered/multiset contents differ)\n  actual:   ${actual}\n  expected: ${expected}")
@@ -141,6 +150,7 @@ fn assert-set-eq!(actual, expected) {
 // Assert the next value to arrive on `ch` deeply-equals `expected`. PASS is
 // decided by the happens-before edge of the producer's send!; the watchdog only
 // guards against the value never arriving.
+/// Assert the next value arriving on ch deeply-equals expected, bounded by an optional watchdog (ms); throws on mismatch or timeout.
 fn assert-receives! {
     (ch, expected) => assert-receives!(ch, expected, default-watchdog-ms())
     (ch, expected, watchdog_ms) => {
@@ -157,6 +167,7 @@ fn assert-receives! {
 // Receive EXACTLY `n` values from `ch` (the count-barrier), each bounded by the
 // watchdog, returning them in arrival order. The exact count is what makes this
 // deterministic: with N workers each sending once, we wait for all N.
+/// Receive exactly n values from ch (each watchdog-bounded), returning them in arrival order.
 fn collect-n(ch, n, watchdog_ms) {
     let mut acc = []
     let mut i = 0
@@ -173,6 +184,7 @@ fn collect-n(ch, n, watchdog_ms) {
 // `expected-set`. Order of arrival is irrelevant; multiplicity is not. This is
 // the canonical concurrency assertion: an exact count-barrier (happens-before
 // on each value) followed by an unordered compare.
+/// Assert exactly n values arrive on ch and, as a multiset, equal expected-set (order-insensitive); throws on misuse, mismatch, or timeout.
 fn assert-receives-all! {
     (ch, n, expected-set) => assert-receives-all!(ch, n, expected-set, default-watchdog-ms())
     (ch, n, expected-set, watchdog_ms) => {
@@ -198,6 +210,7 @@ fn assert-receives-all! {
 // merely in-flight races this snapshot and the check is meaningless — it would
 // pass while the over-production is still on its way. Pure (channel-count
 // snapshot), no timing: with the barrier in place, "empty now" => "stays empty".
+/// Assert ch holds no unreceived values (catches over-production); throws if any remain. Call only after a completion barrier proves all producers are done.
 fn assert-channel-drained!(ch) {
     let extra = chan/channel-count(ch)
     if extra != 0 {
@@ -216,11 +229,13 @@ fn assert-channel-drained!(ch) {
 // atom set via reset!/swap!, which publishes a real happens-before edge) — never
 // because "enough time passed". The watchdog is still a HARD-FAIL-on-hang guard,
 // not the basis of the pass.
+/// Busy-spin until thunk pred returns truthy (watchdog-bounded), returning true; throws on timeout. Use sparingly — prefer the channel primitives.
 fn await-condition! {
     (pred) => await-condition!(pred, default-watchdog-ms())
     (pred, watchdog_ms) => await-condition-spin!(pred, deadline-after(watchdog_ms), watchdog_ms, 1)
 }
 
+/// Recursive spin helper for await-condition!: polls pred with growing backoff until truthy, else throws once past `deadline`.
 fn await-condition-spin!(pred, deadline, watchdog_ms, backoff) {
     if pred() {
         true
@@ -236,6 +251,7 @@ fn await-condition-spin!(pred, deadline, watchdog_ms, backoff) {
 
 // assert-eventually! is await-condition! framed as an assertion (returns null on
 // success, throws on watchdog). Same determinism caveat applies.
+/// await-condition! framed as an assertion: returns null once pred becomes truthy, throws on watchdog timeout.
 fn assert-eventually! {
     (pred) => assert-eventually!(pred, default-watchdog-ms())
     (pred, watchdog_ms) => {

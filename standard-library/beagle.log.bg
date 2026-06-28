@@ -31,6 +31,8 @@ let min-level = atom(LEVEL-DEBUG)
 
 // Map a level int to its uppercase name. Throws on an unknown level rather
 // than silently returning a sentinel.
+/// Map a level int to its uppercase name ("DEBUG"/"INFO"/"WARN"/"ERROR").
+/// Throws on an unknown level int.
 fn level-name(level) {
     if level == LEVEL-DEBUG {
         "DEBUG"
@@ -54,6 +56,8 @@ fn level-name(level) {
 // Normalize a caller-supplied level to its int. Accepts either the int
 // constants above or the keywords :debug/:info/:warn/:error. Throws on
 // anything else (no silent fallback).
+/// Normalize a level to its int, accepting either the LEVEL-* int constants
+/// or the keywords :debug/:info/:warn/:error. Throws on anything else.
 fn normalize-level(level) {
     if level == :debug {
         LEVEL-DEBUG
@@ -105,6 +109,9 @@ fn enabled?(level) {
 // Render a fields-map as " key=value key2=value2 ...", sorted by nothing in
 // particular (map key order). Returns "" for an empty/absent map so plain
 // messages stay clean.
+/// Render a fields map as " key=value key2=value2 ..." (one leading space per
+/// entry). Returns "" when `fields` is null or empty. Keyword keys are
+/// rendered without the leading colon.
 fn format-fields(fields) {
     if fields == null {
         ""
@@ -119,6 +126,8 @@ fn format-fields(fields) {
     }
 }
 
+/// Tail-recursive accumulator for `format-fields`: appends " key=value" for
+/// each key in `ks` from `idx` up to `len`. Internal helper.
 fn format-fields-helper(fields, ks, idx, len, acc) {
     if idx >= len {
         acc
@@ -132,6 +141,36 @@ fn format-fields-helper(fields, ks, idx, len, acc) {
         }
         let entry = " " ++ k-str ++ "=" ++ to-string(v)
         format-fields-helper(fields, ks, idx + 1, len, acc ++ entry)
+    }
+}
+
+/// Render a field key to the exact string used in output: keyword keys lose
+/// their leading colon (via keyword->string), everything else goes through
+/// to-string. Matches the rendering in `format-fields-helper`.
+fn field-key-string(k) {
+    if keyword?(k) {
+        keyword->string(k)
+    } else {
+        to-string(k)
+    }
+}
+
+/// Render a fields map as " key=value key2=value2 ..." with keys in ASCENDING
+/// order (lexicographic by their rendered key string). Returns "" when
+/// `fields` is null or empty. Unlike `format-fields`, the entry order is
+/// deterministic regardless of map insertion order.
+fn format-fields-sorted(fields) {
+    if fields == null {
+        ""
+    } else {
+        let ks = keys(fields)
+        let len = length(ks)
+        if len == 0 {
+            ""
+        } else {
+            let sorted-ks = sort-with(fn(a, b) { field-key-string(a) < field-key-string(b) }, ks)
+            format-fields-helper(fields, sorted-ks, 0, len, "")
+        }
     }
 }
 
@@ -149,18 +188,43 @@ fn format-line-fields(level, msg, fields) {
     format-line(level, msg) ++ format-fields(fields)
 }
 
+/// Build a structured log line WITHOUT a timestamp, with fields in ASCENDING
+/// key order (deterministic regardless of map insertion order):
+///     "LEVEL msg key=value ..."
+/// Used by `log-fields` for its (timestamped) output and for exact-assertion
+/// testing of the sorted-field rendering.
+fn format-line-fields-sorted(level, msg, fields) {
+    format-line(level, msg) ++ format-fields-sorted(fields)
+}
+
 // Build the full line that actually gets written, including the live
 // timestamp: "LEVEL [<epoch-millis>] msg<fields>".
+/// Build the full line that gets written, including a live epoch-millis
+/// timestamp: "LEVEL [<ts>] msg<fields>". `level` may be a keyword or int.
 fn build-emit-line(level, msg, fields) {
     let lvl = normalize-level(level)
     let ts = time/epoch-millis()
     level-name(lvl) ++ " [" ++ to-string(ts) ++ "] " ++ to-string(msg) ++ format-fields(fields)
 }
 
+// Build the full written line with a live timestamp and fields rendered in
+// ASCENDING key order: "LEVEL [<epoch-millis>] msg key=value ...".
+/// Build the full line that gets written, including a live epoch-millis
+/// timestamp, with fields sorted in ascending key order:
+/// "LEVEL [<ts>] msg key=value ...". `level` may be a keyword or int.
+fn build-emit-line-sorted(level, msg, fields) {
+    let lvl = normalize-level(level)
+    let ts = time/epoch-millis()
+    level-name(lvl) ++ " [" ++ to-string(ts) ++ "] " ++ to-string(msg) ++ format-fields-sorted(fields)
+}
+
 // --- Emission --------------------------------------------------------------
 
 // Write a fully-built line to the appropriate sink. debug/info -> stdout
 // (via println), warn/error -> stderr (via io/write-stderr).
+/// Write a fully-built line to its sink based on `lvl`: debug/info to stdout
+/// (println), warn/error to stderr (io/write-stderr with a trailing newline).
+/// Returns null.
 fn emit-line!(lvl, line) {
     if lvl >= LEVEL-WARN {
         io/write-stderr(line ++ "\n")
@@ -173,6 +237,9 @@ fn emit-line!(lvl, line) {
 
 // Core logging entry point. Suppresses below-min-level messages, otherwise
 // builds and emits the line. Returns true if emitted, false if suppressed.
+/// Core logging entry point: emits the message (with timestamp and fields)
+/// only if `level` is at or above the current min-level. Returns true if
+/// emitted, false if suppressed.
 fn log-at(level, msg, fields) {
     let lvl = normalize-level(level)
     if lvl >= deref(min-level) {
@@ -187,6 +254,25 @@ fn log-at(level, msg, fields) {
 /// Structured log: log(level, msg, fields-map). Returns true if emitted.
 fn log(level, msg, fields) {
     log-at(level, msg, fields)
+}
+
+/// Structured log at `level` whose `fields-map` is emitted as space-separated
+/// key=value pairs in ASCENDING key order (deterministic, unlike `log`/`log-at`
+/// which use map insertion order). The message is emitted as
+/// "LEVEL [<ts>] msg key=value ...", respecting the module's current min-level:
+/// suppressed (and returns false) when `level` is below it, otherwise emitted
+/// (and returns true). debug/info go to stdout, warn/error to stderr.
+/// `level` may be a keyword (:debug/:info/:warn/:error) or a LEVEL-* int.
+/// A null or empty `fields-map` emits just "LEVEL [<ts>] msg".
+fn log-fields(level, msg, fields) {
+    let lvl = normalize-level(level)
+    if lvl >= deref(min-level) {
+        let line = build-emit-line-sorted(lvl, msg, fields)
+        emit-line!(lvl, line)
+        true
+    } else {
+        false
+    }
 }
 
 /// Log at debug level. Returns true if emitted (false if suppressed).
@@ -296,25 +382,5 @@ test "level-name throws on out-of-range int" {
     assert-throws!(fn() { level-name(99) })
 }
 
-fn main() {
-    set-level!(:debug)
-    debug("debug message")
-    info("info message")
-    warn("warn message")
-    error("error message")
-
-    println("--- raising min-level to warn ---")
-    set-level!(:warn)
-    debug("hidden debug")
-    info("hidden info")
-    warn("visible warn")
-    error("visible error")
-
-    println("--- structured logging ---")
-    set-level!(:debug)
-    log(:info, "request handled", {:status 200 :ms 12})
-
-    println("format-line: ${format-line(:info, "sample")}")
-    println("format-line-fields: ${format-line-fields(:warn, "req", {:code 404})}")
-    "done"
-}
+/// Demo entry point: exercises each level, raising the min-level to warn, and
+/// structured logging. Returns "done".

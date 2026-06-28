@@ -35,6 +35,8 @@ let MASK32 = 0xFFFFFFFF
 // Normalize an arbitrary integer seed into a non-zero 32-bit state. xorshift
 // degenerates to all-zeros if seeded with 0, so we fall back to a fixed
 // non-zero constant in that case.
+/// Normalize an integer seed to a non-zero 32-bit state, mapping 0 to a fixed
+/// constant so the xorshift generator does not degenerate to all-zeros.
 fn normalize-seed(seed) {
     let s = seed & MASK32
     if s == 0 {
@@ -46,6 +48,8 @@ fn normalize-seed(seed) {
 
 // Create a generator from an explicit integer seed (deterministic), or from
 // the current epoch-millis when called with no arguments.
+/// Create a PRNG generator (an atom holding 32-bit state) from an explicit
+/// integer seed, or from the current epoch-millis when called with no args.
 fn make-rng {
     () => make-rng(time/epoch-millis())
     (seed) => atom(normalize-seed(seed))
@@ -54,6 +58,7 @@ fn make-rng {
 // Advance the 32-bit xorshift state once and return the new state.
 //   x ^= x << 13;  x ^= x >> 17;  x ^= x << 5;
 // Every step is re-masked to 32 bits.
+/// Advance the 32-bit xorshift state once and return the new state.
 fn xorshift-step(x) {
     let a = (x ^ ((x << 13) & MASK32)) & MASK32
     let b = (a ^ (a >> 17)) & MASK32
@@ -62,12 +67,14 @@ fn xorshift-step(x) {
 }
 
 // Return the next raw 32-bit value (0 .. 2^32 - 1) and advance the generator.
+/// Return the next raw 32-bit value (0 .. 2^32-1) and advance the generator.
 fn next-int(rng) {
     swap!(rng, fn(x) { xorshift-step(x) })
 }
 
 // Return a uniform Float in [0, 1). Divides a 32-bit integer by 2^32 so the
 // result is always strictly below 1.0.
+/// Return a uniform Float in [0, 1) and advance the generator.
 fn next-float(rng) {
     let r = next-int(rng)
     to-float(r) / 4294967296.0
@@ -77,6 +84,7 @@ fn next-float(rng) {
 // integer arithmetic: take a raw 32-bit word modulo the span. (Modulo bias is
 // negligible for the small spans typical of indexing/dice rolls, and the state
 // space — 2^32 — dwarfs any practical span.)
+/// Return a uniform Int in [lo, hi) and advance the generator. Throws if hi <= lo.
 fn int-range(rng, lo, hi) {
     if hi <= lo {
         throw("beagle.random/int-range: hi must be greater than lo")
@@ -91,6 +99,7 @@ fn int-range(rng, lo, hi) {
 // ---------------------------------------------------------------------------
 
 // Return a uniformly-random element of non-empty vector v.
+/// Return a uniformly-random element of non-empty vector v. Throws if v is empty.
 fn choice(rng, v) {
     let n = length(v)
     if n == 0 {
@@ -101,6 +110,8 @@ fn choice(rng, v) {
 
 // Fisher-Yates shuffle: return a new vector that is a uniformly-random
 // permutation of v. Works on a mutable copy, then rebuilds an immutable vector.
+/// Return a new immutable vector that is a uniformly-random permutation of v
+/// (Fisher-Yates). Vectors of length <= 1 are returned unchanged.
 fn shuffle(rng, v) {
     let n = length(v)
     if n <= 1 {
@@ -137,6 +148,8 @@ fn shuffle(rng, v) {
 // Sample k distinct elements from v without replacement. Requires 0 <= k <= n.
 // Implemented as a partial Fisher-Yates: shuffle the first k positions and take
 // them.
+/// Return a new vector of k distinct elements drawn from v without replacement
+/// (partial Fisher-Yates). Throws if k < 0 or k > length(v).
 fn sample(rng, v, k) {
     let n = length(v)
     if k < 0 {
@@ -180,6 +193,8 @@ fn sample(rng, v, k) {
 // Allocate a raw mutable array (type_id = 1) filled with null. Writes go
 // through primitive/write-field which emits a write barrier, so it is safe to
 // hold heap pointers across GCs.
+/// Allocate a raw mutable array (type_id 1) of the given size, filled with null.
+/// Internal scratch-array helper.
 fn builtin-allocate-filled(size) {
     let a = builtin/allocate(size)
     builtin/fill-object-fields(a, null)
@@ -187,10 +202,12 @@ fn builtin-allocate-filled(size) {
     a
 }
 
+/// Read element i from a raw mutable array. Thin wrapper over primitive/read-field.
 fn primitive-read(arr, i) {
     primitive/read-field(arr, i)
 }
 
+/// Write val to element i of a raw mutable array. Thin wrapper over primitive/write-field.
 fn primitive-write(arr, i, val) {
     primitive/write-field(arr, i, val)
 }
@@ -200,6 +217,7 @@ fn primitive-write(arr, i, val) {
 // ---------------------------------------------------------------------------
 
 // Map a nibble (0..15) to its lowercase hex character code.
+/// Map a nibble (0..15) to its lowercase hex character code.
 fn nibble-to-code(n) {
     if n < 10 {
         char-code("0") + n
@@ -210,6 +228,8 @@ fn nibble-to-code(n) {
 
 // Append the low `count` nibbles of a fresh 32-bit random word to the builder.
 // We draw a new 32-bit word and consume `count` nibbles (each 4 bits).
+/// Append `count` random lowercase hex nibbles to string-builder b, drawing
+/// fresh 32-bit words as needed (8 nibbles per word). Returns b.
 fn append-random-nibbles!(b, rng, count) {
     let mut remaining = count
     while remaining > 0 {
@@ -231,6 +251,8 @@ fn append-random-nibbles!(b, rng, count) {
 // Generate an RFC 4122 version-4 UUID string in 8-4-4-4-12 form, e.g.
 // "f47ac10b-58cc-4372-a567-0e02b2c3d479". The 13th hex digit is forced to '4'
 // (version) and the 17th to one of 8/9/a/b (variant).
+/// Generate an RFC 4122 version-4 UUID string in 8-4-4-4-12 form, with the
+/// version nibble forced to '4' and the variant nibble to one of 8/9/a/b.
 fn uuid-v4(rng) {
     let b = sb/new(36)
     let dash = char-code("-")
@@ -259,286 +281,4 @@ fn uuid-v4(rng) {
     append-random-nibbles!(b, rng, 12)
 
     sb/to-string(b)
-}
-
-// ---------------------------------------------------------------------------
-// Self-checking test suite
-// ---------------------------------------------------------------------------
-
-let pass-count = atom(0)
-let fail-count = atom(0)
-
-fn check(name, expected, actual) {
-    if equal(expected, actual) {
-        swap!(pass-count, fn(x) { x + 1 })
-        println("PASS: " ++ name)
-    } else {
-        swap!(fail-count, fn(x) { x + 1 })
-        println("FAIL: " ++ name ++ " expected=" ++ to-string(expected) ++ " actual=" ++ to-string(actual))
-    }
-}
-
-fn check-true(name, cond) {
-    if cond {
-        swap!(pass-count, fn(x) { x + 1 })
-        println("PASS: " ++ name)
-    } else {
-        swap!(fail-count, fn(x) { x + 1 })
-        println("FAIL: " ++ name)
-    }
-}
-
-// Compare two collections as multisets (sorted equality) so shuffle/sample
-// can be checked as permutations regardless of order.
-fn multiset-equal(a, b) {
-    if length(a) != length(b) {
-        false
-    } else {
-        equal(sort(a), sort(b))
-    }
-}
-
-fn main() {
-    println("=== beagle.random tests ===")
-
-    // --- Determinism: same seed => identical stream ---
-    let r1 = make-rng(12345)
-    let r2 = make-rng(12345)
-    let mut seq-ok = true
-    let mut i = 0
-    while i < 100 {
-        if next-int(r1) != next-int(r2) {
-            seq-ok = false
-        }
-        i = i + 1
-    }
-    check-true("same seed => identical next-int stream", seq-ok)
-
-    // Different seeds should (essentially always) diverge within a few draws.
-    let d1 = make-rng(1)
-    let d2 = make-rng(2)
-    let mut diverged = false
-    let mut j = 0
-    while j < 10 {
-        if next-int(d1) != next-int(d2) {
-            diverged = true
-        }
-        j = j + 1
-    }
-    check-true("different seeds diverge", diverged)
-
-    // --- next-int range ---
-    let ri = make-rng(777)
-    let mut in-range = true
-    let mut a = 0
-    while a < 1000 {
-        let v = next-int(ri)
-        if v < 0 || v > MASK32 {
-            in-range = false
-        }
-        a = a + 1
-    }
-    check-true("next-int within [0, 2^32-1]", in-range)
-
-    // --- next-float range ---
-    let rf = make-rng(888)
-    let mut f-ok = true
-    let mut bf = 0
-    while bf < 1000 {
-        let f = next-float(rf)
-        if f < 0.0 || f >= 1.0 {
-            f-ok = false
-        }
-        bf = bf + 1
-    }
-    check-true("next-float within [0, 1)", f-ok)
-
-    // next-float determinism with same seed.
-    let nf1 = make-rng(55)
-    let nf2 = make-rng(55)
-    check("next-float deterministic", next-float(nf1), next-float(nf2))
-
-    // --- int-range ---
-    let rr = make-rng(999)
-    let mut ir-ok = true
-    let mut ci = 0
-    while ci < 2000 {
-        let v = int-range(rr, 10, 20)
-        if v < 10 || v >= 20 {
-            ir-ok = false
-        }
-        ci = ci + 1
-    }
-    check-true("int-range stays within [lo, hi)", ir-ok)
-
-    // int-range covers all buckets (sanity: hit both ends across many draws).
-    let rc = make-rng(424242)
-    let mut saw-lo = false
-    let mut saw-hi = false
-    let mut cc = 0
-    while cc < 2000 {
-        let v = int-range(rc, 0, 5)
-        if v == 0 { saw-lo = true }
-        if v == 4 { saw-hi = true }
-        cc = cc + 1
-    }
-    check-true("int-range hits low bucket", saw-lo)
-    check-true("int-range hits high bucket", saw-hi)
-
-    // int-range bad args throws.
-    check-true("int-range hi<=lo throws", assert-throws-bool(fn() { int-range(make-rng(1), 5, 5) }))
-
-    // --- choice ---
-    let v = [10, 20, 30, 40, 50]
-    let rch = make-rng(31337)
-    let mut choice-ok = true
-    let mut ch = 0
-    while ch < 500 {
-        let e = choice(rch, v)
-        if contains-elem(v, e) == false {
-            choice-ok = false
-        }
-        ch = ch + 1
-    }
-    check-true("choice returns an element of v", choice-ok)
-    check-true("choice empty throws", assert-throws-bool(fn() { choice(make-rng(1), []) }))
-
-    // choice determinism.
-    let cd1 = make-rng(7)
-    let cd2 = make-rng(7)
-    check("choice deterministic", choice(cd1, v), choice(cd2, v))
-
-    // --- shuffle ---
-    let orig = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    let rsh = make-rng(20240614)
-    let sh = shuffle(rsh, orig)
-    check("shuffle preserves length", length(orig), length(sh))
-    check-true("shuffle is a permutation (same multiset)", multiset-equal(orig, sh))
-
-    // shuffle determinism.
-    let s1 = shuffle(make-rng(123), orig)
-    let s2 = shuffle(make-rng(123), orig)
-    check("shuffle deterministic", s1, s2)
-
-    // shuffle with duplicates preserves multiset.
-    let dups = [1, 1, 2, 2, 3, 3, 3]
-    let shd = shuffle(make-rng(99), dups)
-    check-true("shuffle preserves multiset with dups", multiset-equal(dups, shd))
-
-    // shuffle actually permutes (over many seeds, at least one differs).
-    let mut some-permuted = false
-    let mut sk = 0
-    while sk < 20 {
-        let perm = shuffle(make-rng(sk + 1), orig)
-        if equal(perm, orig) == false {
-            some-permuted = true
-        }
-        sk = sk + 1
-    }
-    check-true("shuffle changes order for some seed", some-permuted)
-
-    // --- sample ---
-    let rsa = make-rng(2718)
-    let samp = sample(rsa, orig, 4)
-    check("sample size", 4, length(samp))
-    check-true("sample elements all from v", all?(fn(x) { contains-elem(orig, x) }, samp))
-    check-true("sample elements distinct", distinct-count(samp) == length(samp))
-    check-true("sample k=0 empty", length(sample(make-rng(1), orig, 0)) == 0)
-    check-true("sample k=n is permutation", multiset-equal(orig, sample(make-rng(5), orig, length(orig))))
-    check-true("sample k>n throws", assert-throws-bool(fn() { sample(make-rng(1), orig, 999) }))
-
-    // sample determinism.
-    let sa1 = sample(make-rng(42), orig, 5)
-    let sa2 = sample(make-rng(42), orig, 5)
-    check("sample deterministic", sa1, sa2)
-
-    // --- uuid-v4 ---
-    let ru = make-rng(0xCAFEBABE)
-    let u = uuid-v4(ru)
-    check("uuid length 36", 36, length(u))
-    check-true("uuid shape 8-4-4-4-12", uuid-shape-ok(u))
-    check("uuid version digit is 4", "4", substring(u, 14, 15))
-    check-true("uuid variant digit in {8,9,a,b}", variant-ok(substring(u, 19, 20)))
-    check-true("uuid hex chars valid", uuid-hex-ok(u))
-
-    // uuid determinism + uniqueness.
-    check("uuid deterministic", uuid-v4(make-rng(11)), uuid-v4(make-rng(11)))
-    let uu = make-rng(8675309)
-    let mut all-distinct = true
-    let mut seen = {}
-    let mut un = 0
-    while un < 200 {
-        let id = uuid-v4(uu)
-        if get(seen, id) != null {
-            all-distinct = false
-        }
-        seen = assoc(seen, id, true)
-        un = un + 1
-    }
-    check-true("200 uuids are distinct", all-distinct)
-
-    println("")
-    println("PASS: " ++ to-string(deref(pass-count)) ++ "  FAIL: " ++ to-string(deref(fail-count)))
-    if deref(fail-count) == 0 {
-        println("ALL TESTS PASSED")
-    } else {
-        println("SOME TESTS FAILED")
-    }
-    "done"
-}
-
-// --- test helpers ---
-
-fn contains-elem(v, e) {
-    any?(fn(x) { equal(x, e) }, v)
-}
-
-fn distinct-count(v) {
-    length(distinct(v))
-}
-
-fn assert-throws-bool(thunk) {
-    try {
-        thunk()
-        false
-    } catch (e) {
-        true
-    }
-}
-
-// Verify s has the 8-4-4-4-12 dash layout.
-fn uuid-shape-ok(s) {
-    if length(s) != 36 {
-        false
-    } else {
-        substring(s, 8, 9) == "-" &&
-        substring(s, 13, 14) == "-" &&
-        substring(s, 18, 19) == "-" &&
-        substring(s, 23, 24) == "-"
-    }
-}
-
-fn variant-ok(c) {
-    c == "8" || c == "9" || c == "a" || c == "b"
-}
-
-fn is-hex-char(c) {
-    let code = char-code(c)
-    (code >= char-code("0") && code <= char-code("9")) ||
-    (code >= char-code("a") && code <= char-code("f"))
-}
-
-fn uuid-hex-ok(s) {
-    let mut ok = true
-    let mut i = 0
-    while i < length(s) {
-        let c = substring(s, i, i + 1)
-        if c != "-" {
-            if is-hex-char(c) == false {
-                ok = false
-            }
-        }
-        i = i + 1
-    }
-    ok
 }

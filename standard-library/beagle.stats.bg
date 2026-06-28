@@ -23,6 +23,9 @@ namespace beagle.stats
 
 // Materialize any Seqable into a plain vector so we can index it and reuse it
 // without re-walking a one-shot seq. Vectors pass through unchanged.
+/// Materialize any Seqable into a plain vector for indexing and reuse.
+/// A PersistentVector is returned unchanged; anything else is reduced into a
+/// new vector.
 fn as-vector(coll) {
     if instance-of(coll, PersistentVector) {
         coll
@@ -33,11 +36,15 @@ fn as-vector(coll) {
 
 // Force a number into the Float domain. Multiplying by 1.0 promotes an Int
 // (62-bit) to a Float; a value that is already a Float is unchanged.
+/// Promote a number into the Float domain by multiplying by 1.0.
+/// An Int becomes a Float; an existing Float is returned unchanged.
 fn to-float(x) {
     x * 1.0
 }
 
 // Guard: throw a legible error when a statistic is undefined on empty input.
+/// Throw a labeled "empty input" error if v is empty, otherwise return null.
+/// `who` is the statistic name embedded in the message (e.g. "mean").
 fn require-non-empty(v, who) {
     if length(v) == 0 {
         throw("beagle.stats/" ++ who ++ ": empty input — statistic is undefined for an empty collection")
@@ -156,6 +163,8 @@ fn mode(coll) {
 // --- variance / standard deviation -------------------------------------------
 
 // Shared core: sum of squared deviations from the mean (always a Float).
+/// Sum of squared deviations of each element from the mean, as a Float.
+/// Shared core used by the variance functions. Throws on empty input (via mean).
 fn sum-squared-deviations(v) {
     let m = mean(v)
     reduce(fn(acc, x) {
@@ -227,7 +236,9 @@ fn percentile(coll, p) {
         } else {
             // rank in [0, n-1] for the requested percentile
             let rank = to-float(p) / 100.0 * to-float(n - 1)
-            let lo = float-floor-to-int(rank)
+            // rank >= 0, so truncate-toward-zero == floor (O(1) native, vs the
+            // old O(n) count-up loop).
+            let lo = to-int(rank)
             let frac = rank - to-float(lo)
             if lo >= n - 1 {
                 to-float(s[n - 1])
@@ -240,13 +251,32 @@ fn percentile(coll, p) {
     }
 }
 
-// Floor a non-negative Float to an Int. percentile only ever floors values in
-// [0, n-1], so a simple count-up loop is exact and avoids needing a builtin
-// float->int truncation. (n is small relative to integer range here.)
-fn float-floor-to-int(x) {
-    let mut i = 0
-    while to-float(i + 1) <= x {
-        i = i + 1
+/// Quantile via linear interpolation (NumPy type-7), with q expressed on a
+/// 0..1 scale instead of percentile's 0..100. Equivalent to
+/// `percentile(coll, q * 100)`:
+///   * q == 0   -> minimum, q == 1 -> maximum.
+///   * q == 0.5 -> median (for the interpolating definition).
+/// Throws on empty input or when q is outside [0, 1].
+///
+///   quantile([1,2,3,4,5,6,7,8,9,10], 0.5)   // => 5.5
+///   quantile([1,2,3,4],              0)      // => 1.0
+///   quantile([1,2,3,4],              1)      // => 4.0
+///   quantile([1,2,3,4],              0.25)   // => 1.75
+fn quantile(coll, q) {
+    let v = as-vector(coll)
+    require-non-empty(v, "quantile")
+    if q < 0 || q > 1 {
+        throw("beagle.stats/quantile: q must be in 0..1")
+    } else {
+        percentile(v, to-float(q) * 100.0)
     }
-    i
 }
+
+/// Population standard deviation (the `stddev` spelling of `stdev`): the square
+/// root of the population variance. Throws on empty input.
+///
+///   stddev([2, 4, 4, 4, 5, 5, 7, 9])  // => 2.0
+fn stddev(coll) {
+    sqrt(variance(coll))
+}
+

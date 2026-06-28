@@ -1,6 +1,7 @@
 namespace beagle.ansi
 
 use beagle.string-builder as sb
+use beagle.os as os
 
 // ANSI terminal styling — pure Beagle.
 //
@@ -28,21 +29,47 @@ let ESC = char-from-code(27)
 // The full reset sequence: ESC [ 0 m
 let RESET = ESC ++ "[0m"
 
+// Whether ANSI escapes are emitted. Defaults from the NO_COLOR convention
+// (https://no-color.org): if the NO_COLOR env var is set to anything, styling
+// is disabled so output piped to files/logs stays clean. Toggle with set-enabled!.
+let ANSI_ENABLED = atom(os/getenv("NO_COLOR") == null)
+
+/// True if ANSI escapes are currently emitted (false when NO_COLOR disabled them
+/// or set-enabled!(false) was called).
+fn enabled?() {
+    deref(ANSI_ENABLED)
+}
+
+/// Enable or disable ANSI escape emission at runtime. When disabled, every
+/// styling function returns its text unchanged.
+fn set-enabled!(on) {
+    reset!(ANSI_ENABLED, on)
+}
+
 // ---------------------------------------------------------------------------
 // Core wrapping
 // ---------------------------------------------------------------------------
 
 // Wrap `s` with a single SGR code: ESC[<code>m s ESC[0m.
+/// Wrap `s` in a single SGR escape: ESC[<code>m s ESC[0m. Returns a new string.
 fn wrap(code, s) {
-    ESC ++ "[" ++ to-string(code) ++ "m" ++ s ++ RESET
+    if deref(ANSI_ENABLED) {
+        ESC ++ "[" ++ to-string(code) ++ "m" ++ s ++ RESET
+    } else {
+        s
+    }
 }
 
 // Apply a vector of SGR codes as one combined escape: ESC[<c0>;<c1>;...m s ESC[0m.
 // An empty codes vector returns `s` unchanged (no escape emitted).
 //
 //   style("x", [1, 31]) == ESC ++ "[1;31m" ++ "x" ++ ESC ++ "[0m"
+/// Apply a vector of SGR codes as one combined escape; an empty `codes` returns `s` unchanged.
 fn style(s, codes) {
     let n = count(codes)
+    if deref(ANSI_ENABLED) == false {
+        s
+    } else {
     if n == 0 {
         s
     } else {
@@ -62,75 +89,118 @@ fn style(s, codes) {
         sb/append!(builder, RESET)
         sb/to-string(builder)
     }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Text attributes
 // ---------------------------------------------------------------------------
 
+/// Render `s` bold (SGR 1).
 fn bold(s)      { wrap(1, s) }
+/// Render `s` dim/faint (SGR 2).
 fn dim(s)       { wrap(2, s) }
+/// Render `s` italic (SGR 3).
 fn italic(s)    { wrap(3, s) }
+/// Underline `s` (SGR 4).
 fn underline(s) { wrap(4, s) }
+/// Render `s` blinking (SGR 5).
 fn blink(s)     { wrap(5, s) }
+/// Swap foreground/background for `s` (reverse video, SGR 7).
 fn reverse(s)   { wrap(7, s) }
+/// Render `s` hidden/invisible (SGR 8).
 fn hidden(s)    { wrap(8, s) }
+/// Render `s` with a strikethrough line (SGR 9).
 fn strikethrough(s) { wrap(9, s) }
 
 // ---------------------------------------------------------------------------
 // Foreground colors (30..37)
 // ---------------------------------------------------------------------------
 
+/// Black foreground (SGR 30).
 fn black(s)   { wrap(30, s) }
+/// Red foreground (SGR 31).
 fn red(s)     { wrap(31, s) }
+/// Green foreground (SGR 32).
 fn green(s)   { wrap(32, s) }
+/// Yellow foreground (SGR 33).
 fn yellow(s)  { wrap(33, s) }
+/// Blue foreground (SGR 34).
 fn blue(s)    { wrap(34, s) }
+/// Magenta foreground (SGR 35).
 fn magenta(s) { wrap(35, s) }
+/// Cyan foreground (SGR 36).
 fn cyan(s)    { wrap(36, s) }
+/// White foreground (SGR 37).
 fn white(s)   { wrap(37, s) }
 
 // ---------------------------------------------------------------------------
 // Bright foreground colors (90..97)
 // ---------------------------------------------------------------------------
 
+/// Bright black foreground (SGR 90).
 fn bright-black(s)   { wrap(90, s) }
+/// Bright red foreground (SGR 91).
 fn bright-red(s)     { wrap(91, s) }
+/// Bright green foreground (SGR 92).
 fn bright-green(s)   { wrap(92, s) }
+/// Bright yellow foreground (SGR 93).
 fn bright-yellow(s)  { wrap(93, s) }
+/// Bright blue foreground (SGR 94).
 fn bright-blue(s)    { wrap(94, s) }
+/// Bright magenta foreground (SGR 95).
 fn bright-magenta(s) { wrap(95, s) }
+/// Bright cyan foreground (SGR 96).
 fn bright-cyan(s)    { wrap(96, s) }
+/// Bright white foreground (SGR 97).
 fn bright-white(s)   { wrap(97, s) }
 
 // `gray`/`grey` are common aliases for bright-black.
+/// Alias for bright-black (SGR 90).
 fn gray(s) { wrap(90, s) }
+/// Alias for bright-black (SGR 90); British spelling of `gray`.
 fn grey(s) { wrap(90, s) }
 
 // ---------------------------------------------------------------------------
 // Background colors (40..47)
 // ---------------------------------------------------------------------------
 
+/// Black background (SGR 40).
 fn bg-black(s)   { wrap(40, s) }
+/// Red background (SGR 41).
 fn bg-red(s)     { wrap(41, s) }
+/// Green background (SGR 42).
 fn bg-green(s)   { wrap(42, s) }
+/// Yellow background (SGR 43).
 fn bg-yellow(s)  { wrap(43, s) }
+/// Blue background (SGR 44).
 fn bg-blue(s)    { wrap(44, s) }
+/// Magenta background (SGR 45).
 fn bg-magenta(s) { wrap(45, s) }
+/// Cyan background (SGR 46).
 fn bg-cyan(s)    { wrap(46, s) }
+/// White background (SGR 47).
 fn bg-white(s)   { wrap(47, s) }
 
 // ---------------------------------------------------------------------------
 // Bright background colors (100..107)
 // ---------------------------------------------------------------------------
 
+/// Bright black background (SGR 100).
 fn bg-bright-black(s)   { wrap(100, s) }
+/// Bright red background (SGR 101).
 fn bg-bright-red(s)     { wrap(101, s) }
+/// Bright green background (SGR 102).
 fn bg-bright-green(s)   { wrap(102, s) }
+/// Bright yellow background (SGR 103).
 fn bg-bright-yellow(s)  { wrap(103, s) }
+/// Bright blue background (SGR 104).
 fn bg-bright-blue(s)    { wrap(104, s) }
+/// Bright magenta background (SGR 105).
 fn bg-bright-magenta(s) { wrap(105, s) }
+/// Bright cyan background (SGR 106).
 fn bg-bright-cyan(s)    { wrap(106, s) }
+/// Bright white background (SGR 107).
 fn bg-bright-white(s)   { wrap(107, s) }
 
 // ---------------------------------------------------------------------------
@@ -138,16 +208,38 @@ fn bg-bright-white(s)   { wrap(107, s) }
 // ---------------------------------------------------------------------------
 
 // 256-color palette foreground: ESC[38;5;<n>m ... ESC[0m  (n in 0..255).
+/// 256-color palette foreground; `n` is a palette index 0..255: ESC[38;5;n m.
 fn fg-256(n, s) { style(s, [38, 5, n]) }
 
 // 256-color palette background: ESC[48;5;<n>m ... ESC[0m.
+/// 256-color palette background; `n` is a palette index 0..255: ESC[48;5;n m.
 fn bg-256(n, s) { style(s, [48, 5, n]) }
 
 // Truecolor foreground: ESC[38;2;<r>;<g>;<b>m ... ESC[0m  (each 0..255).
+/// Truecolor foreground from `r`,`g`,`b` (each 0..255): ESC[38;2;r;g;b m.
 fn rgb(r, g, b, s) { style(s, [38, 2, r, g, b]) }
 
 // Truecolor background: ESC[48;2;<r>;<g>;<b>m ... ESC[0m.
+/// Truecolor background from `r`,`g`,`b` (each 0..255): ESC[48;2;r;g;b m.
 fn bg-rgb(r, g, b, s) { style(s, [48, 2, r, g, b]) }
+
+// ---------------------------------------------------------------------------
+// Terminal hyperlinks (OSC 8)
+// ---------------------------------------------------------------------------
+
+// OSC 8 hyperlink: ESC ] 8 ; ; <url> ESC \ <label> ESC ] 8 ; ; ESC \
+// The trailing ESC \ pair (ST, "string terminator") closes each OSC; the empty
+// second OSC 8 ends the link region. Terminals that don't understand OSC 8 show
+// just <label>. When ANSI is disabled the bare <label> is returned unchanged.
+/// Wrap `label` in an OSC 8 terminal hyperlink pointing at `url`:
+/// ESC]8;;<url>ESC\<label>ESC]8;;ESC\. Returns `label` unchanged when disabled.
+fn hyperlink(url, label) {
+    if deref(ANSI_ENABLED) {
+        ESC ++ "]8;;" ++ url ++ ESC ++ "\\" ++ label ++ ESC ++ "]8;;" ++ ESC ++ "\\"
+    } else {
+        label
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Combining styles
@@ -156,6 +248,7 @@ fn bg-rgb(r, g, b, s) { style(s, [48, 2, r, g, b]) }
 // Combine several styling functions into one. Each fn must take a string and
 // return a string (e.g. `red`, `bold`). Returns a new function that applies
 // them left-to-right (so `combine([bold, red])("x")` == `bold(red("x"))`).
+/// Build one styling function from `fns` (each string->string), applied left-to-right so combine([bold, red])("x") == bold(red("x")).
 fn combine(fns) {
     fn(s) {
         let n = count(fns)
@@ -176,6 +269,7 @@ fn combine(fns) {
 
 // True when byte code `c` is a decimal digit '0'..'9' or a ';' separator —
 // the only characters allowed inside an SGR parameter list.
+/// True when byte code `c` is an SGR parameter character: a digit '0'..'9' or ';'.
 fn sgr-param-code?(c) {
     (c >= 48 && c <= 57) || c == 59
 }
@@ -185,6 +279,7 @@ fn sgr-param-code?(c) {
 // something other than '[') are left untouched rather than silently eaten.
 //
 //   strip-ansi(red("hi")) == "hi"
+/// Remove all SGR escape sequences (ESC[<params>m) from `s`, returning the plain text; malformed/non-SGR escapes are kept verbatim.
 fn strip-ansi(s) {
     let n = length(s)
     let builder = sb/new(n + 1)

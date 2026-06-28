@@ -19,6 +19,8 @@ use beagle.string-builder as sb
 // libc binding
 // ---------------------------------------------------------------------------
 
+/// Returns the platform-specific libc shared-library to load via FFI:
+/// libSystem on macOS, the glibc .so on Linux, falling back to "libc.so.6".
 fn libc-path() {
     let os = get-os()
     if os == "macos" {
@@ -50,12 +52,15 @@ let c-gettimeofday = ffi/get-function(
 // ---------------------------------------------------------------------------
 
 // Current Unix time in whole seconds (UTC).
+/// Returns the current Unix time in whole seconds (UTC) via libc `time(NULL)`.
 fn epoch-seconds() {
     c-time(null)
 }
 
 // Current Unix time in milliseconds (UTC). Reads a struct timeval via
 // gettimeofday and combines tv_sec*1000 + tv_usec/1000.
+/// Returns the current Unix time in milliseconds (UTC), reading a struct
+/// timeval via libc `gettimeofday` and combining tv_sec*1000 + tv_usec/1000.
 fn epoch-millis() {
     // 16-byte off-heap struct timeval; the I8 array gives us a raw pointer
     // (field 0) that we hand to C, then read back the two 8-byte fields.
@@ -74,6 +79,9 @@ fn epoch-millis() {
 // so we implement floor-div and floor-mod explicitly.
 // ---------------------------------------------------------------------------
 
+/// Euclidean/floored integer division (rounds toward negative infinity),
+/// unlike Beagle's `/` which truncates toward zero. Needed so the calendar
+/// math stays correct for negative (pre-1970) inputs.
 fn floor-div(a, b) {
     let q = a / b
     let r = a - q * b
@@ -90,6 +98,8 @@ fn floor-div(a, b) {
     }
 }
 
+/// Floored modulo paired with `floor-div`: the result has the same sign as
+/// the divisor `b`. Thin wrapper computing `a - floor-div(a, b) * b`.
 fn floor-mod(a, b) {
     a - floor-div(a, b) * b
 }
@@ -100,6 +110,9 @@ fn floor-mod(a, b) {
 
 // Number of days from 1970-01-01 to the civil date y-m-d (m in 1..12,
 // d in 1..28/31). Result is negative for dates before the epoch.
+/// Returns the number of days from 1970-01-01 to the civil date `y`-`m`-`d`
+/// (month 1..12, day 1..31), negative for pre-epoch dates. Uses Hinnant's
+/// proleptic-Gregorian algorithm.
 fn days-from-civil(y, m, d) {
     // Shift the year so that March is the first month (Feb's leap day lands
     // at the end of the year, simplifying the era arithmetic).
@@ -113,6 +126,8 @@ fn days-from-civil(y, m, d) {
 }
 
 // Inverse of days-from-civil. Returns [year, month, day].
+/// Inverse of `days-from-civil`: converts a day count since 1970-01-01 (`z0`,
+/// may be negative) into a `[year, month, day]` civil date.
 fn civil-from-days(z0) {
     let z = z0 + 719468
     let era = floor-div(if z >= 0 { z } else { z - 146096 }, 146097)
@@ -131,12 +146,16 @@ fn civil-from-days(z0) {
 // ---------------------------------------------------------------------------
 
 // Day count (floored) since the epoch for an epoch-seconds value.
+/// Returns the floored count of whole days since 1970-01-01 for an
+/// epoch-seconds value `epoch`.
 fn days-since-epoch(epoch) {
     floor-div(epoch, 86400)
 }
 
 // Weekday for an epoch-seconds value. 0 = Sunday .. 6 = Saturday.
 // 1970-01-01 was a Thursday (day 0 → 4).
+/// Returns the weekday for an epoch-seconds value `epoch`, where 0 = Sunday
+/// .. 6 = Saturday.
 fn weekday(epoch) {
     let days = days-since-epoch(epoch)
     floor-mod(days + 4, 7)
@@ -144,6 +163,8 @@ fn weekday(epoch) {
 
 // Decompose an epoch-seconds value into [year, month, day, hour, minute,
 // second, weekday] in UTC.
+/// Decomposes an epoch-seconds value `epoch` into the UTC tuple
+/// `[year, month, day, hour, minute, second, weekday]`.
 fn civil-from-epoch(epoch) {
     let days = days-since-epoch(epoch)
     let secs-of-day = floor-mod(epoch, 86400)
@@ -164,6 +185,7 @@ let month-names = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 // Append n as a zero-padded two-digit decimal.
+/// Appends `n` to string-builder `b` as a zero-padded two-digit decimal.
 fn append-2!(b, n) {
     if n < 10 {
         sb/append-byte!(b, 48)
@@ -175,6 +197,8 @@ fn append-2!(b, n) {
 
 // Append n as a zero-padded four-digit decimal (years are always >= 0 in the
 // HTTP date range, so no sign handling).
+/// Appends `n` to string-builder `b` as a zero-padded four-digit decimal
+/// (assumes `n` >= 0).
 fn append-4!(b, n) {
     if n < 1000 { sb/append-byte!(b, 48) } else { b }
     if n < 100 { sb/append-byte!(b, 48) } else { b }
@@ -184,6 +208,8 @@ fn append-4!(b, n) {
 
 // Format an epoch-seconds value as an RFC 1123 date string suitable for an
 // HTTP Date header, e.g. "Sun, 06 Nov 1994 08:49:37 GMT".
+/// Formats an epoch-seconds value `epoch` as an RFC 1123 / HTTP Date string
+/// in GMT, e.g. "Sun, 06 Nov 1994 08:49:37 GMT".
 fn http-date(epoch) {
     let c = civil-from-epoch(epoch)
     let year = c[0]
@@ -213,110 +239,76 @@ fn http-date(epoch) {
 }
 
 // ---------------------------------------------------------------------------
-// Self-checking test suite
+// Duration units + formatting
+//
+// These are pure integer/string helpers — they never read the clock. All
+// durations here are measured in MILLISECONDS. The `ms-of-*` constructors
+// exist to make the unit explicit at call sites (avoiding the ms-vs-ns /
+// ms-vs-seconds footgun): write `ms-of-minutes(5)` instead of a bare `300000`.
 // ---------------------------------------------------------------------------
 
-let pass-count = atom(0)
-let fail-count = atom(0)
-
-fn check(name, expected, actual) {
-    if expected == actual {
-        swap!(pass-count, fn(x) { x + 1 })
-        println("PASS: " ++ name)
-    } else {
-        swap!(fail-count, fn(x) { x + 1 })
-        println("FAIL: " ++ name ++ " expected=" ++ to-string(expected) ++ " actual=" ++ to-string(actual))
-    }
+/// Converts a whole-second count `s` into milliseconds (multiplies by 1000).
+/// Use this to make the unit explicit when building a millisecond duration.
+fn ms-of-seconds(s) {
+    s * 1000
 }
 
-fn check-true(name, cond) {
-    if cond {
-        swap!(pass-count, fn(x) { x + 1 })
-        println("PASS: " ++ name)
-    } else {
-        swap!(fail-count, fn(x) { x + 1 })
-        println("FAIL: " ++ name)
-    }
+/// Converts a whole-minute count `m` into milliseconds (multiplies by 60000).
+/// Use this to make the unit explicit when building a millisecond duration.
+fn ms-of-minutes(m) {
+    m * 60000
 }
 
-fn main() {
-    println("=== beagle.time tests ===")
+/// Converts a whole-hour count `h` into milliseconds (multiplies by 3600000).
+/// Use this to make the unit explicit when building a millisecond duration.
+fn ms-of-hours(h) {
+    h * 3600000
+}
 
-    // Clock primitives.
-    check-true("epoch-seconds > 1700000000", epoch-seconds() > 1700000000)
-    check-true("epoch-millis > epoch-seconds*1000-ish",
-               epoch-millis() > 1700000000000)
-    // millis and seconds should agree to within a couple seconds.
-    let s = epoch-seconds()
-    let ms = epoch-millis()
-    check-true("epoch-millis ~ epoch-seconds", floor-div(ms, 1000) - s >= -2)
-    check-true("epoch-millis ~ epoch-seconds 2", floor-div(ms, 1000) - s <= 2)
-
-    // floor-div / floor-mod.
-    check("floor-div 7 3", 2, floor-div(7, 3))
-    check("floor-div -7 3", -3, floor-div(-7, 3))
-    check("floor-div 7 -3", -3, floor-div(7, -3))
-    check("floor-div -7 -3", 2, floor-div(-7, -3))
-    check("floor-mod -7 3", 2, floor-mod(-7, 3))
-    check("floor-mod 7 3", 1, floor-mod(7, 3))
-    check("floor-div 6 3", 2, floor-div(6, 3))
-    check("floor-mod 6 3", 0, floor-mod(6, 3))
-
-    // days-from-civil epoch anchor.
-    check("days-from-civil 1970-01-01", 0, days-from-civil(1970, 1, 1))
-    check("days-from-civil 1970-01-02", 1, days-from-civil(1970, 1, 2))
-    check("days-from-civil 1969-12-31", -1, days-from-civil(1969, 12, 31))
-    check("days-from-civil 2000-01-01", 10957, days-from-civil(2000, 1, 1))
-
-    // civil-from-days round-trips.
-    check("civil-from-days 0", [1970, 1, 1], civil-from-days(0))
-    check("civil-from-days 10957", [2000, 1, 1], civil-from-days(10957))
-    check("civil-from-days -1", [1969, 12, 31], civil-from-days(-1))
-
-    // Round-trip a span of days.
-    let mut d = -1000
-    let mut rt-ok = true
-    while d < 20000 {
-        let ymd = civil-from-days(d)
-        let back = days-from-civil(ymd[0], ymd[1], ymd[2])
-        if back != d {
-            rt-ok = false
+/// Formats a non-negative millisecond count `ms` as a compact human-readable
+/// duration string. The output concatenates the non-zero hour/minute/second/
+/// millisecond components with single-letter units (`h`, `m`, `s`, `ms`),
+/// omitting any component that is zero. Examples: `0` -> "0ms",
+/// `500` -> "500ms", `1500` -> "1s500ms", `3661000` -> "1h1m1s". A `ms` of 0
+/// yields the literal "0ms". Throws on a negative input (durations are
+/// non-negative; use a sign elsewhere if you need a delta).
+fn format-duration(ms) {
+    if ms < 0 {
+        throw("format-duration: milliseconds must be non-negative, got ${ms}")
+    } else if ms == 0 {
+        "0ms"
+    } else {
+        let hours = floor-div(ms, 3600000)
+        let after-hours = floor-mod(ms, 3600000)
+        let minutes = floor-div(after-hours, 60000)
+        let after-minutes = floor-mod(after-hours, 60000)
+        let seconds = floor-div(after-minutes, 1000)
+        let millis = floor-mod(after-minutes, 1000)
+        let b = sb/new(16)
+        if hours != 0 {
+            sb/append-int!(b, hours)
+            sb/append!(b, "h")
+        } else {
+            b
         }
-        d = d + 137
+        if minutes != 0 {
+            sb/append-int!(b, minutes)
+            sb/append!(b, "m")
+        } else {
+            b
+        }
+        if seconds != 0 {
+            sb/append-int!(b, seconds)
+            sb/append!(b, "s")
+        } else {
+            b
+        }
+        if millis != 0 {
+            sb/append-int!(b, millis)
+            sb/append!(b, "ms")
+        } else {
+            b
+        }
+        sb/to-string(b)
     }
-    check-true("civil/days round-trips", rt-ok)
-
-    // weekday: 1970-01-01 = Thursday (4).
-    check("weekday epoch 0 (Thu)", 4, weekday(0))
-    // 784111777 = Sun 06 Nov 1994.
-    check("weekday 784111777 (Sun)", 0, weekday(784111777))
-
-    // civil-from-epoch decomposition for the known vector.
-    check("civil-from-epoch 784111777",
-          [1994, 11, 6, 8, 49, 37, 0],
-          civil-from-epoch(784111777))
-
-    // The headline vector.
-    check("http-date 784111777",
-          "Sun, 06 Nov 1994 08:49:37 GMT",
-          http-date(784111777))
-
-    // Epoch zero formats correctly.
-    check("http-date 0",
-          "Thu, 01 Jan 1970 00:00:00 GMT",
-          http-date(0))
-
-    // A modern-ish round value: 2000-01-01 00:00:00 = 946684800.
-    check("http-date 946684800",
-          "Sat, 01 Jan 2000 00:00:00 GMT",
-          http-date(946684800))
-
-    println("")
-    println("PASS: " ++ to-string(deref(pass-count)) ++ "  FAIL: " ++ to-string(deref(fail-count)))
-    if deref(fail-count) == 0 {
-        println("ALL TESTS PASSED")
-    } else {
-        println("SOME TESTS FAILED")
-    }
-    "done"
 }

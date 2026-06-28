@@ -26,11 +26,13 @@ namespace beagle.glob
 // Character helpers
 // ---------------------------------------------------------------------------
 
+/// Return the integer character code of `s[i]`. Thin wrapper over `char-code`.
 fn code-at(s, i) {
     char-code(s[i])
 }
 
 // '/' is code 47
+/// True if char code `c` is the path separator '/' (code 47).
 fn is-slash-code(c) {
     c == 47
 }
@@ -45,6 +47,10 @@ fn is-slash-code(c) {
 // A ']' immediately after '[' (or after a leading '!'/'^') is a literal ']'.
 // ---------------------------------------------------------------------------
 
+/// Match a character class beginning just past '[' (at `open-idx`) against the
+/// char code `target-code`. Handles ranges (`a-z`) and negation (`!`/`^`).
+/// Returns `[matched?, next-index]` where next-index is just past the ']';
+/// an unterminated class returns `[false, -1]`. Classes never match '/'.
 fn class-match(pattern, open-idx, target-code) {
     let plen = length(pattern)
     // Determine negation
@@ -115,6 +121,9 @@ fn class-match(pattern, open-idx, target-code) {
 // the single-star "*" doesn't-cross-/ rule.)
 // ---------------------------------------------------------------------------
 
+/// True if the '*' run at index `pi` is a cross-slash `**` wildcard, i.e. a
+/// whole path segment (preceded by start-of-pattern or '/', followed by
+/// end-of-pattern or '/'). Otherwise the run collapses to a single '*'.
 fn is-double-star(pattern, pi) {
     let plen = length(pattern)
     if pi + 1 < plen && code-at(pattern, pi) == 42 && code-at(pattern, pi + 1) == 42 {
@@ -142,6 +151,9 @@ fn is-double-star(pattern, pi) {
 // worst-case is polynomial — fine for path-sized inputs.
 // ---------------------------------------------------------------------------
 
+/// Core recursive glob matcher: does `pattern` from index `pi` match `name`
+/// from index `ni`? Handles `*`, `**`, `?`, `[...]` classes, and `\` escapes
+/// with explicit star backtracking. Returns Bool.
 fn match-from(pattern, pi, name, ni) {
     let plen = length(pattern)
     let nlen = length(name)
@@ -280,12 +292,12 @@ fn match-from(pattern, pi, name, ni) {
 /// Match a glob pattern against a name (or path).
 ///
 /// Examples:
-///   (match? "*.txt" "foo.txt")        ; => true
-///   (match? "*.txt" "foo.md")         ; => false
-///   (match? "a?c" "abc")              ; => true
-///   (match? "[a-c]x" "bx")            ; => true
-///   (match? "src/**/*.bg" "src/a/b/c.bg") ; => true
-///   (match? "*" "a/b")               ; => false
+///   match?("*.txt", "foo.txt")        // => true
+///   match?("*.txt", "foo.md")         // => false
+///   match?("a?c", "abc")              // => true
+///   match?("[a-c]x", "bx")            // => true
+///   match?("src/**/*.bg", "src/a/b/c.bg") // => true
+///   match?("*", "a/b")               // => false
 fn match?(pattern, name) {
     match-from(pattern, 0, name, 0)
 }
@@ -306,9 +318,9 @@ fn match?(pattern, name) {
 /// Useful for verifying how a pattern parses.
 ///
 /// Examples:
-///   (translate "a*c")        ; => "LIT(a) STAR LIT(c)"
-///   (translate "src/**/*.bg")
-///     ; => "LIT(s) LIT(r) LIT(c) LIT(/) DOUBLESTAR LIT(/) STAR LIT(.) LIT(b) LIT(g)"
+///   translate("a*c")        // => "LIT(a) STAR LIT(c)"
+///   translate("src/**/*.bg")
+///     // => "LIT(s) LIT(r) LIT(c) LIT(/) DOUBLESTAR LIT(/) STAR LIT(.) LIT(b) LIT(g)"
 fn translate(pattern) {
     let plen = length(pattern)
     let mut buf = ""
@@ -364,6 +376,9 @@ fn translate(pattern) {
 
 // Render a character class token starting at '[' (pattern[pi]).
 // Returns [token-string, next-index]. If unterminated, '[' is a LIT.
+/// Render the character-class token starting at '[' (`pattern[pi]`) for
+/// `translate`. Returns `[token-string, next-index]`; an unterminated class
+/// yields `["LIT([)", pi + 1]`.
 fn translate-class(pattern, pi) {
     let plen = length(pattern)
     // find closing ']' using the same first-char-literal rule
@@ -399,6 +414,196 @@ fn translate-class(pattern, pi) {
 }
 
 // ---------------------------------------------------------------------------
+// Case-insensitive matching.
+//
+// ASCII case folding is done by lowercasing BOTH the pattern and the name and
+// reusing the exact same matcher. Lowercasing only changes letters, so the
+// pattern's structural characters (* ? [ ] - \) are untouched.
+// ---------------------------------------------------------------------------
+
+/// Case-insensitive variant of `match?`: matches `pattern` against `name`
+/// ignoring ASCII letter case. Lowercases both sides, then runs the same
+/// matcher (so `*`, `?`, classes, ranges, and escapes behave identically).
+///
+/// Examples:
+///   match-ci?("*.TXT", "foo.txt")  // => true
+///   match-ci?("[A-C]x", "BX")      // => true
+fn match-ci?(pattern, name) {
+    match-from(lowercase(pattern), 0, lowercase(name), 0)
+}
+
+// ---------------------------------------------------------------------------
+// Brace expansion — PURE STRING, no filesystem.
+//
+// Turns "a{b,c}d" into ["abd", "acd"]. Handles one or more brace groups via
+// cartesian product, and nested groups degrade gracefully (the matching close
+// is found by depth, and commas are only split at depth 0). A group with no
+// top-level comma (e.g. "{x}") is NOT an expansion point: its braces are kept
+// literal, matching shell behavior. An unbalanced '{' is also left literal.
+//
+// Brace, comma and backslash scanning all honor '\' escapes: a backslash and
+// the character after it are passed through untouched (so "\{" never opens a
+// group). Char codes: '{'=123, '}'=125, ','=44, '\'=92.
+// ---------------------------------------------------------------------------
+
+/// Index of the first unescaped '{' in `pattern`, or -1 if none.
+fn brace-first-open(pattern) {
+    let plen = length(pattern)
+    let mut i = 0
+    let mut result = -1
+    while i < plen && result == -1 {
+        let c = code-at(pattern, i)
+        if c == 92 {
+            // '\' escapes the next char
+            i = i + 2
+        } else {
+            if c == 123 {
+                result = i
+            } else {
+                i = i + 1
+            }
+        }
+    }
+    result
+}
+
+/// Index of the '}' matching the '{' at `open` in `pattern`, accounting for
+/// nested braces and '\' escapes. Returns -1 if the group is never closed.
+fn brace-matching-close(pattern, open) {
+    let plen = length(pattern)
+    let mut i = open + 1
+    let mut depth = 1
+    let mut result = -1
+    while i < plen && result == -1 {
+        let c = code-at(pattern, i)
+        if c == 92 {
+            i = i + 2
+        } else {
+            if c == 123 {
+                depth = depth + 1
+                i = i + 1
+            } else {
+                if c == 125 {
+                    depth = depth - 1
+                    if depth == 0 {
+                        result = i
+                    } else {
+                        i = i + 1
+                    }
+                } else {
+                    i = i + 1
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Split `inner` (the text between a group's braces) on its depth-0 commas,
+/// honoring nested `{...}` and '\' escapes. Returns a vector of option strings;
+/// text with no top-level comma yields a single-element vector.
+fn brace-split-commas(inner) {
+    let len = length(inner)
+    let mut parts = []
+    let mut cur = ""
+    let mut i = 0
+    let mut depth = 0
+    while i < len {
+        let c = code-at(inner, i)
+        if c == 92 {
+            // keep the backslash and the escaped char together
+            if i + 1 < len {
+                cur = cur ++ substring(inner, i, i + 2)
+                i = i + 2
+            } else {
+                cur = cur ++ inner[i]
+                i = i + 1
+            }
+        } else {
+            if c == 123 {
+                depth = depth + 1
+                cur = cur ++ inner[i]
+                i = i + 1
+            } else {
+                if c == 125 {
+                    depth = depth - 1
+                    cur = cur ++ inner[i]
+                    i = i + 1
+                } else {
+                    if c == 44 && depth == 0 {
+                        parts = push(parts, cur)
+                        cur = ""
+                        i = i + 1
+                    } else {
+                        cur = cur ++ inner[i]
+                        i = i + 1
+                    }
+                }
+            }
+        }
+    }
+    parts = push(parts, cur)
+    parts
+}
+
+/// Expand shell-style brace groups in `pattern` into the list of concrete
+/// strings they denote, e.g. "a{b,c}d" => ["abd", "acd"]. Multiple groups
+/// produce the cartesian product; nested groups expand out-in. A group with no
+/// top-level comma, and any unbalanced '{', are left literal. Never throws on a
+/// well-formed string; always returns a non-empty vector.
+///
+/// Examples:
+///   expand-braces("a{b,c}d")      // => ["abd", "acd"]
+///   expand-braces("{a,b}{1,2}")   // => ["a1", "a2", "b1", "b2"]
+///   expand-braces("plain")        // => ["plain"]
+fn expand-braces(pattern) {
+    let plen = length(pattern)
+    let open = brace-first-open(pattern)
+    if open == -1 {
+        [pattern]
+    } else {
+        let close = brace-matching-close(pattern, open)
+        if close == -1 {
+            // Unbalanced '{' — leave the whole pattern literal.
+            [pattern]
+        } else {
+            let inner = substring(pattern, open + 1, close)
+            let parts = brace-split-commas(inner)
+            if length(parts) <= 1 {
+                // No top-level comma: not an expansion group. Keep these braces
+                // literal and expand whatever follows the close.
+                let head = substring(pattern, 0, close + 1)
+                let tail = substring(pattern, close + 1, plen)
+                let mut result = []
+                let mut s = seq(expand-braces(tail))
+                while s != null {
+                    result = push(result, head ++ first(s))
+                    s = next(s)
+                }
+                result
+            } else {
+                let prefix = substring(pattern, 0, open)
+                let suffix = substring(pattern, close + 1, plen)
+                let mut result = []
+                let mut ps = seq(parts)
+                while ps != null {
+                    // Re-expand each substituted option so later/nested groups
+                    // are handled too (cartesian product).
+                    let combined = prefix ++ first(ps) ++ suffix
+                    let mut es = seq(expand-braces(combined))
+                    while es != null {
+                        result = push(result, first(es))
+                        es = next(es)
+                    }
+                    ps = next(ps)
+                }
+                result
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // find — recursively list files under `dir` whose path (relative to dir)
 // matches `pattern`. Uses beagle.fs read-dir + is-dir? under an effect
 // handler. Returns a vector of matching relative paths.
@@ -412,6 +617,11 @@ use beagle.fs as fs
 // Iterative directory walk using an explicit worklist of relative dirs.
 // Avoids Beagle-level recursion across the fs perform/resume boundary
 // (which interacts badly with delimited continuations under GC stress).
+/// Iteratively walk the directory tree under `root` (starting at relative path
+/// `start-rel`), accumulating into `acc` every entry whose path relative to
+/// `root` matches `pattern`. Uses an explicit worklist (no Beagle recursion
+/// across the fs perform/resume boundary); read/stat errors are skipped.
+/// Returns the vector of matching relative paths.
 fn find-walk(root, start-rel, pattern, acc) {
     let mut result = acc
     let mut worklist = [start-rel]
@@ -431,10 +641,7 @@ fn find-walk(root, start-rel, pattern, acc) {
             if match?(pattern, entry-rel) {
                 result = push(result, entry-rel)
             }
-            let is-dir = match fs/is-directory?(entry-abs) {
-                Result.Ok { value } => value,
-                Result.Err { error } => false
-            }
+            let is-dir = fs/is-directory?(entry-abs)
             if is-dir {
                 worklist = push(worklist, entry-rel)
             }
@@ -451,7 +658,7 @@ fn find-walk(root, start-rel, pattern, acc) {
 /// Pure matching is done by match?; this only walks the directory tree.
 ///
 /// Examples:
-///   (find "src/**/*.bg" ".")  ; => ["src/a/b.bg", ...]
+///   find("src/**/*.bg", ".")  // => ["src/a/b.bg", ...]
 fn find(pattern, dir) {
     fs/run-blocking(fn() { find-walk(dir, "", pattern, []) })
 }

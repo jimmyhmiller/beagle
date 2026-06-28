@@ -1,6 +1,8 @@
 namespace beagle.containers
 
-// beagle.collections — convenience structures, PURE Beagle.
+use beagle.core as core
+
+// beagle.containers — convenience structures, PURE Beagle.
 //
 // Provides:
 //   * Deque    — double-ended queue over two vectors (amortized O(1) both ends)
@@ -45,6 +47,7 @@ fn deque-empty?(d) {
 }
 
 // Build a vector that is the reverse of `v`.
+/// Return a new vector containing the elements of `v` in reverse order.
 fn coll-reverse(v) {
     let mut acc = []
     let mut i = length(v) - 1
@@ -56,6 +59,8 @@ fn coll-reverse(v) {
 }
 
 // Take the sub-vector v[start..end) (end exclusive).
+/// Return a new vector with the elements of `v` from index `start` (inclusive)
+/// to `end` (exclusive).
 fn coll-subvec(v, start, end) {
     let mut acc = []
     let mut i = start
@@ -80,6 +85,9 @@ fn push-back(d, value) {
 // reversing as needed so the logical order is preserved.
 //
 // logical order = reverse(front) ++ back
+/// Rebalance a deque when one side is empty: move half of the non-empty side
+/// across (reversing as needed to preserve logical order), returning a new
+/// deque. Returns `d` unchanged when neither side needs rebalancing.
 fn deque-rebalance(d) {
     let fl = length(d.front)
     let bl = length(d.back)
@@ -117,7 +125,7 @@ fn pop-front(d) {
         if fl > 0 {
             // Front head is the LAST element of `front` (front is reversed).
             let value = get(d.front, fl - 1)
-            let new-front = coll-subvec(d.front, 0, fl - 1)
+            let new-front = butlast(d.front)   // O(log n) native pop
             [value, Deque { front: new-front, back: d.back }]
         } else {
             // front empty: rebalance then retry.
@@ -125,7 +133,7 @@ fn pop-front(d) {
             if length(rb.front) > 0 {
                 let n = length(rb.front)
                 let value = get(rb.front, n - 1)
-                [value, Deque { front: coll-subvec(rb.front, 0, n - 1), back: rb.back }]
+                [value, Deque { front: butlast(rb.front), back: rb.back }]
             } else {
                 // back has exactly one element (bl == 1, no rebalance)
                 let value = get(rb.back, 0)
@@ -145,7 +153,7 @@ fn pop-back(d) {
         if bl > 0 {
             // Back tail is the LAST element of `back`.
             let value = get(d.back, bl - 1)
-            let new-back = coll-subvec(d.back, 0, bl - 1)
+            let new-back = butlast(d.back)   // O(log n) native pop
             [value, Deque { front: d.front, back: new-back }]
         } else {
             // back empty: rebalance then retry.
@@ -153,13 +161,47 @@ fn pop-back(d) {
             if length(rb.back) > 0 {
                 let n = length(rb.back)
                 let value = get(rb.back, n - 1)
-                [value, Deque { front: rb.front, back: coll-subvec(rb.back, 0, n - 1) }]
+                [value, Deque { front: rb.front, back: butlast(rb.back) }]
             } else {
                 // front has exactly one element. Logical tail = front[0]
                 // (reverse(front) with one element is itself).
                 let value = get(rb.front, 0)
                 [value, Deque { front: coll-subvec(rb.front, 1, length(rb.front)), back: [] }]
             }
+        }
+    }
+}
+
+/// Peek at the FRONT (logical head) element WITHOUT removing it.
+/// Throws on an empty deque (matching pop-front's error style).
+fn deque-peek-front(d) {
+    if deque-empty?(d) {
+        throw("deque-peek-front: deque is empty")
+    } else {
+        let fl = length(d.front)
+        if fl > 0 {
+            // Logical head is the LAST element of `front` (front is reversed).
+            get(d.front, fl - 1)
+        } else {
+            // front empty: logical head is the first element of `back`.
+            get(d.back, 0)
+        }
+    }
+}
+
+/// Peek at the BACK (logical tail) element WITHOUT removing it.
+/// Throws on an empty deque (matching pop-back's error style).
+fn deque-peek-back(d) {
+    if deque-empty?(d) {
+        throw("deque-peek-back: deque is empty")
+    } else {
+        let bl = length(d.back)
+        if bl > 0 {
+            // Logical tail is the LAST element of `back`.
+            get(d.back, bl - 1)
+        } else {
+            // back empty: logical tail = reverse(front)'s last = front[0].
+            get(d.front, 0)
         }
     }
 }
@@ -216,6 +258,13 @@ fn dm-count(dm) {
     length(dm.table)
 }
 
+/// Remove `key` from a default-map, returning a new default-map whose table no
+/// longer contains `key`. The default value is preserved. Removing a key that
+/// is absent yields an equivalent default-map (no error).
+fn dm-remove(dm, key) {
+    DefaultMap { default: dm.default, table: dissoc(dm.table, key) }
+}
+
 // ============================================================================
 // OrderedMap — preserves insertion order
 // ============================================================================
@@ -240,17 +289,12 @@ fn om-get(om, key) {
 }
 
 // Does the order vector already contain this key?
+/// Return true if `key` is present in the ordered map's insertion-order vector
+/// (linear scan using structural equality).
 fn om-has-key?(om, key) {
-    let mut i = 0
-    let mut found = false
-    let len = length(om.order)
-    while i < len && found == false {
-        if equal(get(om.order, i), key) {
-            found = true
-        }
-        i = i + 1
-    }
-    found
+    // O(log n) native map membership instead of an O(n) linear scan of the
+    // order vector (which made om-assoc O(n) and building an ordered map O(n^2)).
+    contains?(om.table, key)
 }
 
 /// Associate key->value, returning a new ordered map. New keys are appended
@@ -262,6 +306,13 @@ fn om-assoc(om, key, value) {
     } else {
         OrderedMap { order: push(om.order, key), table: new-table }
     }
+}
+
+/// Update `key` by applying `f` to its current value (or null if the key is
+/// absent), returning a new ordered map. Insertion order is preserved: an
+/// existing key keeps its position, a new key is appended.
+fn om-update(om, key, f) {
+    om-assoc(om, key, f(om-get(om, key)))
 }
 
 /// The keys in insertion order (a vector).
@@ -299,6 +350,24 @@ fn om-count(om) {
     length(om.order)
 }
 
+/// Remove `key` from an ordered map, returning a new ordered map with `key`
+/// removed from BOTH the insertion-order vector and the backing table. The
+/// relative order of the remaining keys is preserved. Removing a key that is
+/// absent yields an equivalent ordered map (no error).
+fn om-remove(om, key) {
+    OrderedMap {
+        order: filter(fn(k) { k != key }, om.order),
+        table: dissoc(om.table, key)
+    }
+}
+
+/// Alias for `om-remove`: remove `key` from an ordered map (Clojure-style
+/// `dissoc` name). Returns a new ordered map with `key` gone from both the
+/// order vector and the table.
+fn om-dissoc(om, key) {
+    om-remove(om, key)
+}
+
 // ============================================================================
 // Set helpers over vectors-as-sets
 // ============================================================================
@@ -307,6 +376,8 @@ fn om-count(om) {
 // distinct). They return de-duplicated vectors, preserving first-seen order.
 
 // Linear membership test using structural equality.
+/// Return true if `x` appears in vector `v` (linear scan using structural
+/// equality).
 fn vec-member?(v, x) {
     let mut i = 0
     let mut found = false
@@ -355,4 +426,97 @@ fn set-difference-vec(a, b) {
         i = i + 1
     }
     acc
+}
+
+// ============================================================================
+// Core-protocol implementations
+// ============================================================================
+//
+// Lifting these container types onto the core collection protocols means the
+// generic operations — count, get, assoc, contains?, keys, seq, first, for-in,
+// map/filter/reduce, into, ... — all work on them without bespoke code. The
+// concrete `deque-*`/`dm-*`/`om-*` functions above remain as the explicit,
+// discoverable API; these extends make the polymorphic core API work too.
+
+extend Deque with core/Length {
+    /// Number of elements (front + back).
+    fn length(d) { length(d.front) + length(d.back) }
+}
+
+extend Deque with core/Seqable {
+    /// Sequence the deque in logical head->tail order.
+    fn seq(d) { seq(deque-to-vec(d)) }
+}
+
+extend Deque with core/Conj {
+    /// Conjoin onto a deque: push onto the back.
+    fn conj(d, x) { push-back(d, x) }
+}
+
+extend DefaultMap with core/Indexed {
+    fn get {
+        /// Look up a key, returning the map's stored default when absent.
+        (dm, key) => if contains?(dm.table, key) { get(dm.table, key) } else { dm.default }
+        /// Look up a key, returning `default` when absent.
+        (dm, key, default) => if contains?(dm.table, key) { get(dm.table, key) } else { default }
+    }
+}
+
+extend DefaultMap with core/Associable {
+    /// Associate key->value, returning a new default-map.
+    fn assoc(dm, key, value) { DefaultMap { default: dm.default, table: assoc(dm.table, key, value) } }
+}
+
+extend DefaultMap with core/Length {
+    /// Number of explicitly-stored keys.
+    fn length(dm) { length(dm.table) }
+}
+
+extend DefaultMap with core/Contains {
+    /// True if `key` is explicitly stored (independent of the default).
+    fn contains?(dm, key) { contains?(dm.table, key) }
+}
+
+extend DefaultMap with core/Keys {
+    /// The explicitly-stored keys.
+    fn keys(dm) { keys(dm.table) }
+}
+
+extend DefaultMap with core/Seqable {
+    /// Sequence the stored [key, value] entries.
+    fn seq(dm) { seq(dm.table) }
+}
+
+extend OrderedMap with core/Indexed {
+    fn get {
+        /// Look up a key (null if absent).
+        (om, key) => get(om.table, key)
+        /// Look up a key, returning `default` when absent.
+        (om, key, default) => get(om.table, key, default)
+    }
+}
+
+extend OrderedMap with core/Associable {
+    /// Associate key->value, preserving insertion order.
+    fn assoc(om, key, value) { om-assoc(om, key, value) }
+}
+
+extend OrderedMap with core/Length {
+    /// Number of entries.
+    fn length(om) { length(om.order) }
+}
+
+extend OrderedMap with core/Contains {
+    /// True if `key` is present.
+    fn contains?(om, key) { om-has-key?(om, key) }
+}
+
+extend OrderedMap with core/Keys {
+    /// The keys in insertion order.
+    fn keys(om) { om.order }
+}
+
+extend OrderedMap with core/Seqable {
+    /// Sequence the [key, value] pairs in insertion order.
+    fn seq(om) { seq(om-pairs(om)) }
 }

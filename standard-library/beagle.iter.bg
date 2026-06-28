@@ -10,6 +10,8 @@ namespace beagle.iter
 // ----------------------------------------------------------------------------
 
 // Collect any seqable into a fresh vector.
+/// Walk coll via seq/first/next and collect every element into a fresh
+/// persistent vector. Used internally to materialize Seqable inputs.
 fn iter-to-vec(coll) {
     let mut s = seq(coll)
     let mut acc = []
@@ -25,7 +27,7 @@ fn iter-to-vec(coll) {
 // ----------------------------------------------------------------------------
 
 /// Map f over coll and concatenate the resulting collections.
-/// mapcat(fn(x) { [x, x] }, [1, 2]) => [1, 1, 2, 2]
+/// mapcat(fn(x) { [x, x] }, [1, 2]) // => [1, 1, 2, 2]
 fn mapcat(f, coll) {
     let mut s = seq(coll)
     let mut acc = []
@@ -42,7 +44,7 @@ fn mapcat(f, coll) {
 }
 
 /// Successive reductions of f over coll, starting from init.
-/// reductions(fn(a, x) { a + x }, 0, [1, 2, 3]) => [0, 1, 3, 6]
+/// reductions(fn(a, x) { a + x }, 0, [1, 2, 3]) // => [0, 1, 3, 6]
 fn reductions(f, init, coll) {
     let mut s = seq(coll)
     let mut acc-val = init
@@ -56,7 +58,7 @@ fn reductions(f, init, coll) {
 }
 
 /// Take leading elements while pred is true.
-/// take-while(fn(x) { x < 3 }, [1, 2, 3, 1]) => [1, 2]
+/// take-while(fn(x) { x < 3 }, [1, 2, 3, 1]) // => [1, 2]
 fn take-while(pred, coll) {
     let mut s = seq(coll)
     let mut acc = []
@@ -74,7 +76,7 @@ fn take-while(pred, coll) {
 }
 
 /// Drop leading elements while pred is true; return the rest.
-/// drop-while(fn(x) { x < 3 }, [1, 2, 3, 1]) => [3, 1]
+/// drop-while(fn(x) { x < 3 }, [1, 2, 3, 1]) // => [3, 1]
 fn drop-while(pred, coll) {
     let mut s = seq(coll)
     while s != null && pred(first(s)) {
@@ -90,7 +92,7 @@ fn drop-while(pred, coll) {
 
 /// Partition coll into consecutive vectors of exactly n elements.
 /// A trailing group with fewer than n elements is dropped.
-/// partition(2, [1, 2, 3, 4, 5]) => [[1, 2], [3, 4]]
+/// partition(2, [1, 2, 3, 4, 5]) // => [[1, 2], [3, 4]]
 /// n must be >= 1; for n <= 0 there is no valid chunk size, so [] is returned.
 fn partition(n, coll) {
     let v = iter-to-vec(coll)
@@ -111,7 +113,7 @@ fn partition(n, coll) {
 }
 
 /// Like partition but keep the trailing partial group.
-/// partition-all(2, [1, 2, 3, 4, 5]) => [[1, 2], [3, 4], [5]]
+/// partition-all(2, [1, 2, 3, 4, 5]) // => [[1, 2], [3, 4], [5]]
 /// n must be >= 1; for n <= 0 there is no valid chunk size, so [] is returned.
 fn partition-all(n, coll) {
     let v = iter-to-vec(coll)
@@ -131,8 +133,38 @@ fn partition-all(n, coll) {
     acc
 }
 
+/// Sliding windows of size n over coll, advancing the start by step each time.
+/// Returns a vector of vectors. A trailing window with fewer than n elements is
+/// dropped (only full windows are kept). n and step must each be >= 1.
+/// windowed(2, 1, [1, 2, 3, 4]) // => [[1, 2], [2, 3], [3, 4]]
+/// windowed(2, 2, [1, 2, 3, 4, 5]) // => [[1, 2], [3, 4]]
+/// windowed(3, 1, [1, 2, 3, 4, 5]) // => [[1, 2, 3], [2, 3, 4], [3, 4, 5]]
+fn windowed(n, step, coll) {
+    if n < 1 {
+        throw("beagle.iter/windowed: n must be >= 1")
+    }
+    if step < 1 {
+        throw("beagle.iter/windowed: step must be >= 1")
+    }
+    let v = iter-to-vec(coll)
+    let len = length(v)
+    let mut acc = []
+    let mut i = 0
+    while i + n <= len {
+        let mut window = []
+        let mut j = 0
+        while j < n {
+            window = push(window, get(v, i + j))
+            j = j + 1
+        }
+        acc = push(acc, window)
+        i = i + step
+    }
+    acc
+}
+
 /// Split coll into runs of consecutive elements that share f's return value.
-/// chunk-by(fn(x) { x % 2 }, [1, 3, 2, 4, 5]) => [[1, 3], [2, 4], [5]]
+/// chunk-by(fn(x) { x % 2 }, [1, 3, 2, 4, 5]) // => [[1, 3], [2, 4], [5]]
 fn chunk-by(f, coll) {
     let mut s = seq(coll)
     if s == null {
@@ -158,7 +190,7 @@ fn chunk-by(f, coll) {
 }
 
 /// Pair up elements from a and b. Stops at the shorter input.
-/// zip([1, 2, 3], ["a", "b"]) => [[1, "a"], [2, "b"]]
+/// zip([1, 2, 3], ["a", "b"]) // => [[1, "a"], [2, "b"]]
 fn zip(a, b) {
     let mut sa = seq(a)
     let mut sb = seq(b)
@@ -172,7 +204,7 @@ fn zip(a, b) {
 }
 
 /// Combine a and b elementwise with f. Stops at the shorter input.
-/// zip-with(fn(x, y) { x + y }, [1, 2, 3], [10, 20, 30]) => [11, 22, 33]
+/// zip-with(fn(x, y) { x + y }, [1, 2, 3], [10, 20, 30]) // => [11, 22, 33]
 fn zip-with(f, a, b) {
     let mut sa = seq(a)
     let mut sb = seq(b)
@@ -186,7 +218,7 @@ fn zip-with(f, a, b) {
 }
 
 /// Insert sep between each element of coll.
-/// interpose(0, [1, 2, 3]) => [1, 0, 2, 0, 3]
+/// interpose(0, [1, 2, 3]) // => [1, 0, 2, 0, 3]
 fn interpose(sep, coll) {
     let mut s = seq(coll)
     let mut acc = []
@@ -206,7 +238,7 @@ fn interpose(sep, coll) {
 
 /// Fully flatten an arbitrarily-nested vector of vectors into a flat vector.
 /// Non-vector elements (including strings) are treated as leaves.
-/// flatten([1, [2, [3, 4]], 5]) => [1, 2, 3, 4, 5]
+/// flatten([1, [2, [3, 4]], 5]) // => [1, 2, 3, 4, 5]
 fn flatten(coll) {
     let mut s = seq(coll)
     let mut acc = []
@@ -228,12 +260,14 @@ fn flatten(coll) {
 }
 
 // A leaf-vs-branch test for flatten: only PersistentVectors recurse.
+/// True when x is a PersistentVector. Used by flatten to decide whether to
+/// recurse into a value (vectors are branches; everything else is a leaf).
 fn iter-vector?(x) {
     instance-of(x, PersistentVector)
 }
 
 /// Remove duplicate elements, keeping first occurrence order.
-/// distinct([1, 2, 1, 3, 2]) => [1, 2, 3]
+/// distinct([1, 2, 1, 3, 2]) // => [1, 2, 3]
 fn distinct(coll) {
     let mut s = seq(coll)
     let mut seen = {}
@@ -250,7 +284,7 @@ fn distinct(coll) {
 }
 
 /// Count occurrences of each element. Returns a map element -> count.
-/// frequencies([1, 1, 2, 3, 3, 3]) => {1 2, 2 1, 3 3}
+/// frequencies([1, 1, 2, 3, 3, 3]) // => {1 2, 2 1, 3 3}
 fn frequencies(coll) {
     let mut s = seq(coll)
     let mut counts = {}
@@ -265,7 +299,7 @@ fn frequencies(coll) {
 }
 
 /// Group elements by f's return value. Returns a map key -> vector of elements.
-/// group-by(fn(x) { x % 2 }, [1, 2, 3, 4]) => {1 [1, 3], 0 [2, 4]}
+/// group-by(fn(x) { x % 2 }, [1, 2, 3, 4]) // => {1 [1, 3], 0 [2, 4]}
 fn group-by(f, coll) {
     let mut s = seq(coll)
     let mut groups = {}
@@ -285,7 +319,7 @@ fn group-by(f, coll) {
 }
 
 /// Count elements by f's return value. Returns a map key -> count.
-/// count-by(fn(x) { x % 2 }, [1, 2, 3, 4, 5]) => {1 3, 0 2}
+/// count-by(fn(x) { x % 2 }, [1, 2, 3, 4, 5]) // => {1 3, 0 2}
 fn count-by(f, coll) {
     let mut s = seq(coll)
     let mut counts = {}
@@ -305,9 +339,9 @@ fn count-by(f, coll) {
 
 /// Build a vector of integers from start (inclusive) to end (exclusive),
 /// with an optional step (default 1). step must be non-zero.
-/// range(0, 5) => [0, 1, 2, 3, 4]
-/// range(0, 10, 2) => [0, 2, 4, 6, 8]
-/// range(5, 0, -1) => [5, 4, 3, 2, 1]
+/// range(0, 5) // => [0, 1, 2, 3, 4]
+/// range(0, 10, 2) // => [0, 2, 4, 6, 8]
+/// range(5, 0, -1) // => [5, 4, 3, 2, 1]
 fn range {
     (start, end) => range(start, end, 1)
     (start, end, step) => {
@@ -332,7 +366,7 @@ fn range {
 }
 
 /// A vector containing x repeated n times.
-/// repeat(3, "a") => ["a", "a", "a"]
+/// repeat(3, "a") // => ["a", "a", "a"]
 fn repeat(n, x) {
     let mut acc = []
     let mut k = n
@@ -344,7 +378,7 @@ fn repeat(n, x) {
 }
 
 /// Take n elements by cycling through coll repeatedly.
-/// cycle-take(7, [1, 2, 3]) => [1, 2, 3, 1, 2, 3, 1]
+/// cycle-take(7, [1, 2, 3]) // => [1, 2, 3, 1, 2, 3, 1]
 fn cycle-take(n, coll) {
     let v = iter-to-vec(coll)
     let len = length(v)
@@ -366,7 +400,7 @@ fn cycle-take(n, coll) {
 }
 
 /// Pair each element with its 0-based index.
-/// enumerate(["a", "b", "c"]) => [[0, "a"], [1, "b"], [2, "c"]]
+/// enumerate(["a", "b", "c"]) // => [[0, "a"], [1, "b"], [2, "c"]]
 fn enumerate(coll) {
     let mut s = seq(coll)
     let mut idx = 0
@@ -384,7 +418,7 @@ fn enumerate(coll) {
 // ----------------------------------------------------------------------------
 
 /// Sum of all elements (0 for empty).
-/// sum([1, 2, 3, 4]) => 10
+/// sum([1, 2, 3, 4]) // => 10
 fn sum(coll) {
     let mut s = seq(coll)
     let mut total = 0
@@ -396,7 +430,7 @@ fn sum(coll) {
 }
 
 /// Product of all elements (1 for empty).
-/// product([1, 2, 3, 4]) => 24
+/// product([1, 2, 3, 4]) // => 24
 fn product(coll) {
     let mut s = seq(coll)
     let mut total = 1
@@ -408,7 +442,7 @@ fn product(coll) {
 }
 
 /// Element with the smallest f value (first such on ties); null if empty.
-/// min-by(fn(s) { length(s) }, ["abc", "a", "ab"]) => "a"
+/// min-by(fn(s) { length(s) }, ["abc", "a", "ab"]) // => "a"
 fn min-by(f, coll) {
     let mut s = seq(coll)
     if s == null {
@@ -431,7 +465,7 @@ fn min-by(f, coll) {
 }
 
 /// Element with the largest f value (first such on ties); null if empty.
-/// max-by(fn(s) { length(s) }, ["a", "abc", "ab"]) => "abc"
+/// max-by(fn(s) { length(s) }, ["a", "abc", "ab"]) // => "abc"
 fn max-by(f, coll) {
     let mut s = seq(coll)
     if s == null {
@@ -460,7 +494,7 @@ fn max-by(f, coll) {
 /// `reductions` (the itertools.accumulate / reductions concept). The output
 /// includes the initial value as its first element, then each successive
 /// accumulation.
-/// accumulate(fn(a, x) { a + x }, 0, [1, 2, 3]) => [0, 1, 3, 6]
+/// accumulate(fn(a, x) { a + x }, 0, [1, 2, 3]) // => [0, 1, 3, 6]
 fn accumulate(f, init, coll) {
     reductions(f, init, coll)
 }
@@ -474,9 +508,9 @@ fn accumulate(f, init, coll) {
 /// collection (product([1,2,3,4]) => 24). Keeping both names preserves the
 /// existing public API.
 ///
-/// cartesian-product([[1, 2], [3, 4]]) => [[1, 3], [1, 4], [2, 3], [2, 4]]
-/// cartesian-product([]) => [[]]            (empty product is one empty tuple)
-/// cartesian-product([[1, 2], []]) => []    (any empty factor => no tuples)
+/// cartesian-product([[1, 2], [3, 4]]) // => [[1, 3], [1, 4], [2, 3], [2, 4]]
+/// cartesian-product([]) // => [[]]            (empty product is one empty tuple)
+/// cartesian-product([[1, 2], []]) // => []    (any empty factor => no tuples)
 fn cartesian-product(vec-of-vecs) {
     let factors = iter-to-vec(vec-of-vecs)
     let nf = length(factors)
@@ -507,9 +541,9 @@ fn cartesian-product(vec-of-vecs) {
 /// All k-element combinations of vec, in lexicographic index order, no repeats,
 /// preserving the input order within each combination. Matches
 /// itertools.combinations.
-/// combinations([1, 2, 3, 4], 2) => [[1, 2], [1, 3], [1, 4], [2, 3], [2, 4], [3, 4]]
-/// combinations(x, 0) => [[]]
-/// combinations(x, k) where k > length(x) => []
+/// combinations([1, 2, 3, 4], 2) // => [[1, 2], [1, 3], [1, 4], [2, 3], [2, 4], [3, 4]]
+/// combinations(x, 0) // => [[]]
+/// combinations(x, k) where k > length(x) // => []
 fn combinations(coll, k) {
     let v = iter-to-vec(coll)
     let n = length(v)
@@ -521,6 +555,8 @@ fn combinations(coll, k) {
 }
 
 // Generate k-combinations of v[start..n], as vectors of elements.
+/// Recursive helper for `combinations`: build all k-element combinations drawn
+/// from indices start..n of v, in lexicographic index order, as element vectors.
 fn combinations-from(v, n, k, start) {
     if k == 0 {
         [[]]
@@ -544,6 +580,7 @@ fn combinations-from(v, n, k, start) {
 }
 
 // Prepend a single element to a vector, returning a new vector.
+/// Prepend element x to vector vec, returning a new vector with x at index 0.
 fn push-front-elem(x, vec) {
     let mut out = [x]
     let mut s = seq(vec)
@@ -554,12 +591,54 @@ fn push-front-elem(x, vec) {
     out
 }
 
+/// All k-element combinations of coll allowing repeated elements, in
+/// lexicographic index order, preserving input order within each combination.
+/// Matches itertools.combinations_with_replacement.
+/// combinations-with-replacement([1, 2, 3], 2) // => [[1, 1], [1, 2], [1, 3], [2, 2], [2, 3], [3, 3]]
+/// combinations-with-replacement(x, 0) // => [[]]
+/// combinations-with-replacement([], k) where k > 0 // => []
+fn combinations-with-replacement(coll, k) {
+    let v = iter-to-vec(coll)
+    let n = length(v)
+    if k < 0 {
+        throw("beagle.iter/combinations-with-replacement: k must be >= 0")
+    } else {
+        combinations-wr-from(v, n, k, 0)
+    }
+}
+
+// Generate k-combinations (with replacement) of v[start..n], as element vectors.
+/// Recursive helper for `combinations-with-replacement`: build all k-element
+/// combinations drawn from indices start..n of v, allowing each index to repeat,
+/// in lexicographic index order, as element vectors.
+fn combinations-wr-from(v, n, k, start) {
+    if k == 0 {
+        [[]]
+    } else {
+        let mut acc = []
+        let mut i = start
+        while i < n {
+            let head = get(v, i)
+            // Reuse index i (not i + 1) so the element can repeat.
+            let rest = combinations-wr-from(v, n, k - 1, i)
+            let mut ri = 0
+            let nr = length(rest)
+            while ri < nr {
+                acc = push(acc, push-front-elem(head, get(rest, ri)))
+                ri = ri + 1
+            }
+            i = i + 1
+        }
+        acc
+    }
+}
+
 /// All permutations of coll. With one argument, all full-length permutations
 /// (in itertools order). With two arguments, all k-length permutations.
-/// permutations([1, 2, 3]) => 6 entries, first is [1, 2, 3]
-/// permutations([1, 2, 3, 4], 2) => 12 entries
-/// permutations(x, 0) => [[]]
-/// permutations([]) => [[]]   (the single empty permutation)
+/// permutations([1, 2, 3]) // => 6 entries, first is [1, 2, 3]
+/// permutations([1, 2, 3, 4], 2) // => 12 entries
+/// permutations(x, 0) // => [[]]
+/// permutations([]) // => [[]]   (the single empty permutation)
 fn permutations {
     (coll) => {
         let v = iter-to-vec(coll)
@@ -572,6 +651,8 @@ fn permutations {
 }
 
 // k-length permutations of vector v (by index, itertools order).
+/// Helper for `permutations`: all k-length permutations of vector v in
+/// itertools order. Throws if k < 0; returns [] when k > length(v).
 fn permutations-of(v, k) {
     let n = length(v)
     if k < 0 {
@@ -593,6 +674,8 @@ fn permutations-of(v, k) {
 }
 
 // Recursive permutation builder: choose each unused index in turn.
+/// Recursive helper for `permutations-of`: place each still-unused index in
+/// turn (tracked by the boolean `used` vector) to build k-length element tuples.
 fn permutations-rec(v, n, k, used) {
     if k == 0 {
         [[]]

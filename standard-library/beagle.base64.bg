@@ -22,6 +22,9 @@ let STD_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567
 let URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
 // Convert the polymorphic input (String or Vec<Int>) into a Vec<Int> of bytes.
+/// Normalize `input` to a Vec<Int> of byte values. A String is converted to
+/// its raw UTF-8 bytes (multibyte-correct via a string-builder); a Vec<Int> is
+/// assumed to already be byte values and returned unchanged.
 fn to-bytes(input) {
     if instance-of(input, String) {
         // A String is encoded by its UTF-8 bytes. We obtain those bytes by
@@ -45,6 +48,9 @@ fn to-bytes(input) {
 }
 
 // Core encoder. `pad?` controls whether '=' padding is emitted.
+/// Core base64 encoder. Encodes `input` (String or Vec<Int>) using the 64-char
+/// `alphabet`, emitting '=' padding for the trailing 1- or 2-byte group only
+/// when `pad?` is true. Returns the encoded String.
 fn encode-with(input, alphabet, pad?) {
     let bytes = to-bytes(input)
     let n = length(bytes)
@@ -91,6 +97,9 @@ fn encode-with(input, alphabet, pad?) {
 
 // Map a single base64 character code to its 6-bit value, or -1 if it is
 // not a valid base64 symbol (padding/whitespace handled by the caller).
+/// Map a single character code to its 0..63 base64 value, accepting both the
+/// standard ('+', '/') and URL-safe ('-', '_') symbols. Returns -1 for any
+/// non-alphabet character (the caller handles padding/whitespace).
 fn decode-char-value(code) {
     // 'A'..'Z' => 0..25
     if code >= 65 && code <= 90 {
@@ -123,6 +132,9 @@ fn decode-char-value(code) {
 // Core decoder. Accepts both standard and url-safe alphabets, ignores
 // '=' padding and ASCII whitespace, and rejects any other invalid symbol
 // with a hard error. Returns a Vec<Int> of byte values.
+/// Core base64 decoder. Decodes `text` (standard or URL-safe alphabet) into a
+/// Vec<Int> of byte values, ignoring '=' padding and ASCII whitespace. Throws
+/// if any other invalid base64 character is encountered.
 fn decode-any(text) {
     let n = length(text)
     let mut out = []
@@ -162,28 +174,86 @@ fn decode-any(text) {
 // ---- Public API -----------------------------------------------------------
 
 // Encode bytes-or-string to a standard base64 String (with '=' padding).
+/// Encode `input` (String or Vec<Int>) to a standard-alphabet base64 String
+/// with '=' padding. Thin wrapper over encode-with using STD_ALPHABET.
 fn encode(input) {
     encode-with(input, STD_ALPHABET, true)
 }
 
 // Decode a standard base64 String to a Vec<Int> of byte values.
+/// Decode a standard base64 String to a Vec<Int> of byte values. Thin wrapper
+/// over decode-any (which also tolerates URL-safe symbols and whitespace).
 fn decode(text) {
     decode-any(text)
 }
 
 // Encode bytes-or-string to a URL-safe base64 String (no padding).
+/// Encode `input` (String or Vec<Int>) to a URL-safe base64 String using '-'
+/// and '_' and emitting NO padding. Thin wrapper over encode-with using
+/// URL_ALPHABET.
 fn encode-url(input) {
     encode-with(input, URL_ALPHABET, false)
 }
 
 // Decode a URL-safe base64 String to a Vec<Int> of byte values.
 // (Also accepts standard-alphabet input and padding.)
+/// Decode a URL-safe base64 String to a Vec<Int> of byte values. Also accepts
+/// standard-alphabet input and '=' padding. Thin wrapper over decode-any.
 fn decode-url(text) {
     decode-any(text)
 }
 
+// Strictly decode a canonical standard base64 String to a Vec<Int> of bytes.
+// Unlike `decode`, this REJECTS malformed input rather than tolerating it:
+// the length must be a multiple of 4, every character must be a valid base64
+// symbol or trailing '=' padding, and padding may only appear (at most twice)
+// at the very end.
+/// Strictly decode a canonical base64 String to a Vec<Int> of byte values.
+/// Throws on malformed input: length not a multiple of 4, any non-alphabet
+/// character, or '=' padding that is misplaced or longer than two characters.
+fn decode-strict(text) {
+    let n = length(text)
+    // Canonical base64 is always padded to a multiple of 4 characters.
+    if (n % 4) != 0 {
+        throw("beagle.base64/decode-strict: input length ${n} is not a multiple of 4")
+    }
+    let mut i = 0
+    let mut padding = 0
+    while i < n {
+        let code = char-code(text[i])
+        if code == 61 {
+            // '=' padding: allowed only as a trailing run of at most two.
+            padding = padding + 1
+        } else {
+            // A real data character must not follow padding.
+            if padding > 0 {
+                throw("beagle.base64/decode-strict: '=' padding may only appear at the end (index ${i})")
+            }
+            let v = decode-char-value(code)
+            if v < 0 {
+                throw("beagle.base64/decode-strict: invalid base64 character with code ${code} at index ${i}")
+            }
+        }
+        i = i + 1
+    }
+    if padding > 2 {
+        throw("beagle.base64/decode-strict: too much '=' padding (${padding} characters)")
+    }
+    decode-any(text)
+}
+
+// Decode a base64 String straight to a UTF-8 String (lenient, like `decode`).
+/// Decode a base64 String and return the decoded bytes as a UTF-8 String.
+/// Convenience over decode + bytes-to-string; lenient like `decode` (tolerates
+/// missing padding, ASCII whitespace, and both alphabets).
+fn decode-to-string(text) {
+    bytes-to-string(decode-any(text))
+}
+
 // Helper: turn a Vec<Int> of byte values back into a String (for round-trip
 // tests of textual data).
+/// Build a String from a Vec<Int> of byte values, appending each as a raw
+/// UTF-8 byte. Useful for round-tripping decoded textual data back to a String.
 fn bytes-to-string(bytes) {
     let out = sb/new(length(bytes) + 1)
     let mut i = 0
@@ -194,19 +264,5 @@ fn bytes-to-string(bytes) {
     sb/to-string(out)
 }
 
-fn main() {
-    println(encode("Man"))
-    println(encode("Ma"))
-    println(encode("M"))
-    println(encode("hello"))
-    println(encode(""))
-    "done"
-}
-
-// @beagle.core.snapshot
-// TWFu
-// TWE=
-// TQ==
-// aGVsbG8=
-//
-// done
+/// Demo/snapshot entry point: prints standard base64 encodings of a few sample
+/// strings and returns "done".

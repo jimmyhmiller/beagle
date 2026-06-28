@@ -14,6 +14,7 @@ namespace beagle.json
 // API
 //   parse(string)                  -> value      (objects -> maps, arrays -> vectors)
 //   stringify(value)               -> string     (compact)
+//   stringify-pretty(value)        -> string     (2-space indent per level)
 //   stringify-pretty(value, indent)-> string     (indent spaces per level)
 //
 // Mapping
@@ -35,6 +36,8 @@ use beagle.string-builder as sb
 //   s            : the source string
 //   pos          : current byte index (mutated in place)
 //   keyword-keys : when true, object keys become keywords; else stay strings
+/// Mutable parse cursor: source string `s`, in-place byte index `pos`, and
+/// `keyword-keys` flag controlling whether object keys parse as keywords.
 struct Cursor {
     s
     mut pos
@@ -42,6 +45,7 @@ struct Cursor {
 }
 
 // char code at the current position, or -1 at end of input.
+/// Char code at the cursor's current position, or -1 at end of input.
 fn cur-code(c) {
     if c.pos < length(c.s) {
         char-code(c.s[c.pos])
@@ -50,25 +54,31 @@ fn cur-code(c) {
     }
 }
 
+/// True when the cursor has consumed the entire source string.
 fn at-end?(c) {
     c.pos >= length(c.s)
 }
 
+/// True when `code` is a JSON whitespace byte (space, tab, LF, or CR).
 fn ws-code?(code) {
     code == 32 || code == 9 || code == 10 || code == 13
 }
 
+/// Advance the cursor past any run of JSON whitespace.
 fn skip-ws(c) {
     while c.pos < length(c.s) && ws-code?(cur-code(c)) {
         c.pos = c.pos + 1
     }
 }
 
+/// Throw a `beagle.json/parse` error tagged with `msg` and the cursor position.
 fn parse-error(c, msg) {
     throw("beagle.json/parse: " ++ msg ++ " at position " ++ to-string(c.pos))
 }
 
 // Parse a complete JSON document. Errors on trailing non-whitespace.
+/// Parse a complete JSON document (one value plus surrounding whitespace).
+/// Throws if any non-whitespace remains after the value.
 fn parse-document(c) {
     skip-ws(c)
     let v = parse-value(c)
@@ -80,6 +90,8 @@ fn parse-document(c) {
     }
 }
 
+/// Parse a single JSON value at the cursor, dispatching on the leading byte
+/// (object, array, string, true/false/null literal, or number).
 fn parse-value(c) {
     skip-ws(c)
     if at-end?(c) {
@@ -119,6 +131,8 @@ fn parse-value(c) {
 }
 
 // Match an exact keyword literal (true/false/null) and return its value.
+/// Match the exact keyword `word` (true/false/null) at the cursor and return
+/// `value`; throws if the text does not match.
 fn parse-literal(c, word, value) {
     let n = length(word)
     let start = c.pos
@@ -135,6 +149,8 @@ fn parse-literal(c, word, value) {
     }
 }
 
+/// Parse a JSON object (cursor at the opening `{`) into a map. Keys become
+/// keywords or stay strings depending on the cursor's `keyword-keys` flag.
 fn parse-object(c) {
     c.pos = c.pos + 1            // consume '{'
     skip-ws(c)
@@ -181,6 +197,7 @@ fn parse-object(c) {
     }
 }
 
+/// Parse a JSON array (cursor at the opening `[`) into a vector.
 fn parse-array(c) {
     c.pos = c.pos + 1            // consume '['
     skip-ws(c)
@@ -211,6 +228,8 @@ fn parse-array(c) {
 }
 
 // Parse a JSON string starting at the opening quote.
+/// Parse a JSON string (cursor at the opening quote), decoding escapes, into
+/// a String. Throws on an unterminated string or bad escape.
 fn parse-string(c) {
     c.pos = c.pos + 1            // consume opening '"'
     let out = sb/new(16)
@@ -241,6 +260,8 @@ fn parse-string(c) {
     sb/to-string(out)
 }
 
+/// Decode the backslash escape at the cursor (`\"`, `\\`, `\/`, `\n`, `\t`,
+/// `\r`, `\b`, `\f`, or `\uXXXX`) and append its byte(s) to `out`.
 fn parse-escape(c, out) {
     let e = cur-code(c)
     if e == 34 {                    // \"
@@ -291,6 +312,8 @@ fn parse-escape(c, out) {
 }
 
 // Parse \uXXXX (with surrogate-pair support) and encode the code point as UTF-8.
+/// Parse a `\uXXXX` escape (cursor at the `u`), combining a high/low surrogate
+/// pair when present, and append the code point as UTF-8 to `out`.
 fn parse-unicode-escape(c, out) {
     c.pos = c.pos + 1                       // consume 'u'
     let cp = read-hex4(c)
@@ -314,6 +337,8 @@ fn parse-unicode-escape(c, out) {
 }
 
 // Read exactly 4 hex digits, returning the integer value.
+/// Read exactly 4 hex digits at the cursor and return their integer value;
+/// throws on a short or non-hex sequence.
 fn read-hex4(c) {
     let mut n = 0
     let mut i = 0
@@ -334,6 +359,7 @@ fn read-hex4(c) {
     n
 }
 
+/// Value (0-15) of a hex-digit char code (0-9, a-f, A-F), or -1 if not hex.
 fn hex-digit-value(code) {
     if code >= 48 && code <= 57 {
         code - 48               // '0'..'9'
@@ -351,6 +377,7 @@ fn hex-digit-value(code) {
 }
 
 // Encode a Unicode code point as UTF-8 bytes into the builder.
+/// Encode Unicode code point `cp` as 1-4 UTF-8 bytes appended to `out`.
 fn encode-utf8(out, cp) {
     if cp < 128 {
         sb/append-byte!(out, cp)
@@ -373,12 +400,15 @@ fn encode-utf8(out, cp) {
     }
 }
 
+/// True when `code` is an ASCII digit '0'-'9'.
 fn digit-code?(code) {
     code >= 48 && code <= 57
 }
 
 // Parse a JSON number. Returns an Int if it has no fraction/exponent,
 // otherwise a Float.
+/// Scan a JSON number at the cursor, returning an Int when it has no fraction
+/// or exponent and a Float otherwise. Throws on malformed numbers.
 fn parse-number(c) {
     let start = c.pos
     let mut is-float = false
@@ -443,6 +473,8 @@ fn parse-number(c) {
 // number instead (matching JS/Python json, where every JSON number is
 // conceptually a double — large integers come back as floats rather than
 // silently-wrong wrapped integers). Normal in-range integers stay exact.
+/// Parse an integer numeric substring into a tagged Int, degrading to a Float
+/// approximation when the value overflows the 2^60-1 tagged-Int range.
 fn parse-int-text(c, text) {
     let mut neg = false
     let mut i = 0
@@ -479,6 +511,8 @@ fn parse-int-text(c, text) {
 }
 
 // Parse a float substring; the substring is already validated by the scanner.
+/// Parse an already-scanner-validated float substring into a Float (thin
+/// wrapper over parse-float-text).
 fn to-float-checked(c, text) {
     parse-float-text(text)
 }
@@ -490,6 +524,8 @@ fn to-float-checked(c, text) {
 // loop, each step rounding to a double, so values like 6.022e23 / 1e-7 came out
 // off by many ULPs. JSON number syntax is a subset of Rust's float grammar, so
 // from_str accepts every scanner-validated token exactly.
+/// Parse a validated numeric substring `s` into a Float via the native
+/// correctly-rounded parser. Throws if the native parser unexpectedly rejects it.
 fn parse-float-text(s) {
     let parsed = parse-float-string(s)
     if parsed == null {
@@ -506,8 +542,8 @@ fn parse-float-text(s) {
 /// Parse a JSON string into a Beagle value. Object keys become keywords.
 ///
 /// Examples:
-///   (parse "{\"a\":[1,2,3],\"b\":true,\"c\":null}")
-///     ; => {:a [1, 2, 3], :b true, :c null}
+///   parse("{\"a\":[1,2,3],\"b\":true,\"c\":null}")
+///     // => {:a [1, 2, 3], :b true, :c null}
 fn parse(s) {
     let c = Cursor { s: s, pos: 0, keyword-keys: true }
     parse-document(c)
@@ -516,10 +552,25 @@ fn parse(s) {
 /// Parse a JSON string into a Beagle value, keeping object keys as Strings.
 ///
 /// Examples:
-///   (parse-with-string-keys "{\"a\":1}")  ; => {"a" 1}
+///   parse-with-string-keys("{\"a\":1}")  // => {"a" 1}
 fn parse-with-string-keys(s) {
     let c = Cursor { s: s, pos: 0, keyword-keys: false }
     parse-document(c)
+}
+
+/// Parse a JSON string without throwing: returns Result.Ok { value } on
+/// success, or Result.Err { error } carrying the parse error message instead
+/// of throwing. Object keys become keywords, like `parse`.
+///
+/// Examples:
+///   parse-result("{\"a\":1}")  // => Result.Ok { value: {:a 1} }
+///   parse-result("{")          // => Result.Err { error: "beagle.json/parse: ..." }
+fn parse-result(s) {
+    try {
+        Result.Ok { value: parse(s) }
+    } catch (e) {
+        Result.Err { error: e }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -529,26 +580,151 @@ fn parse-with-string-keys(s) {
 /// Serialize a Beagle value to compact JSON.
 ///
 /// Examples:
-///   (stringify {:a 1 :b [1, 2]})  ; => {"a":1,"b":[1,2]}
+///   stringify({:a 1, :b [1, 2]})  // => {"a":1,"b":[1,2]}
 fn stringify(value) {
     let out = sb/new(64)
     write-value(out, value, 0 - 1, 0)
     sb/to-string(out)
 }
 
-/// Serialize a Beagle value to pretty-printed JSON using `indent` spaces per
-/// nesting level.
+/// Serialize a Beagle value to pretty-printed JSON.
+///
+/// The one-argument form uses a 2-space indent per nesting level: it writes a
+/// newline after each array element and object member, a space after each `:`,
+/// and emits object keys in the same insertion order as `stringify` (the
+/// underlying `write-value` machinery is shared, so key order matches exactly).
+/// The two-argument form takes an explicit `indent` (spaces per nesting level).
 ///
 /// Examples:
-///   (stringify-pretty {:a 1} 2)
-///     ; => {\n  "a": 1\n}
-fn stringify-pretty(value, indent) {
+///   stringify-pretty({:a 1})
+///     // => {\n  "a": 1\n}
+///   stringify-pretty({:a 1}, 4)
+///     // => {\n    "a": 1\n}
+fn stringify-pretty {
+    (value) => stringify-pretty(value, 2)
+    (value, indent) => {
+        let out = sb/new(64)
+        write-value(out, value, indent, 0)
+        sb/to-string(out)
+    }
+}
+
+/// Serialize a Beagle value to compact JSON with object keys emitted in sorted
+/// (canonical) order at every nesting level. Useful for stable, comparable
+/// output such as hashing or diffing two equivalent values.
+///
+/// Examples:
+///   stringify-sorted({:b 1, :a 2})  // => {"a":2,"b":1}
+fn stringify-sorted(value) {
     let out = sb/new(64)
-    write-value(out, value, indent, 0)
+    write-value-sorted(out, value, 0 - 1, 0)
     sb/to-string(out)
 }
 
+// Like write-value, but arrays/objects recurse through the sorted writers so
+// keys come out sorted at every depth. indent < 0 means compact.
+/// Write `value` as JSON into `out` like `write-value`, but recursing through
+/// the sorted writers so object keys are emitted in sorted order at every depth.
+fn write-value-sorted(out, value, indent, depth) {
+    if value == null {
+        sb/append!(out, "null")
+    } else {
+        if value == true {
+            sb/append!(out, "true")
+        } else {
+            if value == false {
+                sb/append!(out, "false")
+            } else {
+                if instance-of(value, String) {
+                    write-string(out, value)
+                } else {
+                    if instance-of(value, Int) {
+                        sb/append!(out, to-string(value))
+                    } else {
+                        if instance-of(value, Float) {
+                            let fs = to-string(value)
+                            if fs == "NaN" || fs == "infinity" || fs == "-infinity" {
+                                throw("beagle.json/stringify: cannot serialize non-finite float (${fs})")
+                            } else {
+                                sb/append!(out, fs)
+                            }
+                        } else {
+                            if instance-of(value, PersistentVector) {
+                                write-array-sorted(out, value, indent, depth)
+                            } else {
+                                if instance-of(value, PersistentMap) {
+                                    write-object-sorted(out, value, indent, depth)
+                                } else {
+                                    if instance-of(value, Keyword) {
+                                        write-string(out, keyword->string(value))
+                                    } else {
+                                        throw("beagle.json/stringify: cannot serialize unsupported value type")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Write vector `vec` as a JSON array into `out` like `write-array`, but
+/// recursing through `write-value-sorted` so nested object keys stay sorted.
+fn write-array-sorted(out, vec, indent, depth) {
+    let n = length(vec)
+    if n == 0 {
+        sb/append!(out, "[]")
+    } else {
+        sb/append-byte!(out, 91)        // '['
+        let mut i = 0
+        while i < n {
+            if i > 0 {
+                sb/append-byte!(out, 44) // ','
+            }
+            write-newline-indent(out, indent, depth + 1)
+            write-value-sorted(out, vec[i], indent, depth + 1)
+            i = i + 1
+        }
+        write-newline-indent(out, indent, depth)
+        sb/append-byte!(out, 93)        // ']'
+    }
+}
+
+/// Write map `m` as a JSON object into `out` like `write-object`, but with keys
+/// emitted in sorted order (by their JSON string form) and values recursing
+/// through `write-value-sorted`.
+fn write-object-sorted(out, m, indent, depth) {
+    let ks = sort-by(fn(k) { key->string(k) }, keys(m))
+    let n = length(ks)
+    if n == 0 {
+        sb/append!(out, "{}")
+    } else {
+        sb/append-byte!(out, 123)       // '{'
+        let mut i = 0
+        while i < n {
+            if i > 0 {
+                sb/append-byte!(out, 44) // ','
+            }
+            write-newline-indent(out, indent, depth + 1)
+            let k = ks[i]
+            write-string(out, key->string(k))
+            sb/append-byte!(out, 58)    // ':'
+            if indent >= 0 {
+                sb/append-byte!(out, 32) // ' ' after colon in pretty mode
+            }
+            write-value-sorted(out, get(m, k), indent, depth + 1)
+            i = i + 1
+        }
+        write-newline-indent(out, indent, depth)
+        sb/append-byte!(out, 125)       // '}'
+    }
+}
+
 // Write a value. indent < 0 means compact; depth is the current nesting level.
+/// Write `value` as JSON into builder `out`. `indent` < 0 means compact;
+/// `depth` is the current nesting level. Throws on unserializable value types.
 fn write-value(out, value, indent, depth) {
     if value == null {
         sb/append!(out, "null")
@@ -566,7 +742,14 @@ fn write-value(out, value, indent, depth) {
                         sb/append!(out, to-string(value))
                     } else {
                         if instance-of(value, Float) {
-                            sb/append!(out, to-string(value))
+                            // NaN / +-infinity are not valid JSON; refuse rather
+                            // than emit a token no JSON parser accepts.
+                            let fs = to-string(value)
+                            if fs == "NaN" || fs == "infinity" || fs == "-infinity" {
+                                throw("beagle.json/stringify: cannot serialize non-finite float (${fs})")
+                            } else {
+                                sb/append!(out, fs)
+                            }
                         } else {
                             if instance-of(value, PersistentVector) {
                                 write-array(out, value, indent, depth)
@@ -590,6 +773,8 @@ fn write-value(out, value, indent, depth) {
     }
 }
 
+/// In pretty mode (`indent` >= 0) write a newline plus `indent * depth` spaces;
+/// a no-op in compact mode.
 fn write-newline-indent(out, indent, depth) {
     if indent >= 0 {
         sb/append-byte!(out, 10)        // '\n'
@@ -601,6 +786,7 @@ fn write-newline-indent(out, indent, depth) {
     }
 }
 
+/// Write vector `vec` as a JSON array into `out`, honoring indent/depth.
 fn write-array(out, vec, indent, depth) {
     let n = length(vec)
     if n == 0 {
@@ -621,6 +807,8 @@ fn write-array(out, vec, indent, depth) {
     }
 }
 
+/// Write map `m` as a JSON object into `out`, honoring indent/depth; keys are
+/// stringified via key->string.
 fn write-object(out, m, indent, depth) {
     let ks = keys(m)
     let n = length(ks)
@@ -649,6 +837,7 @@ fn write-object(out, m, indent, depth) {
 }
 
 // Convert a map key (keyword or string) to its JSON string form.
+/// Convert a map key (keyword, string, or other) to its JSON string form.
 fn key->string(k) {
     if instance-of(k, Keyword) {
         keyword->string(k)
@@ -662,6 +851,8 @@ fn key->string(k) {
 }
 
 // Write a JSON-escaped string literal (including surrounding quotes).
+/// Write string `s` into `out` as a JSON string literal, including the
+/// surrounding quotes and escaping of special and control characters.
 fn write-string(out, s) {
     sb/append-byte!(out, 34)            // opening '"'
     let n = length(s)
@@ -713,6 +904,7 @@ fn write-string(out, s) {
     sb/append-byte!(out, 34)            // closing '"'
 }
 
+/// Write control char `code` as a `\u00XX` escape sequence into `out`.
 fn write-control-escape(out, code) {
     sb/append-byte!(out, 92)            // backslash
     sb/append-byte!(out, 117)           // 'u'
@@ -722,6 +914,7 @@ fn write-control-escape(out, code) {
     sb/append-byte!(out, hex-char(code & 15))
 }
 
+/// ASCII char code of the lowercase hex digit for `d` (0-15).
 fn hex-char(d) {
     if d < 10 {
         48 + d                          // '0'..'9'

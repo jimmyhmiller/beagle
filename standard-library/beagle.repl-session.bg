@@ -8,12 +8,18 @@ use beagle.async as async
 // Session Management for REPL Server
 // ============================================================================
 
+/// A queued evaluation: the request `id`, the `code` string to eval, and
+/// `result_atom` where the resulting response list is published.
 struct EvalRequest {
     id
     code
     result_atom
 }
 
+/// One REPL connection's evaluation state: its `id`, the dedicated
+/// `eval_thread`, the `message_queue` of pending requests, the `is_running`
+/// busy flag, the `cancel_token`, the `resume_stack` of suspended exceptions,
+/// and `ns`, the session's pinned current namespace.
 struct Session {
     id
     eval_thread
@@ -24,6 +30,9 @@ struct Session {
     ns
 }
 
+/// Create and start a new REPL `Session` with the given `id`, spawning its
+/// eval thread. The session inherits the namespace current at creation time
+/// and isolates it thereafter. Returns the `Session`.
 fn create-session(id) {
     let queue = atom([])
     let running = atom(false)
@@ -54,16 +63,21 @@ fn create-session(id) {
     }
 }
 
+/// Return all but the first of `items`, or `[]` when there is no tail.
 fn rest-or-empty(items) {
     let tail = rest(items)
     if tail == null { [] } else { tail }
 }
 
+/// Return `items` without its last element, or `[]` when nothing remains.
 fn pop-or-empty(items) {
     let remaining = slice(items, 0, length(items) - 1)
     if remaining == null { [] } else { remaining }
 }
 
+/// The eval thread's main loop: until `cancel` is set, dequeue and process one
+/// request at a time from `queue`, toggling the `running` flag and sleeping
+/// when the queue is empty.
 fn session-eval-loop(queue, running, cancel, resume_stack, ns) {
     while deref(cancel) == false {
         let requests = deref(queue)
@@ -219,6 +233,8 @@ fn process-eval-request(request, cancel, queue, running, resume_stack, ns) {
     }
 }
 
+/// Enqueue `code` for evaluation on `session` under `request_id`. Returns the
+/// result atom that will be filled with the response list once processed.
 fn session-eval(session, request_id, code) {
     let result_atom = atom(null)
     let request = EvalRequest {
@@ -232,6 +248,9 @@ fn session-eval(session, request_id, code) {
     result_atom
 }
 
+/// Resume the topmost suspended exception on `session` with the value of
+/// `code`, under `request_id`. Returns a result atom holding an error response
+/// when there is no suspended exception to resume.
 fn session-resume(session, request_id, code) {
     let result_atom = atom(null)
     let stack = deref(session.resume_stack)
@@ -245,6 +264,9 @@ fn session-resume(session, request_id, code) {
     result_atom
 }
 
+/// Abort the topmost suspended exception on `session` under `request_id`,
+/// discarding it without resuming. Returns a result atom holding an error
+/// response when there is no suspended exception to abort.
 fn session-abort(session, request_id) {
     let result_atom = atom(null)
     let stack = deref(session.resume_stack)
@@ -258,20 +280,26 @@ fn session-abort(session, request_id) {
     result_atom
 }
 
+/// Interrupt `session`'s in-flight evaluation by briefly raising and clearing
+/// its cancel token.
 fn session-interrupt(session) {
     reset!(session.cancel_token, true)
     core/sleep(50)
     reset!(session.cancel_token, false)
 }
 
+/// Permanently stop `session` by setting its cancel token, ending the eval loop.
 fn session-close(session) {
     reset!(session.cancel_token, true)
 }
 
+/// Return whether `session` is currently evaluating a request.
 fn session-busy?(session) {
     deref(session.is_running)
 }
 
+/// Return the number of suspended (resumable) exceptions currently stacked on
+/// `session`, or 0 when none.
 fn session-suspend-depth(session) {
     let stack = deref(session.resume_stack)
     if stack == null { 0 } else { length(stack) }

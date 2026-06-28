@@ -26,6 +26,7 @@ use beagle.core as core
 // Futures represent values that may not be available yet. They are created
 // by spawn() and resolved by the async runtime.
 
+/// A future's lifecycle state: Pending, Running, Resolved (with value), Rejected (with error), or Cancelled.
 enum FutureState {
     Pending {},
     Running {},
@@ -36,6 +37,7 @@ enum FutureState {
 
 // Future struct - holds state as an atom for thread-safe access
 // The state_atom contains a FutureState value
+/// A future, holding its FutureState in an atom for thread-safe access.
 struct Future {
     state_atom
 }
@@ -45,7 +47,7 @@ struct Future {
 /// Futures represent values that may not be available yet.
 ///
 /// Examples:
-///   (let f (make-future (FutureState.Pending {})))
+///   let f = make-future(FutureState.Pending {})
 fn make-future(initial_state) {
     Future { state_atom: atom(initial_state) }
 }
@@ -99,6 +101,7 @@ fn future-cancelled?(future) {
 // CancellationToken provides a cooperative cancellation mechanism.
 // Tasks check the token periodically and exit early if cancelled.
 
+/// A cooperative cancellation token wrapping a boolean atom; tasks poll it and exit early when it is set.
 struct CancellationToken {
     cancelled_atom
 }
@@ -130,12 +133,14 @@ fn cancelled?(token) {
 // TaskScope ensures that all spawned tasks complete before the scope exits.
 // If the scope exits early (error or cancellation), all child tasks are cancelled.
 
+/// A structured-concurrency scope: a cancellation token plus an atom holding its child futures.
 struct TaskScope {
     token
     children_atom
 }
 
 // Create a new task scope
+/// Create a new task scope with a fresh cancellation token and no children.
 fn make-scope() {
     TaskScope {
         token: make-cancellation-token()
@@ -144,17 +149,20 @@ fn make-scope() {
 }
 
 // Add a child future to a scope
+/// Register a child future with a scope so the scope tracks and can cancel it.
 fn scope-add-child!(scope, future) {
     let children = deref(scope.children_atom)
     reset!(scope.children_atom, push(children, future))
 }
 
 // Get all children from a scope
+/// Return the vector of child futures registered with a scope.
 fn scope-children(scope) {
     deref(scope.children_atom)
 }
 
 // Cancel all children in a scope
+/// Cancel a scope's token and every child future registered with it.
 fn scope-cancel-all!(scope) {
     cancel!(scope.token)
     let children = scope-children(scope)
@@ -167,6 +175,7 @@ fn scope-cancel-all!(scope) {
 }
 
 // Wait for all children to complete (or be cancelled)
+/// Block until every child future of a scope reaches a terminal state (resolved, rejected, or cancelled).
 fn scope-await-all-children(scope) {
     let children = scope-children(scope)
     let mut s = seq(children)
@@ -195,9 +204,9 @@ fn scope-await-all-children(scope) {
 /// On error or cancellation, all child tasks are cancelled.
 ///
 /// Examples:
-///   (with-scope fn(scope) {
-///       let f1 = spawn(scope, fn() { compute1() })
-///       let f2 = spawn(scope, fn() { compute2() })
+///   with-scope(fn(scope) {
+///       let f1 = spawn-in-scope(scope, fn() { compute1() })
+///       let f2 = spawn-in-scope(scope, fn() { compute2() })
 ///       [await(f1), await(f2)]
 ///   })
 fn with-scope(body) {
@@ -217,12 +226,14 @@ fn with-scope(body) {
 }
 
 // Result types for await-first
+/// Result of await-first: Ok with the winning value and its index, or AllFailed with the collected errors.
 enum RaceResult {
     Ok { value, index },
     AllFailed { errors }
 }
 
 // Result type for timeout operations
+/// Result of a timed await: Ok with the value, or TimedOut if the deadline passed.
 enum TimeoutResult {
     Ok { value },
     TimedOut {}
@@ -235,12 +246,14 @@ enum TimeoutResult {
 // the operation and resumes the continuation when it completes.
 
 // TCP Listener - wraps a listener ID and event loop ID
+/// A TCP listener, wrapping its owning event-loop id and listener id.
 struct TcpListener {
     loop_id
     listener_id
 }
 
 // TCP Socket - wraps a socket ID and event loop ID
+/// A TCP socket, wrapping its owning event-loop id and socket id.
 struct TcpSocket {
     loop_id
     socket_id
@@ -251,10 +264,12 @@ struct TcpSocket {
 // scheduler stack), so throwing there would escape the scheduler instead of the
 // awaiting code. Returning a sentinel lets tcp-result-or-throw re-raise the
 // error inside the resumed continuation, where the caller's try/catch lives.
+/// Sentinel value returned (not thrown) for a failed async TCP op, so tcp-result-or-throw can re-raise it in the caller's stack. Holds the error message.
 struct TcpIoError {
     message
 }
 
+/// Describes a TCP I/O operation for the async handler to perform (listen, connect, accept, read, write, close).
 enum IOAction {
     // TCP operations
     TcpListen { host, port },
@@ -270,6 +285,7 @@ enum IOAction {
 // Cooperative Scheduler Data Types
 // ============================================================================
 
+/// A pending cooperative-scheduler operation: TCP I/O, file I/O, a timer, a spawned-task wait, or a new task to start.
 enum PendingOp {
     TcpIO { op_id, loop_id },
     FileIO { handle, loop_id },
@@ -278,8 +294,18 @@ enum PendingOp {
     NewTask { thunk }
 }
 
+/// A scheduler task ready to run, pairing a continuation (resume) with the result to resume it with.
 struct ReadyTask { resume, result }
+// Internal sentinels the cooperative scheduler resumes an awaiting continuation
+// with so `await` can re-raise a rejected/cancelled future as a throw at the await
+// site, rather than returning the error as an ordinary value (or parking forever).
+/// Sentinel: the awaited future rejected; `await` re-raises `error`.
+struct AwaitRejected { error }
+/// Sentinel: the awaited future was cancelled; `await` throws.
+struct AwaitCancelled {}
+/// A parked cooperative task: the PendingOp it waits on plus the continuation to resume when it completes.
 struct SchedulerTask { op, resume }
+/// Cooperative single-threaded async handler state: an atom of parked tasks plus the event-loop id.
 struct CooperativeHandler { tasks, loop_id }
 
 // ============================================================================
@@ -287,6 +313,7 @@ struct CooperativeHandler { tasks, loop_id }
 // ============================================================================
 // The Async effect handles all async operations including legacy file I/O.
 
+/// The Async effect: futures (await/cancel), generic TCP I/O, file and directory operations, low-level file handles, sleep, and spawning.
 enum Async {
     // Future operations
     Await { future },
@@ -341,16 +368,19 @@ enum Async {
 // standard Result and Error types from beagle.core.
 
 // Create an async success result (uses beagle.core/ok)
+/// Wrap a value as a successful Result (beagle.core/ok).
 fn async-ok(value) {
     ok(value)
 }
 
 // Create an async error result (uses beagle.core/err with Error.IO)
+/// Wrap a message as a failed Result carrying Error.IO. The code argument is currently ignored.
 fn async-err(code, message) {
     err(Error.IO { message: message })
 }
 
 // Check if a result is successful
+/// Return true if a Result is Ok, false if it is an Err.
 fn async-ok?(result) {
     match result {
         Result.Ok { value } => true,
@@ -359,6 +389,7 @@ fn async-ok?(result) {
 }
 
 // Unwrap a result, throwing on error
+/// Return the value of an Ok Result, or throw the contained error if it is an Err.
 fn async-unwrap(result) {
     match result {
         Result.Ok { value } => value,
@@ -367,6 +398,7 @@ fn async-unwrap(result) {
 }
 
 // Unwrap a result with a default value on error
+/// Return the value of an Ok Result, or the given default if it is an Err.
 fn async-unwrap-or(result, default) {
     match result {
         Result.Ok { value } => value,
@@ -378,6 +410,7 @@ fn async-unwrap-or(result, default) {
 // File Handler Implementation Functions (inlined to avoid circular deps)
 // ============================================================================
 
+/// Read a file's full contents synchronously; returns ok(content) or err(Error.NotFound) on failure.
 fn handle-read-file(path) {
     try {
         let content = read-full-file(path)
@@ -387,6 +420,7 @@ fn handle-read-file(path) {
     }
 }
 
+/// Open path for writing, write content, and close; returns ok(bytes) or err(error).
 fn handle-write-file(path, content) {
     let file-result = io/open(path, "w")
     match file-result {
@@ -405,6 +439,7 @@ fn handle-write-file(path, content) {
     }
 }
 
+/// Open path in append mode, write content, and close; returns ok(bytes) or err(error).
 fn handle-append-file(path, content) {
     let file-result = io/open(path, "a")
     match file-result {
@@ -423,6 +458,7 @@ fn handle-append-file(path, content) {
     }
 }
 
+/// Unlink a file synchronously; returns ok(null) or err(Error.NotFound).
 fn handle-delete-file(path) {
     let result = core/fs-unlink(path)
     if result == 0 {
@@ -432,11 +468,13 @@ fn handle-delete-file(path) {
     }
 }
 
+/// Return ok(true/false) for whether path exists (via an F_OK access check).
 fn handle-file-exists(path) {
     let result = core/fs-access(path, 0) // F_OK = 0
     ok(result == 0)
 }
 
+/// Return the file size in bytes as an ok Result, or an err if the stat fails.
 fn handle-file-size(path) {
     let size = core/fs-file-size(path)
     if size < 0 {
@@ -446,16 +484,19 @@ fn handle-file-size(path) {
     }
 }
 
+/// Return ok(true/false) for whether path is a regular file.
 fn handle-is-file(path) {
     let result = core/fs-is-file?(path)
     async-ok(result)
 }
 
+/// Return ok(true/false) for whether path is a directory.
 fn handle-is-directory(path) {
     let result = core/fs-is-directory?(path)
     async-ok(result)
 }
 
+/// Rename/move old-path to new-path; returns ok(null) or an err Result on failure.
 fn handle-rename-file(old-path, new-path) {
     let result = core/fs-rename(old-path, new-path)
     if result == 0 {
@@ -465,6 +506,7 @@ fn handle-rename-file(old-path, new-path) {
     }
 }
 
+/// Copy src-path to dest-path by reading then writing; returns the write Result or the read err.
 fn handle-copy-file(src-path, dest-path) {
     let read-result = handle-read-file(src-path)
     match read-result {
@@ -477,6 +519,7 @@ fn handle-copy-file(src-path, dest-path) {
     }
 }
 
+/// List directory entries; returns ok(entries) or err(Error.NotFound).
 fn handle-read-dir(path) {
     let entries = core/fs-readdir(path)
     if entries == null {
@@ -486,6 +529,7 @@ fn handle-read-dir(path) {
     }
 }
 
+/// Create a single directory (mode 0755); returns ok(null), err(AlreadyExists), or err(IO).
 fn handle-create-dir(path) {
     let result = core/fs-mkdir(path, 493) // 0755 in octal
     if result == 0 {
@@ -497,6 +541,7 @@ fn handle-create-dir(path) {
     }
 }
 
+/// Create path and all missing parent directories; returns ok(null) or the first err encountered.
 fn handle-create-dir-all(path) {
     if path == "" || path == "/" {
         async-ok(null)
@@ -535,6 +580,7 @@ fn handle-create-dir-all(path) {
     }
 }
 
+/// Remove an empty directory; returns ok(null) or an err Result.
 fn handle-remove-dir(path) {
     let result = core/fs-rmdir(path)
     if result == 0 {
@@ -544,6 +590,7 @@ fn handle-remove-dir(path) {
     }
 }
 
+/// Recursively remove a file or directory tree; returns ok(null) or the first err encountered.
 fn handle-remove-dir-all(path) {
     let entries = core/fs-readdir(path)
     if entries == null {
@@ -593,6 +640,7 @@ fn handle-remove-dir-all(path) {
     }
 }
 
+/// Open a file with the given mode; returns ok(file handle) or err(error).
 fn handle-open(path, mode) {
     let result = io/open(path, mode)
     match result {
@@ -601,6 +649,7 @@ fn handle-open(path, mode) {
     }
 }
 
+/// Close a file handle; returns ok(null) or err(error).
 fn handle-close(file) {
     let result = io/close(file)
     match result {
@@ -609,6 +658,7 @@ fn handle-close(file) {
     }
 }
 
+/// Read n bytes from a file, decode as a string, and free the buffer; returns ok(string) or err(error).
 fn handle-read(file, n) {
     let result = io/read-bytes(file, n)
     match result {
@@ -621,6 +671,7 @@ fn handle-read(file, n) {
     }
 }
 
+/// Write a string to a file; returns ok(bytes written) or err(error).
 fn handle-write(file, content) {
     let result = io/write-string(file, content)
     match result {
@@ -629,6 +680,7 @@ fn handle-write(file, content) {
     }
 }
 
+/// Read a line (up to 4096 bytes) from a file; returns ok(line) or err(error).
 fn handle-read-line(file) {
     let result = io/read-line(file, 4096)
     match result {
@@ -637,6 +689,7 @@ fn handle-read-line(file) {
     }
 }
 
+/// Flush a file's buffers; returns ok(null) or err(error).
 fn handle-flush(file) {
     let result = io/flush(file)
     match result {
@@ -645,6 +698,7 @@ fn handle-flush(file) {
     }
 }
 
+/// Sleep synchronously for ms milliseconds via core/sleep; returns ok(null).
 fn handle-sleep(ms) {
     // Use the builtin sleep from beagle.core
     core/sleep(ms)
@@ -655,6 +709,7 @@ fn handle-sleep(ms) {
 // BlockingAsyncHandler - handles Async effects synchronously
 // ============================================================================
 
+/// Async handler that runs every operation synchronously on the current thread. Used for deterministic testing.
 struct BlockingAsyncHandler {}
 
 extend BlockingAsyncHandler with effect/Handler(Async) {
@@ -761,6 +816,7 @@ extend BlockingAsyncHandler with effect/Handler(Async) {
 // Blocking Handler Implementation Functions
 // ============================================================================
 
+/// Await a future in blocking mode: returns its value, throws its error or cancellation, or throws if it is still pending/running (futures must already be resolved). A null future returns null.
 fn handle-await-blocking(future) {
     // Handle null futures - nothing to await, just return null
     if future == null {
@@ -786,6 +842,7 @@ fn handle-await-blocking(future) {
     }
 }
 
+/// Await every future in order (blocking) and return their values as a vector.
 fn handle-await-all-blocking(futures) {
     let mut results = []
     let mut s = seq(futures)
@@ -798,6 +855,7 @@ fn handle-await-all-blocking(futures) {
     results
 }
 
+/// Return the first resolved future's value as a RaceResult.Ok, or AllFailed with the collected errors. Assumes futures are already resolved.
 fn handle-await-first-blocking(futures) {
     // In blocking mode, all futures are already resolved
     // Just return the first resolved one's result
@@ -854,11 +912,13 @@ fn handle-await-first-blocking(futures) {
     }
 }
 
+/// Cancel a future and return null.
 fn handle-cancel(future) {
     cancel-future!(future)
     null
 }
 
+/// Run thunk synchronously, returning a future already resolved with its result (or rejected on throw).
 fn handle-spawn-blocking(thunk) {
     // Create a future and immediately execute the thunk synchronously
     let future = make-future(FutureState.Running {})
@@ -871,6 +931,7 @@ fn handle-spawn-blocking(thunk) {
     future
 }
 
+/// Run thunk synchronously unless the token is cancelled, returning a resolved, rejected, or cancelled future.
 fn handle-spawn-with-token-blocking(thunk, token) {
     // Create a future and immediately execute the thunk synchronously
     let future = make-future(FutureState.Running {})
@@ -900,6 +961,7 @@ fn handle-spawn-with-token-blocking(thunk, token) {
 // Used by ImplicitAsyncHandler for production-ready async/concurrency.
 
 // Spawn a thread to execute the thunk
+/// Spawn an OS thread to run thunk, returning a future the thread resolves or rejects on completion.
 fn handle-spawn-threaded(thunk) {
     let future = make-future(FutureState.Running {})
     // Capture the atom for the closure
@@ -919,6 +981,7 @@ fn handle-spawn-threaded(thunk) {
 }
 
 // Spawn a thread with cancellation token
+/// Spawn an OS thread to run thunk, honoring the cancellation token before and after; returns its future.
 fn handle-spawn-with-token-threaded(thunk, token) {
     let future = make-future(FutureState.Running {})
     let state_atom = future.state_atom
@@ -950,6 +1013,7 @@ fn handle-spawn-with-token-threaded(thunk, token) {
 }
 
 // Wait for a future by polling its state
+/// Await a future by polling until it resolves (or return null for a null future).
 fn handle-await-threaded(future) {
     // Handle null futures - nothing to await, just return null
     if future == null {
@@ -960,6 +1024,7 @@ fn handle-await-threaded(future) {
 }
 
 // Poll a future until it resolves, using efficient condition variable waiting
+/// Block on a future, waiting on the condition variable (up to 50ms per round), until it resolves (returns the value), rejects, or is cancelled (throws).
 fn poll-until-resolved(future) {
     let wait_timeout = 50  // Wait up to 50ms per iteration for notifications
     loop {
@@ -983,6 +1048,7 @@ fn poll-until-resolved(future) {
 }
 
 // Wait for all futures (they run in parallel already)
+/// Await every future in order and return their values as a vector.
 fn handle-await-all-threaded(futures) {
     let mut results = []
     let mut s = seq(futures)
@@ -996,6 +1062,7 @@ fn handle-await-all-threaded(futures) {
 }
 
 // Wait for first future to resolve
+/// Poll all futures until one resolves (RaceResult.Ok) or all fail (RaceResult.AllFailed with errors).
 fn handle-await-first-threaded(futures) {
     let len = length(futures)
     if len == 0 {
@@ -1088,6 +1155,7 @@ fn handle-await-first-threaded(futures) {
 // Used by ImplicitAsyncHandler for non-blocking sleep and file operations.
 
 // Sleep using event loop timers
+/// Sleep using an event-loop timer: set a timer and drive the loop until this sleeper's marker completes. Returns ok(null).
 fn handle-sleep-event-loop(loop_id, ms) {
     // Use a unique marker value for this timer
     let marker = core/time-now()
@@ -1126,6 +1194,7 @@ fn handle-sleep-event-loop(loop_id, ms) {
 // Type codes: 1=ReadOk, 2=ReadErr, 3=WriteOk, 4=WriteErr,
 //             5=DeleteOk, 6=DeleteErr, 7=StatOk, 8=StatErr,
 //             9=ReadDirOk, 10=ReadDirErr
+/// Poll an async file operation by handle, decoding its result-type code into an ok/err Result, or null if it is not ready yet.
 fn poll-file-result(loop_id, handle) {
     let type_code = core/file-result-poll-type(loop_id, handle)
     if type_code == 0 {
@@ -1195,6 +1264,7 @@ fn poll-file-result(loop_id, handle) {
 }
 
 // Wait for a file operation to complete by handle
+/// Drive the event loop, blocking, until the file operation for handle completes, then return its Result.
 fn wait-for-file-result(loop_id, handle) {
     loop {
         // Block until notified (timeout=0 means wait forever)
@@ -1212,6 +1282,7 @@ fn wait-for-file-result(loop_id, handle) {
 // Async File Handler Functions
 // ============================================================================
 
+/// Submit an async file read and block (via the event loop) until it completes. Throws if submission fails.
 fn handle-read-file-async(loop_id, path) {
     let handle = core/file-read-submit(loop_id, path)
     if handle < 0 {
@@ -1220,6 +1291,7 @@ fn handle-read-file-async(loop_id, path) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async file write and block until it completes. Throws if submission fails.
 fn handle-write-file-async(loop_id, path, content) {
     let handle = core/file-write-submit(loop_id, path, content)
     if handle < 0 {
@@ -1228,6 +1300,7 @@ fn handle-write-file-async(loop_id, path, content) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async file delete and block until it completes. Throws if submission fails.
 fn handle-delete-file-async(loop_id, path) {
     let handle = core/file-delete-submit(loop_id, path)
     if handle < 0 {
@@ -1236,6 +1309,7 @@ fn handle-delete-file-async(loop_id, path) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async stat and block until it completes, returning the file size Result. Throws if submission fails.
 fn handle-file-size-async(loop_id, path) {
     let handle = core/file-stat-submit(loop_id, path)
     if handle < 0 {
@@ -1244,6 +1318,7 @@ fn handle-file-size-async(loop_id, path) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async directory listing and block until it completes. Throws if submission fails.
 fn handle-read-dir-async(loop_id, path) {
     let handle = core/file-readdir-submit(loop_id, path)
     if handle < 0 {
@@ -1252,6 +1327,7 @@ fn handle-read-dir-async(loop_id, path) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async file append and block until it completes. Throws if submission fails.
 fn handle-append-file-async(loop_id, path, content) {
     let handle = core/file-append-submit(loop_id, path, content)
     if handle < 0 {
@@ -1260,6 +1336,7 @@ fn handle-append-file-async(loop_id, path, content) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async existence check and block until it completes. Throws if submission fails.
 fn handle-file-exists-async(loop_id, path) {
     let handle = core/file-exists-submit(loop_id, path)
     if handle < 0 {
@@ -1268,6 +1345,7 @@ fn handle-file-exists-async(loop_id, path) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async rename and block until it completes. Throws if submission fails.
 fn handle-rename-file-async(loop_id, old_path, new_path) {
     let handle = core/file-rename-submit(loop_id, old_path, new_path)
     if handle < 0 {
@@ -1276,6 +1354,7 @@ fn handle-rename-file-async(loop_id, old_path, new_path) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async file copy and block until it completes. Throws if submission fails.
 fn handle-copy-file-async(loop_id, src_path, dest_path) {
     let handle = core/file-copy-submit(loop_id, src_path, dest_path)
     if handle < 0 {
@@ -1284,6 +1363,7 @@ fn handle-copy-file-async(loop_id, src_path, dest_path) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async mkdir and block until it completes. Throws if submission fails.
 fn handle-create-dir-async(loop_id, path) {
     let handle = core/file-mkdir-submit(loop_id, path)
     if handle < 0 {
@@ -1292,6 +1372,7 @@ fn handle-create-dir-async(loop_id, path) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async recursive mkdir and block until it completes. Throws if submission fails.
 fn handle-create-dir-all-async(loop_id, path) {
     let handle = core/file-mkdir-all-submit(loop_id, path)
     if handle < 0 {
@@ -1300,6 +1381,7 @@ fn handle-create-dir-all-async(loop_id, path) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async rmdir and block until it completes. Throws if submission fails.
 fn handle-remove-dir-async(loop_id, path) {
     let handle = core/file-rmdir-submit(loop_id, path)
     if handle < 0 {
@@ -1308,6 +1390,7 @@ fn handle-remove-dir-async(loop_id, path) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async recursive rmdir and block until it completes. Throws if submission fails.
 fn handle-remove-dir-all-async(loop_id, path) {
     let handle = core/file-rmdir-all-submit(loop_id, path)
     if handle < 0 {
@@ -1316,6 +1399,7 @@ fn handle-remove-dir-all-async(loop_id, path) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async is-directory check and block until it completes. Throws if submission fails.
 fn handle-is-directory-async(loop_id, path) {
     let handle = core/file-is-dir-submit(loop_id, path)
     if handle < 0 {
@@ -1324,6 +1408,7 @@ fn handle-is-directory-async(loop_id, path) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async is-file check and block until it completes. Throws if submission fails.
 fn handle-is-file-async(loop_id, path) {
     let handle = core/file-is-file-submit(loop_id, path)
     if handle < 0 {
@@ -1332,6 +1417,7 @@ fn handle-is-file-async(loop_id, path) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async file open and block until it completes, returning a handle-key Result. Throws if submission fails.
 fn handle-open-async(loop_id, path, mode) {
     let handle = core/file-open-submit(loop_id, path, mode)
     if handle < 0 {
@@ -1340,6 +1426,7 @@ fn handle-open-async(loop_id, path, mode) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async close for a file handle-key and block until it completes. Throws if submission fails.
 fn handle-close-async(loop_id, handle_key) {
     let handle = core/file-close-submit(loop_id, handle_key)
     if handle < 0 {
@@ -1348,6 +1435,7 @@ fn handle-close-async(loop_id, handle_key) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async read of n bytes on a file handle-key and block until it completes. Throws if submission fails.
 fn handle-handle-read-async(loop_id, handle_key, n) {
     let handle = core/file-handle-read-submit(loop_id, handle_key, n)
     if handle < 0 {
@@ -1356,6 +1444,7 @@ fn handle-handle-read-async(loop_id, handle_key, n) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async write of content on a file handle-key and block until it completes. Throws if submission fails.
 fn handle-handle-write-async(loop_id, handle_key, content) {
     let handle = core/file-handle-write-submit(loop_id, handle_key, content)
     if handle < 0 {
@@ -1364,6 +1453,7 @@ fn handle-handle-write-async(loop_id, handle_key, content) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async read-line on a file handle-key and block until it completes. Throws if submission fails.
 fn handle-handle-readline-async(loop_id, handle_key) {
     let handle = core/file-handle-readline-submit(loop_id, handle_key)
     if handle < 0 {
@@ -1372,6 +1462,7 @@ fn handle-handle-readline-async(loop_id, handle_key) {
     wait-for-file-result(loop_id, handle)
 }
 
+/// Submit an async flush on a file handle-key and block until it completes. Throws if submission fails.
 fn handle-handle-flush-async(loop_id, handle_key) {
     let handle = core/file-handle-flush-submit(loop_id, handle_key)
     if handle < 0 {
@@ -1385,106 +1476,127 @@ fn handle-handle-flush-async(loop_id, handle_key) {
 // ============================================================================
 
 // Read the entire contents of a file as a string
+/// Read the entire contents of a file as a string. Performs Async.ReadFile; returns a Result.
 fn read-file(path) {
     perform Async.ReadFile { path: path }
 }
 
 // Write content to a file (creates or overwrites)
+/// Write content to a file, creating or overwriting it. Performs Async.WriteFile; returns a Result.
 fn write-file(path, content) {
     perform Async.WriteFile { path: path, content: content }
 }
 
 // Append content to a file (creates if doesn't exist)
+/// Append content to a file, creating it if absent. Performs Async.AppendFile; returns a Result.
 fn append-file(path, content) {
     perform Async.AppendFile { path: path, content: content }
 }
 
 // Delete a file
+/// Delete a file. Performs Async.DeleteFile; returns a Result.
 fn delete-file(path) {
     perform Async.DeleteFile { path: path }
 }
 
 // Check if a file exists
+/// Check whether a file exists. Performs Async.FileExists; returns ok(true/false).
 fn file-exists?(path) {
     perform Async.FileExists { path: path }
 }
 
 // List directory contents
+/// List a directory's entries. Performs Async.ReadDir; returns a Result.
 fn read-dir(path) {
     perform Async.ReadDir { path: path }
 }
 
 // Create a directory
+/// Create a directory. Performs Async.CreateDir; returns a Result.
 fn create-dir(path) {
     perform Async.CreateDir { path: path }
 }
 
 // Create a directory and all parent directories
+/// Create a directory and all missing parents. Performs Async.CreateDirAll; returns a Result.
 fn create-dir-all(path) {
     perform Async.CreateDirAll { path: path }
 }
 
 // Remove an empty directory
+/// Remove an empty directory. Performs Async.RemoveDir; returns a Result.
 fn remove-dir(path) {
     perform Async.RemoveDir { path: path }
 }
 
 // Remove a directory and all contents
+/// Remove a directory and all its contents. Performs Async.RemoveDirAll; returns a Result.
 fn remove-dir-all(path) {
     perform Async.RemoveDirAll { path: path }
 }
 
 // Get file size in bytes
+/// Get a file's size in bytes. Performs Async.FileSize; returns a Result.
 fn file-size(path) {
     perform Async.FileSize { path: path }
 }
 
 // Check if path is a directory
+/// Check whether a path is a directory. Performs Async.IsDirectory; returns ok(true/false).
 fn is-directory?(path) {
     perform Async.IsDirectory { path: path }
 }
 
 // Check if path is a regular file
+/// Check whether a path is a regular file. Performs Async.IsFile; returns ok(true/false).
 fn is-file?(path) {
     perform Async.IsFile { path: path }
 }
 
 // Rename/move a file or directory
+/// Rename or move a file or directory. Performs Async.RenameFile; returns a Result.
 fn rename-file(old-path, new-path) {
     perform Async.RenameFile { old_path: old-path, new_path: new-path }
 }
 
 // Copy a file
+/// Copy a file. Performs Async.CopyFile; returns a Result.
 fn copy-file(src-path, dest-path) {
     perform Async.CopyFile { src_path: src-path, dest_path: dest-path }
 }
 
 // Open a file with mode ("r", "w", "a", etc.)
+/// Open a file with the given mode ("r", "w", "a", ...). Performs Async.Open; returns a Result with a file handle.
 fn open(path, mode) {
     perform Async.Open { path: path, mode: mode }
 }
 
 // Close a file handle
+/// Close a file handle. Performs Async.Close; returns a Result.
 fn close(file) {
     perform Async.Close { file: file }
 }
 
 // Read n bytes from a file
+/// Read n bytes from a file. Performs Async.Read; returns a Result with the data.
 fn read(file, n) {
     perform Async.Read { file: file, n: n }
 }
 
 // Write content to a file
+/// Write content to a file. Performs Async.Write; returns a Result.
 fn write(file, content) {
     perform Async.Write { file: file, content: content }
 }
 
 // Read a line from a file
+/// Read a single line from a file. Performs Async.ReadLine; returns a Result.
 fn read-line(file) {
     perform Async.ReadLine { file: file }
 }
 
 // Flush a file's buffers
+/// Flush a file's buffers. Performs Async.Flush; returns a Result.
 fn flush(file) {
     perform Async.Flush { file: file }
 }
@@ -1494,7 +1606,7 @@ fn flush(file) {
 /// Must be called within an Async effect handler.
 ///
 /// Examples:
-///   (sleep 1000)  ; Sleep for 1 second
+///   sleep(1000)  // Sleep for 1 second
 fn sleep(ms) {
     perform Async.Sleep { ms: ms }
 }
@@ -1509,10 +1621,19 @@ fn sleep(ms) {
 /// Blocks until the future resolves, rejects, or is cancelled.
 ///
 /// Examples:
-///   (let f (spawn fn() { compute() }))
-///   (await f)  ; => result of compute()
+///   let f = spawn(fn() { compute() })
+///   await(f)  // => result of compute()
 fn await(future) {
-    perform Async.Await { future: future }
+    let r = perform Async.Await { future: future }
+    // Under the cooperative scheduler a rejected/cancelled future resumes here
+    // with a sentinel; re-raise it so the caller's try/catch sees the error.
+    // (Blocking/threaded handlers throw internally and never produce a sentinel,
+    // so this match falls through to `_` and returns the value unchanged.)
+    match r {
+        AwaitRejected { error } => throw(error),
+        AwaitCancelled {} => throw("Future was cancelled"),
+        _ => r
+    }
 }
 
 /// Wait for all futures to complete and return their values as a vector.
@@ -1522,8 +1643,8 @@ fn await(future) {
 /// their results in order.
 ///
 /// Examples:
-///   (let fs [(spawn fn() { 1 }) (spawn fn() { 2 })])
-///   (await-all fs)  ; => [1 2]
+///   let fs = [spawn(fn() { 1 }), spawn(fn() { 2 })]
+///   await-all(fs)  // => [1, 2]
 fn await-all(futures) {
     let mut results = []
     let mut s = seq(futures)
@@ -1622,16 +1743,19 @@ fn await-timeout(ms, future) {
 // ============================================================================
 
 // Create a future with a cancellation token
+/// Spawn thunk as a task governed by a cancellation token, returning its future. Performs Async.SpawnWithToken.
 fn async-with-token(token, thunk) {
     perform Async.SpawnWithToken { thunk: thunk, token: token }
 }
 
 // Cancel a future (cooperative cancellation)
+/// Request cooperative cancellation of a future. Performs Async.Cancel.
 fn cancel(future) {
     perform Async.Cancel { future: future }
 }
 
 // Spawn a task in a scope
+/// Spawn thunk as a child of a scope (using the scope's token) and register its future with the scope.
 fn spawn-in-scope(scope, thunk) {
     let future = async-with-token(scope.token, thunk)
     scope-add-child!(scope, future)
@@ -1643,6 +1767,7 @@ fn spawn-in-scope(scope, thunk) {
 // ============================================================================
 
 // Run a thunk with a timeout (in milliseconds)
+/// Run thunk synchronously and report whether it finished within ms milliseconds. Does NOT interrupt thunk; it only measures elapsed time, returning TimeoutResult.Ok or TimedOut.
 fn with-timeout(ms, thunk) {
     let start = time-now()
     let deadline_ns = start + (ms * 1000000)
@@ -1658,6 +1783,7 @@ fn with-timeout(ms, thunk) {
 }
 
 // Run an async operation with a timeout
+/// Spawn thunk with a fresh cancellation token and await it up to ms milliseconds, cancelling and returning TimedOut on timeout, else Ok with the value.
 fn async-with-timeout(ms, thunk) {
     let token = make-cancellation-token()
     let result_future = async-with-token(token, thunk)
@@ -1675,6 +1801,7 @@ fn async-with-timeout(ms, thunk) {
 }
 
 // Create an async sleep - returns a future that resolves after ms milliseconds
+/// Return a future that resolves to null after ms milliseconds (spawns a task that sleeps).
 fn async-sleep(ms) {
     spawn(fn() {
         sleep(ms)
@@ -1683,11 +1810,13 @@ fn async-sleep(ms) {
 }
 
 // Shorthand for awaiting a sleep
+/// Sleep for ms milliseconds by spawning and awaiting an async sleep.
 fn await-sleep(ms) {
     await(async-sleep(ms))
 }
 
 // Get current time in nanoseconds
+/// Return the current time in nanoseconds (thin wrapper over core/time-now).
 fn time-now() {
     core/time-now()
 }
@@ -1700,8 +1829,8 @@ fn time-now() {
 /// `thread()` for real parallelism. `await` the future to get the result.
 ///
 /// Examples:
-///   (let f (spawn fn() { compute() }))
-///   (await f)  ; => result of compute()
+///   let f = spawn(fn() { compute() })
+///   await(f)  // => result of compute()
 fn spawn(thunk) {
     perform Async.Spawn { thunk: thunk }
 }
@@ -1711,31 +1840,37 @@ fn spawn(thunk) {
 // ============================================================================
 
 // Read file and unwrap the result
+/// Read a file and unwrap the Result, throwing on error. Returns the contents string.
 fn read-file!(path) {
     async-unwrap(read-file(path))
 }
 
 // Write file and unwrap the result
+/// Write a file and unwrap the Result, throwing on error.
 fn write-file!(path, content) {
     async-unwrap(write-file(path, content))
 }
 
 // Check if operation was successful
+/// Return true if a Result is Ok (alias for async-ok?).
 fn ok?(result) {
     async-ok?(result)
 }
 
 // Unwrap result or return default
+/// Return the Ok value of a Result, or default on error (alias for async-unwrap-or).
 fn unwrap-or(result, default) {
     async-unwrap-or(result, default)
 }
 
 // Create the default async handler
+/// Create the default async handler instance (a BlockingAsyncHandler).
 fn default-handler() {
     BlockingAsyncHandler {}
 }
 
 // Run a block with the default blocking handler
+/// Run thunk with the BlockingAsyncHandler installed for the Async effect.
 fn run-blocking(thunk) {
     let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
@@ -1747,6 +1882,7 @@ fn run-blocking(thunk) {
 // Single-Operation Convenience Functions
 // ============================================================================
 
+/// Run read-file under the blocking handler. Convenience for a single synchronous operation.
 fn blocking-read-file(path) {
     let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
@@ -1754,6 +1890,7 @@ fn blocking-read-file(path) {
     }
 }
 
+/// Run write-file under the blocking handler. Convenience for a single synchronous operation.
 fn blocking-write-file(path, content) {
     let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
@@ -1761,6 +1898,7 @@ fn blocking-write-file(path, content) {
     }
 }
 
+/// Run append-file under the blocking handler. Convenience for a single synchronous operation.
 fn blocking-append-file(path, content) {
     let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
@@ -1768,6 +1906,7 @@ fn blocking-append-file(path, content) {
     }
 }
 
+/// Run delete-file under the blocking handler. Convenience for a single synchronous operation.
 fn blocking-delete-file(path) {
     let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
@@ -1775,6 +1914,7 @@ fn blocking-delete-file(path) {
     }
 }
 
+/// Run file-exists? under the blocking handler. Convenience for a single synchronous operation.
 fn blocking-file-exists?(path) {
     let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
@@ -1782,6 +1922,7 @@ fn blocking-file-exists?(path) {
     }
 }
 
+/// Run read-dir under the blocking handler. Convenience for a single synchronous operation.
 fn blocking-read-dir(path) {
     let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
@@ -1789,6 +1930,7 @@ fn blocking-read-dir(path) {
     }
 }
 
+/// Run create-dir under the blocking handler. Convenience for a single synchronous operation.
 fn blocking-create-dir(path) {
     let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
@@ -1796,6 +1938,7 @@ fn blocking-create-dir(path) {
     }
 }
 
+/// Run remove-dir under the blocking handler. Convenience for a single synchronous operation.
 fn blocking-remove-dir(path) {
     let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
@@ -1803,6 +1946,7 @@ fn blocking-remove-dir(path) {
     }
 }
 
+/// Run file-size under the blocking handler. Convenience for a single synchronous operation.
 fn blocking-file-size(path) {
     let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
@@ -1810,6 +1954,7 @@ fn blocking-file-size(path) {
     }
 }
 
+/// Run is-directory? under the blocking handler. Convenience for a single synchronous operation.
 fn blocking-is-directory?(path) {
     let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
@@ -1817,6 +1962,7 @@ fn blocking-is-directory?(path) {
     }
 }
 
+/// Run is-file? under the blocking handler. Convenience for a single synchronous operation.
 fn blocking-is-file?(path) {
     let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
@@ -1824,6 +1970,7 @@ fn blocking-is-file?(path) {
     }
 }
 
+/// Run rename-file under the blocking handler. Convenience for a single synchronous operation.
 fn blocking-rename-file(old-path, new-path) {
     let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
@@ -1831,6 +1978,7 @@ fn blocking-rename-file(old-path, new-path) {
     }
 }
 
+/// Run copy-file under the blocking handler. Convenience for a single synchronous operation.
 fn blocking-copy-file(src-path, dest-path) {
     let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
@@ -1838,6 +1986,7 @@ fn blocking-copy-file(src-path, dest-path) {
     }
 }
 
+/// Run sleep under the blocking handler. Convenience for a single synchronous operation.
 fn blocking-sleep(ms) {
     let handler = BlockingAsyncHandler {}
     handle effect/Handler(Async) with handler {
@@ -1849,6 +1998,7 @@ fn blocking-sleep(ms) {
 // Async Combinators (Legacy - for running thunks)
 // ============================================================================
 
+/// Call each thunk in order and collect their return values into a vector.
 fn run-all-thunks(thunks) {
     let mut results = []
     let mut s = seq(thunks)
@@ -1860,6 +2010,7 @@ fn run-all-thunks(thunks) {
     results
 }
 
+/// Call each thunk in order, returning the first whose Result is Ok, or null if none succeed.
 fn await-any(thunks) {
     let mut s = seq(thunks)
     let mut result = null
@@ -1876,6 +2027,7 @@ fn await-any(thunks) {
     result
 }
 
+/// Map f over the Ok values of a sequence of Results, leaving Err results unchanged.
 fn map-results(results, f) {
     map(fn(r) {
         match r {
@@ -1885,10 +2037,12 @@ fn map-results(results, f) {
     }, results)
 }
 
+/// Return only the Ok Results from a sequence.
 fn filter-ok(results) {
     filter(fn(r) { async-ok?(r) }, results)
 }
 
+/// Return the unwrapped values of all Ok Results in a sequence (Err results are dropped).
 fn unwrap-all(results) {
     map(fn(r) {
         match r {
@@ -1922,6 +2076,7 @@ let TCP_WRITE_OK = 7
 let TCP_WRITE_ERR = 8
 
 // Decode a completed TCP result into a Beagle value
+/// Decode a completed TCP result (by its numeric type) into a value: a TcpSocket, read data, bytes written, or a TcpIoError sentinel for failures.
 fn decode-tcp-result(result_type, loop_id, op_id) {
     if result_type == TCP_CONNECT_OK || result_type == TCP_ACCEPT_OK {
         let socket_id = core/tcp-result-value-for-op-id(loop_id, op_id)
@@ -1947,6 +2102,7 @@ fn decode-tcp-result(result_type, loop_id, op_id) {
 // through. Socket ops call this so the throw happens in the caller's stack
 // (inside their try/catch), matching the blocking handler's semantics, rather
 // than in the cooperative scheduler where decode-tcp-result actually ran.
+/// Re-raise a TcpIoError sentinel as a thrown error, or pass any other value through unchanged.
 fn tcp-result-or-throw(result) {
     // `result` is frequently a bare scalar (read-data string, bytes-written int),
     // so this must tolerate non-struct values — instance-of handles that.
@@ -1957,6 +2113,7 @@ fn tcp-result-or-throw(result) {
     }
 }
 
+/// Return the shared global event loop, lazily creating a 4-worker threaded loop on first use (CAS-guarded against races).
 fn get-io-loop() {
     let loop_id = deref(__io_loop_atom)
     if loop_id == null {
@@ -1978,6 +2135,7 @@ fn get-io-loop() {
     }
 }
 
+/// Return the shared global event loop (thin alias for get-io-loop).
 fn get-io-loop-threaded() {
     get-io-loop()
 }
@@ -1989,6 +2147,7 @@ fn get-io-loop-threaded() {
 // The scheduler loop polls for completions and resumes ready tasks.
 // Sync ops (listen, close) are handled immediately.
 
+/// Park a cooperative task: push a SchedulerTask (its pending op and continuation) onto the handler's task atom. Returns null.
 fn stash-task(tasks_atom, op, resume) {
     swap!(tasks_atom, fn(t) {
         push(t, SchedulerTask { op: op, resume: resume })
@@ -2001,6 +2160,7 @@ fn stash-task(tasks_atom, op, resume) {
 // with everything else; `await` on the returned future suspends the caller
 // until it resolves. This is what `spawn`/`future` mean under the cooperative
 // default — concurrency without threads. Real parallelism is `thread()`.
+/// Spawn thunk as a cooperative task (no OS thread) on the current scheduler and return its future; the scheduler interleaves it with other work.
 fn spawn-cooperative-task(tasks_atom, thunk) {
     let future = make-future(FutureState.Running {})
     let state_atom = future.state_atom
@@ -2222,9 +2382,11 @@ extend CooperativeHandler with effect/Handler(Async) {
 // event-loop-based sleep and async file I/O (for non-blocking operations).
 // The runtime installs it for main() and spawned threads.
 
+/// The primary production async handler: threaded spawn/await combined with event-loop sleep and async file I/O.
 struct ImplicitAsyncHandler {}
 
 // Handle an IO action synchronously (blocking current thread)
+/// Execute a TCP IOAction synchronously, blocking the current thread on the event loop until the operation completes. Throws on failure.
 fn handle-io-action(action) {
     match action {
         // Listen and Connect create new resources - use the current thread's event loop
@@ -2436,6 +2598,7 @@ extend ImplicitAsyncHandler with effect/Handler(Async) {
 }
 
 // Create the default implicit handler instance
+/// Create an ImplicitAsyncHandler instance (the default production handler).
 fn create-implicit-handler() {
     ImplicitAsyncHandler {}
 }
@@ -2445,6 +2608,7 @@ fn create-implicit-handler() {
 // ============================================================================
 
 // Poll all pending tasks, returning [ready_list, remaining_list]
+/// Poll every parked scheduler task once, returning [ready, remaining]: tasks whose op completed (paired with their result) and those still pending.
 fn poll-tasks(tasks, loop_id) {
     let mut ready = []
     let mut remaining = []
@@ -2482,7 +2646,15 @@ fn poll-tasks(tasks, loop_id) {
                         ready = push(ready, ReadyTask { resume: task.resume, result: value })
                     },
                     FutureState.Rejected { error } => {
-                        ready = push(ready, ReadyTask { resume: task.resume, result: error })
+                        // Resume with a sentinel so `await` throws the error at the
+                        // await site (was: resumed with the raw error as a value,
+                        // silently breaking try/catch around await).
+                        ready = push(ready, ReadyTask { resume: task.resume, result: AwaitRejected { error: error } })
+                    },
+                    FutureState.Cancelled {} => {
+                        // Was missing entirely, so awaiting a cancelled future
+                        // parked forever; resume with a sentinel so `await` throws.
+                        ready = push(ready, ReadyTask { resume: task.resume, result: AwaitCancelled {} })
                     },
                     _ => {
                         remaining = push(remaining, task)
@@ -2499,6 +2671,7 @@ fn poll-tasks(tasks, loop_id) {
 }
 
 // Run the scheduler loop — polls for IO completions, resumes ready tasks
+/// Run the cooperative scheduler: repeatedly poll parked tasks, resume ready ones (and start new tasks), driving the event loop until no tasks remain.
 fn scheduler-loop(handler) {
     loop {
         let tasks = deref(handler.tasks)
@@ -2546,6 +2719,7 @@ fn scheduler-loop(handler) {
 // The thunk is enqueued as the root task; when it suspends on an async op the
 // continuation is parked and the scheduler runs other ready work, so a single
 // thread multiplexes many logical flows while each flow stays sequential.
+/// Run thunk under a fresh cooperative scheduler and return its value. The thunk is the root task; async ops park their continuation so other tasks progress on the same thread.
 fn run-cooperative(thunk) {
     let handler = CooperativeHandler { tasks: atom([]), loop_id: null }
     let result_box = atom(null)

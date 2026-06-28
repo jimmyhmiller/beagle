@@ -300,6 +300,7 @@ fn floor-div(a, b) {
 // True when x is a float (compared against the type of a known float literal,
 // so it needs no cross-namespace type token). Floor-div/floor-mod use it
 // because int `/` truncates toward zero while float `/` is true division.
+/// True if x is a Float (type-compared against a float literal).
 fn mathx-float?(x) {
     equal(type-of(x), type-of(1.0))
 }
@@ -325,5 +326,59 @@ fn floor-mod(a, b) {
                 r
             }
         }
+    }
+}
+
+// --- logarithms --------------------------------------------------------------
+
+/// Logarithm of x in the given base, as a Float.
+/// Computed as the natural log of x divided by the natural log of base.
+/// x must be strictly positive; base must be strictly positive and not 1
+/// (a base of 1 has no logarithm — the natural log of 1 is 0, so the ratio
+/// would divide by zero). All three are hard errors.
+///
+///   log-base(8, 2)     // => 3.0
+///   log-base(100, 10)  // => 2.0
+///   log-base(1, 10)    // => 0.0
+fn log-base(x, base) {
+    if x <= 0 {
+        throw("beagle.mathx/log-base: non-positive argument — the logarithm is undefined for x <= 0")
+    } else {
+        if base <= 0 {
+            throw("beagle.mathx/log-base: non-positive base — the base must be strictly positive")
+        } else {
+            // log here is beagle.core's natural log. When base == 1 (int or
+            // float) its natural log is exactly 0, so guard on that result
+            // rather than comparing base against 1 across numeric types.
+            let denom = log(base)
+            if denom == 0.0 {
+                throw("beagle.mathx/log-base: base of 1 — the logarithm is undefined for base 1")
+            } else {
+                log(x) / denom
+            }
+        }
+    }
+}
+
+// --- rounding ----------------------------------------------------------------
+
+/// Round a Float to `places` decimal places, returning a Float.
+/// `places` must be a non-negative Int (a hard error otherwise). Rounding is
+/// half-away-from-zero, matching beagle.core's `round`.
+///
+///   round-to(3.14159, 2)  // => 3.14
+///   round-to(2.5, 0)      // => 3.0
+///   round-to(-2.5, 0)     // => -3.0
+fn round-to(x, places) {
+    if places < 0 {
+        throw("beagle.mathx/round-to: negative places — the number of decimal places must be non-negative")
+    } else {
+        let mut scale = 1.0
+        let mut k = 0
+        while k < places {
+            scale = scale * 10.0
+            k = k + 1
+        }
+        round((x + 0.0) * scale) / scale
     }
 }

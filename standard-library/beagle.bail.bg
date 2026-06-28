@@ -19,15 +19,26 @@ namespace beagle.bail
 // Kept deliberately minimal: one body, one operator. Inlining a more
 // complex slow path here doesn't help — the path is cold by definition.
 
+/// Tier-2 bail-out for `+`: adds `a` and `b` via the polymorphic path.
 fn add(a, b) { a + b }
+/// Tier-2 bail-out for `-`: subtracts `b` from `a` via the polymorphic path.
 fn sub(a, b) { a - b }
+/// Tier-2 bail-out for `*`: multiplies `a` and `b` via the polymorphic path.
 fn mul(a, b) { a * b }
+/// Tier-2 bail-out for `/`: divides `a` by `b` via the polymorphic path.
 fn div(a, b) { a / b }
+/// Tier-2 bail-out for `%`: returns `a` modulo `b` via the polymorphic path.
 fn modulo(a, b) { a % b }
 
+/// Tier-2 bail-out for `<`: returns whether `a` is less than `b`.
 fn lt(a, b)  { a < b }
+/// Tier-2 bail-out for `<=`: returns whether `a` is less than or equal to `b`.
 fn lte(a, b) { a <= b }
+/// Tier-2 bail-out for `>`: returns whether `a` is greater than `b`.
 fn gt(a, b)  { a > b }
+/// Tier-2 bail-out for `>=`: returns whether `a` is greater than or equal to `b`.
 fn gte(a, b) { a >= b }
+/// Tier-2 bail-out for `==`: returns whether `a` and `b` are equal.
 fn eq(a, b)  { a == b }
+/// Tier-2 bail-out for `!=`: returns whether `a` and `b` are not equal.
 fn ne(a, b)  { a != b }

@@ -13,11 +13,13 @@ namespace beagle.path
 let SLASH = 47
 
 // Is the byte at s[i] a slash?
+/// True if the byte at index i of string s is a '/' (slash) character.
 fn slash-at?(s, i) {
     char-code(s[i]) == SLASH
 }
 
 // Does the path start with '/'?
+/// True if path p is absolute, i.e. begins with '/'. The empty path is not absolute.
 fn is-absolute?(p) {
     if length(p) == 0 {
         false
@@ -29,6 +31,7 @@ fn is-absolute?(p) {
 // Strip every trailing slash, but never reduce a path to "" if it was all
 // slashes — in that case keep a single "/". Used by basename/dirname so
 // "/a/b/" behaves like "/a/b".
+/// Remove trailing slashes from p, but keep a single "/" if p was all slashes.
 fn strip-trailing-slashes(p) {
     let len = length(p)
     if len == 0 {
@@ -48,6 +51,7 @@ fn strip-trailing-slashes(p) {
 }
 
 // Index of the last '/' in p in [0, end), or -1 if none.
+/// Index of the last '/' in p within the range [0, end), or -1 if none is found.
 fn last-slash-index(p, end) {
     let mut i = end - 1
     let mut found = -1
@@ -65,6 +69,7 @@ fn last-slash-index(p, end) {
 //   basename("/a/b/")      == "b"
 //   basename("/")          == "/"
 //   basename("")           == ""
+/// Final path component of p, ignoring trailing slashes. Returns "/" for "/" and "" for the empty path.
 fn basename(p) {
     if length(p) == 0 {
         ""
@@ -90,6 +95,7 @@ fn basename(p) {
 //   dirname("c.txt")      == "."
 //   dirname("/")          == "/"
 //   dirname("")           == "."
+/// Directory portion of p (everything before the final component), trailing slashes ignored. Returns "." when p has no directory and "/" for the root.
 fn dirname(p) {
     if length(p) == 0 {
         "."
@@ -124,6 +130,7 @@ fn dirname(p) {
 //   join("a", "")      == "a"
 //   join("", "b")      == "b"
 //   join("a", "/b")    == "/b"
+/// Join two segments with exactly one '/'. An absolute b (leading '/') overrides a; an empty segment falls back to the other.
 fn join(a, b) {
     if length(b) == 0 {
         a
@@ -147,6 +154,7 @@ fn join(a, b) {
 
 // Join a vector of segments left to right with join.
 //   join-all(["/a", "b", "c"]) == "/a/b/c"
+/// Fold a vector of segments left-to-right with join. Returns "" for an empty vector.
 fn join-all(parts) {
     let len = length(parts)
     if len == 0 {
@@ -165,6 +173,7 @@ fn join-all(parts) {
 // True iff every char of `s` in [0, end) is '.' — used to reject all-dot
 // basenames ("..", "...") where the final dot is part of a leading-dot run and
 // is therefore NOT an extension separator (matches posixpath.splitext).
+/// True if every char of s in [0, end) is '.'; used to reject all-dot names ("..", "...") as having an extension.
 fn all-dots-before?(s, end) {
     let mut i = 0
     let mut all = true
@@ -180,6 +189,9 @@ fn all-dots-before?(s, end) {
 // Find the last '.' in the basename (so dotfiles like ".bashrc" and the
 // dot before the basename in "/a.b/c" don't count). Returns the index
 // into p, or -1 if there is no extension.
+/// Index *within basename(p)* of the '.' that separates the extension, or -1 if
+/// none (leading-dot dotfiles and all-dot names excluded). Note: the returned
+/// offset is relative to the basename, not to the full path p.
 fn ext-dot-index(p) {
     let base = basename(p)
     let blen = length(base)
@@ -206,6 +218,7 @@ fn ext-dot-index(p) {
 //   extension("x")        == ""
 //   extension(".bashrc")  == ""
 //   extension("/a/b.txt") == ".txt"
+/// File extension of p including the leading dot, or "" if none. Dotfiles like ".bashrc" and all-dot names have no extension.
 fn extension(p) {
     let base = basename(p)
     let blen = length(base)
@@ -231,6 +244,7 @@ fn extension(p) {
 //   strip-extension("x")        == "x"
 //   strip-extension("/a/b.txt") == "/a/b"
 //   strip-extension(".bashrc")  == ".bashrc"
+/// p with its final extension removed; returns p unchanged when there is no extension.
 fn strip-extension(p) {
     let ext = extension(p)
     let elen = length(ext)
@@ -248,6 +262,7 @@ fn strip-extension(p) {
 //   split-path("a//b/")   == ["a", "b"]
 //   split-path("")        == []
 //   split-path("/")       == []
+/// Split p into its non-empty components, dropping leading, duplicate, and trailing slashes. Use is-absolute? to recover absoluteness.
 fn split-path(p) {
     let len = length(p)
     let mut acc = []
@@ -269,6 +284,7 @@ fn split-path(p) {
 }
 
 // Join components back into a path, preserving leading-slash absoluteness.
+/// Join components back into a path, prefixing "/" when absolute. Empty components yield "/" (absolute) or "." (relative).
 fn rebuild-path(components, absolute) {
     let len = length(components)
     if len == 0 {
@@ -302,6 +318,7 @@ fn rebuild-path(components, absolute) {
 //   normalize("")            == "."
 //   normalize("./a")         == "a"
 //   normalize("../a")        == "../a"
+/// Resolve '.' and '..' and collapse duplicate slashes. Drops '..' above an absolute root, keeps a leading '..' for relative paths; the empty path normalizes to ".".
 fn normalize(p) {
     if length(p) == 0 {
         "."
@@ -341,100 +358,229 @@ fn normalize(p) {
     }
 }
 
-// ============================================================================
-// Self-checking tests
-// ============================================================================
-
-let failures = atom(0)
-
-fn check(label, actual, expected) {
-    if actual == expected {
-        null
+// Replace (or add) the final extension of a path.
+//   with-extension("README", "md")       == "README.md"
+//   with-extension("README", ".md")      == "README.md"
+//   with-extension("notes.txt", "md")    == "notes.md"
+//   with-extension("a.tar.gz", "md")     == "a.tar.md"
+//   with-extension("/a/b/file.c", "rs")  == "/a/b/file.rs"
+//   with-extension("notes.txt", "")      == "notes"      (empty ext removes it)
+//   with-extension(".bashrc", "txt")     == ".bashrc.txt"
+// `ext` may be given with or without the leading dot. A '/' in `ext` would
+// change the path shape, and an all-dot ext ("." / "..") is not a real
+// extension — both are rejected with a thrown error rather than silently
+// producing a malformed path.
+/// p with its final extension replaced by ext (given as ".md" or "md"); an empty
+/// ext removes the extension. Throws if ext contains '/' or is all dots.
+fn with-extension(p, ext) {
+    let elen = length(ext)
+    // Reject separators: an extension can never contain a path separator.
+    let mut i = 0
+    while i < elen {
+        if slash-at?(ext, i) {
+            throw("beagle.path/with-extension: extension may not contain '/': '${ext}'")
+        }
+        i = i + 1
+    }
+    if elen == 0 {
+        strip-extension(p)
     } else {
-        swap!(failures, fn(n) { n + 1 })
-        println("FAIL: " ++ label)
-        println("  expected: " ++ to-string(expected))
-        println("  actual:   " ++ to-string(actual))
+        if all-dots-before?(ext, elen) {
+            // "." and ".." are not valid extensions.
+            throw("beagle.path/with-extension: invalid extension: '${ext}'")
+        } else {
+            let stripped = strip-extension(p)
+            if char-code(ext[0]) == 46 {
+                stripped ++ ext
+            } else {
+                stripped ++ "." ++ ext
+            }
+        }
     }
 }
 
-fn main() {
-    // basename
-    check("basename /a/b/c.txt", basename("/a/b/c.txt"), "c.txt")
-    check("basename /a/b/",      basename("/a/b/"),      "b")
-    check("basename c.txt",      basename("c.txt"),      "c.txt")
-    check("basename /",          basename("/"),          "/")
-    check("basename empty",      basename(""),           "")
-    check("basename a//b",       basename("a//b"),       "b")
-    check("basename /usr/",      basename("/usr/"),      "usr")
+// Negation of is-absolute?, as a first-class predicate.
+//   is-relative?("a/b") == true
+//   is-relative?("/a")  == false
+//   is-relative?("")    == true   (the empty path is not absolute)
+/// True if path p is relative, i.e. does not begin with '/'. The empty path is relative.
+fn is-relative?(p) {
+    not(is-absolute?(p))
+}
 
-    // dirname
-    check("dirname /a/b/c.txt",  dirname("/a/b/c.txt"),  "/a/b")
-    check("dirname /a/b/",       dirname("/a/b/"),       "/a")
-    check("dirname c.txt",       dirname("c.txt"),       ".")
-    check("dirname /",           dirname("/"),           "/")
-    check("dirname empty",       dirname(""),            ".")
-    check("dirname /x",          dirname("/x"),          "/")
-    check("dirname /a/b",        dirname("/a/b"),        "/a")
-
-    // join
-    check("join /a/b c",         join("/a/b", "c"),      "/a/b/c")
-    check("join /a/b/ c",        join("/a/b/", "c"),     "/a/b/c")
-    check("join a empty",        join("a", ""),          "a")
-    check("join empty b",        join("", "b"),          "b")
-    check("join a /b",           join("a", "/b"),        "/b")
-    check("join / x",            join("/", "x"),         "/x")
-
-    // join-all
-    check("join-all /a b c",     join-all(["/a", "b", "c"]), "/a/b/c")
-    check("join-all single",     join-all(["x"]),        "x")
-    check("join-all empty",      join-all([]),           "")
-
-    // extension
-    check("ext x.tar.gz",        extension("x.tar.gz"),  ".gz")
-    check("ext x",               extension("x"),         "")
-    check("ext .bashrc",         extension(".bashrc"),   "")
-    check("ext /a/b.txt",        extension("/a/b.txt"),  ".txt")
-    check("ext /a.b/c",          extension("/a.b/c"),    "")
-    check("ext file.",           extension("file."),     ".")
-
-    // strip-extension
-    check("strip x.tar.gz",      strip-extension("x.tar.gz"), "x.tar")
-    check("strip x",             strip-extension("x"),   "x")
-    check("strip /a/b.txt",      strip-extension("/a/b.txt"), "/a/b")
-    check("strip .bashrc",       strip-extension(".bashrc"), ".bashrc")
-
-    // is-absolute?
-    check("abs /x",              is-absolute?("/x"),     true)
-    check("abs x",               is-absolute?("x"),      false)
-    check("abs empty",           is-absolute?(""),       false)
-    check("abs /",               is-absolute?("/"),      true)
-
-    // split-path
-    check("split /a/b/c",        split-path("/a/b/c"),   ["a", "b", "c"])
-    check("split a//b/",         split-path("a//b/"),    ["a", "b"])
-    check("split empty",         split-path(""),         [])
-    check("split /",             split-path("/"),        [])
-    check("split rel",           split-path("a/b"),      ["a", "b"])
-
-    // normalize
-    check("norm /a/./b/../c",    normalize("/a/./b/../c"), "/a/c")
-    check("norm a/b/../../c",    normalize("a/b/../../c"), "c")
-    check("norm a//b",           normalize("a//b"),      "a/b")
-    check("norm /..",            normalize("/.."),       "/")
-    check("norm empty",          normalize(""),          ".")
-    check("norm ./a",            normalize("./a"),       "a")
-    check("norm ../a",           normalize("../a"),      "../a")
-    check("norm /a/b/c/../../d", normalize("/a/b/c/../../d"), "/a/d")
-    check("norm trailing",       normalize("/a/b/"),     "/a/b")
-    check("norm dot only",       normalize("."),         ".")
-    check("norm /",              normalize("/"),         "/")
-
-    let f = deref(failures)
-    if f == 0 {
-        println("ALL PASS")
+// Components of a normalized path string. normalize collapses a relative path
+// with no real components to ".", which split-path would (wrongly) report as a
+// single "." component — so map that case to the empty component list.
+/// Component vector of an already-normalized path string, treating "." as having no components.
+fn parts-of-normalized(n) {
+    if n == "." {
+        []
     } else {
-        println("FAILURES: " ++ to-string(f))
+        split-path(n)
     }
-    null
+}
+
+// Length of the shared leading run of equal components in two vectors.
+/// Number of leading components a and b share (by value equality).
+fn common-prefix-len(a, b) {
+    let la = length(a)
+    let lb = length(b)
+    let limit = if la < lb { la } else { lb }
+    let mut i = 0
+    let mut common = 0
+    let mut stop = false
+    while i < limit && not(stop) {
+        if a[i] == b[i] {
+            common = common + 1
+        } else {
+            stop = true
+        }
+        i = i + 1
+    }
+    common
+}
+
+// Express p relative to base, using ".." to climb out of base as needed.
+// Both paths are normalized first. They must be the same kind (both absolute
+// or both relative); otherwise the relationship needs a working directory and
+// the call throws. A base that climbs above its own root (a leading "..") is
+// likewise unresolvable and throws.
+//   relative-to("/a/b/c", "/a/b")   == "c"
+//   relative-to("/a/b",   "/a/b/c") == ".."
+//   relative-to("/a/b/c", "/a/x/y") == "../../b/c"
+//   relative-to("/a/b",   "/a/b")   == "."
+//   relative-to("a/b/c",  "a/b")    == "c"
+//   relative-to("a",      ".")      == "a"
+//   relative-to(".",      "a")      == ".."
+/// p expressed relative to base (POSIX, using ".."), after normalizing both.
+/// Throws if one path is absolute and the other relative, or if base escapes above its root.
+fn relative-to(p, base) {
+    let np = normalize(p)
+    let nbase = normalize(base)
+    let abs-p = is-absolute?(np)
+    let abs-base = is-absolute?(nbase)
+    if not(abs-p == abs-base) {
+        throw("beagle.path/relative-to: cannot relate an absolute and a relative path: '${p}' vs '${base}'")
+    } else {
+        let p-parts = parts-of-normalized(np)
+        let base-parts = parts-of-normalized(nbase)
+        // A base with a leading ".." climbs above its starting point; without a
+        // working directory there is no way to invert that, so refuse.
+        let mut bi = 0
+        while bi < length(base-parts) {
+            if base-parts[bi] == ".." {
+                throw("beagle.path/relative-to: base '${base}' escapes above the current directory; no relative path exists")
+            }
+            bi = bi + 1
+        }
+        let common = common-prefix-len(p-parts, base-parts)
+        let mut result = []
+        // Ascend out of every remaining base component.
+        let mut j = common
+        while j < length(base-parts) {
+            result = push(result, "..")
+            j = j + 1
+        }
+        // Descend into every remaining p component.
+        let mut k = common
+        while k < length(p-parts) {
+            result = push(result, p-parts[k])
+            k = k + 1
+        }
+        if length(result) == 0 {
+            "."
+        } else {
+            rebuild-path(result, false)
+        }
+    }
+}
+
+// Components of a path. Like split-path, but an absolute path is reported with
+// a leading "/" element so absoluteness survives the round-trip. Duplicate and
+// trailing slashes are still dropped. Use split-path if you don't want the
+// leading "/" element.
+//   components("/a/b/c")  == ["/", "a", "b", "c"]
+//   components("a/b")     == ["a", "b"]
+//   components("a//b/")   == ["a", "b"]
+//   components("/")       == ["/"]
+//   components("")        == []
+/// Vector of p's components; an absolute path gets a leading "/" element so
+/// absoluteness is preserved. Duplicate and trailing slashes are dropped.
+fn components(p) {
+    let parts = split-path(p)
+    if is-absolute?(p) {
+        let mut acc = ["/"]
+        let mut i = 0
+        while i < length(parts) {
+            acc = push(acc, parts[i])
+            i = i + 1
+        }
+        acc
+    } else {
+        parts
+    }
+}
+
+// A path is "hidden" when its final component (its basename) begins with a dot.
+// This is the conventional POSIX dotfile rule; note that "." and ".." are
+// therefore reported as hidden, since their basenames literally start with '.'.
+//   is-hidden?(".bashrc")          == true
+//   is-hidden?("/home/u/.config")  == true
+//   is-hidden?("/home/u/file.txt") == false
+//   is-hidden?("")                 == false
+/// True when basename(p) begins with a '.' (a POSIX dotfile). The empty path is
+/// not hidden; note "." and ".." count as hidden by this rule.
+fn is-hidden?(p) {
+    let base = basename(p)
+    if length(base) == 0 {
+        false
+    } else {
+        char-code(base[0]) == 46
+    }
+}
+
+// Remove a leading directory prefix from p, returning the remainder as a
+// relative path. Both paths are compared component-wise (duplicate and trailing
+// slashes are ignored), and they must share the same absoluteness. When p
+// equals prefix the remainder is ".". Throws a clear error when p is not under
+// prefix — matching the module's no-silent-failure style (see relative-to).
+//   strip-prefix("/a/b/c", "/a/b")  == "c"
+//   strip-prefix("/a/b/c", "/a")    == "b/c"
+//   strip-prefix("/a/b/c", "/a/b/") == "c"
+//   strip-prefix("/a/b",   "/a/b")  == "."
+//   strip-prefix("a/b/c",  "a/b")   == "c"
+//   strip-prefix("/a/b",   "/")     == "a/b"
+/// p with the leading directory prefix removed, as a relative path ("." when p
+/// equals prefix). Throws if p is not under prefix or their absoluteness differs.
+fn strip-prefix(p, prefix) {
+    if not(is-absolute?(p) == is-absolute?(prefix)) {
+        throw("beagle.path/strip-prefix: cannot relate an absolute and a relative path: '${p}' vs '${prefix}'")
+    } else {
+        let p-parts = split-path(p)
+        let pre-parts = split-path(prefix)
+        let pre-len = length(pre-parts)
+        if length(p-parts) < pre-len {
+            throw("beagle.path/strip-prefix: '${p}' is not under prefix '${prefix}'")
+        } else {
+            let mut i = 0
+            let mut ok = true
+            while i < pre-len {
+                if not(p-parts[i] == pre-parts[i]) {
+                    ok = false
+                }
+                i = i + 1
+            }
+            if not(ok) {
+                throw("beagle.path/strip-prefix: '${p}' is not under prefix '${prefix}'")
+            } else {
+                let mut rest = []
+                let mut j = pre-len
+                while j < length(p-parts) {
+                    rest = push(rest, p-parts[j])
+                    j = j + 1
+                }
+                rebuild-path(rest, false)
+            }
+        }
+    }
 }

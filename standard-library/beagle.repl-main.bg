@@ -33,12 +33,16 @@ use beagle.repl-session as session
 // and polled by the server thread that owns the socket.
 let main_eval_queue = atom([])
 
+/// A queued eval request handed from a server thread to the main thread.
+/// `result_atom` starts null; the main thread sets it to an EvalResult once done.
 struct MainEvalRequest {
     id           // string: request id
     code         // string: code to evaluate
     result_atom  // atom(null): main thread sets this to {output, value, error}
 }
 
+/// The outcome of evaluating one request: captured output, the result value
+/// as a string, and an error message (null when evaluation succeeded).
 struct EvalResult {
     output   // string: captured println/print output
     value    // string: result value as string
@@ -61,6 +65,8 @@ fn process-eval-queue() {
     }
 }
 
+/// Recursively process the drained request list starting at index `i`,
+/// calling process-single-request on each.
 fn process-requests(requests, i) {
     if i < length(requests) {
         let request = nth(requests, i)
@@ -69,6 +75,9 @@ fn process-requests(requests, i) {
     }
 }
 
+/// Evaluate one request's code with output redirected to a string buffer,
+/// then set its result_atom to an EvalResult capturing the output and either
+/// the stringified value or a caught error.
 fn process-single-request(request) {
     let buf = core/new-string-buffer()
 
@@ -107,11 +116,15 @@ fn process-single-request(request) {
 // Server implementation (runs on background thread)
 // ============================================================================
 
+/// JSON-encode `response` and write it to the client socket followed by a newline.
 fn send-response(client, response) {
     let json = json-encode(response)
     socket/write(client, json ++ "\n")
 }
 
+/// Handle an "eval" op: validate the session/id/code fields, queue the code
+/// for the main thread, poll until it finishes, then stream out, value or
+/// exception responses back over the client socket.
 fn handle-eval(client, msg) {
     let session_id = get(msg, "session")
     let request_id = get(msg, "id")
@@ -155,12 +168,14 @@ fn handle-eval(client, msg) {
     }
 }
 
+/// Handle an "interrupt" op by replying with a "done" status (no-op interrupt).
 fn handle-interrupt(client, msg) {
     let request_id = get(msg, "id")
     let done_status = ["done"]
     send-response(client, {:id request_id, :status done_status})
 }
 
+/// Handle a "describe" op by replying with the supported ops and version info.
 fn handle-describe(client, msg) {
     let request_id = get(msg, "id")
     let ops = ["eval", "interrupt", "describe", "ls-sessions", "close"]
@@ -169,6 +184,7 @@ fn handle-describe(client, msg) {
     send-response(client, {:id request_id, :ops ops, :versions versions, :status done_status})
 }
 
+/// Handle an "ls-sessions" op by replying with an empty session list and "done".
 fn handle-ls-sessions(client, msg) {
     let request_id = get(msg, "id")
     let empty = []
@@ -176,12 +192,15 @@ fn handle-ls-sessions(client, msg) {
     send-response(client, {:id request_id, :sessions empty, :status done_status})
 }
 
+/// Handle a "close" op by replying with a "done" status.
 fn handle-close(client, msg) {
     let request_id = get(msg, "id")
     let done_status = ["done"]
     send-response(client, {:id request_id, :status done_status})
 }
 
+/// Dispatch a decoded message to the matching op handler based on its "op"
+/// field; replies with an error response for a missing or unknown op.
 fn handle-message(client, msg) {
     let op = get(msg, "op")
 
@@ -214,6 +233,9 @@ fn handle-message(client, msg) {
     }
 }
 
+/// Split buffered socket data on newlines into complete lines, returning
+/// {:lines, :buffer} where :buffer holds the trailing incomplete fragment
+/// to carry over to the next read.
 fn extract-lines(data, buffer) {
     let combined = buffer ++ data
     let parts = core/split(combined, "\n")
@@ -234,6 +256,9 @@ fn extract-lines(data, buffer) {
     }
 }
 
+/// Read-loop for a connected client: accumulate data, decode each newline-
+/// delimited JSON message and dispatch it, until the connection closes or
+/// errors; closes the socket on exit.
 fn handle-client(client) {
     let mut buffer = ""
     let mut running = true
@@ -322,6 +347,8 @@ fn start(host, port) {
 // inspect this and send a resume/abort command.
 let main_thread_crash = atom(null)
 
+/// Register the crash-recovery atom, start the regular REPL server on a
+/// background thread, then run main-fn on the main thread under crash recovery.
 fn run-with-repl(host, port, main-fn) {
     repl/register-main-crash-atom(main_thread_crash)
     thread(fn() {
@@ -330,6 +357,9 @@ fn run-with-repl(host, port, main-fn) {
     run-with-recovery(main-fn)
 }
 
+/// Run main-fn, and if it throws, publish the error to main_thread_crash and
+/// block waiting for a REPL "resume" (optionally evaluating fix-up code and
+/// resuming the continuation) or "abort" (returning to let main-fn exit).
 fn run-with-recovery(main-fn) {
     try {
         main-fn()

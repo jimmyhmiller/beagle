@@ -20,6 +20,10 @@ namespace beagle.priorityqueue
 // so a max-heap is just `pq-new-with(fn(a, b) { b - a })` (see pq-new-max).
 // ============================================================================
 
+/// A binary min-heap priority queue. `items` is a persistent vector holding
+/// the heap (children of index i at 2i+1/2i+2); `compare` is the ordering
+/// function (negative => first arg pops before second). Immutable: operations
+/// return a new PriorityQueue.
 struct PriorityQueue {
     items     // PersistentVector — the heap array
     compare   // fn(a, b) -> Int (negative => a before b)
@@ -27,6 +31,8 @@ struct PriorityQueue {
 
 // Default comparator: works for numbers (and, via < / >, strings — string
 // ordering in Beagle is lexicographic and correct). Returns -1 / 0 / 1.
+/// Default min-heap comparator. Returns -1 when a < b, 1 when a > b, 0 when
+/// equal. Works for numbers and (lexicographically) strings.
 fn default-compare(a, b) {
     if a < b {
         -1
@@ -42,7 +48,7 @@ fn default-compare(a, b) {
 /// Create an empty min-heap priority queue using the default comparator.
 ///
 /// Examples:
-///   (pq-new)  ; => empty min-heap
+///   pq-new()  // => empty min-heap
 fn pq-new() {
     PriorityQueue { items: [], compare: default-compare }
 }
@@ -53,7 +59,7 @@ fn pq-new() {
 /// before `b`, zero when equivalent, positive otherwise.
 ///
 /// Examples:
-///   (pq-new-with fn(a, b) { b - a })  ; => empty max-heap (numbers)
+///   pq-new-with(fn(a, b) { b - a })  // => empty max-heap (numbers)
 fn pq-new-with(compare-fn) {
     PriorityQueue { items: [], compare: compare-fn }
 }
@@ -63,7 +69,7 @@ fn pq-new-with(compare-fn) {
 /// Uses the default ordering, inverted.
 ///
 /// Examples:
-///   (pq-new-max)  ; => empty max-heap
+///   pq-new-max()  // => empty max-heap
 fn pq-new-max() {
     PriorityQueue { items: [], compare: fn(a, b) { default-compare(b, a) } }
 }
@@ -71,7 +77,7 @@ fn pq-new-max() {
 /// Return the number of items in the queue.
 ///
 /// Examples:
-///   (pq-count (pq-push (pq-new) 5))  ; => 1
+///   pq-count(pq-push(pq-new(), 5))  // => 1
 fn pq-count(pq) {
     length(pq.items)
 }
@@ -79,12 +85,14 @@ fn pq-count(pq) {
 /// Return true when the queue has no items.
 ///
 /// Examples:
-///   (pq-empty? (pq-new))  ; => true
+///   pq-empty?(pq-new())  // => true
 fn pq-empty?(pq) {
     length(pq.items) == 0
 }
 
 // Swap the elements at indices i and j of vector v, returning a new vector.
+/// Swap the elements at indices `i` and `j` of vector `v`, returning a new
+/// vector (the input is unchanged). Internal heap helper.
 fn pq-swap(v, i, j) {
     let vi = get(v, i)
     let vj = get(v, j)
@@ -94,6 +102,9 @@ fn pq-swap(v, i, j) {
 // Restore the heap invariant upward: the element just appended at `idx`
 // is bubbled toward the root while it compares "before" its parent.
 // Returns a new heap vector.
+/// Restore the heap upward: bubble the element at `idx` toward the root while
+/// it compares before its parent under `compare`. Returns a new heap vector.
+/// Internal helper.
 fn pq-sift-up(v, idx, compare) {
     if idx == 0 {
         v
@@ -112,6 +123,9 @@ fn pq-sift-up(v, idx, compare) {
 // Restore the heap invariant downward from `idx`: the element at `idx` is
 // pushed down, swapping with the smaller (compare-before) of its children
 // while that child compares before it. Returns a new heap vector.
+/// Restore the heap downward: push the element at `idx` down, swapping with
+/// the smaller (compare-before) child while that child compares before it.
+/// Returns a new heap vector. Internal helper.
 fn pq-sift-down(v, idx, compare) {
     let len = length(v)
     let left = 2 * idx + 1
@@ -135,7 +149,7 @@ fn pq-sift-down(v, idx, compare) {
 /// The original queue is unchanged.
 ///
 /// Examples:
-///   (pq-peek (pq-push (pq-push (pq-new) 5) 3))  ; => 3
+///   pq-peek(pq-push(pq-push(pq-new(), 5), 3))  // => 3
 fn pq-push(pq, item) {
     let cmp = pq.compare
     let appended = push(pq.items, item)
@@ -150,7 +164,7 @@ fn pq-push(pq, item) {
 /// elements are not recommended since maps/ordering treat them poorly.)
 ///
 /// Examples:
-///   (pq-peek (pq-new))  ; => null
+///   pq-peek(pq-new())  // => null
 fn pq-peek(pq) {
     if pq-empty?(pq) {
         null
@@ -166,7 +180,7 @@ fn pq-peek(pq) {
 /// empty (peek + empty? let you check first).
 ///
 /// Examples:
-///   (let [m, rest] (pq-pop (pq-push (pq-new) 7)))  ; m => 7, rest empty
+///   let [m, rest] = pq-pop(pq-push(pq-new(), 7))  // m => 7, rest empty
 fn pq-pop(pq) {
     if pq-empty?(pq) {
         throw("pq-pop on empty priority queue")
@@ -179,8 +193,9 @@ fn pq-pop(pq) {
             [root, PriorityQueue { items: [], compare: cmp }]
         } else {
             // Move the last element to the root, drop the tail, sift down.
+            // butlast is O(log n) native pop on a vector (was O(n) take rebuild).
             let last-val = get(v, len - 1)
-            let without-last = take(len - 1, v)
+            let without-last = butlast(v)
             let with-new-root = assoc(without-last, 0, last-val)
             let new-items = pq-sift-down(with-new-root, 0, cmp)
             [root, PriorityQueue { items: new-items, compare: cmp }]
@@ -194,7 +209,7 @@ fn pq-pop(pq) {
 /// (O(n) instead of O(n log n)).
 ///
 /// Examples:
-///   (pq-peek (pq-from-vec [5 3 8 1 9 2]))  ; => 1
+///   pq-peek(pq-from-vec([5, 3, 8, 1, 9, 2]))  // => 1
 fn pq-from-vec(v) {
     pq-from-vec-with(v, default-compare)
 }
@@ -223,11 +238,44 @@ fn pq-from-vec-with(v, compare) {
     }
 }
 
+/// Return the minimum item (under the comparator) WITHOUT removing it.
+///
+/// Convenience alias for pq-peek. Returns null when the queue is empty.
+///
+/// Examples:
+///   peek(pq-from-vec([5, 3, 8, 1, 9, 2]))  // => 1
+///   peek(pq-new())                     // => null
+fn peek(pq) {
+    pq-peek(pq)
+}
+
+/// Return the number of items in the queue.
+///
+/// Convenience alias for pq-count.
+///
+/// Examples:
+///   pq-size(pq-push(pq-new(), 5))  // => 1
+///   pq-size(pq-new())              // => 0
+fn pq-size(pq) {
+    pq-count(pq)
+}
+
+/// Build a priority queue from a vector (min-heap, default comparator).
+///
+/// Convenience alias for pq-from-vec. Inserts every element of `vec` using
+/// Floyd's bottom-up heapify (O(n)).
+///
+/// Examples:
+///   peek(from-vec([5, 3, 8, 1, 9, 2]))  // => 1
+fn from-vec(vec) {
+    pq-from-vec(vec)
+}
+
 /// Drain a priority queue into a sorted vector (smallest first under the
 /// comparator). Does not mutate the input.
 ///
 /// Examples:
-///   (pq-to-sorted-vec (pq-from-vec [5 3 8 1 9 2]))  ; => [1 2 3 5 8 9]
+///   pq-to-sorted-vec(pq-from-vec([5, 3, 8, 1, 9, 2]))  // => [1, 2, 3, 5, 8, 9]
 fn pq-to-sorted-vec(pq) {
     let mut current = pq
     let mut acc = []

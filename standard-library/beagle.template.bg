@@ -38,6 +38,9 @@ use beagle.string-builder as sb
 //   raw-expr  : text  = the inner expression of a {{{ ... }}} (NOT escaped)
 //   tag       : text  = the inner directive of a {% ... %}    (if/else/endif/for/endfor)
 
+/// A lexer token produced by `tokenize`: `kind` is "literal", "expr",
+/// "raw-expr", or "tag"; `text` is the verbatim run or the inner
+/// expression/directive.
 struct Token {
     kind
     text
@@ -53,21 +56,33 @@ struct Token {
 //   IfNode    { path, then-body, else-body }  {% if x %}..{% else %}..{% endif %}
 //   ForNode   { var, path, body }             {% for v in items %}..{% endfor %}
 
+/// AST node for literal output: `text` is copied verbatim on render.
 struct TextNode { text }
+/// AST node for an interpolation: `path` is the keyword lookup path; `escape`
+/// is true to HTML-escape the looked-up value.
 struct VarNode { path, escape }
+/// AST node for `{% if %}`: `path` is the condition lookup; `then-body` and
+/// `else-body` are node vectors (`else-body` is empty when there is no
+/// `{% else %}`).
 struct IfNode { path, then-body, else-body }
+/// AST node for `{% for %}`: `var` is the loop-binding keyword, `path` locates
+/// the vector to iterate, and `body` is the node vector rendered per element.
 struct ForNode { var, path, body }
 
 // ===========================================================================
 // Character helpers
 // ===========================================================================
 
+/// True if char-code `c` is an ASCII whitespace character (space, tab,
+/// newline, CR, form-feed, or vertical-tab).
 fn ws-code?(c) {
     c == 32 || c == 9 || c == 10 || c == 13 || c == 12 || c == 11
 }
 
 // Trim ASCII whitespace from both ends of a string (does not rely on core/trim
 // so the module is self-contained for the bits it cares about).
+/// Trim ASCII whitespace from both ends of string `s` and return the
+/// substring. Self-contained (does not rely on core/trim).
 fn strip(s) {
     let len = length(s)
     let mut start = 0
@@ -82,6 +97,7 @@ fn strip(s) {
 }
 
 // Does the source `s` contain the literal `pat` starting exactly at index `i`?
+/// True if the literal `pat` occurs in `s` starting exactly at index `i`.
 fn matches-at?(s, i, pat) {
     let plen = length(pat)
     let slen = length(s)
@@ -93,6 +109,8 @@ fn matches-at?(s, i, pat) {
 }
 
 // Find the first index >= start where `pat` occurs in `s`, or -1.
+/// Return the first index >= `start` where `pat` occurs in `s`, or -1 if not
+/// found.
 fn find-from(s, pat, start) {
     let slen = length(s)
     let plen = length(pat)
@@ -115,6 +133,9 @@ fn find-from(s, pat, start) {
 // opening of a triple-brace, double-brace, or tag block; everything else is
 // accumulated as a literal run. Throws a clear error on an unterminated block.
 
+/// Scan `src` left-to-right into a vector of `Token`s, splitting on the
+/// `{{{ }}}`, `{{ }}`, and `{% %}` delimiters (triple-brace is tested first).
+/// Throws a clear error on an unterminated block.
 fn tokenize(src) {
     let len = length(src)
     let mut tokens = []
@@ -168,6 +189,8 @@ fn tokenize(src) {
 }
 
 // Push a literal token for src[start:end] if the range is non-empty.
+/// Append a "literal" `Token` for `src[start:end]` to `tokens` if the range is
+/// non-empty; otherwise return `tokens` unchanged.
 fn flush-literal(tokens, src, start, end) {
     if end > start {
         push(tokens, Token { kind: "literal", text: substring(src, start, end) })
@@ -182,6 +205,9 @@ fn flush-literal(tokens, src, start, end) {
 
 // Split a dotted path string "user.name" into a vector of keyword segments
 // [:user :name]. Empty segments throw (e.g. "a..b" or a leading/trailing dot).
+/// Split a dotted path string like "user.name" into a vector of keyword
+/// segments `[:user :name]`. Throws on an empty or malformed path
+/// (e.g. "a..b" or a leading/trailing dot).
 fn parse-path(expr) {
     let parts = split(expr, ".")
     let n = length(parts)
@@ -205,6 +231,9 @@ fn parse-path(expr) {
 
 // Parse the inside of a {{ ... }}: an optional " | raw" filter sets escape=false.
 // Default escape = the caller-supplied default (true for {{ }}, false for {{{ }}}).
+/// Parse the inside of an interpolation into a `VarNode`. An optional " | raw"
+/// filter forces `escape` false; `default-escape` sets the base (true for
+/// `{{ }}`, false for `{{{ }}}`). Throws on any unknown filter.
 fn parse-expr(text, default-escape) {
     let bar = find-from(text, "|", 0)
     if bar < 0 {
@@ -221,6 +250,8 @@ fn parse-expr(text, default-escape) {
 }
 
 // First whitespace-delimited word of a tag, e.g. "if x" -> "if".
+/// Return the first whitespace-delimited word of a tag body, e.g.
+/// "if x" -> "if".
 fn tag-keyword(tag) {
     let len = length(tag)
     let mut i = 0
@@ -231,6 +262,8 @@ fn tag-keyword(tag) {
 }
 
 // Everything after the first word of a tag, stripped. "for x in items" -> "x in items".
+/// Return everything after the first word of a tag body, stripped, e.g.
+/// "for x in items" -> "x in items".
 fn tag-rest(tag) {
     let len = length(tag)
     let mut i = 0
@@ -252,6 +285,9 @@ fn tag-rest(tag) {
 
 // Returns a 2-element vector [nodes, next-index].
 // `stops` is a vector of tag-keyword strings that terminate this body.
+/// Recursive-descent parse of `tokens` from index `start`, building a node
+/// vector until it hits a tag whose keyword is in `stops` (which it does NOT
+/// consume). Returns `[nodes, next-index]`.
 fn parse-body(tokens, start, stops) {
     let n = length(tokens)
     let mut nodes = []
@@ -298,6 +334,8 @@ fn parse-body(tokens, start, stops) {
     [nodes, i]
 }
 
+/// True if tag keyword `kw` is one of the terminating keywords in the `stops`
+/// vector.
 fn is-stop?(kw, stops) {
     let n = length(stops)
     let mut i = 0
@@ -312,6 +350,10 @@ fn is-stop?(kw, stops) {
 }
 
 // tokens[start] is the {% if cond %} tag. Returns [IfNode, next-index].
+/// Parse an `{% if %}` block beginning at `tokens[start]`, consuming an
+/// optional `{% else %}` and the closing `{% endif %}`. Returns
+/// `[IfNode, next-index]`. Throws if the condition is empty or the block is
+/// unterminated.
 fn parse-if(tokens, start) {
     let if-tag = tokens[start]
     let cond = tag-rest(if-tag.text)
@@ -346,6 +388,9 @@ fn parse-if(tokens, start) {
 }
 
 // tokens[start] is the {% for x in items %} tag. Returns [ForNode, next-index].
+/// Parse a `{% for VAR in ITEMS %}` block beginning at `tokens[start]`,
+/// consuming the closing `{% endfor %}`. Returns `[ForNode, next-index]`.
+/// Throws on malformed syntax or a missing `{% endfor %}`.
 fn parse-for(tokens, start) {
     let for-tag = tokens[start]
     let rest = tag-rest(for-tag.text)
@@ -374,6 +419,8 @@ fn parse-for(tokens, start) {
 }
 
 // Top-level parse: a full body with no legal terminators.
+/// Parse the full token vector into a top-level node vector. Throws if a stray
+/// `endif`/`else`/`endfor` tag is found with no open block.
 fn parse(tokens) {
     let result = parse-body(tokens, 0, [])
     let nodes = result[0]
@@ -392,6 +439,9 @@ fn parse(tokens) {
 
 // Resolve a keyword path against the context map by chained `get`. Returns null
 // if any segment is missing.
+/// Resolve a keyword `path` against context map `ctx` via chained `get`,
+/// trying the keyword key first then falling back to its string form. Returns
+/// null if any segment is missing.
 fn lookup(ctx, path) {
     let n = length(path)
     let mut current = ctx
@@ -417,6 +467,9 @@ fn lookup(ctx, path) {
 // Truthiness for {% if %} (Jinja/Python-ish): null and false are falsy; an
 // empty string or empty vector is falsy; the number 0 (Int or Float) is falsy.
 // Everything else — including nonzero numbers and true — is truthy.
+/// Jinja-style truthiness for `{% if %}`: null, false, the empty string, the
+/// empty vector, and numeric zero (Int or Float) are falsy; everything else is
+/// truthy.
 fn truthy?(v) {
     if v == null {
         false
@@ -446,6 +499,8 @@ fn truthy?(v) {
 }
 
 // HTML-escape the five significant characters. Operates char by char.
+/// Return `s` with the five significant HTML characters (& < > " ') replaced
+/// by their entities, processed character by character.
 fn html-escape(s) {
     let len = length(s)
     let builder = sb/new(len + 16)
@@ -479,6 +534,9 @@ fn html-escape(s) {
 }
 
 // Render a value to its string form. null -> "" (so missing vars vanish).
+/// Render a value to its string form for output: null becomes "" (so missing
+/// vars vanish), strings pass through, and everything else goes through
+/// `to-string`.
 fn render-value(v) {
     if v == null {
         ""
@@ -492,6 +550,8 @@ fn render-value(v) {
 }
 
 // Render a body (vector of nodes) into the builder against ctx.
+/// Render each node in `nodes` into the string-`builder` against context
+/// `ctx`. Returns null.
 fn render-body(builder, nodes, ctx) {
     let n = length(nodes)
     let mut i = 0
@@ -502,6 +562,8 @@ fn render-body(builder, nodes, ctx) {
     null
 }
 
+/// Render a single AST node (TextNode/VarNode/IfNode/ForNode) into `builder`
+/// against context `ctx`. Throws on an unknown node type.
 fn render-node(builder, node, ctx) {
     let ty = type-of(node)
     if ty == TextNode {
@@ -533,6 +595,9 @@ fn render-node(builder, node, ctx) {
     }
 }
 
+/// Render a `ForNode` by iterating its vector and rendering the body once per
+/// element with the loop var bound in a child context. A null collection
+/// renders nothing; a non-vector value throws a clear error.
 fn render-for(builder, node, ctx) {
     let items = lookup(ctx, node.path)
     if items == null {
@@ -561,51 +626,54 @@ fn render-for(builder, node, ctx) {
 // Public API
 // ===========================================================================
 
+/// A pre-parsed template produced by `compile`: `nodes` is the parsed AST node
+/// vector and `size-hint` seeds the output string-builder. Render it any number
+/// of times with `render-compiled` without re-tokenizing or re-parsing.
+struct CompiledTemplate { nodes, size-hint }
+
+/// Tokenize and parse `template` ONCE into a reusable `CompiledTemplate`.
+/// Render it against many contexts with `render-compiled` to avoid re-parsing
+/// the same string repeatedly. Throws on malformed template syntax (the same
+/// errors `render` raises).
+fn compile(template) {
+    let tokens = tokenize(template)
+    let ast = parse(tokens)
+    CompiledTemplate { nodes: ast, size-hint: length(template) + 32 }
+}
+
+/// Render an already-`compile`d template against context map `ctx`. Equivalent
+/// to `render` but skips the tokenize+parse step, so it is cheap to call
+/// repeatedly with the same compiled template. Throws if `compiled` is not a
+/// `CompiledTemplate`.
+fn render-compiled(compiled, ctx) {
+    if type-of(compiled) != CompiledTemplate {
+        throw("beagle.template: render-compiled expects a CompiledTemplate (from compile), got: " ++ to-string(compiled))
+    } else {
+        let builder = sb/new(compiled.size-hint)
+        render-body(builder, compiled.nodes, ctx)
+        sb/to-string(builder)
+    }
+}
+
 /// Render a template string against a context map.
 ///
 /// Context keys are keywords; template variable paths are dotted strings
 /// resolved as nested keyword lookups. Interpolated values are HTML-escaped
 /// unless the `| raw` filter or triple-brace `{{{ }}}` is used.
 ///
+/// Equivalent to `render-compiled(compile(template), ctx)`; use `compile` +
+/// `render-compiled` directly when rendering one template many times.
+///
 /// Examples:
-///   (render "Hello {{ name }}!" {:name "World"})       ; => "Hello World!"
-///   (render "{{ user.name }}" {:user {:name "Ann"}})   ; => "Ann"
+///   render("Hello {{ name }}!", {:name "World"})       // => "Hello World!"
+///   render("{{ user.name }}", {:user {:name "Ann"}})   // => "Ann"
 fn render(template, ctx) {
-    let tokens = tokenize(template)
-    let ast = parse(tokens)
-    let builder = sb/new(length(template) + 32)
-    render-body(builder, ast, ctx)
-    sb/to-string(builder)
+    render-compiled(compile(template), ctx)
 }
 
 // ===========================================================================
 // Demo
 // ===========================================================================
 
-fn main() {
-    // 1. Basic interpolation + dotted path.
-    println(render("Hello {{ user.name }}! You have {{ count }} messages.",
-                   {:user {:name "Ada"}, :count 3}))
-
-    // 2. Loop over a vector.
-    let cart = {:items ["apple", "banana", "cherry"]}
-    println(render("Cart:{% for item in items %} [{{ item }}]{% endfor %}", cart))
-
-    // 3. if / else.
-    println(render("{% if admin %}Welcome boss{% else %}Hello guest{% endif %}",
-                   {:admin true}))
-    println(render("{% if admin %}Welcome boss{% else %}Hello guest{% endif %}",
-                   {:admin false}))
-
-    // 4. HTML escaping vs raw.
-    println(render("escaped: {{ html }}", {:html "<b>&'\""}))
-    println(render("raw: {{ html | raw }}", {:html "<b>&"}))
-    println(render("triple: {{{ html }}}", {:html "<b>&"}))
-
-    // 5. Nested for + if.
-    let blog = {:posts [{:title "First", :published true},
-                        {:title "Draft", :published false}]}
-    println(render("{% for p in posts %}{% if p.published %}- {{ p.title }}\n{% endif %}{% endfor %}", blog))
-
-    "done"
-}
+/// Demo entry point: renders several example templates (interpolation, loops,
+/// if/else, HTML escaping vs raw, and nested for/if) and prints the results.

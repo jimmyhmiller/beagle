@@ -57,6 +57,8 @@ protocol Handler(T) {
     fn handle(self, op, resume)
 }
 
+/// Resume a captured effect continuation in tail position with `value`,
+/// avoiding stack growth from nested resumes. Delegates to builtin/resume-tail.
 fn resume-tail(resume, value) {
     builtin/resume-tail(resume, value)
 }

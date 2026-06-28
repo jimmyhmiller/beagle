@@ -4,6 +4,9 @@ use beagle.ffi as ffi
 use beagle.builtin as builtin
 
 // Load libc (platform-specific path)
+/// Return the platform-specific path to the libc shared library.
+///
+/// Resolves "macos" and "linux"; falls back to "libc" on unknown platforms.
 fn get-libc-path() {
     let os = get-os()
     if os == "macos" {
@@ -21,6 +24,7 @@ let libc = ffi/load-library(get-libc-path())
 // Result and Error types come from beagle.core (globally available)
 
 // Helper to create IO errors
+/// Wrap a message in a Result.Err carrying an Error.IO with that message.
 fn io-err(msg) { err(Error.IO { message: msg }) }
 
 // FFI function bindings for FILE* operations
@@ -48,9 +52,11 @@ let _write = ffi/get-function(libc, "write",
     [ffi/Type.I32, ffi/Type.Pointer, ffi/Type.U64], ffi/Type.I32)
 
 // File struct wrapper
+/// Wraps an open FILE* handle returned from libc fopen.
 struct File { handle }
 
 // Buffer result for read operations
+/// Result of a read: a native buffer and the number of bytes read into it.
 struct BufferResult { buffer, length }
 
 // Standard file descriptors
@@ -59,12 +65,16 @@ let STDOUT-FD = 1
 let STDERR-FD = 2
 
 // Helper: check if a pointer is null
+/// Return true if the given FFI pointer is null (its low word is 0).
 fn is-null(pointer) {
     pointer.lo == 0
 }
 
 // Helper: copy string bytes to a buffer
 // Returns a buffer containing the string bytes
+/// Allocate a native buffer and copy the bytes of string `s` into it.
+///
+/// Returns the buffer (caller is responsible for deallocating it).
 fn string-to-buffer(s) {
     let len = length(s)
     let buf = ffi/allocate(len)
@@ -86,10 +96,10 @@ fn string-to-buffer(s) {
 /// Returns Result with a File handle or error.
 ///
 /// Examples:
-///   (match (io/open "/tmp/test.txt" "r") {
+///   match io/open("/tmp/test.txt", "r") {
 ///       Result.Ok { value } => value,
 ///       Result.Err { error } => println("Failed to open")
-///   })
+///   }
 fn open(path, mode) {
     let handle = _fopen(path, mode)
     if is-null(handle) {
@@ -106,6 +116,15 @@ fn close(file) {
         ok(null)
     } else {
         io-err("Failed to close file")
+    }
+}
+
+// Participate in the core `Closeable` protocol so `with-open` can manage a File.
+extend File with Closeable {
+    /// Close the file's OS handle (releasing it for `with-open`).
+    fn close(file) {
+        _fclose(file.handle)
+        null
     }
 }
 

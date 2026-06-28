@@ -10,6 +10,8 @@ namespace beagle.semver
 // (null when absent). Precedence ignores `build` entirely, exactly as the spec
 // requires.
 
+/// A parsed Semantic Version. `major`/`minor`/`patch` are ints; `prerelease`
+/// and `build` are the raw strings after the `-`/`+` markers (null when absent).
 struct SemVer {
     major
     minor
@@ -23,22 +25,26 @@ struct SemVer {
 // e.g. reject leading zeros in numeric identifiers, which parse-int allows).
 // ---------------------------------------------------------------------------
 
+/// True if `c` is an ASCII digit (0-9).
 fn digit?(c) {
     let code = char-code(c)
     code >= 48 && code <= 57
 }
 
+/// True if `c` is an ASCII letter (A-Z or a-z).
 fn alpha?(c) {
     let code = char-code(c)
     (code >= 65 && code <= 90) || (code >= 97 && code <= 122)
 }
 
 // Identifier char allowed in prerelease/build: [0-9A-Za-z-]
+/// True if `c` is a legal prerelease/build identifier char ([0-9A-Za-z-]).
 fn ident-char?(c) {
     digit?(c) || alpha?(c) || char-code(c) == 45
 }
 
 // Every character of s is a digit (and s is non-empty).
+/// True if `s` is non-empty and every character is an ASCII digit.
 fn all-digits?(s) {
     let len = length(s)
     if len == 0 {
@@ -57,6 +63,8 @@ fn all-digits?(s) {
 }
 
 // Every character of s is a legal identifier char (and s is non-empty).
+/// True if `s` is non-empty and every character is a legal identifier char
+/// ([0-9A-Za-z-]).
 fn all-ident-chars?(s) {
     let len = length(s)
     if len == 0 {
@@ -80,6 +88,8 @@ fn all-ident-chars?(s) {
 
 // A valid numeric version part: all digits, and no leading zero unless it is
 // exactly "0".
+/// True if `s` is a valid numeric version part: all digits with no leading
+/// zero (unless the part is exactly "0").
 fn valid-num-part?(s) {
     if all-digits?(s) == false {
         false
@@ -99,6 +109,9 @@ fn valid-num-part?(s) {
 // A prerelease is a dot-separated series of identifiers. Each identifier is
 // non-empty and contains only [0-9A-Za-z-]; numeric identifiers may not have
 // leading zeros.
+/// True if `s` is a valid prerelease string: a non-empty, dot-separated series
+/// of non-empty identifiers, each [0-9A-Za-z-], with no leading zeros on
+/// numeric identifiers.
 fn valid-prerelease?(s) {
     if length(s) == 0 {
         false
@@ -129,6 +142,8 @@ fn valid-prerelease?(s) {
 
 // Build metadata: dot-separated identifiers, each non-empty, [0-9A-Za-z-].
 // Leading zeros ARE permitted in build identifiers.
+/// True if `s` is valid build metadata: a non-empty, dot-separated series of
+/// non-empty [0-9A-Za-z-] identifiers (leading zeros allowed).
 fn valid-build?(s) {
     if length(s) == 0 {
         false
@@ -159,9 +174,9 @@ fn valid-build?(s) {
 /// Parse a SemVer 2.0.0 string into a SemVer struct, or null if invalid.
 ///
 /// Examples:
-///   (parse "1.2.3")               ; => SemVer { 1 2 3 null null }
-///   (parse "1.2.3-alpha.1+build") ; => SemVer { 1 2 3 "alpha.1" "build" }
-///   (parse "1.2")                 ; => null
+///   parse("1.2.3")               // => SemVer { 1, 2, 3, null, null }
+///   parse("1.2.3-alpha.1+build") // => SemVer { 1, 2, 3, "alpha.1", "build" }
+///   parse("1.2")                 // => null
 fn parse(s) {
     if length(s) == 0 {
         null
@@ -188,6 +203,8 @@ fn parse(s) {
     }
 }
 
+/// Validate the already-split `core` ("major.minor.patch"), `prerelease`, and
+/// `build` pieces and build a SemVer struct, or null if any part is invalid.
 fn parse-validated(core, prerelease, build) {
     let nums = split(core, ".")
     if length(nums) != 3 {
@@ -242,6 +259,7 @@ fn valid?(s) {
 // compare
 // ---------------------------------------------------------------------------
 
+/// Compare two ints -> -1 if a<b, 0 if equal, 1 if a>b.
 fn cmp-int(a, b) {
     if a < b {
         -1
@@ -255,6 +273,7 @@ fn cmp-int(a, b) {
 }
 
 // Lexicographic compare of two ASCII strings -> -1/0/1.
+/// Lexicographically compare two ASCII strings -> -1/0/1.
 fn cmp-string(a, b) {
     if a < b {
         -1
@@ -271,6 +290,9 @@ fn cmp-string(a, b) {
 //   - numeric identifiers compare numerically
 //   - alphanumeric identifiers compare lexically (ASCII)
 //   - numeric identifiers always have LOWER precedence than alphanumeric ones
+/// Compare two prerelease identifiers -> -1/0/1: numeric ones compare
+/// numerically, alphanumeric ones lexically, and numeric ranks below
+/// alphanumeric.
 fn cmp-pre-identifier(a, b) {
     let a-num = all-digits?(a)
     let b-num = all-digits?(b)
@@ -293,6 +315,8 @@ fn cmp-pre-identifier(a, b) {
 // Compare two prerelease strings (already known to be valid). Either may be
 // null, meaning "no prerelease" (release), which has HIGHER precedence than
 // any prerelease.
+/// Compare two prerelease strings -> -1/0/1. Either may be null (a release),
+/// which ranks HIGHER than any prerelease.
 fn cmp-prerelease(a, b) {
     if a == null && b == null {
         0
@@ -310,6 +334,8 @@ fn cmp-prerelease(a, b) {
     }
 }
 
+/// Compare two lists of prerelease identifiers field-by-field -> -1/0/1; when
+/// all shared fields are equal, the list with fewer fields ranks lower.
 fn cmp-pre-parts(a-parts, b-parts) {
     let a-len = length(a-parts)
     let b-len = length(b-parts)
@@ -347,7 +373,18 @@ fn cmp-pre-parts(a-parts, b-parts) {
     result
 }
 
+// Participate in the core `Comparable` protocol so core `sort`/`min-of`/`max-of`
+// work on parsed SemVer structs (compare-semver compares structs, not strings).
+extend SemVer with Comparable {
+    /// Three-way compare two SemVer structs by precedence (-1/0/1).
+    fn compare-to(a, b) {
+        compare-semver(a, b)
+    }
+}
+
 // Compare two SemVer structs -> -1/0/1.
+/// Compare two SemVer structs by precedence -> -1/0/1 (major, then minor,
+/// patch, then prerelease; `build` is ignored).
 fn compare-semver(a, b) {
     let c-major = cmp-int(a.major, b.major)
     if c-major != 0 {
@@ -371,9 +408,9 @@ fn compare-semver(a, b) {
 /// Throws if either argument is not a valid SemVer string.
 ///
 /// Examples:
-///   (compare "1.0.0" "2.0.0")        ; => -1
-///   (compare "1.0.0-alpha" "1.0.0")  ; => -1
-///   (compare "1.0.0" "1.0.0")        ; => 0
+///   compare("1.0.0", "2.0.0")        // => -1
+///   compare("1.0.0-alpha", "1.0.0")  // => -1
+///   compare("1.0.0", "1.0.0")        // => 0
 fn compare(a, b) {
     let pa = parse(a)
     let pb = parse(b)
@@ -397,6 +434,8 @@ fn compare(a, b) {
 //   ^1.2.3 := >=1.2.3 <2.0.0
 //   ^0.2.3 := >=0.2.3 <0.3.0
 //   ^0.0.3 := >=0.0.3 <0.0.4
+/// Exclusive upper bound for a caret range over `base`: bumps the left-most
+/// non-zero of major/minor/patch and zeroes the rest.
 fn caret-upper(base) {
     if base.major > 0 {
         SemVer { major: base.major + 1, minor: 0, patch: 0, prerelease: null, build: null }
@@ -411,16 +450,20 @@ fn caret-upper(base) {
 
 // Tilde range: allows patch-level changes if a minor version is specified.
 //   ~1.2.3 := >=1.2.3 <1.3.0
+/// Exclusive upper bound for a tilde range over `base`: bumps minor and zeroes
+/// patch (allows patch-level changes within the given minor).
 fn tilde-upper(base) {
     SemVer { major: base.major, minor: base.minor + 1, patch: 0, prerelease: null, build: null }
 }
 
 // version >= lower (strict numeric+prerelease precedence)
+/// True if SemVer `v` is >= `lower` by precedence.
 fn ge?(v, lower) {
     compare-semver(v, lower) >= 0
 }
 
 // version < upper
+/// True if SemVer `v` is < `upper` by precedence.
 fn lt?(v, upper) {
     compare-semver(v, upper) < 0
 }
@@ -430,10 +473,14 @@ fn lt?(v, upper) {
 // [major,minor,patch] tuple also carries a prerelease. Otherwise prereleases of
 // some OTHER tuple (like the next major) would silently leak into a stable
 // range. Stable versions (no prerelease) are always allowed by this rule.
+/// True if `a` and `b` share the same [major, minor, patch] tuple.
 fn same-tuple?(a, b) {
     a.major == b.major && a.minor == b.minor && a.patch == b.patch
 }
 
+/// Apply the node-semver prerelease rule: a prerelease version `v` may match
+/// only if the comparator `base` shares its tuple and also carries a
+/// prerelease; stable versions always pass.
 fn prerelease-ok?(v, base) {
     if v.prerelease == null {
         true
@@ -453,8 +500,8 @@ fn prerelease-ok?(v, base) {
 /// Throws if the version or range cannot be parsed.
 ///
 /// Examples:
-///   (satisfies? "1.2.5" "^1.2.0")  ; => true
-///   (satisfies? "2.0.0" "^1.2.0")  ; => false
+///   satisfies?("1.2.5", "^1.2.0")  // => true
+///   satisfies?("2.0.0", "^1.2.0")  // => false
 fn satisfies?(version, range) {
     let v = parse(version)
     if v == null {
@@ -464,6 +511,8 @@ fn satisfies?(version, range) {
     }
 }
 
+/// Parse `s` as a SemVer or throw, citing `range` in the error. Used to parse
+/// the comparator operand inside a range expression.
 fn require-parse(s, range) {
     let p = parse(s)
     if p == null {
@@ -473,6 +522,8 @@ fn require-parse(s, range) {
     }
 }
 
+/// Test parsed version `v` against the (trimmed) `range` string, dispatching on
+/// its leading operator (^, ~, >=, <=, >, <, =, or bare = exact match).
 fn satisfies-parsed?(v, range) {
     if starts-with?(range, "^") {
         let base = require-parse(substring(range, 1, length(range)), range)
@@ -511,5 +562,35 @@ fn satisfies-parsed?(v, range) {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// range-and
+// ---------------------------------------------------------------------------
+
+/// True if `version` satisfies EVERY comparator string in the vector `ranges`
+/// (logical AND). Each comparator uses the same forms as `satisfies?` (^, ~,
+/// >=, <=, >, <, =, or a bare exact version). An empty `ranges` vector is
+/// vacuously true. Throws if `version` or any comparator cannot be parsed.
+///
+/// Examples:
+///   range-and("1.2.5", [">=1.2.0", "<2.0.0"])  // => true
+///   range-and("2.0.0", [">=1.2.0", "<2.0.0"])  // => false
+fn range-and(version, ranges) {
+    let v = parse(version)
+    if v == null {
+        throw("semver/range-and: invalid version string: ${version}")
+    } else {
+        let n = length(ranges)
+        let mut i = 0
+        let mut ok = true
+        while i < n && ok {
+            if satisfies-parsed?(v, trim(ranges[i])) == false {
+                ok = false
+            }
+            i = i + 1
+        }
+        ok
     }
 }

@@ -21,15 +21,20 @@ let COMMA = char-code(",")
 let QUOTE = char-code("\"")
 let CR = char-code("\r")
 let LF = char-code("\n")
+let TAB = char-code("\t")
 
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
 
-// Parse the entire CSV text into a vector of rows, each row a vector of
-// string fields. A truly empty input yields []. A trailing newline does
-// NOT produce a spurious empty trailing row.
-fn parse(text) {
+// Core char-by-char state machine, parameterized by the field-delimiter and
+// quote byte codes so that `parse`, `parse-with`, and `parse-tsv` can all
+// share exactly one parser. `delim` and `quote` are byte codes (e.g. from
+// char-code), NOT strings. Record terminators are always CR / LF / CRLF.
+/// Parse delimiter-separated text into a Vec of rows of string fields, using
+/// the byte codes `delim` and `quote` (e.g. from char-code) for the field
+/// separator and the quote character. The shared core of parse/parse-with.
+fn parse-delim(text, delim, quote) {
     let n = length(text)
     let mut rows = []
     let mut row = []
@@ -44,27 +49,28 @@ fn parse(text) {
     while i < n {
         let c = char-code(text[i])
         if in-quotes {
-            if c == QUOTE {
+            if c == quote {
                 // Either an escaped quote ("") or the closing quote.
-                if i + 1 < n && char-code(text[i + 1]) == QUOTE {
-                    sb/append-byte!(field, QUOTE)
+                if i + 1 < n && char-code(text[i + 1]) == quote {
+                    sb/append-byte!(field, quote)
                     i = i + 2
                 } else {
                     in-quotes = false
                     i = i + 1
                 }
             } else {
-                // Inside quotes everything is literal, including , \r \n.
+                // Inside quotes everything is literal, including the delimiter
+                // and \r \n.
                 sb/append-byte!(field, c)
                 i = i + 1
             }
         } else {
-            if c == QUOTE && sb/length(field) == 0 {
+            if c == quote && sb/length(field) == 0 {
                 // A quote is only special at the very START of a field.
                 in-quotes = true
                 row-started = true
                 i = i + 1
-            } else if c == COMMA {
+            } else if c == delim {
                 row = push(row, sb/to-string(field))
                 field = sb/new(16)
                 row-started = true
@@ -99,9 +105,56 @@ fn parse(text) {
     rows
 }
 
+// Parse the entire CSV text into a vector of rows, each row a vector of
+// string fields. A truly empty input yields []. A trailing newline does
+// NOT produce a spurious empty trailing row.
+/// Parse RFC 4180 CSV text into a Vec of rows, each a Vec of string fields.
+/// Handles quoted fields containing commas, embedded newlines, and doubled
+/// quotes. Empty input yields []; a trailing terminator adds no empty row.
+fn parse(text) {
+    parse-delim(text, COMMA, QUOTE)
+}
+
+// Read a one-character option string from `opts` under `key`, falling back to
+// `default-str` when the key is absent. Throws a clear error if the value is
+// not exactly one character so a bad delimiter/quote fails loudly.
+/// Read a one-character option string from map `opts` at `key`, defaulting to
+/// `default-str`; throws if the resolved value is not exactly one character.
+fn opt-char(opts, key, default-str) {
+    let s = get(opts, key, default-str)
+    if length(s) != 1 {
+        throw("beagle.csv: option ${key} must be a single character, got: ${s}")
+    }
+    char-code(s)
+}
+
+// Parse using a caller-supplied delimiter and quote character.
+/// Parse delimiter-separated text using an options map: `:delimiter` and
+/// `:quote` are one-character strings (defaulting to "," and "\""). Returns a
+/// Vec of rows of string fields. Throws if an option is not one character or
+/// if the delimiter and quote characters are equal.
+fn parse-with(text, opts) {
+    let delim = opt-char(opts, :delimiter, ",")
+    let quote = opt-char(opts, :quote, "\"")
+    if delim == quote {
+        throw("beagle.csv/parse-with: :delimiter and :quote must differ")
+    }
+    parse-delim(text, delim, quote)
+}
+
+// Convenience wrapper for tab-separated values.
+/// Parse tab-separated (TSV) text into a Vec of rows of string fields, using
+/// the tab character as the delimiter and the double-quote for quoting.
+fn parse-tsv(text) {
+    parse-delim(text, TAB, QUOTE)
+}
+
 // Parse CSV where the first row is a header of column names. Returns a
 // vector of maps keyed by the (string) header names. Extra fields beyond
 // the header length are dropped; missing fields are filled with "".
+/// Parse CSV whose first row is a header into a Vec of maps keyed by the
+/// header names. Extra fields are dropped; missing fields default to "".
+/// Returns [] when the input has no rows.
 fn parse-with-header(text) {
     let rows = parse(text)
     if length(rows) == 0 {
@@ -133,6 +186,8 @@ fn parse-with-header(text) {
 // ---------------------------------------------------------------------------
 
 // A field needs quoting if it contains a comma, a quote, CR, or LF.
+/// Return true if string `s` must be quoted per RFC 4180, i.e. it contains
+/// a comma, double-quote, CR, or LF.
 fn needs-quoting?(s) {
     let n = length(s)
     let mut i = 0
@@ -148,6 +203,9 @@ fn needs-quoting?(s) {
 }
 
 // Append one field to the builder, quoting and escaping per RFC 4180.
+/// Append field string `s` to string-builder `builder`, wrapping it in
+/// quotes and doubling embedded quotes only when needs-quoting? is true.
+/// Mutates the builder; returns null.
 fn write-field!(builder, s) {
     if needs-quoting?(s) {
         sb/append-byte!(builder, QUOTE)
@@ -172,6 +230,9 @@ fn write-field!(builder, s) {
 }
 
 // Append one row of fields (a vector of strings) plus a CRLF terminator.
+/// Append `row` (a Vec of fields) to `builder`, comma-separating fields
+/// (each via to-string + write-field!) and terminating with CRLF.
+/// Mutates the builder; returns null.
 fn write-row!(builder, row) {
     let n = length(row)
     let mut i = 0
@@ -189,6 +250,8 @@ fn write-row!(builder, row) {
 
 // Serialize a vector of rows (each a vector of fields) to a CSV string.
 // Uses CRLF line endings per RFC 4180, including a trailing CRLF.
+/// Serialize a Vec of rows (each a Vec of fields) into a CSV string with
+/// CRLF line endings, including a trailing CRLF.
 fn write(rows) {
     let builder = sb/new(256)
     let mut r = 0
@@ -200,12 +263,60 @@ fn write(rows) {
 }
 
 // Serialize a header row followed by data rows.
+/// Serialize `header` as the first CSV row followed by `rows` (each a Vec
+/// of fields), returning a CSV string with CRLF line endings.
 fn write-with-header(header, rows) {
     let builder = sb/new(256)
     write-row!(builder, header)
     let mut r = 0
     while r < length(rows) {
         write-row!(builder, rows[r])
+        r = r + 1
+    }
+    sb/to-string(builder)
+}
+
+// Serialize a single row of fields into one CSV line, WITHOUT any trailing
+// record terminator. Each field is run through `to-string` then quoted and
+// escaped per RFC 4180 (via write-field!) so fields containing the comma
+// delimiter, a double-quote, CR, or LF are wrapped in quotes with embedded
+// quotes doubled. This is the non-mutating, string-returning counterpart to
+// the builder-mutating write-row!.
+/// Serialize one row (`fields`, a Vec of fields) into a single CSV line
+/// string, comma-separating fields and quoting/escaping per RFC 4180. Adds
+/// no trailing terminator. An empty Vec yields "".
+fn write-row(fields) {
+    let builder = sb/new(64)
+    let n = length(fields)
+    let mut i = 0
+    while i < n {
+        if i > 0 {
+            sb/append-byte!(builder, COMMA)
+        }
+        write-field!(builder, to-string(fields[i]))
+        i = i + 1
+    }
+    sb/to-string(builder)
+}
+
+// Serialize a vector of rows into a CSV string, joining the per-row lines
+// with a CRLF ("\r\n") record separator. Unlike `write`, NO trailing
+// terminator is appended, so the result round-trips through `parse` exactly
+// (the parser accepts CR, LF, or CRLF as a record terminator). An empty
+// `rows` yields "".
+/// Serialize `rows` (each a Vec of fields) into a CSV string, joining rows
+/// with CRLF and adding no trailing terminator. Each row is rendered via
+/// write-row (RFC 4180 quoting). An empty Vec yields "".
+fn write-rows(rows) {
+    let builder = sb/new(256)
+    let n = length(rows)
+    let mut r = 0
+    while r < n {
+        if r > 0 {
+            sb/append-byte!(builder, CR)
+            sb/append-byte!(builder, LF)
+        }
+        sb/append!(builder, write-row(rows[r]))
         r = r + 1
     }
     sb/to-string(builder)
