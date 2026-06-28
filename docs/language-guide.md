@@ -734,6 +734,20 @@ fn main() {
 
 Qualified reference is `alias/name`. The alias is required — there's no "flat" import.
 
+### 11.2a Internal naming convention — the `_` prefix
+
+Anything internal — a helper function, a protocol accessor that's only meant to be
+called through a public wrapper, or a whole namespace of primitives — is prefixed with
+an underscore `_`. The documentation generators hide these automatically:
+
+- A **function/method** whose name starts with `_` (e.g. `_first`, `_install_continuation_mark`)
+  is omitted from `docs/api.html` / `docs/api.md`.
+- A **namespace** whose name (or any `.`-separated segment) starts with `_`
+  (e.g. `beagle._collections`) is omitted entirely.
+
+So the rule is simply: **if it shouldn't appear in the public API docs, give it a `_` prefix.**
+(Double-underscore `__` names are dropped even earlier, by the runtime's doc export.)
+
 ### 11.3 Standard-library namespaces
 
 All shipped under `standard-library/`:

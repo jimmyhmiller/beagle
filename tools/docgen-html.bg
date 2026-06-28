@@ -1,12 +1,14 @@
 /// Beagle HTML Documentation Generator
 ///
-/// Reads documentation JSON and generates a standalone HTML documentation page.
+/// Refined developer / IDE-style API reference. Reads the docs JSON whose
+/// path is args[0], builds one self-contained HTML document (no network
+/// dependencies), prints it to stdout.
 ///
 /// Usage:
 ///   beagle --export-docs > /tmp/docs.json
 ///   beagle tools/docgen-html.bg /tmp/docs.json > docs/api.html
 
-namespace docgen-html
+namespace docgen_html
 
 use beagle.fs as fs
 
@@ -14,26 +16,26 @@ use beagle.fs as fs
 // Configuration
 // ============================================================================
 
-// Namespaces to exclude from documentation (internal/private)
 let EXCLUDED_NAMESPACES = [
     "beagle.__internal_test__",
     "beagle.builtin"
 ]
 
-// User-facing namespaces to highlight first
 let PRIORITY_NAMESPACES = [
     "beagle.core",
+    "beagle.collections",
     "beagle.fs",
-    "beagle.async",
     "beagle.io",
-    "beagle.timer",
+    "beagle.async",
+    "beagle.iter",
+    "beagle.json",
     "beagle.regex",
     "beagle.reflect",
-    "beagle.collections"
+    "beagle.timer"
 ]
 
 // ============================================================================
-// Helpers
+// Small helpers
 // ============================================================================
 
 /// Read and parse the JSON documentation from a file
@@ -42,7 +44,7 @@ fn read-docs(path) {
     match result {
         Result.Ok { value } => json-decode(value),
         Result.Err { error } => {
-            println("Error reading file: {error}")
+            println("Error reading file: ${error}")
             null
         }
     }
@@ -61,849 +63,1399 @@ fn html-escape(s) {
     }
 }
 
-/// Convert a string to lowercase kebab-case for anchor links
+/// Lowercase kebab-case anchor from a namespace name
 fn lower-kebab(s) {
-    lowercase(replace(s, ".", "-"))
+    lowercase(replace(replace(s, ".", "-"), "/", "-"))
 }
 
-/// Check if namespace should be excluded
+fn truthy?(v) {
+    v == true
+}
+
+fn or-empty(s) {
+    if s == null { "" } else { s }
+}
+
 fn excluded?(ns-name) {
-    any?(EXCLUDED_NAMESPACES, fn(excluded) { excluded == ns-name })
+    let in-list = any?(fn(excluded) { excluded == ns-name }, EXCLUDED_NAMESPACES)
+    // Internal namespaces are hidden from docs by convention: the name, or any
+    // dotted segment of it, starts with "_" (e.g. "_internal", "beagle._collections").
+    in-list || starts-with?(ns-name, "_") || contains?(ns-name, "._")
 }
 
-/// Check if a function has documentation
-fn documented?(func) {
-    get(func, "docstring") != null
-}
-
-/// Get namespace priority (lower = higher priority)
 fn namespace-priority(ns-name) {
-    let idx = find-index(PRIORITY_NAMESPACES, fn(p) { p == ns-name })
+    let idx = find-index(fn(p) { p == ns-name }, PRIORITY_NAMESPACES)
     if idx == -1 { 999 } else { idx }
 }
 
-/// Sort namespaces by priority
+/// Sort namespaces: priority group first, alphabetical within group.
 fn sort-namespaces(namespaces) {
-    sort-by(namespaces, fn(ns) { namespace-priority(get(ns, "name")) })
+    sort-by(fn(ns) {
+        let name = get(ns, "name")
+        let p = namespace-priority(name)
+        pad-left(to-string(p), 3, "0") ++ "-" ++ lowercase(name)
+    }, namespaces)
 }
 
-/// Count documented functions in a namespace
-fn count-documented(functions) {
+/// Is this a Type-cased underscored protocol/dispatch helper
+/// (e.g. `PersistentMap_get`, `String_format`)?
+fn protocol-method?(name) {
+    if (name == null) || (length(name) == 0) {
+        false
+    } else {
+        let c = substring(name, 0, 1)
+        (c == uppercase(c)) && (c != lowercase(c)) && (index-of(name, "_") != -1)
+    }
+}
+
+// ============================================================================
+// Function noise-filtering & arity collapsing
+// ============================================================================
+
+/// Display name: strip everything from the first "$" onward.
+fn display-name(func) {
+    let name = get(func, "name")
+    let idx = last-index-of(name, "$")
+    if idx == -1 {
+        name
+    } else {
+        // Strip a trailing arity suffix "$N" (digits). A leading "$" with a
+        // non-numeric tail (internal protocol helper) is kept verbatim.
+        let suffix = substring(name, idx + 1, length(name))
+        if (length(suffix) > 0) && (parse-int(suffix) != null) {
+            substring(name, 0, idx)
+        } else {
+            name
+        }
+    }
+}
+
+/// Is this a noise function we should skip entirely?
+/// Skips anonymous lambda literals and internal functions/methods, which are
+/// prefixed with "_" by convention and hidden from docs.
+fn noise-fn?(func) {
+    let name = get(func, "name")
+    name == "<Anonymous>" || starts-with?(name, "_")
+}
+
+/// Collapse a namespace's functions into ordered, de-duplicated groups.
+/// Each group: {:display name, :funcs [all variants]}.
+fn collapse-functions(functions) {
     if functions == null {
-        0
+        []
     } else {
-        length(filter(functions, documented?))
+        let mut seen = []
+        let mut groups = []
+        for func in functions {
+            if noise-fn?(func) {
+                // skip lambda literals
+            } else {
+                let dn = display-name(func)
+                let idx = find-index(fn(s) { s == dn }, seen)
+                if idx == -1 {
+                    let variants = filter(fn(f) {
+                        (noise-fn?(f) == false) && (display-name(f) == dn)
+                    }, functions)
+                    seen = push(seen, dn)
+                    groups = push(groups, {:display dn, :funcs variants})
+                }
+            }
+        }
+        groups
     }
 }
 
-/// Count total functions in a namespace
-fn count-total(functions) {
-    if functions == null { 0 } else { length(functions) }
+/// A group is documented if any variant carries a docstring.
+fn group-documented?(group) {
+    let funcs = get(group, :funcs)
+    any?(fn(f) { get(f, "docstring") != null }, funcs)
+}
+
+fn arg-count(f) {
+    let args = get(f, "arg_names")
+    if args == null { 0 } else { length(args) }
+}
+
+/// Pick the variant with the most argument names as the display representative.
+fn representative(group) {
+    let funcs = get(group, :funcs)
+    let mut best = first-of(funcs)
+    let mut best-n = 0
+    for f in funcs {
+        let n = arg-count(f)
+        if n >= best-n {
+            best = f
+            best-n = n
+        }
+    }
+    best
+}
+
+/// First docstring found among the variants (null if none).
+fn group-docstring(group) {
+    let funcs = get(group, :funcs)
+    let documented = filter(fn(f) { get(f, "docstring") != null }, funcs)
+    if length(documented) == 0 {
+        null
+    } else {
+        get(first-of(documented), "docstring")
+    }
+}
+
+/// Distinct arities across the variants, sorted ascending, as a string list.
+fn group-arities(group) {
+    let funcs = get(group, :funcs)
+    let arities = map(fn(f) {
+        let a = get(f, "arity")
+        if a == null { 0 } else { a }
+    }, funcs)
+    let uniq = distinct(sort(arities))
+    map(fn(a) { to-string(a) }, uniq)
+}
+
+/// Variants sorted ascending by arg count, de-duplicated so each distinct
+/// arity appears exactly once (keeping the first occurrence).
+fn group-distinct-variants(group) {
+    let funcs = get(group, :funcs)
+    let sorted = sort-by(fn(f) { pad-left(to-string(arg-count(f)), 3, "0") }, funcs)
+    let mut seen = []
+    let mut out = []
+    for f in sorted {
+        let n = arg-count(f)
+        let idx = find-index(fn(x) { x == n }, seen)
+        if idx == -1 {
+            seen = push(seen, n)
+            out = push(out, f)
+        }
+    }
+    out
 }
 
 // ============================================================================
-// Function Formatting
+// Markdown (light) rendering
 // ============================================================================
 
-/// Format function signature
-fn format-signature(func) {
-    let name = get(func, "name")
+/// Render `[text](url)` links inside a plain-text run, HTML-escaping the rest.
+fn render-links-go(rest, acc) {
+    let open = index-of(rest, "[")
+    if open == -1 {
+        acc ++ html-escape(rest)
+    } else {
+        let before = substring(rest, 0, open)
+        let tail = substring(rest, open + 1, length(rest))
+        let close = index-of(tail, "]")
+        if close == -1 {
+            acc ++ html-escape(rest)
+        } else {
+            let text = substring(tail, 0, close)
+            let after-close = substring(tail, close + 1, length(tail))
+            if starts-with?(after-close, "(") {
+                let urlpart = substring(after-close, 1, length(after-close))
+                let pclose = index-of(urlpart, ")")
+                if pclose == -1 {
+                    render-links-go(substring(rest, open + 1, length(rest)),
+                        acc ++ html-escape(before) ++ "[")
+                } else {
+                    let url = substring(urlpart, 0, pclose)
+                    let remaining = substring(urlpart, pclose + 1, length(urlpart))
+                    let link = "<a href=\"" ++ html-escape(url) ++ "\" rel=\"noreferrer\">"
+                        ++ html-escape(text) ++ "</a>"
+                    render-links-go(remaining, acc ++ html-escape(before) ++ link)
+                }
+            } else {
+                render-links-go(substring(rest, open + 1, length(rest)),
+                    acc ++ html-escape(before) ++ "[")
+            }
+        }
+    }
+}
+
+/// Inline render: process `code` spans (and links + escaping in between).
+fn render-inline-go(rest, in-code, acc) {
+    let idx = index-of(rest, "`")
+    if idx == -1 {
+        if in-code {
+            acc ++ "<code>" ++ html-escape(rest) ++ "</code>"
+        } else {
+            render-links-go(rest, acc)
+        }
+    } else {
+        let before = substring(rest, 0, idx)
+        let acc2 = if in-code {
+            acc ++ "<code>" ++ html-escape(before) ++ "</code>"
+        } else {
+            render-links-go(before, acc)
+        }
+        render-inline-go(substring(rest, idx + 1, length(rest)), not(in-code), acc2)
+    }
+}
+
+fn render-inline(s) {
+    render-inline-go(s, false, "")
+}
+
+fn strip-leading-hashes(s) {
+    let mut h = s
+    while starts-with?(h, "#") {
+        h = substring(h, 1, length(h))
+    }
+    trim(h)
+}
+
+/// Render a docstring as light markdown:
+///   - fenced ``` code blocks preserved verbatim
+///   - `#`/`##`/... headings
+///   - `- ` / `* ` bullet lists
+///   - blank lines separate paragraphs
+///   - inline `code` -> <code>, and [text](url) links
+fn render-markdown(doc) {
+    if doc == null {
+        ""
+    } else {
+        let lines = split(doc, "\n")
+        let mut out = ""
+        let mut para = ""
+        let mut in-fence = false
+        let mut in-list = false
+        let mut fence = ""
+        for line in lines {
+            let trimmed = trim(line)
+            let is-bullet = starts-with?(trimmed, "- ") || starts-with?(trimmed, "* ")
+            if starts-with?(trimmed, "```") {
+                if trim(para) != "" {
+                    out = out ++ "<p>" ++ render-inline(para) ++ "</p>\n"
+                    para = ""
+                }
+                if in-list {
+                    out = out ++ "</ul>\n"
+                    in-list = false
+                }
+                if in-fence {
+                    out = out ++ "<pre class=\"code-block\"><code>" ++ html-escape(fence) ++ "</code></pre>\n"
+                    fence = ""
+                    in-fence = false
+                } else {
+                    in-fence = true
+                }
+            } else {
+                if in-fence {
+                    fence = fence ++ line ++ "\n"
+                } else {
+                    if is-bullet {
+                        if trim(para) != "" {
+                            out = out ++ "<p>" ++ render-inline(para) ++ "</p>\n"
+                            para = ""
+                        }
+                        if in-list == false {
+                            out = out ++ "<ul class=\"doc-ul\">\n"
+                            in-list = true
+                        }
+                        let item = substring(trimmed, 2, length(trimmed))
+                        out = out ++ "<li>" ++ render-inline(trim(item)) ++ "</li>\n"
+                    } else {
+                        if starts-with?(trimmed, "#") {
+                            if trim(para) != "" {
+                                out = out ++ "<p>" ++ render-inline(para) ++ "</p>\n"
+                                para = ""
+                            }
+                            if in-list {
+                                out = out ++ "</ul>\n"
+                                in-list = false
+                            }
+                            out = out ++ "<h4 class=\"doc-h\">" ++ render-inline(strip-leading-hashes(trimmed)) ++ "</h4>\n"
+                        } else {
+                            if trimmed == "" {
+                                if trim(para) != "" {
+                                    out = out ++ "<p>" ++ render-inline(para) ++ "</p>\n"
+                                    para = ""
+                                }
+                                if in-list {
+                                    out = out ++ "</ul>\n"
+                                    in-list = false
+                                }
+                            } else {
+                                if in-list {
+                                    out = out ++ "</ul>\n"
+                                    in-list = false
+                                }
+                                if para == "" {
+                                    para = trimmed
+                                } else {
+                                    para = para ++ " " ++ trimmed
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if trim(para) != "" {
+            out = out ++ "<p>" ++ render-inline(para) ++ "</p>\n"
+        }
+        if in-list {
+            out = out ++ "</ul>\n"
+        }
+        if in-fence && (fence != "") {
+            out = out ++ "<pre class=\"code-block\"><code>" ++ html-escape(fence) ++ "</code></pre>\n"
+        }
+        out
+    }
+}
+
+// ============================================================================
+// Signature rendering (syntax-tinted)
+// ============================================================================
+
+/// Build a syntax-tinted HTML signature for one specific function variant.
+fn signature-html(func, display) {
     let args = get(func, "arg_names")
-    let is-variadic = get(func, "is_variadic")
+    let is-variadic = truthy?(get(func, "is_variadic"))
 
-    if args == null || length(args) == 0 {
+    let mut inner = ""
+    if args != null && (length(args) > 0) {
+        let mut i = 0
+        let n = length(args)
+        for arg in args {
+            inner = inner ++ "<span class=\"s-arg\">" ++ html-escape(arg) ++ "</span>"
+            if i < (n - 1) {
+                inner = inner ++ "<span class=\"s-punct\">, </span>"
+            }
+            i = i + 1
+        }
         if is-variadic {
-            name ++ "(...args)"
-        } else {
-            name ++ "()"
+            inner = inner ++ "<span class=\"s-punct\">, </span><span class=\"s-rest\">...</span>"
         }
     } else {
-        let args-str = join(args, ", ")
         if is-variadic {
-            name ++ "(" ++ args-str ++ ", ...)"
-        } else {
-            name ++ "(" ++ args-str ++ ")"
+            inner = inner ++ "<span class=\"s-rest\">...</span>"
         }
+    }
+
+    "<span class=\"s-fn\">" ++ html-escape(display) ++ "</span>"
+        ++ "<span class=\"s-punct\">(</span>"
+        ++ inner
+        ++ "<span class=\"s-punct\">)</span>"
+}
+
+/// Plain-text signature for search indexing.
+fn signature-text(func, display) {
+    let args = get(func, "arg_names")
+    let is-variadic = truthy?(get(func, "is_variadic"))
+    let args-str = if args == null { "" } else { join(args, ", ") }
+    let tail = if is-variadic {
+        if args-str == "" { "..." } else { args-str ++ ", ..." }
+    } else {
+        args-str
+    }
+    display ++ "(" ++ tail ++ ")"
+}
+
+// ============================================================================
+// Function card
+// ============================================================================
+
+fn source-link(func) {
+    let file = get(func, "source_file")
+    let line = get(func, "source_line")
+    if (file != null) && (line != null) {
+        let parts = split(file, "/")
+        let base = last(parts)
+        // Clickable: opens the source file in the browser; #L<n> mirrors the
+        // GitHub line-anchor convention so a real repo URL drops in cleanly.
+        "<a class=\"src\" href=\"file://" ++ html-escape(file) ++ "#L" ++ to-string(line)
+            ++ "\" title=\"" ++ html-escape(file ++ ":" ++ to-string(line)) ++ "\">"
+            ++ html-escape(base) ++ ":" ++ to-string(line) ++ "</a>"
+    } else {
+        ""
     }
 }
 
-/// Generate HTML for a single function
-fn html-function(func) {
-    let sig = format-signature(func)
-    let doc = get(func, "docstring")
-    let is-builtin = get(func, "is_builtin")
-    let name = get(func, "name")
-
-    let mut result = "<div class=\"function\" id=\"fn-" ++ html-escape(name) ++ "\">\n"
-    result = result ++ "  <div class=\"function-header\">\n"
-    result = result ++ "    <code class=\"signature\">" ++ html-escape(sig) ++ "</code>\n"
-
-    if is-builtin {
-        result = result ++ "    <span class=\"badge builtin\">builtin</span>\n"
+/// Render the badge cluster shared by cards and undocumented items.
+fn badges-html(func, display, arities) {
+    let is-builtin = truthy?(get(func, "is_builtin"))
+    let is-variadic = truthy?(get(func, "is_variadic"))
+    let is-method = protocol-method?(display)
+    let mut out = ""
+    if is-method {
+        out = out ++ "<span class=\"badge method\">method</span>"
     }
+    if is-builtin {
+        out = out ++ "<span class=\"badge builtin\">builtin</span>"
+    }
+    if is-variadic {
+        out = out ++ "<span class=\"badge variadic\">variadic</span>"
+    }
+    if length(arities) > 1 {
+        out = out ++ "<span class=\"badge arities\">arities " ++ html-escape(join(arities, ", ")) ++ "</span>"
+    }
+    out
+}
 
+fn html-card(group, ns-anchor) {
+    let rep = representative(group)
+    let display = get(group, :display)
+    let doc = group-docstring(group)
+    let arities = group-arities(group)
+    let variants = group-distinct-variants(group)
+
+    let search-text = lowercase(signature-text(rep, display) ++ " " ++ (if doc == null { "" } else { doc }))
+
+    let mut result = "<article class=\"card\" id=\"fn-" ++ html-escape(lower-kebab(ns-anchor) ++ "-" ++ display)
+        ++ "\" data-search=\"" ++ html-escape(search-text) ++ "\">\n"
+    result = result ++ "  <div class=\"card-head\">\n"
+
+    // One signature line per distinct arity (the 1-arg shape is not lost).
+    result = result ++ "    <div class=\"sigs\">\n"
+    for v in variants {
+        result = result ++ "      <code class=\"sig\">" ++ signature-html(v, display) ++ "</code>\n"
+    }
+    result = result ++ "    </div>\n"
+
+    result = result ++ "    <span class=\"badges\">" ++ badges-html(rep, display, arities) ++ "</span>\n"
+    result = result ++ "    " ++ source-link(rep) ++ "\n"
     result = result ++ "  </div>\n"
 
     if doc != null {
-        result = result ++ "  <div class=\"docstring\">" ++ html-escape(doc) ++ "</div>\n"
-    } else {
-        result = result ++ "  <div class=\"docstring undocumented\">No documentation available.</div>\n"
+        result = result ++ "  <div class=\"doc\">" ++ render-markdown(doc) ++ "</div>\n"
     }
 
-    result = result ++ "</div>\n"
+    result = result ++ "</article>\n"
     result
 }
 
+/// A single undocumented entry (used inside the collapsed group). Surfaces the
+/// signature shape plus builtin/variadic/method/arity badges.
+fn html-undoc-item(group, ns-anchor) {
+    let rep = representative(group)
+    let display = get(group, :display)
+    let arities = group-arities(group)
+    let variants = group-distinct-variants(group)
+    let search-text = lowercase(signature-text(rep, display))
+    // One sig per distinct arity so the 1-arg shape is not lost when a
+    // multi-arity badge appears.
+    let mut sigs = ""
+    for v in variants {
+        sigs = sigs ++ "<code>" ++ signature-html(v, display) ++ "</code>"
+    }
+    "      <li class=\"undoc-item\" data-search=\"" ++ html-escape(search-text) ++ "\">"
+        ++ "<span class=\"undoc-sigs\">" ++ sigs ++ "</span>"
+        ++ "<span class=\"badges mini\">" ++ badges-html(rep, display, arities) ++ "</span>"
+        ++ "</li>\n"
+}
+
 // ============================================================================
-// Namespace Formatting
+// Namespace model (collapse computed ONCE, threaded through everything)
 // ============================================================================
 
-/// Generate HTML for a namespace
-fn html-namespace(ns) {
+fn build-ns-model(ns) {
     let ns-name = get(ns, "name")
-    let functions = get(ns, "functions")
+    let groups = collapse-functions(get(ns, "functions"))
+    let documented = filter(group-documented?, groups)
+    let undocumented = filter(fn(g) { group-documented?(g) == false }, groups)
+    {
+        :name ns-name,
+        :anchor lower-kebab(ns-name),
+        :groups groups,
+        :documented documented,
+        :undocumented undocumented,
+        :total length(groups),
+        :doc-count length(documented)
+    }
+}
 
-    let documented-count = count-documented(functions)
-    let total-count = count-total(functions)
-    let pct = if total-count > 0 { (documented-count * 100) / total-count } else { 0 }
+fn html-namespace(model) {
+    let ns-name = get(model, :name)
+    let anchor = get(model, :anchor)
+    let documented = get(model, :documented)
+    let undocumented = get(model, :undocumented)
+    let total = get(model, :total)
+    let doc-count = get(model, :doc-count)
 
-    let mut result = "<section class=\"namespace\" id=\"" ++ lower-kebab(ns-name) ++ "\">\n"
-    result = result ++ "  <h2>" ++ html-escape(ns-name) ++ "</h2>\n"
+    let pct = if total > 0 { (doc-count * 100) / total } else { 0 }
+    let badge-class = if pct >= 80 { "good" } else { if pct >= 40 { "medium" } else { "low" } }
 
-    // Coverage badge
-    let badge-class = if pct >= 80 { "good" } else { if pct >= 50 { "medium" } else { "low" } }
-    result = result ++ "  <div class=\"coverage " ++ badge-class ++ "\">"
-    result = result ++ to-string(documented-count) ++ "/" ++ to-string(total-count)
-    result = result ++ " functions documented (" ++ to-string(pct) ++ "%)</div>\n"
+    let mut parts = []
+    parts = push(parts, "<section class=\"ns\" id=\"" ++ anchor ++ "\" data-ns=\"" ++ html-escape(lowercase(ns-name)) ++ "\">\n")
+    parts = push(parts, "  <div class=\"ns-head\">\n")
+    parts = push(parts, "    <h2><a class=\"anchor\" href=\"#" ++ anchor ++ "\">#</a>"
+        ++ html-escape(ns-name) ++ "</h2>\n")
+    parts = push(parts, "    <span class=\"cov " ++ badge-class ++ "\">"
+        ++ to-string(doc-count) ++ "/" ++ to-string(total) ++ " documented</span>\n")
+    parts = push(parts, "  </div>\n")
 
-    if functions != null && length(functions) > 0 {
-        // Documented functions
-        let documented-fns = filter(functions, documented?)
-        if length(documented-fns) > 0 {
-            result = result ++ "  <div class=\"functions-list\">\n"
-            for func in documented-fns {
-                result = result ++ html-function(func)
-            }
-            result = result ++ "  </div>\n"
-        }
-
-        // Undocumented functions in collapsible section
-        let undocumented-fns = filter(functions, fn(f) { not(documented?(f)) })
-        if length(undocumented-fns) > 0 {
-            result = result ++ "  <details class=\"undocumented-section\">\n"
-            result = result ++ "    <summary>Undocumented functions (" ++ to-string(length(undocumented-fns)) ++ ")</summary>\n"
-            result = result ++ "    <ul class=\"undocumented-list\">\n"
-            for func in undocumented-fns {
-                let sig = format-signature(func)
-                result = result ++ "      <li><code>" ++ html-escape(sig) ++ "</code></li>\n"
-            }
-            result = result ++ "    </ul>\n"
-            result = result ++ "  </details>\n"
-        }
+    for group in documented {
+        parts = push(parts, html-card(group, anchor))
     }
 
-    result = result ++ "</section>\n"
-    result
+    if length(undocumented) > 0 {
+        parts = push(parts, "  <details class=\"undoc\">\n")
+        parts = push(parts, "    <summary>" ++ to-string(length(undocumented)) ++ " undocumented</summary>\n")
+        parts = push(parts, "    <ul class=\"undoc-list\">\n")
+        for group in undocumented {
+            parts = push(parts, html-undoc-item(group, anchor))
+        }
+        parts = push(parts, "    </ul>\n")
+        parts = push(parts, "  </details>\n")
+    }
+
+    parts = push(parts, "</section>\n")
+    join(parts, "")
 }
 
 // ============================================================================
-// Struct and Enum Formatting
+// Structs & Enums
 // ============================================================================
 
-/// Generate HTML for a struct
 fn html-struct(s) {
     let s-name = get(s, "name")
-    let mut result = "<div class=\"type-def\">\n"
-    result = result ++ "  <h4>" ++ html-escape(s-name) ++ "</h4>\n"
+    let search-text = lowercase(s-name ++ " " ++ or-empty(get(s, "docstring")))
+    let mut result = "<article class=\"card type-card\" data-search=\"" ++ html-escape(search-text) ++ "\">\n"
+    result = result ++ "  <div class=\"card-head\"><code class=\"sig\"><span class=\"s-type\">"
+        ++ html-escape(s-name) ++ "</span></code></div>\n"
 
     let docstring = get(s, "docstring")
     if docstring != null {
-        result = result ++ "  <p class=\"type-doc\">" ++ html-escape(docstring) ++ "</p>\n"
+        result = result ++ "  <div class=\"doc\">" ++ render-markdown(docstring) ++ "</div>\n"
     }
 
     let fields = get(s, "fields")
-    if fields != null && length(fields) > 0 {
-        result = result ++ "  <div class=\"fields\"><strong>Fields:</strong>\n"
-        result = result ++ "    <ul>\n"
+    if (fields != null) && (length(fields) > 0) {
+        result = result ++ "  <ul class=\"members\">\n"
         for field in fields {
             let field-name = get(field, "name")
-            let is-mutable = get(field, "mutable")
-            result = result ++ "      <li><code>" ++ html-escape(field-name) ++ "</code>"
+            let is-mutable = truthy?(get(field, "mutable"))
+            result = result ++ "    <li><code class=\"member\">" ++ html-escape(field-name) ++ "</code>"
             if is-mutable {
-                result = result ++ " <span class=\"badge mutable\">mutable</span>"
+                result = result ++ " <span class=\"badge mutable\">mut</span>"
             }
             let field-doc = get(field, "docstring")
             if field-doc != null {
-                result = result ++ " - " ++ html-escape(field-doc)
+                result = result ++ " <span class=\"member-doc\">" ++ html-escape(field-doc) ++ "</span>"
             }
             result = result ++ "</li>\n"
         }
-        result = result ++ "    </ul>\n"
-        result = result ++ "  </div>\n"
+        result = result ++ "  </ul>\n"
     }
 
-    result = result ++ "</div>\n"
+    result = result ++ "</article>\n"
     result
 }
 
-/// Generate HTML for an enum
 fn html-enum(e) {
     let e-name = get(e, "name")
-    let mut result = "<div class=\"type-def\">\n"
-    result = result ++ "  <h4>" ++ html-escape(e-name) ++ "</h4>\n"
+    let search-text = lowercase(e-name ++ " " ++ or-empty(get(e, "docstring")))
+    let mut result = "<article class=\"card type-card\" data-search=\"" ++ html-escape(search-text) ++ "\">\n"
+    result = result ++ "  <div class=\"card-head\"><code class=\"sig\"><span class=\"s-type\">"
+        ++ html-escape(e-name) ++ "</span></code></div>\n"
 
     let docstring = get(e, "docstring")
     if docstring != null {
-        result = result ++ "  <p class=\"type-doc\">" ++ html-escape(docstring) ++ "</p>\n"
+        result = result ++ "  <div class=\"doc\">" ++ render-markdown(docstring) ++ "</div>\n"
     }
 
     let variants = get(e, "variants")
-    if variants != null && length(variants) > 0 {
-        result = result ++ "  <div class=\"variants\"><strong>Variants:</strong>\n"
-        result = result ++ "    <ul>\n"
+    if (variants != null) && (length(variants) > 0) {
+        result = result ++ "  <ul class=\"members\">\n"
         for variant in variants {
             let v-name = get(variant, "name")
             let v-fields = get(variant, "fields")
-            if v-fields != null && length(v-fields) > 0 {
+            if (v-fields != null) && (length(v-fields) > 0) {
                 let fields-str = join(v-fields, ", ")
-                result = result ++ "      <li><code>" ++ html-escape(v-name) ++ " { " ++ html-escape(fields-str) ++ " }</code></li>\n"
+                result = result ++ "    <li><code class=\"member\">" ++ html-escape(v-name)
+                    ++ " { " ++ html-escape(fields-str) ++ " }</code></li>\n"
             } else {
-                result = result ++ "      <li><code>" ++ html-escape(v-name) ++ "</code></li>\n"
+                result = result ++ "    <li><code class=\"member\">" ++ html-escape(v-name) ++ "</code></li>\n"
             }
         }
-        result = result ++ "    </ul>\n"
-        result = result ++ "  </div>\n"
+        result = result ++ "  </ul>\n"
     }
 
-    result = result ++ "</div>\n"
+    result = result ++ "</article>\n"
     result
 }
 
 // ============================================================================
-// CSS Styles
+// Sidebar
+// ============================================================================
+
+fn sidebar-entry(model) {
+    let ns-name = get(model, :name)
+    let anchor = get(model, :anchor)
+    let total = get(model, :total)
+    let doc-count = get(model, :doc-count)
+    "      <li class=\"nav-item\" data-search=\"" ++ html-escape(lowercase(ns-name)) ++ "\">"
+        ++ "<a href=\"#" ++ anchor ++ "\" data-target=\"" ++ anchor ++ "\">"
+        ++ "<span class=\"nav-name\">" ++ html-escape(ns-name) ++ "</span>"
+        ++ "<span class=\"nav-count\">" ++ to-string(doc-count) ++ "/" ++ to-string(total) ++ "</span>"
+        ++ "</a></li>\n"
+}
+
+fn generate-sidebar(models, has-structs, has-enums) {
+    let mut parts = []
+    parts = push(parts, "<aside class=\"sidebar\" id=\"sidebar\">\n")
+    parts = push(parts, "  <div class=\"sidebar-inner\">\n")
+    parts = push(parts, "    <div class=\"nav-section-label\">Namespaces</div>\n")
+    parts = push(parts, "    <ul class=\"nav-list\">\n")
+    for model in models {
+        parts = push(parts, sidebar-entry(model))
+    }
+    parts = push(parts, "    </ul>\n")
+
+    if has-structs || has-enums {
+        parts = push(parts, "    <div class=\"nav-section-label\">Types</div>\n")
+        parts = push(parts, "    <ul class=\"nav-list\">\n")
+        if has-structs {
+            parts = push(parts, "      <li class=\"nav-item\" data-search=\"structs\"><a href=\"#structs\" data-target=\"structs\"><span class=\"nav-name\">Structs</span></a></li>\n")
+        }
+        if has-enums {
+            parts = push(parts, "      <li class=\"nav-item\" data-search=\"enums\"><a href=\"#enums\" data-target=\"enums\"><span class=\"nav-name\">Enums</span></a></li>\n")
+        }
+        parts = push(parts, "    </ul>\n")
+    }
+
+    parts = push(parts, "  </div>\n")
+    parts = push(parts, "</aside>\n")
+    join(parts, "")
+}
+
+// ============================================================================
+// Stats
+// ============================================================================
+
+fn calc-stats(models) {
+    let mut total = 0
+    let mut documented = 0
+    for model in models {
+        total = total + get(model, :total)
+        documented = documented + get(model, :doc-count)
+    }
+    {:total total, :documented documented}
+}
+
+// ============================================================================
+// CSS
 // ============================================================================
 
 fn get-css() {
     "
-* {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
+:root {
+  --bg: #0d1117;
+  --bg-elev: #161b22;
+  --bg-card: #161b22;
+  --bg-hover: #1f2630;
+  --border: #2b3340;
+  --border-soft: #21272f;
+  --text: #e6edf3;
+  --text-dim: #9aa7b4;
+  --text-faint: #6e7b8a;
+  --accent: #58a6ff;
+  --accent-soft: rgba(88,166,255,0.12);
+  --fn: #d2a8ff;
+  --arg: #79c0ff;
+  --type: #7ee787;
+  --punct: #8b98a5;
+  --rest: #ffa657;
+  --method: #ff7b72;
+  --code-bg: #1b2230;
+  --track: #21272f;
+  --shadow: 0 1px 3px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.18);
+  --topbar-h: 60px;
+  --sidebar-w: 280px;
 }
+html[data-theme='light'] {
+  --bg: #ffffff;
+  --bg-elev: #f6f8fa;
+  --bg-card: #ffffff;
+  --bg-hover: #eef1f5;
+  --border: #d0d7de;
+  --border-soft: #e6e9ee;
+  --text: #1f2328;
+  --text-dim: #59636e;
+  --text-faint: #818b96;
+  --accent: #0969da;
+  --accent-soft: rgba(9,105,218,0.10);
+  --fn: #8250df;
+  --arg: #0550ae;
+  --type: #1a7f37;
+  --punct: #6e7781;
+  --rest: #bc4c00;
+  --method: #cf222e;
+  --code-bg: #f0f3f6;
+  --track: #e6e9ee;
+  --shadow: 0 1px 2px rgba(31,35,40,0.06), 0 4px 16px rgba(31,35,40,0.06);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scroll-behavior: smooth; }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
-    background: #ffffff;
-    color: #24292f;
-    line-height: 1.6;
-    font-size: 16px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
 }
 
-.container {
-    display: flex;
-    min-height: 100vh;
+code, .sig, .mono {
+  font-family: 'SF Mono', 'JetBrains Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
 }
 
-/* Sidebar */
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Top bar */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  height: var(--topbar-h);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 20px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(6px);
+}
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 16px;
+  white-space: nowrap;
+}
+.brand .dot { color: var(--accent); }
+.brand .sub { color: var(--text-faint); font-weight: 500; font-size: 12px; }
+
+.hamburger {
+  display: none;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  width: 38px;
+  height: 38px;
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.search-wrap { flex: 1; max-width: 520px; position: relative; }
+.search-wrap .magnifier {
+  position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+  color: var(--text-faint); pointer-events: none; font-size: 14px;
+}
+.search-wrap .kbd {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  color: var(--text-faint); pointer-events: none; font-size: 11px;
+  border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px;
+  background: var(--bg-elev);
+}
+#search {
+  width: 100%;
+  padding: 9px 38px 9px 34px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+#search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.topbar-stat {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.topbar-stat strong { color: var(--text); }
+
+.theme-toggle {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 10px;
+  width: 38px; height: 38px;
+  cursor: pointer;
+  font-size: 17px;
+  line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.theme-toggle:hover { background: var(--bg-hover); }
+/* FOUC-proof glyph: driven purely by data-theme set before <style> loads. */
+.theme-toggle::before { content: '\2600'; }            /* sun (dark -> light) */
+html[data-theme='light'] .theme-toggle::before { content: '\263D'; } /* moon */
+
+/* Layout */
+.layout { display: flex; align-items: flex-start; }
+
 .sidebar {
-    width: 260px;
-    background: #f6f8fa;
-    border-right: 1px solid #d0d7de;
-    position: fixed;
-    height: 100vh;
-    overflow-y: auto;
-    padding: 20px;
+  width: var(--sidebar-w);
+  flex: 0 0 var(--sidebar-w);
+  position: sticky;
+  top: var(--topbar-h);
+  height: calc(100vh - var(--topbar-h));
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  background: var(--bg-elev);
 }
-
-.sidebar h1 {
-    font-size: 20px;
-    font-weight: 600;
-    margin-bottom: 16px;
-    color: #24292f;
+.sidebar-inner { padding: 18px 12px 60px; }
+.nav-section-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-faint);
+  font-weight: 700;
+  margin: 18px 10px 8px;
 }
-
-.sidebar h1 span {
-    color: #0969da;
+.nav-section-label:first-child { margin-top: 4px; }
+.nav-list { list-style: none; }
+.nav-item a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  color: var(--text-dim);
+  font-size: 13.5px;
+  border-left: 2px solid transparent;
 }
-
-.search-box {
-    width: 100%;
-    padding: 8px 12px;
-    border: 1px solid #d0d7de;
-    border-radius: 6px;
-    background: #ffffff;
-    color: #24292f;
-    font-size: 14px;
-    margin-bottom: 16px;
+.nav-item a:hover { background: var(--bg-hover); color: var(--text); text-decoration: none; }
+.nav-item a.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-left-color: var(--accent);
+  font-weight: 600;
 }
-
-.search-box:focus {
-    outline: none;
-    border-color: #0969da;
-    box-shadow: 0 0 0 3px rgba(9, 105, 218, 0.1);
+.nav-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-count {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 20px;
+  padding: 1px 7px;
+  flex: 0 0 auto;
 }
+.nav-item a.active .nav-count { color: var(--accent); border-color: var(--accent); }
 
-.nav-section {
-    margin-bottom: 20px;
-}
-
-.nav-section h3 {
-    font-size: 12px;
-    font-weight: 600;
-    text-transform: uppercase;
-    color: #57606a;
-    margin-bottom: 8px;
-    letter-spacing: 0.5px;
-}
-
-.nav-list {
-    list-style: none;
-}
-
-.nav-list li {
-    margin: 2px 0;
-}
-
-.nav-list a {
-    display: block;
-    padding: 6px 10px;
-    color: #24292f;
-    text-decoration: none;
-    border-radius: 6px;
-    font-size: 14px;
-    transition: background 0.15s;
-}
-
-.nav-list a:hover {
-    background: #eaeef2;
-}
-
-.nav-list .coverage-indicator {
-    font-size: 12px;
-    color: #57606a;
-    margin-left: 4px;
-}
-
-/* Main content */
+/* Main */
 .main {
-    margin-left: 260px;
-    padding: 40px 60px;
-    max-width: 1000px;
-    flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 32px 40px 120px;
+  max-width: 1080px;
+}
+.page-head { margin-bottom: 28px; }
+.page-head h1 { font-size: 30px; font-weight: 800; letter-spacing: -0.01em; }
+.page-head p { color: var(--text-dim); margin-top: 6px; }
+
+/* Coverage progress bar */
+.coverage {
+  margin-top: 18px;
+  max-width: 520px;
+}
+.coverage-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.coverage-top strong { color: var(--text); font-size: 13px; }
+.coverage-track {
+  height: 8px;
+  border-radius: 20px;
+  background: var(--track);
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+}
+.coverage-fill {
+  height: 100%;
+  border-radius: 20px;
+  background: linear-gradient(90deg, #3fb950, #58a6ff);
+  transition: width 0.3s ease;
 }
 
-.main h1 {
-    font-size: 32px;
-    font-weight: 600;
-    margin-bottom: 8px;
-    color: #24292f;
+.no-results {
+  display: none;
+  padding: 40px;
+  text-align: center;
+  color: var(--text-dim);
 }
-
-.main .subtitle {
-    color: #57606a;
-    margin-bottom: 32px;
-    font-size: 16px;
-}
-
-.overall-coverage {
-    background: #f6f8fa;
-    padding: 16px 20px;
-    border-radius: 6px;
-    margin-bottom: 32px;
-    border: 1px solid #d0d7de;
-    font-size: 14px;
-}
-
-/* Quick start */
-.quick-start {
-    background: #f6f8fa;
-    border-radius: 6px;
-    padding: 20px 24px;
-    margin-bottom: 40px;
-    border: 1px solid #d0d7de;
-}
-
-.quick-start h2 {
-    font-size: 18px;
-    font-weight: 600;
-    margin-bottom: 16px;
-}
-
-.quick-start pre {
-    background: #24292f;
-    color: #e6edf3;
-    padding: 16px;
-    border-radius: 6px;
-    overflow-x: auto;
-    font-size: 13px;
-    line-height: 1.5;
-}
-
-.quick-start code {
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
-}
+.no-results.show { display: block; }
 
 /* Namespace sections */
-.namespace {
-    margin-bottom: 48px;
-    scroll-margin-top: 20px;
+.ns {
+  margin-bottom: 44px;
+  scroll-margin-top: calc(var(--topbar-h) + 12px);
 }
-
-.namespace h2 {
-    font-size: 24px;
-    font-weight: 600;
-    color: #24292f;
-    padding-bottom: 8px;
-    margin-bottom: 16px;
-    border-bottom: 1px solid #d0d7de;
+.ns-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 10px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
 }
-
-.coverage {
-    display: inline-block;
-    padding: 4px 12px;
-    border-radius: 20px;
-    font-size: 12px;
-    font-weight: 500;
-    margin-bottom: 16px;
+.ns-head h2 {
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
-
-.coverage.good { background: #dafbe1; color: #116329; }
-.coverage.medium { background: #fff8c5; color: #6c4f00; }
-.coverage.low { background: #ffebe9; color: #82071e; }
-
-/* Function entries */
-.function {
-    padding: 16px 0;
-    border-bottom: 1px solid #eaeef2;
+.anchor {
+  color: var(--text-faint);
+  margin-right: 8px;
+  font-weight: 400;
+  opacity: 0;
+  transition: opacity 0.12s;
 }
+.ns-head:hover .anchor { opacity: 1; }
 
-.function:last-child {
-    border-bottom: none;
+.cov {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 20px;
+  white-space: nowrap;
 }
+.cov.good { background: rgba(63,185,80,0.15); color: #3fb950; }
+.cov.medium { background: rgba(210,153,34,0.15); color: #d29922; }
+.cov.low { background: rgba(248,81,73,0.15); color: #f85149; }
+html[data-theme='light'] .cov.good { background: #dafbe1; color: #1a7f37; }
+html[data-theme='light'] .cov.medium { background: #fff8c5; color: #9a6700; }
+html[data-theme='light'] .cov.low { background: #ffebe9; color: #cf222e; }
 
-.function-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 8px;
+/* Cards */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+  box-shadow: var(--shadow);
+  transition: border-color 0.12s;
 }
-
-.signature {
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
-    font-size: 14px;
-    font-weight: 600;
-    color: #0550ae;
+.card:hover { border-color: var(--border); }
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
+.sigs { display: flex; flex-direction: column; gap: 3px; }
+.sig { font-size: 14px; font-weight: 600; }
+.s-fn { color: var(--fn); font-weight: 700; }
+.s-arg { color: var(--arg); }
+.s-punct { color: var(--punct); }
+.s-rest { color: var(--rest); }
+.s-type { color: var(--type); font-weight: 700; }
 
+.badges { display: inline-flex; gap: 5px; flex-wrap: wrap; }
 .badge {
-    font-size: 10px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    text-transform: uppercase;
-    font-weight: 600;
-    letter-spacing: 0.3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.badge.builtin { background: var(--accent-soft); color: var(--accent); }
+.badge.variadic { background: rgba(255,166,87,0.14); color: var(--rest); }
+.badge.arities { background: rgba(126,231,135,0.12); color: var(--type); }
+.badge.method { background: rgba(255,123,114,0.14); color: var(--method); }
+.badge.mutable { background: rgba(210,153,34,0.16); color: #d29922; }
+.badges.mini { margin-left: 6px; }
+.badges.mini .badge { font-size: 9px; padding: 1px 5px; }
+
+.src {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-faint);
+  font-family: 'SF Mono', monospace;
+  white-space: nowrap;
+}
+.src:hover { color: var(--accent); }
+
+.doc {
+  margin-top: 10px;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+.doc p { margin: 0 0 8px; }
+.doc p:last-child { margin-bottom: 0; }
+.doc .doc-h {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  margin: 12px 0 6px;
+}
+.doc .doc-ul { margin: 6px 0 10px 18px; }
+.doc .doc-ul li { margin: 3px 0; }
+.doc a { color: var(--accent); }
+.doc code {
+  background: var(--code-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  padding: 1px 5px;
+  font-size: 12.5px;
+  color: var(--text);
+}
+.doc .code-block {
+  background: var(--code-bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 8px 0;
+  overflow-x: auto;
+}
+.doc .code-block code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 12.5px;
+  color: var(--text);
+  white-space: pre;
 }
 
-.badge.builtin {
-    background: #ddf4ff;
-    color: #0969da;
+/* Members (struct fields / enum variants) */
+.members { list-style: none; margin-top: 10px; }
+.members li {
+  padding: 5px 0;
+  border-top: 1px solid var(--border-soft);
+  font-size: 13.5px;
+  color: var(--text-dim);
 }
+.member { color: var(--arg); font-size: 13px; }
+.member-doc { color: var(--text-dim); }
 
-.badge.mutable {
-    background: #fff8c5;
-    color: #6c4f00;
+/* Undocumented */
+.undoc {
+  margin-top: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 8px 14px;
+  background: transparent;
 }
+.undoc summary {
+  cursor: pointer;
+  color: var(--text-faint);
+  font-size: 13px;
+  font-weight: 600;
+  user-select: none;
+}
+.undoc summary:hover { color: var(--text-dim); }
+.undoc-list {
+  list-style: none;
+  margin-top: 10px;
+  columns: 2;
+  column-gap: 24px;
+}
+.undoc-item {
+  margin: 4px 0;
+  break-inside: avoid;
+  font-size: 12.5px;
+  opacity: 0.85;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.undoc-item code { font-size: 12px; }
+.undoc-sigs { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; }
 
-.docstring {
-    color: #57606a;
-    white-space: pre-wrap;
-    font-size: 14px;
-    line-height: 1.6;
-    padding-left: 0;
-}
+.hidden { display: none !important; }
 
-.docstring.undocumented {
-    font-style: italic;
-    color: #8c959f;
-}
-
-/* Undocumented section */
-.undocumented-section {
-    margin-top: 20px;
-    background: #f6f8fa;
-    border: 1px solid #d0d7de;
-    border-radius: 6px;
-    padding: 12px 16px;
-}
-
-.undocumented-section summary {
-    cursor: pointer;
-    font-weight: 500;
-    font-size: 14px;
-    color: #57606a;
-}
-
-.undocumented-section summary:hover {
-    color: #24292f;
-}
-
-.undocumented-list {
-    margin-top: 12px;
-    padding-left: 20px;
-    columns: 2;
-    column-gap: 24px;
-}
-
-.undocumented-list li {
-    margin: 4px 0;
-    font-size: 13px;
-    break-inside: avoid;
-}
-
-.undocumented-list code {
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
-    font-size: 12px;
-    color: #57606a;
-}
-
-/* Types section */
-.types-section, .enums-section {
-    margin-bottom: 48px;
-    scroll-margin-top: 20px;
-}
-
-.types-section h2, .enums-section h2 {
-    font-size: 24px;
-    font-weight: 600;
-    padding-bottom: 8px;
-    margin-bottom: 16px;
-    border-bottom: 1px solid #d0d7de;
-}
-
-.types-section > p, .enums-section > p {
-    color: #57606a;
-    margin-bottom: 16px;
-    font-size: 14px;
-}
-
-.type-def {
-    padding: 16px 0;
-    border-bottom: 1px solid #eaeef2;
-}
-
-.type-def:last-child {
-    border-bottom: none;
-}
-
-.type-def h4 {
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
-    font-size: 14px;
-    font-weight: 600;
-    color: #0550ae;
-    margin-bottom: 8px;
-}
-
-.type-doc {
-    color: #57606a;
-    margin-bottom: 8px;
-    font-size: 14px;
-}
-
-.fields, .variants {
-    margin-top: 8px;
-    font-size: 14px;
-}
-
-.fields strong, .variants strong {
-    font-weight: 500;
-    color: #24292f;
-}
-
-.fields ul, .variants ul {
-    margin-top: 4px;
-    padding-left: 20px;
-}
-
-.fields li, .variants li {
-    margin: 4px 0;
-    color: #57606a;
-}
-
-.fields code, .variants code {
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
-    font-size: 13px;
-}
+/* Scrollbar */
+.sidebar::-webkit-scrollbar { width: 9px; }
+.sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+.sidebar::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
 
 /* Responsive */
-@media (max-width: 900px) {
-    .sidebar {
-        width: 220px;
-    }
-    .main {
-        margin-left: 220px;
-        padding: 24px 32px;
-    }
+@media (max-width: 1000px) {
+  .main { padding: 24px 24px 100px; }
 }
-
-@media (max-width: 700px) {
-    .container {
-        flex-direction: column;
-    }
-    .sidebar {
-        position: relative;
-        width: 100%;
-        height: auto;
-        border-right: none;
-        border-bottom: 1px solid #d0d7de;
-    }
-    .main {
-        margin-left: 0;
-        padding: 24px;
-    }
-    .undocumented-list {
-        columns: 1;
-    }
-}
-
-/* Search */
-.function.hidden {
-    display: none;
-}
-
-/* Scrollbar styling */
-.sidebar::-webkit-scrollbar {
-    width: 8px;
-}
-
-.sidebar::-webkit-scrollbar-track {
-    background: transparent;
-}
-
-.sidebar::-webkit-scrollbar-thumb {
-    background: #d0d7de;
-    border-radius: 4px;
-}
-
-.sidebar::-webkit-scrollbar-thumb:hover {
-    background: #8c959f;
+@media (max-width: 820px) {
+  .hamburger { display: inline-flex; }
+  .topbar-stat { display: none; }
+  .search-wrap .kbd { display: none; }
+  .sidebar {
+    position: fixed;
+    top: var(--topbar-h);
+    left: 0;
+    height: calc(100vh - var(--topbar-h));
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    z-index: 40;
+    box-shadow: var(--shadow);
+  }
+  .sidebar.open { transform: translateX(0); }
+  .main { padding: 20px 16px 100px; }
+  .undoc-list { columns: 1; }
 }
 "
 }
 
 // ============================================================================
-// JavaScript for Search
+// JS
 // ============================================================================
+
+/// Tiny head script: restore the saved theme BEFORE the stylesheet paints so a
+/// user who saved 'light' never sees a dark flash (FOUC).
+fn get-theme-script() {
+    "
+(function () {
+  try {
+    var saved = localStorage.getItem('beagle-theme');
+    if (saved === 'light' || saved === 'dark') {
+      document.documentElement.setAttribute('data-theme', saved);
+    }
+  } catch (e) {}
+})();
+"
+}
 
 fn get-js() {
     "
-document.addEventListener('DOMContentLoaded', function() {
-    const searchBox = document.querySelector('.search-box');
-    const functions = document.querySelectorAll('.function');
+(function () {
+  var root = document.documentElement;
+  var STORE = 'beagle-theme';
 
-    searchBox.addEventListener('input', function(e) {
-        const query = e.target.value.toLowerCase();
+  document.addEventListener('DOMContentLoaded', function () {
+    var toggle = document.getElementById('theme-toggle');
+    if (toggle) {
+      toggle.title = 'Toggle theme';
+      toggle.addEventListener('click', function () {
+        var next = root.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+        root.setAttribute('data-theme', next);
+        try { localStorage.setItem(STORE, next); } catch (e) {}
+      });
+    }
 
-        functions.forEach(function(fn) {
-            const signature = fn.querySelector('.signature');
-            const docstring = fn.querySelector('.docstring');
-            const sigText = signature ? signature.textContent.toLowerCase() : '';
-            const docText = docstring ? docstring.textContent.toLowerCase() : '';
-
-            if (query === '' || sigText.includes(query) || docText.includes(query)) {
-                fn.classList.remove('hidden');
-            } else {
-                fn.classList.add('hidden');
-            }
-        });
+    var hamburger = document.getElementById('hamburger');
+    var sidebar = document.getElementById('sidebar');
+    if (hamburger && sidebar) {
+      hamburger.addEventListener('click', function () { sidebar.classList.toggle('open'); });
+    }
+    document.querySelectorAll('.nav-item a').forEach(function (a) {
+      a.addEventListener('click', function () {
+        if (sidebar && window.innerWidth <= 820) sidebar.classList.remove('open');
+      });
     });
 
-    // Smooth scrolling for nav links
-    document.querySelectorAll('.nav-list a').forEach(function(link) {
-        link.addEventListener('click', function(e) {
-            const href = this.getAttribute('href');
-            if (href.startsWith('#')) {
-                e.preventDefault();
-                const target = document.querySelector(href);
-                if (target) {
-                    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                }
-            }
-        });
+    // Search.
+    var search = document.getElementById('search');
+    var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
+    var undocItems = Array.prototype.slice.call(document.querySelectorAll('.undoc-item'));
+    var sections = Array.prototype.slice.call(document.querySelectorAll('.ns, .type-section'));
+    var navItems = Array.prototype.slice.call(document.querySelectorAll('.nav-item'));
+    var noResults = document.getElementById('no-results');
+
+    var navByTarget = {};
+    navItems.forEach(function (n) {
+      var a = n.querySelector('a');
+      if (a) { navByTarget[a.getAttribute('data-target')] = a; }
     });
-});
+
+    function sectionId(el) { return el.getAttribute('id'); }
+
+    function apply(q) {
+      q = q.trim().toLowerCase();
+      var empty = q === '';
+      var anyVisibleSection = false;
+      var visibleIds = {};
+
+      cards.forEach(function (c) {
+        var hit = empty || (c.getAttribute('data-search') || '').indexOf(q) !== -1;
+        c.classList.toggle('hidden', !hit);
+      });
+
+      undocItems.forEach(function (it) {
+        var hit = empty || (it.getAttribute('data-search') || '').indexOf(q) !== -1;
+        it.classList.toggle('hidden', !hit);
+      });
+
+      sections.forEach(function (s) {
+        var nsName = (s.getAttribute('data-ns') || '');
+        var nsHit = !empty && nsName.indexOf(q) !== -1;
+        var visibleCard = s.querySelector('.card:not(.hidden)');
+        var visibleUndoc = s.querySelector('.undoc-item:not(.hidden)');
+        var show = empty || nsHit || visibleCard || visibleUndoc;
+        s.classList.toggle('hidden', !show);
+        if (show) { anyVisibleSection = true; visibleIds[sectionId(s)] = true; }
+
+        var det = s.querySelector('.undoc');
+        if (det) {
+          if (!empty && visibleUndoc) det.setAttribute('open', '');
+          else if (empty) det.removeAttribute('open');
+        }
+      });
+
+      navItems.forEach(function (n) {
+        var link = n.querySelector('a');
+        var target = link ? link.getAttribute('data-target') : null;
+        var nameHit = empty || (n.getAttribute('data-search') || '').indexOf(q) !== -1;
+        var sectionVisible = target ? !!visibleIds[target] : false;
+        n.classList.toggle('hidden', !(empty || nameHit || sectionVisible));
+      });
+
+      if (noResults) noResults.classList.toggle('show', !anyVisibleSection && !empty);
+    }
+
+    if (search) {
+      search.addEventListener('input', function (e) { apply(e.target.value); });
+      search.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') { search.value = ''; apply(''); search.blur(); }
+      });
+    }
+
+    // '/' focuses the search box (standard docs shortcut).
+    document.addEventListener('keydown', function (e) {
+      if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        var ae = document.activeElement;
+        var tag = (ae && ae.tagName) || '';
+        if (tag !== 'INPUT' && tag !== 'TEXTAREA' && search) {
+          e.preventDefault();
+          search.focus();
+        }
+      }
+    });
+
+    // Scroll-spy: highlight the namespace currently in view.
+    if ('IntersectionObserver' in window) {
+      var spy = new IntersectionObserver(function (entries) {
+        entries.forEach(function (en) {
+          if (!en.isIntersecting) return;
+          var a = navByTarget[en.target.getAttribute('id')];
+          if (!a) return;
+          Object.keys(navByTarget).forEach(function (k) {
+            navByTarget[k].classList.remove('active');
+          });
+          a.classList.add('active');
+          var r = a.getBoundingClientRect();
+          if (r.top < 70 || r.bottom > window.innerHeight) {
+            a.scrollIntoView({ block: 'nearest' });
+          }
+        });
+      }, { rootMargin: '-12% 0px -78% 0px', threshold: 0 });
+      sections.forEach(function (s) { spy.observe(s); });
+    }
+  });
+})();
 "
 }
 
 // ============================================================================
-// Main HTML Generator
+// Main HTML
 // ============================================================================
 
-/// Calculate overall documentation statistics
-fn calc-stats(namespaces) {
-    let mut total = 0
-    let mut documented = 0
-
-    for ns in namespaces {
-        let ns-name = get(ns, "name")
-        if excluded?(ns-name) == false {
-            let functions = get(ns, "functions")
-            if functions != null {
-                total = total + length(functions)
-                documented = documented + count-documented(functions)
-            }
-        }
-    }
-
-    {:total total, :documented documented}
-}
-
-/// Generate sidebar navigation
-fn generate-sidebar(sorted-namespaces) {
-    let mut result = "<aside class=\"sidebar\">\n"
-    result = result ++ "  <h1><span>Beagle</span> Docs</h1>\n"
-    result = result ++ "  <input type=\"text\" class=\"search-box\" placeholder=\"Search functions...\">\n"
-
-    result = result ++ "  <nav class=\"nav-section\">\n"
-    result = result ++ "    <h3>Namespaces</h3>\n"
-    result = result ++ "    <ul class=\"nav-list\">\n"
-
-    for ns in sorted-namespaces {
-        let ns-name = get(ns, "name")
-        let functions = get(ns, "functions")
-        let doc-count = count-documented(functions)
-        let total-count = count-total(functions)
-        result = result ++ "      <li><a href=\"#" ++ lower-kebab(ns-name) ++ "\">"
-        result = result ++ html-escape(ns-name)
-        result = result ++ " <span class=\"coverage-indicator\">(" ++ to-string(doc-count) ++ "/" ++ to-string(total-count) ++ ")</span>"
-        result = result ++ "</a></li>\n"
-    }
-
-    result = result ++ "    </ul>\n"
-    result = result ++ "  </nav>\n"
-
-    result = result ++ "  <nav class=\"nav-section\">\n"
-    result = result ++ "    <h3>Reference</h3>\n"
-    result = result ++ "    <ul class=\"nav-list\">\n"
-    result = result ++ "      <li><a href=\"#types\">Types</a></li>\n"
-    result = result ++ "      <li><a href=\"#enums\">Enums</a></li>\n"
-    result = result ++ "    </ul>\n"
-    result = result ++ "  </nav>\n"
-
-    result = result ++ "</aside>\n"
-    result
-}
-
-/// Generate the full HTML documentation
 fn generate-html(docs) {
     let namespaces = get(docs, "namespaces")
     let structs = get(docs, "structs")
     let enums = get(docs, "enums")
 
-    // Filter and sort namespaces
     let visible-namespaces = if namespaces != null {
-        filter(namespaces, fn(ns) { not(excluded?(get(ns, "name"))) })
+        filter(fn(ns) { excluded?(get(ns, "name")) == false }, namespaces)
     } else {
         []
     }
     let sorted-namespaces = sort-namespaces(visible-namespaces)
 
-    // Calculate stats
-    let stats = calc-stats(visible-namespaces)
+    // Collapse functions exactly ONCE per namespace; thread the models through
+    // stats, sidebar, and section rendering.
+    let models = map(build-ns-model, sorted-namespaces)
+
+    let stats = calc-stats(models)
     let total = get(stats, :total)
     let documented = get(stats, :documented)
     let pct = if total > 0 { (documented * 100) / total } else { 0 }
 
-    // Start HTML
-    let mut result = "<!DOCTYPE html>\n"
-    result = result ++ "<html lang=\"en\">\n"
-    result = result ++ "<head>\n"
-    result = result ++ "  <meta charset=\"UTF-8\">\n"
-    result = result ++ "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
-    result = result ++ "  <title>Beagle API Reference</title>\n"
-    result = result ++ "  <style>" ++ get-css() ++ "</style>\n"
-    result = result ++ "</head>\n"
-    result = result ++ "<body>\n"
-    result = result ++ "<div class=\"container\">\n"
+    let has-structs = (structs != null) && (length(structs) > 0)
+    let has-enums = (enums != null) && (length(enums) > 0)
 
-    // Sidebar
-    result = result ++ generate-sidebar(sorted-namespaces)
+    let mut parts = []
+    parts = push(parts, "<!DOCTYPE html>\n<html lang=\"en\" data-theme=\"dark\">\n<head>\n")
+    parts = push(parts, "  <meta charset=\"UTF-8\">\n")
+    parts = push(parts, "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n")
+    parts = push(parts, "  <title>Beagle Standard Library</title>\n")
+    // FOUC-proof: restore theme before the stylesheet is parsed.
+    parts = push(parts, "  <script>" ++ get-theme-script() ++ "</script>\n")
+    parts = push(parts, "  <style>" ++ get-css() ++ "</style>\n")
+    parts = push(parts, "</head>\n<body>\n")
 
-    // Main content
-    result = result ++ "<main class=\"main\">\n"
-    result = result ++ "  <h1>Beagle API Reference</h1>\n"
-    result = result ++ "  <p class=\"subtitle\">Auto-generated documentation for the Beagle programming language.</p>\n"
+    // Top bar
+    parts = push(parts, "<header class=\"topbar\">\n")
+    parts = push(parts, "  <button class=\"hamburger\" id=\"hamburger\" aria-label=\"Toggle navigation\">&#9776;</button>\n")
+    parts = push(parts, "  <div class=\"brand\">Beagle <span class=\"dot\">&bull;</span> <span class=\"sub\">Standard Library</span></div>\n")
+    parts = push(parts, "  <div class=\"search-wrap\"><span class=\"magnifier\">&#9906;</span>"
+        ++ "<input type=\"text\" id=\"search\" placeholder=\"Search functions, signatures, docs...\" autocomplete=\"off\" spellcheck=\"false\">"
+        ++ "<span class=\"kbd\">/</span></div>\n")
+    parts = push(parts, "  <div class=\"topbar-stat\"><strong>" ++ to-string(documented) ++ "</strong>/"
+        ++ to-string(total) ++ " documented &middot; <strong>" ++ to-string(pct) ++ "%</strong></div>\n")
+    parts = push(parts, "  <button class=\"theme-toggle\" id=\"theme-toggle\" aria-label=\"Toggle theme\"></button>\n")
+    parts = push(parts, "</header>\n")
 
-    // Overall coverage
-    result = result ++ "  <div class=\"overall-coverage\">\n"
-    result = result ++ "    <strong>Overall documentation coverage:</strong> "
-    result = result ++ to-string(documented) ++ "/" ++ to-string(total) ++ " functions (" ++ to-string(pct) ++ "%)\n"
-    result = result ++ "  </div>\n"
+    parts = push(parts, "<div class=\"layout\">\n")
+    parts = push(parts, generate-sidebar(models, has-structs, has-enums))
 
-    // Quick start
-    result = result ++ "  <div class=\"quick-start\">\n"
-    result = result ++ "    <h2>Quick Start</h2>\n"
-    result = result ++ "    <pre><code>// Hello World\n"
-    result = result ++ "fn main() {\n"
-    result = result ++ "    println(\"Hello, Beagle!\")\n"
-    result = result ++ "}\n"
-    result = result ++ "\n"
-    result = result ++ "// Using collections\n"
-    result = result ++ "let numbers = [1, 2, 3, 4, 5]\n"
-    result = result ++ "let doubled = map(numbers, fn(x) { x * 2 })\n"
-    result = result ++ "let sum = reduce(numbers, 0, fn(acc, x) { acc + x })\n"
-    result = result ++ "\n"
-    result = result ++ "// File I/O\n"
-    result = result ++ "use beagle.fs as fs\n"
-    result = result ++ "let content = fs/blocking-read-file(\"/tmp/test.txt\")</code></pre>\n"
-    result = result ++ "  </div>\n"
+    parts = push(parts, "<main class=\"main\">\n")
+    parts = push(parts, "  <div class=\"page-head\">\n")
+    parts = push(parts, "    <h1>Beagle Standard Library</h1>\n")
+    parts = push(parts, "    <p>API reference across " ++ to-string(length(sorted-namespaces))
+        ++ " namespaces and " ++ to-string(total) ++ " functions. Use the search above to filter live.</p>\n")
+    // Visual doc-coverage progress bar.
+    parts = push(parts, "    <div class=\"coverage\">\n")
+    parts = push(parts, "      <div class=\"coverage-top\"><span>Documentation coverage</span>"
+        ++ "<span><strong>" ++ to-string(pct) ++ "%</strong> &middot; " ++ to-string(documented)
+        ++ "/" ++ to-string(total) ++ "</span></div>\n")
+    parts = push(parts, "      <div class=\"coverage-track\"><div class=\"coverage-fill\" style=\"width: "
+        ++ to-string(pct) ++ "%\"></div></div>\n")
+    parts = push(parts, "    </div>\n")
+    parts = push(parts, "  </div>\n")
+    parts = push(parts, "  <div class=\"no-results\" id=\"no-results\">No matches. Press Esc to clear.</div>\n")
 
-    // Namespace documentation
-    for ns in sorted-namespaces {
-        result = result ++ html-namespace(ns)
+    for model in models {
+        parts = push(parts, html-namespace(model))
     }
 
-    // Types (Structs)
-    if structs != null && length(structs) > 0 {
-        result = result ++ "<section class=\"types-section\" id=\"types\">\n"
-        result = result ++ "  <h2>Types</h2>\n"
-        result = result ++ "  <p>Built-in struct types available in Beagle.</p>\n"
+    if has-structs {
+        parts = push(parts, "<section class=\"ns type-section\" id=\"structs\" data-ns=\"structs\">\n")
+        parts = push(parts, "  <div class=\"ns-head\"><h2><a class=\"anchor\" href=\"#structs\">#</a>Structs</h2>"
+            ++ "<span class=\"cov good\">" ++ to-string(length(structs)) ++ " types</span></div>\n")
         for s in structs {
-            result = result ++ html-struct(s)
+            parts = push(parts, html-struct(s))
         }
-        result = result ++ "</section>\n"
+        parts = push(parts, "</section>\n")
     }
 
-    // Enums
-    if enums != null && length(enums) > 0 {
-        result = result ++ "<section class=\"enums-section\" id=\"enums\">\n"
-        result = result ++ "  <h2>Enums</h2>\n"
-        result = result ++ "  <p>Built-in enum types available in Beagle.</p>\n"
+    if has-enums {
+        parts = push(parts, "<section class=\"ns type-section\" id=\"enums\" data-ns=\"enums\">\n")
+        parts = push(parts, "  <div class=\"ns-head\"><h2><a class=\"anchor\" href=\"#enums\">#</a>Enums</h2>"
+            ++ "<span class=\"cov good\">" ++ to-string(length(enums)) ++ " types</span></div>\n")
         for e in enums {
-            result = result ++ html-enum(e)
+            parts = push(parts, html-enum(e))
         }
-        result = result ++ "</section>\n"
+        parts = push(parts, "</section>\n")
     }
 
-    result = result ++ "</main>\n"
-    result = result ++ "</div>\n"
-
-    // JavaScript
-    result = result ++ "<script>" ++ get-js() ++ "</script>\n"
-
-    result = result ++ "</body>\n"
-    result = result ++ "</html>\n"
-    result
+    parts = push(parts, "</main>\n</div>\n")
+    parts = push(parts, "<script>" ++ get-js() ++ "</script>\n")
+    parts = push(parts, "</body>\n</html>\n")
+    join(parts, "")
 }
 
 fn main(args) {
     if length(args) == 0 {
-        println("Beagle HTML Documentation Generator")
-        println("")
         println("Usage: beagle tools/docgen-html.bg <docs.json>")
-        println("")
-        println("Generate HTML documentation from export-docs output:")
-        println("  beagle --export-docs > /tmp/docs.json")
-        println("  beagle tools/docgen-html.bg /tmp/docs.json > docs/api.html")
     } else {
         let path = get(args, 0)
         let docs = read-docs(path)

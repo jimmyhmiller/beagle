@@ -70,7 +70,27 @@ fn lower-kebab(s) {
 
 /// Check if namespace should be excluded
 fn excluded?(ns-name) {
-    any?(EXCLUDED_NAMESPACES, fn(excluded) { excluded == ns-name })
+    let in-list = any?(fn(excluded) { excluded == ns-name }, EXCLUDED_NAMESPACES)
+    // Internal namespaces are hidden from docs by convention: the name, or any
+    // dotted segment of it, starts with "_" (e.g. "_internal", "beagle._collections").
+    in-list || starts-with?(ns-name, "_") || contains?(ns-name, "._")
+}
+
+/// A function is visible in docs unless it is an anonymous lambda literal or an
+/// internal function/method (prefixed with "_" by convention).
+fn visible-fn?(func) {
+    let name = get(func, "name")
+    (name != "<Anonymous>") && (starts-with?(name, "_") == false)
+}
+
+/// The doc-visible functions of a namespace (internal/anonymous filtered out).
+fn visible-functions(ns) {
+    let functions = get(ns, "functions")
+    if functions == null {
+        []
+    } else {
+        filter(visible-fn?, functions)
+    }
 }
 
 /// Check if a function has documentation
@@ -80,13 +100,13 @@ fn documented?(func) {
 
 /// Get namespace priority (lower = higher priority)
 fn namespace-priority(ns-name) {
-    let idx = find-index(PRIORITY_NAMESPACES, fn(p) { p == ns-name })
+    let idx = find-index(fn(p) { p == ns-name }, PRIORITY_NAMESPACES)
     if idx == -1 { 999 } else { idx }
 }
 
 /// Sort namespaces by priority
 fn sort-namespaces(namespaces) {
-    sort-by(namespaces, fn(ns) { namespace-priority(get(ns, "name")) })
+    sort-by(fn(ns) { namespace-priority(get(ns, "name")) }, namespaces)
 }
 
 // ============================================================================
@@ -158,7 +178,7 @@ fn count-documented(functions) {
     if functions == null {
         0
     } else {
-        length(filter(functions, documented?))
+        length(filter(documented?, functions))
     }
 }
 
@@ -170,7 +190,7 @@ fn count-total(functions) {
 /// Generate documentation for a namespace
 fn doc-namespace(ns) {
     let ns-name = get(ns, "name")
-    let functions = get(ns, "functions")
+    let functions = visible-functions(ns)
 
     let documented-count = count-documented(functions)
     let total-count = count-total(functions)
@@ -186,7 +206,7 @@ fn doc-namespace(ns) {
 
     if functions != null && length(functions) > 0 {
         // First show documented functions
-        let documented-fns = filter(functions, documented?)
+        let documented-fns = filter(documented?, functions)
         if length(documented-fns) > 0 {
             for func in documented-fns {
                 result = result ++ doc-function(func, false)
@@ -194,7 +214,7 @@ fn doc-namespace(ns) {
         }
 
         // Then show undocumented functions in a collapsed section
-        let undocumented-fns = filter(functions, fn(f) { not(documented?(f)) })
+        let undocumented-fns = filter(fn(f) { not(documented?(f)) }, functions)
         if length(undocumented-fns) > 0 {
             result = result ++ "<details>\n<summary><strong>Undocumented functions ("
                            ++ to-string(length(undocumented-fns)) ++ ")</strong></summary>\n\n"
@@ -284,7 +304,7 @@ fn calc-stats(namespaces) {
     for ns in namespaces {
         let ns-name = get(ns, "name")
         if excluded?(ns-name) == false {
-            let functions = get(ns, "functions")
+            let functions = visible-functions(ns)
             if functions != null {
                 total = total + length(functions)
                 documented = documented + count-documented(functions)
@@ -303,7 +323,7 @@ fn generate-docs(docs) {
 
     // Filter and sort namespaces
     let visible-namespaces = if namespaces != null {
-        filter(namespaces, fn(ns) { not(excluded?(get(ns, "name"))) })
+        filter(fn(ns) { not(excluded?(get(ns, "name"))) }, namespaces)
     } else {
         []
     }
@@ -346,7 +366,7 @@ fn generate-docs(docs) {
     result = result ++ "### Namespaces\n\n"
     for ns in sorted-namespaces {
         let ns-name = get(ns, "name")
-        let functions = get(ns, "functions")
+        let functions = visible-functions(ns)
         let doc-count = count-documented(functions)
         let total-count = count-total(functions)
         result = result ++ "- [" ++ ns-name ++ "](#" ++ lower-kebab(ns-name) ++ ") ("
