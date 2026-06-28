@@ -3083,10 +3083,40 @@ impl AstCompiler<'_> {
                 body,
                 token_range: _,
             } => {
-                // Helper to compute the mangled protocol string
-                let (protocol_ns, protocol_name_only) = self.get_namespace_name_and_name(&protocol).unwrap_or_else(|_| {
-                    (self.compiler.current_namespace_name(), protocol.clone())
-                });
+                // Resolve the protocol's defining namespace. An UNqualified
+                // protocol name must resolve to a real protocol — current
+                // namespace first, then beagle.core (mirroring how core enums
+                // resolve). Previously this silently defaulted to the current
+                // namespace, so `extend Foo with Length` registered a dead impl
+                // under `<current-ns>/Length` that the real `beagle.core/Length`
+                // dispatcher never reads. Now it resolves correctly, and errors
+                // loudly if the protocol is unknown (rather than failing silently).
+                let (protocol_ns, protocol_name_only) = if protocol.contains('/') {
+                    self.get_namespace_name_and_name(&protocol)?
+                } else {
+                    let current_ns = self.compiler.current_namespace_name();
+                    if self
+                        .compiler
+                        .defined_protocols
+                        .contains(&format!("{}/{}", current_ns, protocol))
+                    {
+                        (current_ns, protocol.clone())
+                    } else if self
+                        .compiler
+                        .defined_protocols
+                        .contains(&format!("beagle.core/{}", protocol))
+                    {
+                        ("beagle.core".to_string(), protocol.clone())
+                    } else {
+                        return Err(CompileError::InternalError {
+                            message: format!(
+                                "Protocol `{}` is not defined in `{}` or beagle.core. \
+                                 Qualify it (e.g. `alias/{}`) or define the protocol before extending it.",
+                                protocol, current_ns, protocol
+                            ),
+                        });
+                    }
+                };
                 let qualified_protocol = format!("{}/{}", protocol_ns, protocol_name_only);
                 let qualified_type_args: Vec<String> = protocol_type_args
                     .iter()
@@ -3650,7 +3680,7 @@ impl AstCompiler<'_> {
                     self.ir.push_to_stack(reg.into());
                 }
 
-                let vector_pointer = self.call("beagle.collections/vec", vec![])?;
+                let vector_pointer = self.call("beagle._collections/vec", vec![])?;
 
                 let vector_register = self.ir.assign_new(vector_pointer);
                 // Elements were pushed to locals; retrieve their local indices
@@ -3661,7 +3691,7 @@ impl AstCompiler<'_> {
                 for local in local_indices.iter() {
                     let value = self.ir.load_local(*local);
                     let push_result = self.call(
-                        "beagle.collections/vec-push",
+                        "beagle._collections/vec-push",
                         vec![vector_register.into(), value],
                     )?;
                     self.ir.assign(vector_register, push_result);
@@ -3675,7 +3705,7 @@ impl AstCompiler<'_> {
             Ast::MapLiteral { pairs, .. } => {
                 // Special case: empty map
                 if pairs.is_empty() {
-                    return self.call("beagle.collections/map", vec![]);
+                    return self.call("beagle._collections/map", vec![]);
                 }
 
                 // Check for duplicate literal keys at compile time
@@ -3718,7 +3748,7 @@ impl AstCompiler<'_> {
                 }
 
                 // Create empty map
-                let map_pointer = self.call("beagle.collections/map", vec![])?;
+                let map_pointer = self.call("beagle._collections/map", vec![])?;
                 let map_register = self.ir.assign_new(map_pointer);
 
                 // Load pairs from locals and assoc them
@@ -3732,7 +3762,7 @@ impl AstCompiler<'_> {
                     let value = self.ir.load_local(pair_locals[2 * i + 1]);
 
                     let assoc_result = self.call(
-                        "beagle.collections/map-assoc",
+                        "beagle._collections/map-assoc",
                         vec![map_register.into(), key, value],
                     )?;
                     self.ir.assign(map_register, assoc_result);
@@ -3748,7 +3778,7 @@ impl AstCompiler<'_> {
             Ast::SetLiteral { elements, .. } => {
                 // Special case: empty set
                 if elements.is_empty() {
-                    return self.call("beagle.collections/set", vec![]);
+                    return self.call("beagle._collections/set", vec![]);
                 }
 
                 // Check for duplicate literal elements at compile time
@@ -3786,7 +3816,7 @@ impl AstCompiler<'_> {
                 }
 
                 // Create empty set
-                let set_pointer = self.call("beagle.collections/set", vec![])?;
+                let set_pointer = self.call("beagle._collections/set", vec![])?;
                 let set_register = self.ir.assign_new(set_pointer);
 
                 // Load elements from locals and add them
@@ -3797,7 +3827,7 @@ impl AstCompiler<'_> {
                     let element = self.ir.load_local(*local);
 
                     let add_result = self.call(
-                        "beagle.collections/set-add",
+                        "beagle._collections/set-add",
                         vec![set_register.into(), element],
                     )?;
                     self.ir.assign(set_register, add_result);
@@ -4947,6 +4977,13 @@ impl AstCompiler<'_> {
                 name,
                 cases,
                 token_range: _,
+                // NOTE: the multi-arity docstring is intentionally NOT propagated
+                // onto the per-arity `name$N` functions. Doing so makes their
+                // stored source_text include the `///` lines, which breaks tier-up
+                // re-parse of an arity case (`(args) => body` is not a standalone
+                // fn). Multi-arity functions are therefore currently undocumented
+                // in the generated docs; fixing that needs source_text decoupled
+                // from the docstring metadata.
                 docstring: _,
             } => {
                 // Compile each arity case as a distinct function with name suffixed by $N
@@ -4976,7 +5013,8 @@ impl AstCompiler<'_> {
                         .as_ref()
                         .map(|n| format!("{}${}", n, arity));
 
-                    // Create an Ast::Function for this arity case and compile it
+                    // Create an Ast::Function for this arity case and compile it.
+                    // docstring stays None here — see the NOTE on the match arm.
                     let arity_function = Ast::Function {
                         name: arity_name.clone(),
                         args: case.args.clone(),
@@ -4998,6 +5036,10 @@ impl AstCompiler<'_> {
                     if let Some(ref arity_fn_name) = arity_name {
                         let full_arity_name =
                             self.compiler.current_namespace_name() + "/" + arity_fn_name;
+                        // This `name$N` function's stored source is a single
+                        // `(args) => body` case; mark it so tier-up/OSR re-parse
+                        // it under FragmentContext::ArityCase.
+                        self.compiler.mark_arity_fragment(full_arity_name.clone());
                         if let Some(function) = self.compiler.get_function_by_name(&full_arity_name)
                             && let Some(jt_ptr) =
                                 self.compiler.get_jump_table_pointer(function.clone())
@@ -7197,6 +7239,11 @@ impl AstCompiler<'_> {
                 token_range: _,
             } => {
                 self.compiler.reserve_namespace_slot(name);
+                // Record the fully-qualified protocol name so a later `extend`
+                // (possibly in another module) can resolve this protocol when it
+                // is referenced unqualified.
+                let qualified = format!("{}/{}", self.compiler.current_namespace_name(), name);
+                self.compiler.defined_protocols.insert(qualified);
                 for ast in body.iter() {
                     self.first_pass(ast)?;
                 }
@@ -8123,7 +8170,7 @@ impl AstCompiler<'_> {
                 // Get the count using vec-count directly (doesn't need stack/frame pointer)
                 let arr_for_count = self.ir.load_local(array_local_idx);
                 let length_value =
-                    self.call_builtin("beagle.collections/vec-count", vec![arr_for_count])?;
+                    self.call_builtin("beagle._collections/vec-count", vec![arr_for_count])?;
 
                 // Create expected length as tagged int
                 // Note: TaggedConstant takes the UNTAGGED value; code gen will tag it
@@ -8157,7 +8204,7 @@ impl AstCompiler<'_> {
                     let index_val = Value::TaggedConstant(idx as isize);
                     let index_reg = self.ir.assign_new(index_val);
                     let elem_value = self.call_builtin(
-                        "beagle.collections/vec-get",
+                        "beagle._collections/vec-get",
                         vec![arr_for_get, index_reg.into()],
                     )?;
 

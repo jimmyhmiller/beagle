@@ -837,8 +837,8 @@ fn resolve_name(runtime: &Runtime, name: &str) -> String {
     if runtime.get_function_by_name(&core).is_some() {
         return core;
     }
-    // Try beagle.collections
-    let coll = format!("beagle.collections/{}", name);
+    // Try beagle._collections
+    let coll = format!("beagle._collections/{}", name);
     if runtime.get_function_by_name(&coll).is_some() {
         return coll;
     }

@@ -1460,6 +1460,343 @@ impl PersistentMap {
         }
     }
 
+    /// Remove `key`, returning a new map. If `key` is absent, returns `map`
+    /// unchanged. O(log32 n) — navigates and rebuilds only the path to the key,
+    /// instead of the O(n) "filter keys + re-assoc each" rebuild.
+    ///
+    /// Nodes are not aggressively collapsed/inlined (a sub-node left with a
+    /// single entry stays a sub-node, a collision node left with one entry stays
+    /// a collision node); this keeps the code simple and is fully correct for
+    /// get/assoc — depth stays bounded by the hash. Empty nodes ARE pruned.
+    pub fn without(
+        runtime: &mut Runtime,
+        stack_pointer: usize,
+        map: GcHandle,
+        key: usize,
+    ) -> Result<GcHandle, Box<dyn Error>> {
+        let root_ptr = map.get_field(FIELD_ROOT);
+        if root_ptr == BuiltInTypes::null_value() as usize {
+            return Ok(map);
+        }
+        // Presence check (O(log n)). Absent key => map unchanged.
+        if Self::is_not_found(Self::get(runtime, map, key)) {
+            return Ok(map);
+        }
+        let count = Self::count(map);
+        let hash = runtime.hash_value(key);
+
+        let mut scope = HandleScope::new(runtime, stack_pointer);
+        let map_h = scope.alloc_handle(map);
+        let root = GcHandle::from_tagged(map_h.to_gc_handle().get_field(FIELD_ROOT));
+        let root_h = scope.alloc_handle(root);
+
+        let new_root = Self::remove_node(&mut scope, root_h, 0, hash, key)?;
+
+        let new_map_h = scope.allocate_typed_zeroed(2, TYPE_ID_PERSISTENT_MAP)?;
+        let new_map = new_map_h.to_gc_handle();
+        new_map.set_field(
+            FIELD_COUNT,
+            BuiltInTypes::construct_int((count - 1) as isize) as usize,
+        );
+        match new_root {
+            Some(nr_h) => {
+                let nr = nr_h.to_gc_handle();
+                new_map.set_field_with_barrier(scope.runtime(), FIELD_ROOT, nr.as_tagged());
+            }
+            None => {
+                new_map.set_field(FIELD_ROOT, BuiltInTypes::null_value() as usize);
+            }
+        }
+        Ok(new_map_h.to_gc_handle())
+    }
+
+    /// Remove `key` (known present) from a node. Returns the new node, or `None`
+    /// if the node became empty.
+    fn remove_node(
+        scope: &mut HandleScope<'_>,
+        node_h: Handle,
+        shift: usize,
+        hash: usize,
+        key: usize,
+    ) -> Result<Option<Handle>, Box<dyn Error>> {
+        let type_id = node_h.to_gc_handle().get_type_id();
+        if type_id == TYPE_ID_BITMAP_NODE {
+            Self::remove_bitmap_node(scope, node_h, shift, hash, key)
+        } else if type_id == TYPE_ID_ARRAY_NODE {
+            Self::remove_array_node(scope, node_h, shift, hash, key)
+        } else if type_id == TYPE_ID_COLLISION_NODE {
+            Self::remove_collision_node(scope, node_h, key)
+        } else {
+            Ok(Some(node_h))
+        }
+    }
+
+    fn remove_bitmap_node(
+        scope: &mut HandleScope<'_>,
+        node_h: Handle,
+        shift: usize,
+        hash: usize,
+        key: usize,
+    ) -> Result<Option<Handle>, Box<dyn Error>> {
+        let null_val = BuiltInTypes::null_value() as usize;
+        let node = node_h.to_gc_handle();
+        let bitmap = BuiltInTypes::untag(node.get_field(BN_FIELD_BITMAP));
+        let bit = 1usize << ((hash >> shift) & BRANCH_MASK);
+        if (bitmap & bit) == 0 {
+            return Ok(Some(node_h)); // not here (shouldn't happen)
+        }
+        let index = (bitmap & (bit - 1)).count_ones() as usize;
+        let children = GcHandle::from_tagged(node.get_field(BN_FIELD_CHILDREN));
+        let children_h = scope.alloc_handle(children);
+        let children = children_h.to_gc_handle();
+        let slot_key = children.get_field(index * 2);
+        let slot_value = children.get_field(index * 2 + 1);
+
+        let is_subnode = slot_value == null_val && BuiltInTypes::is_heap_pointer(slot_key) && {
+            let t = GcHandle::from_tagged(slot_key).get_type_id();
+            t == TYPE_ID_BITMAP_NODE || t == TYPE_ID_ARRAY_NODE || t == TYPE_ID_COLLISION_NODE
+        };
+
+        if is_subnode {
+            let sub = GcHandle::from_tagged(slot_key);
+            let sub_h = scope.alloc_handle(sub);
+            let new_sub = Self::remove_node(scope, sub_h, shift + 5, hash, key)?;
+            match new_sub {
+                Some(ns_h) => {
+                    // Replace the sub-node pointer in a same-size clone.
+                    let new_children_h = Self::clone_node_array(scope, children_h)?;
+                    let new_children = new_children_h.to_gc_handle();
+                    let ns = ns_h.to_gc_handle();
+                    new_children
+                        .set_field_with_barrier(scope.runtime(), index * 2, ns.as_tagged());
+                    Self::make_bitmap_node(scope, bitmap, new_children_h)
+                }
+                None => Self::remove_bitmap_slot(scope, children_h, bitmap, bit, index),
+            }
+        } else {
+            // Leaf with matching key.
+            Self::remove_bitmap_slot(scope, children_h, bitmap, bit, index)
+        }
+    }
+
+    /// Clear `bit` and drop the (key,value) pair at `index` from a clone of the
+    /// children array. Returns `None` if the node becomes empty.
+    fn remove_bitmap_slot(
+        scope: &mut HandleScope<'_>,
+        children_h: Handle,
+        bitmap: usize,
+        bit: usize,
+        index: usize,
+    ) -> Result<Option<Handle>, Box<dyn Error>> {
+        let new_bitmap = bitmap & !bit;
+        if new_bitmap == 0 {
+            return Ok(None);
+        }
+        let null_val = BuiltInTypes::null_value() as usize;
+        let children = children_h.to_gc_handle();
+        let old_len = children.field_count();
+        let new_len = old_len - 2;
+        let new_children_h = scope.allocate_typed_zeroed(new_len, TYPE_ID_BITMAP_NODE)?;
+
+        let children = children_h.to_gc_handle();
+        let new_children = new_children_h.to_gc_handle();
+        children.copy_fields_to(&new_children, index * 2);
+
+        let children = children_h.to_gc_handle();
+        let new_children = new_children_h.to_gc_handle();
+        children.copy_fields_range_to(
+            &new_children,
+            index * 2 + 2,
+            index * 2,
+            old_len - index * 2 - 2,
+        );
+
+        let new_children = new_children_h.to_gc_handle();
+        for i in 0..new_len {
+            let slot = new_children.get_field(i);
+            if slot != null_val {
+                scope.runtime().write_barrier(new_children.as_tagged(), slot);
+            }
+        }
+        Self::make_bitmap_node(scope, new_bitmap, new_children_h)
+    }
+
+    fn make_bitmap_node(
+        scope: &mut HandleScope<'_>,
+        bitmap: usize,
+        children_h: Handle,
+    ) -> Result<Option<Handle>, Box<dyn Error>> {
+        let new_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_BITMAP_NODE)?;
+        let new_node = new_node_h.to_gc_handle();
+        new_node.set_field(
+            BN_FIELD_BITMAP,
+            BuiltInTypes::construct_int(bitmap as isize) as usize,
+        );
+        let children = children_h.to_gc_handle();
+        new_node.set_field_with_barrier(scope.runtime(), BN_FIELD_CHILDREN, children.as_tagged());
+        Ok(Some(new_node_h))
+    }
+
+    /// Clone a node's interleaved/flat pointer array (BitmapNode children), with
+    /// write barriers for the copied heap pointers.
+    fn clone_node_array(
+        scope: &mut HandleScope<'_>,
+        arr_h: Handle,
+    ) -> Result<Handle, Box<dyn Error>> {
+        let null_val = BuiltInTypes::null_value() as usize;
+        let arr = arr_h.to_gc_handle();
+        let len = arr.field_count();
+        let new_h = scope.allocate_typed_zeroed(len, TYPE_ID_BITMAP_NODE)?;
+        let arr = arr_h.to_gc_handle();
+        let new_arr = new_h.to_gc_handle();
+        arr.copy_fields_to(&new_arr, len);
+        let new_arr = new_h.to_gc_handle();
+        for i in 0..len {
+            let slot = new_arr.get_field(i);
+            if slot != null_val {
+                scope.runtime().write_barrier(new_arr.as_tagged(), slot);
+            }
+        }
+        Ok(new_h)
+    }
+
+    fn remove_array_node(
+        scope: &mut HandleScope<'_>,
+        node_h: Handle,
+        shift: usize,
+        hash: usize,
+        key: usize,
+    ) -> Result<Option<Handle>, Box<dyn Error>> {
+        let null_val = BuiltInTypes::null_value() as usize;
+        let node = node_h.to_gc_handle();
+        let count = BuiltInTypes::untag(node.get_field(AN_FIELD_COUNT));
+        let children = GcHandle::from_tagged(node.get_field(AN_FIELD_CHILDREN));
+        let children_h = scope.alloc_handle(children);
+        let idx = (hash >> shift) & BRANCH_MASK;
+        let child_ptr = children_h.to_gc_handle().get_field(idx);
+        let child = GcHandle::from_tagged(child_ptr);
+        let child_h = scope.alloc_handle(child);
+        let new_child = Self::remove_node(scope, child_h, shift + 5, hash, key)?;
+
+        match new_child {
+            Some(nc_h) => {
+                let new_children_h = Self::clone_array_children(scope, children_h)?;
+                let new_children = new_children_h.to_gc_handle();
+                let nc = nc_h.to_gc_handle();
+                new_children.set_field_with_barrier(scope.runtime(), idx, nc.as_tagged());
+                Self::make_array_node(scope, count, new_children_h)
+            }
+            None => {
+                let new_count = count - 1;
+                if new_count == 0 {
+                    return Ok(None);
+                }
+                let new_children_h = Self::clone_array_children(scope, children_h)?;
+                let new_children = new_children_h.to_gc_handle();
+                new_children.set_field(idx, null_val);
+                Self::make_array_node(scope, new_count, new_children_h)
+            }
+        }
+    }
+
+    fn clone_array_children(
+        scope: &mut HandleScope<'_>,
+        arr_h: Handle,
+    ) -> Result<Handle, Box<dyn Error>> {
+        let null_val = BuiltInTypes::null_value() as usize;
+        let arr = arr_h.to_gc_handle();
+        let len = arr.field_count();
+        let new_h = scope.allocate_typed_zeroed(len, TYPE_ID_ARRAY_NODE_CHILDREN)?;
+        let arr = arr_h.to_gc_handle();
+        let new_arr = new_h.to_gc_handle();
+        arr.copy_fields_to(&new_arr, len);
+        let new_arr = new_h.to_gc_handle();
+        for i in 0..len {
+            let slot = new_arr.get_field(i);
+            if slot != null_val {
+                scope.runtime().write_barrier(new_arr.as_tagged(), slot);
+            }
+        }
+        Ok(new_h)
+    }
+
+    fn make_array_node(
+        scope: &mut HandleScope<'_>,
+        count: usize,
+        children_h: Handle,
+    ) -> Result<Option<Handle>, Box<dyn Error>> {
+        let new_node_h = scope.allocate_typed_zeroed(2, TYPE_ID_ARRAY_NODE)?;
+        let new_node = new_node_h.to_gc_handle();
+        new_node.set_field(
+            AN_FIELD_COUNT,
+            BuiltInTypes::construct_int(count as isize) as usize,
+        );
+        let children = children_h.to_gc_handle();
+        new_node.set_field_with_barrier(scope.runtime(), AN_FIELD_CHILDREN, children.as_tagged());
+        Ok(Some(new_node_h))
+    }
+
+    fn remove_collision_node(
+        scope: &mut HandleScope<'_>,
+        node_h: Handle,
+        key: usize,
+    ) -> Result<Option<Handle>, Box<dyn Error>> {
+        let null_val = BuiltInTypes::null_value() as usize;
+        let node = node_h.to_gc_handle();
+        let hash = node.get_field(CN_FIELD_HASH);
+        let count = BuiltInTypes::untag(node.get_field(CN_FIELD_COUNT));
+        let kv = GcHandle::from_tagged(node.get_field(CN_FIELD_KV_ARRAY));
+        let kv_h = scope.alloc_handle(kv);
+
+        let mut found = usize::MAX;
+        {
+            let kv = kv_h.to_gc_handle();
+            for i in 0..count {
+                if scope.runtime().equal(kv.get_field(i * 2), key) {
+                    found = i;
+                    break;
+                }
+            }
+        }
+        if found == usize::MAX {
+            return Ok(Some(node_h));
+        }
+        let new_count = count - 1;
+        if new_count == 0 {
+            return Ok(None);
+        }
+
+        // Build a new kv array without the found pair.
+        let new_kv_h = scope.allocate_typed_zeroed(new_count * 2, TYPE_ID_COLLISION_NODE)?;
+        {
+            let mut w = 0usize;
+            for i in 0..count {
+                if i == found {
+                    continue;
+                }
+                let kv = kv_h.to_gc_handle();
+                let k = kv.get_field(i * 2);
+                let v = kv.get_field(i * 2 + 1);
+                let new_kv = new_kv_h.to_gc_handle();
+                new_kv.set_field_with_barrier(scope.runtime(), w * 2, k);
+                new_kv.set_field_with_barrier(scope.runtime(), w * 2 + 1, v);
+                w += 1;
+            }
+        }
+
+        let new_node_h = scope.allocate_typed_zeroed(3, TYPE_ID_COLLISION_NODE)?;
+        let new_kv = new_kv_h.to_gc_handle();
+        let new_node = new_node_h.to_gc_handle();
+        new_node.set_field(CN_FIELD_HASH, hash);
+        new_node.set_field(
+            CN_FIELD_COUNT,
+            BuiltInTypes::construct_int(new_count as isize) as usize,
+        );
+        new_node.set_field_with_barrier(scope.runtime(), CN_FIELD_KV_ARRAY, new_kv.as_tagged());
+        let _ = null_val;
+        Ok(Some(new_node_h))
+    }
+
     /// Get all keys from the map as a PersistentVec.
     pub fn keys(
         runtime: &mut Runtime,

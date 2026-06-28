@@ -1225,6 +1225,10 @@ pub enum FragmentContext {
     /// The fragment is a method body from an `extend ... with ...` block;
     /// reserved words are valid as its `fn` name.
     ExtendMethod,
+    /// The fragment is a single multi-arity case `(args) => body` — the stored
+    /// source of a generated `name$N` arity function. Re-parsed into a one-arity
+    /// function (a top-level parse rejects the bare `(args)` list).
+    ArityCase,
 }
 
 pub struct Parser {
@@ -1411,8 +1415,33 @@ impl Parser {
     }
 
     pub fn parse(&mut self) -> ParseResult<Ast> {
+        // An arity-case fragment (the stored source of a `name$N` arity function)
+        // is `(args) => body`, which is not a valid top-level form; parse it into
+        // a single one-arity function so tier-up/OSR can re-compile it.
+        if self.fragment_context == FragmentContext::ArityCase {
+            return self.parse_arity_case_fragment();
+        }
         Ok(Ast::Program {
             elements: self.parse_elements()?,
+            token_range: TokenRange::new(0, self.tokens.len()),
+        })
+    }
+
+    fn parse_arity_case_fragment(&mut self) -> ParseResult<Ast> {
+        self.skip_whitespace();
+        let case = self.parse_arity_case()?;
+        // Placeholder name; the specializer renames the sole top-level fn to the
+        // real `name$N` via rename_sole_top_level_function.
+        let func = Ast::Function {
+            name: Some("__arity_fragment__".to_string()),
+            args: case.args,
+            rest_param: case.rest_param,
+            body: case.body,
+            token_range: case.token_range,
+            docstring: None,
+        };
+        Ok(Ast::Program {
+            elements: vec![func],
             token_range: TokenRange::new(0, self.tokens.len()),
         })
     }

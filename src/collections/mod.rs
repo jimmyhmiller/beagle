@@ -7,7 +7,7 @@
 //! # Usage
 //!
 //! ```beagle
-//! import "beagle.collections" as c
+//! import "beagle._collections" as c
 //! let v = c/vec()
 //! let v2 = c/vec-push(v, 42)
 //! ```

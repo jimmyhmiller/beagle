@@ -61,13 +61,17 @@ impl Runtime {
             4, // stack_pointer + frame_pointer + multi_arity_obj + arg_count
         )?;
 
-        // to-string: Convert any value to its string representation
+        // __raw-repr: low-level raw representation of a value. This is the leaf
+        // formatter used by the `Format` protocol's DEFAULT impl. User code
+        // should call `to-string`/`format` (defined in std.bg), which route
+        // through `Format` so custom `extend T with Format` impls are honored.
+        // Kept internal (underscore prefix) so it stays out of the docs.
         self.add_builtin_with_doc(
-            "beagle.core/to-string",
+            "beagle.core/__raw-repr",
             to_string as *const u8,
             true,
             &["value"],
-            "Convert any value to its string representation.\n\nExamples:\n  (to-string 42)     ; => \"42\"\n  (to-string true)   ; => \"true\"\n  (to-string [1 2])  ; => \"[1, 2]\"",
+            "Internal: raw representation of a value (the Format protocol's default leaf). Use to-string/format instead.",
         )?;
 
         self.add_builtin_with_doc(
@@ -2535,14 +2539,14 @@ impl Runtime {
         use super::collections::*;
 
         // Register the namespace so it can be imported
-        self.reserve_namespace("beagle.collections".to_string());
+        self.reserve_namespace("beagle._collections".to_string());
 
         // ============================================================================
         // Persistent Vector (HAMT-based immutable vector)
         // ============================================================================
 
         self.add_builtin_with_doc(
-            "beagle.collections/vec",
+            "beagle._collections/vec",
             rust_vec_empty as *const u8,
             true,
             &[],
@@ -2550,7 +2554,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/vec-count",
+            "beagle._collections/vec-count",
             rust_vec_count as *const u8,
             false,
             &["vec"],
@@ -2558,7 +2562,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/vec-get",
+            "beagle._collections/vec-get",
             rust_vec_get as *const u8,
             false,
             &["vec", "index"],
@@ -2566,7 +2570,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/vec-push",
+            "beagle._collections/vec-push",
             rust_vec_push as *const u8,
             true,
             &["vec", "value"],
@@ -2574,7 +2578,15 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/vec-assoc",
+            "beagle._collections/vec-pop",
+            rust_vec_pop as *const u8,
+            true,
+            &["vec"],
+            "Return a new vector with the last element removed (empty if 0/1 elements).\n\nExamples:\n  (vec-pop [1 2 3])  ; => [1 2]",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle._collections/vec-assoc",
             rust_vec_assoc as *const u8,
             true,
             &["vec", "index", "value"],
@@ -2582,7 +2594,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/vec-to-array",
+            "beagle._collections/vec-to-array",
             rust_vec_to_array as *const u8,
             true,
             &["vec"],
@@ -2590,7 +2602,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/array-to-vec",
+            "beagle._collections/array-to-vec",
             rust_array_to_vec as *const u8,
             true,
             &["array", "len"],
@@ -2602,7 +2614,7 @@ impl Runtime {
         // ============================================================================
 
         self.add_builtin_with_doc(
-            "beagle.collections/map",
+            "beagle._collections/map",
             rust_map_empty as *const u8,
             true,
             &[],
@@ -2610,7 +2622,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/map-count",
+            "beagle._collections/map-count",
             rust_map_count as *const u8,
             false,
             &["m"],
@@ -2618,7 +2630,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/map-get",
+            "beagle._collections/map-get",
             rust_map_get as *const u8,
             false,
             &["m", "key"],
@@ -2626,7 +2638,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/map-assoc",
+            "beagle._collections/map-assoc",
             rust_map_assoc as *const u8,
             true,
             &["m", "key", "value"],
@@ -2634,7 +2646,15 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/map-keys",
+            "beagle._collections/map-dissoc",
+            rust_map_dissoc as *const u8,
+            true,
+            &["m", "key"],
+            "Return a new map with the key removed (the same map if absent). O(log n).\n\nExamples:\n  (map-dissoc {:a 1 :b 2} :a)  ; => {:b 2}",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle._collections/map-keys",
             rust_map_keys as *const u8,
             true,
             &["m"],
@@ -2642,7 +2662,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/map-get-default",
+            "beagle._collections/map-get-default",
             rust_map_get_default as *const u8,
             false,
             &["m", "key", "default"],
@@ -2650,7 +2670,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/map-contains?",
+            "beagle._collections/map-contains?",
             rust_map_contains as *const u8,
             false,
             &["m", "key"],
@@ -2658,7 +2678,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/map-find",
+            "beagle._collections/map-find",
             rust_map_find as *const u8,
             true,
             &["m", "key"],
@@ -2670,7 +2690,7 @@ impl Runtime {
         // ============================================================================
 
         self.add_builtin_with_doc(
-            "beagle.collections/set",
+            "beagle._collections/set",
             rust_set_empty as *const u8,
             true,
             &[],
@@ -2678,7 +2698,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/set-count",
+            "beagle._collections/set-count",
             rust_set_count as *const u8,
             false,
             &["s"],
@@ -2686,7 +2706,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/set-contains?",
+            "beagle._collections/set-contains?",
             rust_set_contains as *const u8,
             false,
             &["s", "element"],
@@ -2694,7 +2714,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/set-add",
+            "beagle._collections/set-add",
             rust_set_add as *const u8,
             true,
             &["s", "element"],
@@ -2702,7 +2722,15 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/set-elements",
+            "beagle._collections/set-disj",
+            rust_set_disj as *const u8,
+            true,
+            &["s", "element"],
+            "Return a new set with the element removed (the same set if absent). O(log n).\n\nExamples:\n  (set-disj #{1 2 3} 2)  ; => #{1 3}",
+        )?;
+
+        self.add_builtin_with_doc(
+            "beagle._collections/set-elements",
             rust_set_elements as *const u8,
             true,
             &["s"],
@@ -2710,11 +2738,48 @@ impl Runtime {
         )?;
 
         // ============================================================================
+        // TLS client (rustls)
+        // ============================================================================
+        {
+            use super::tls::*;
+            self.reserve_namespace("beagle._tls".to_string());
+
+            self.add_builtin_with_doc(
+                "beagle._tls/connect",
+                tls_connect as *const u8,
+                true,
+                &["host", "port"],
+                "Open a TLS (HTTPS) connection to host:port, returning an integer handle, or -1 on failure. Internal: use beagle.tls.",
+            )?;
+            self.add_builtin_with_doc(
+                "beagle._tls/write",
+                tls_write as *const u8,
+                true,
+                &["handle", "data"],
+                "Write data over a TLS connection; returns bytes written or -1. Internal: use beagle.tls.",
+            )?;
+            self.add_builtin_with_doc(
+                "beagle._tls/read",
+                tls_read as *const u8,
+                true,
+                &["handle", "n"],
+                "Read up to n plaintext bytes from a TLS connection ('' at end-of-stream). Internal: use beagle.tls.",
+            )?;
+            self.add_builtin_with_doc(
+                "beagle._tls/close",
+                tls_close as *const u8,
+                true,
+                &["handle"],
+                "Close a TLS connection. Internal: use beagle.tls.",
+            )?;
+        }
+
+        // ============================================================================
         // Mutable Map (open-addressing hash table)
         // ============================================================================
 
         self.add_builtin_with_doc(
-            "beagle.collections/mutable-map",
+            "beagle._collections/mutable-map",
             rust_mutable_map_empty as *const u8,
             true,
             &[],
@@ -2722,7 +2787,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/mutable-map-with-capacity",
+            "beagle._collections/mutable-map-with-capacity",
             rust_mutable_map_with_capacity as *const u8,
             true,
             &["capacity"],
@@ -2730,7 +2795,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/mutable-map-put!",
+            "beagle._collections/mutable-map-put!",
             rust_mutable_map_put as *const u8,
             true,
             &["m", "key", "value"],
@@ -2738,7 +2803,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/mutable-map-get",
+            "beagle._collections/mutable-map-get",
             rust_mutable_map_get as *const u8,
             false,
             &["m", "key"],
@@ -2746,7 +2811,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/mutable-map-increment!",
+            "beagle._collections/mutable-map-increment!",
             rust_mutable_map_increment as *const u8,
             true,
             &["m", "key"],
@@ -2754,7 +2819,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/mutable-map-count",
+            "beagle._collections/mutable-map-count",
             rust_mutable_map_count as *const u8,
             false,
             &["m"],
@@ -2762,7 +2827,7 @@ impl Runtime {
         )?;
 
         self.add_builtin_with_doc(
-            "beagle.collections/mutable-map-entries",
+            "beagle._collections/mutable-map-entries",
             rust_mutable_map_entries as *const u8,
             true,
             &["m"],

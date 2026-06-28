@@ -38,6 +38,7 @@ pub mod embedded_stdlib {
             "beagle.fs.bg" => Some(include_str!("../standard-library/beagle.fs.bg")),
             "beagle.timer.bg" => Some(include_str!("../standard-library/beagle.timer.bg")),
             "beagle.socket.bg" => Some(include_str!("../standard-library/beagle.socket.bg")),
+            "beagle.tls.bg" => Some(include_str!("../standard-library/beagle.tls.bg")),
             "beagle.stream.bg" => Some(include_str!("../standard-library/beagle.stream.bg")),
             "beagle.repl-session.bg" => {
                 Some(include_str!("../standard-library/beagle.repl-session.bg"))
@@ -1152,6 +1153,76 @@ fn load_default_files(runtime: &mut Runtime) -> Result<Vec<String>, Box<dyn Erro
     Ok(all_top_levels)
 }
 
+/// Stdlib modules that are NOT loaded by default (resolved on demand via `use`),
+/// but which we want force-loaded for documentation export so the docs cover the
+/// full standard library rather than only the default prelude.
+const EXTRA_DOC_STDLIB_FILES: [&str; 39] = [
+    "beagle.repl-main.bg",
+    "beagle.spawn.bg",
+    "beagle.mutable-array.bg",
+    "beagle.string-builder.bg",
+    "beagle.text.bg",
+    "beagle.base64.bg",
+    "beagle.hex.bg",
+    "beagle.hash.bg",
+    "beagle.url.bg",
+    "beagle.os.bg",
+    "beagle.path.bg",
+    "beagle.process.bg",
+    "beagle.time.bg",
+    "beagle.http.bg",
+    "beagle.template.bg",
+    "beagle.ws.bg",
+    "beagle.iter.bg",
+    "beagle.containers.bg",
+    "beagle.stats.bg",
+    "beagle.random.bg",
+    "beagle.ip.bg",
+    "beagle.json.bg",
+    "beagle.csv.bg",
+    "beagle.bigint.bg",
+    "beagle.channel.bg",
+    "beagle.date.bg",
+    "beagle.regex-wrapper.bg",
+    "beagle.cli.bg",
+    "beagle.log.bg",
+    "beagle.test.bg",
+    "beagle.test-async.bg",
+    "beagle.mathx.bg",
+    "beagle.ini.bg",
+    "beagle.priorityqueue.bg",
+    "beagle.semver.bg",
+    "beagle.ansi.bg",
+    "beagle.glob.bg",
+    "beagle.textwrap.bg",
+    "beagle.struct-pack.bg",
+];
+
+/// Force-load every on-demand stdlib module so documentation export covers the
+/// whole standard library. Errors on any single module are reported and skipped
+/// rather than aborting the whole export.
+fn load_extra_stdlib_for_docs(runtime: &mut Runtime) {
+    let mut seen = std::collections::HashSet::new();
+    for file_name in EXTRA_DOC_STDLIB_FILES {
+        if !seen.insert(file_name) {
+            continue;
+        }
+        let result = match find_stdlib_file(file_name) {
+            Ok(file_path) => runtime.compile(&file_path),
+            Err(_) => match embedded_stdlib::get(file_name) {
+                Some(source) => runtime.compile_source(file_name, source),
+                None => {
+                    eprintln!("docs: skipping {} (not found)", file_name);
+                    continue;
+                }
+            },
+        };
+        if let Err(e) = result {
+            eprintln!("docs: skipping {} (compile error: {})", file_name, e);
+        }
+    }
+}
+
 fn find_resource_file(file_name: &str) -> Result<String, Box<dyn Error>> {
     let mut exe_path = env::current_exe()?;
     exe_path = exe_path.parent().unwrap().to_path_buf();
@@ -2242,6 +2313,9 @@ fn export_docs(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
     runtime.install_builtins()?;
     if !args.no_std {
         load_default_files(runtime)?;
+        // Force-load on-demand modules so docs cover the whole stdlib, not just
+        // the default prelude.
+        load_extra_stdlib_for_docs(runtime);
     }
 
     // Export documentation as JSON

@@ -627,6 +627,219 @@ impl PersistentVec {
             Ok(new_node_h)
         }
     }
+
+    /// Remove the last element, returning a new (one-shorter) vector.
+    ///
+    /// The original vector is unchanged (persistent). Popping a 0- or
+    /// 1-element vector returns the empty vector.
+    ///
+    /// O(log32 n), and O(1) on the common path where the tail just shrinks.
+    pub fn pop(
+        runtime: &mut Runtime,
+        stack_pointer: usize,
+        vec: GcHandle,
+    ) -> Result<GcHandle, Box<dyn Error>> {
+        let count = Self::count(vec);
+
+        // 0 -> empty (no-op); 1 -> empty (removed the only element).
+        if count <= 1 {
+            return Self::empty(runtime, stack_pointer);
+        }
+
+        let shift = BuiltInTypes::untag(vec.get_field(FIELD_SHIFT));
+        let tail = GcHandle::from_tagged(vec.get_field(FIELD_TAIL));
+        let tail_len = tail.field_count();
+
+        if tail_len > 1 {
+            // Fast path: drop the last tail slot; root is shared unchanged.
+            Self::pop_tail_shrink(runtime, stack_pointer, vec, count, shift, tail, tail_len)
+        } else {
+            // Tail has one element: promote the tree's last leaf to the new
+            // tail and remove that leaf from the tree.
+            Self::pop_from_tree(runtime, stack_pointer, vec, count, shift)
+        }
+    }
+
+    /// Fast pop: copy the tail minus its last element; reuse the root.
+    fn pop_tail_shrink(
+        runtime: &mut Runtime,
+        stack_pointer: usize,
+        vec: GcHandle,
+        count: usize,
+        shift: usize,
+        tail: GcHandle,
+        tail_len: usize,
+    ) -> Result<GcHandle, Box<dyn Error>> {
+        let mut scope = HandleScope::new(runtime, stack_pointer);
+
+        let vec_h = scope.alloc_handle(vec);
+        let tail_h = scope.alloc_handle(tail);
+
+        let new_tail_h = scope.allocate_typed_zeroed(tail_len - 1, TYPE_ID_PERSISTENT_VEC_NODE)?;
+        let new_vec_h = scope.allocate_typed_zeroed(4, TYPE_ID_PERSISTENT_VEC)?;
+
+        // Copy the first tail_len-1 slots (barriers: slots may be heap pointers).
+        for i in 0..(tail_len - 1) {
+            let old_tail = tail_h.to_gc_handle();
+            let slot = old_tail.get_field(i);
+            let new_tail = new_tail_h.to_gc_handle();
+            new_tail.set_field_with_barrier(scope.runtime(), i, slot);
+        }
+
+        let vec = vec_h.to_gc_handle();
+        let root = vec.get_field(FIELD_ROOT);
+        let new_vec = new_vec_h.to_gc_handle();
+        new_vec.set_field(
+            FIELD_COUNT,
+            BuiltInTypes::construct_int((count - 1) as isize) as usize,
+        );
+        new_vec.set_field(
+            FIELD_SHIFT,
+            BuiltInTypes::construct_int(shift as isize) as usize,
+        );
+        new_vec.set_field_with_barrier(scope.runtime(), FIELD_ROOT, root);
+        let new_tail = new_tail_h.to_gc_handle();
+        new_vec.set_field_with_barrier(scope.runtime(), FIELD_TAIL, new_tail.as_tagged());
+
+        Ok(new_vec_h.to_gc_handle())
+    }
+
+    /// Pop when the tail holds a single element: the tree's rightmost leaf
+    /// becomes the new tail, and that leaf is removed from the tree (with a
+    /// possible root collapse when the root is left with a single child).
+    fn pop_from_tree(
+        runtime: &mut Runtime,
+        stack_pointer: usize,
+        vec: GcHandle,
+        count: usize,
+        shift: usize,
+    ) -> Result<GcHandle, Box<dyn Error>> {
+        let mut scope = HandleScope::new(runtime, stack_pointer);
+
+        let vec_h = scope.alloc_handle(vec);
+
+        // New tail = the leaf holding element (count - 2). Immutable, so we can
+        // share it directly (the new root will no longer reference it).
+        let vec = vec_h.to_gc_handle();
+        let root = GcHandle::from_tagged(vec.get_field(FIELD_ROOT));
+        let new_tail_leaf = Self::get_node_for_level(root, shift, count - 2);
+        let new_tail_h = scope.alloc_handle(new_tail_leaf);
+
+        // Remove the rightmost leaf from the tree.
+        let root_h = scope.alloc_handle(root);
+        let popped = Self::do_pop_tail(&mut scope, shift, root_h, count)?;
+
+        let (mut new_root_h, mut new_shift) = match popped {
+            Some(h) => (h, shift),
+            None => {
+                // Whole tree emptied: use a fresh empty node (shift stays small).
+                let empty_h =
+                    scope.allocate_typed_zeroed(0, TYPE_ID_PERSISTENT_VEC_NODE)?;
+                (empty_h, shift)
+            }
+        };
+
+        // Collapse a single-child root: if the root has >1 slots but slot 1 is
+        // null, the tree got shorter — drop a level.
+        if new_shift > 5 {
+            let new_root = new_root_h.to_gc_handle();
+            if new_root.field_count() > 1
+                && new_root.get_field(1) == BuiltInTypes::null_value() as usize
+            {
+                let only_child = GcHandle::from_tagged(new_root.get_field(0));
+                new_root_h = scope.alloc_handle(only_child);
+                new_shift -= 5;
+            }
+        }
+
+        let new_vec_h = scope.allocate_typed_zeroed(4, TYPE_ID_PERSISTENT_VEC)?;
+        let new_root = new_root_h.to_gc_handle();
+        let new_vec = new_vec_h.to_gc_handle();
+        new_vec.set_field(
+            FIELD_COUNT,
+            BuiltInTypes::construct_int((count - 1) as isize) as usize,
+        );
+        new_vec.set_field(
+            FIELD_SHIFT,
+            BuiltInTypes::construct_int(new_shift as isize) as usize,
+        );
+        new_vec.set_field_with_barrier(scope.runtime(), FIELD_ROOT, new_root.as_tagged());
+        let new_tail = new_tail_h.to_gc_handle();
+        new_vec.set_field_with_barrier(scope.runtime(), FIELD_TAIL, new_tail.as_tagged());
+
+        Ok(new_vec_h.to_gc_handle())
+    }
+
+    /// Recursive helper: remove the rightmost leaf from the tree rooted at
+    /// `node_h`. Returns `None` when the subtree becomes empty, else the new
+    /// (copy-on-write) node. `count` is the ORIGINAL element count.
+    fn do_pop_tail(
+        scope: &mut HandleScope<'_>,
+        level: usize,
+        node_h: Handle,
+        count: usize,
+    ) -> Result<Option<Handle>, Box<dyn Error>> {
+        let sub_index = ((count - 2) >> level) & BRANCH_MASK;
+
+        if level > 5 {
+            // Internal level: recurse into the child holding element count-2.
+            let node = node_h.to_gc_handle();
+            let child = GcHandle::from_tagged(node.get_field(sub_index));
+            let child_h = scope.alloc_handle(child);
+            let new_child = Self::do_pop_tail(scope, level - 5, child_h, count)?;
+
+            if new_child.is_none() && sub_index == 0 {
+                // Child emptied and it was our only populated slot.
+                return Ok(None);
+            }
+
+            let new_node_h = Self::clone_node(scope, node_h)?;
+            let new_node = new_node_h.to_gc_handle();
+            match new_child {
+                Some(nc_h) => {
+                    let nc = nc_h.to_gc_handle();
+                    new_node.set_field_with_barrier(scope.runtime(), sub_index, nc.as_tagged());
+                }
+                None => {
+                    // Drop the now-empty child (null needs no barrier).
+                    new_node.set_field(sub_index, BuiltInTypes::null_value() as usize);
+                }
+            }
+            Ok(Some(new_node_h))
+        } else if sub_index == 0 {
+            // Level just above the leaves, and the leaf to drop is slot 0 →
+            // this whole node disappears.
+            Ok(None)
+        } else {
+            // Drop the rightmost leaf pointer from a copy of this node.
+            let new_node_h = Self::clone_node(scope, node_h)?;
+            let new_node = new_node_h.to_gc_handle();
+            new_node.set_field(sub_index, BuiltInTypes::null_value() as usize);
+            Ok(Some(new_node_h))
+        }
+    }
+
+    /// Allocate a copy-on-write clone of a tree node (with write barriers for
+    /// the copied heap pointers).
+    fn clone_node(
+        scope: &mut HandleScope<'_>,
+        node_h: Handle,
+    ) -> Result<Handle, Box<dyn Error>> {
+        let node = node_h.to_gc_handle();
+        let node_len = node.field_count();
+        let new_node_h = scope.allocate_typed_zeroed(node_len, TYPE_ID_PERSISTENT_VEC_NODE)?;
+
+        let node = node_h.to_gc_handle();
+        let new_node = new_node_h.to_gc_handle();
+        node.copy_fields_to(&new_node, node_len);
+        for i in 0..node_len {
+            let slot = new_node.get_field(i);
+            if slot != BuiltInTypes::null_value() as usize {
+                scope.runtime().write_barrier(new_node.as_tagged(), slot);
+            }
+        }
+        Ok(new_node_h)
+    }
 }
 
 #[cfg(test)]

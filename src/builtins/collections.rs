@@ -78,6 +78,35 @@ pub unsafe extern "C" fn rust_vec_push(
     }
 }
 
+/// Remove the last element of a persistent vector, returning a new vector.
+/// Popping a 0- or 1-element vector returns the empty vector.
+/// Signature: (stack_pointer, frame_pointer, vec_ptr) -> tagged_ptr
+pub unsafe extern "C" fn rust_vec_pop(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    vec_ptr: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    if !BuiltInTypes::is_heap_pointer(vec_ptr) {
+        return BuiltInTypes::null_value() as usize;
+    }
+
+    let vec = GcHandle::from_tagged(vec_ptr);
+
+    match PersistentVec::pop(runtime, stack_pointer, vec) {
+        Ok(handle) => handle.as_tagged(),
+        Err(e) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                format!("Failed to pop from vector: {}", e),
+            );
+        },
+    }
+}
+
 /// Update a value at an index in a persistent vector
 /// Signature: (stack_pointer, frame_pointer, vec_ptr, index, value) -> tagged_ptr
 pub unsafe extern "C" fn rust_vec_assoc(
@@ -409,6 +438,36 @@ pub unsafe extern "C" fn rust_map_assoc(
     }
 }
 
+/// Remove a key from a persistent map, returning a new map (the same map if the
+/// key was absent). O(log32 n) native HAMT remove.
+/// Signature: (stack_pointer, frame_pointer, map_ptr, key) -> tagged_ptr
+pub unsafe extern "C" fn rust_map_dissoc(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    map_ptr: usize,
+    key: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    if !BuiltInTypes::is_heap_pointer(map_ptr) {
+        return map_ptr;
+    }
+
+    let map = GcHandle::from_tagged(map_ptr);
+
+    match PersistentMap::without(runtime, stack_pointer, map, key) {
+        Ok(handle) => handle.as_tagged(),
+        Err(e) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                format!("Failed to remove key from map: {}", e),
+            );
+        },
+    }
+}
+
 /// Get all keys from a persistent map as a vector
 // Signature: (stack_pointer, frame_pointer, map_ptr) -> tagged_ptr (vector)
 pub unsafe extern "C" fn rust_map_keys(
@@ -517,6 +576,34 @@ pub unsafe extern "C" fn rust_set_add(
                 stack_pointer,
                 "AllocationError",
                 format!("Failed to add element to set: {}", e),
+            );
+        },
+    }
+}
+
+/// Remove an element from a persistent set, returning a new set (the same set if
+/// absent). O(log32 n) native remove via the backing map.
+/// Signature: (stack_pointer, frame_pointer, set_ptr, element) -> tagged_ptr
+pub unsafe extern "C" fn rust_set_disj(
+    stack_pointer: usize,
+    frame_pointer: usize,
+    set_ptr: usize,
+    element: usize,
+) -> usize {
+    save_gc_context!(stack_pointer, frame_pointer);
+    let runtime = get_runtime().get_mut();
+
+    if !BuiltInTypes::is_heap_pointer(set_ptr) {
+        return set_ptr;
+    }
+
+    match PersistentSet::remove(runtime, stack_pointer, set_ptr, element) {
+        Ok(handle) => handle.as_tagged(),
+        Err(e) => unsafe {
+            throw_runtime_error(
+                stack_pointer,
+                "AllocationError",
+                format!("Failed to remove element from set: {}", e),
             );
         },
     }

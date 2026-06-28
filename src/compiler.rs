@@ -425,6 +425,11 @@ pub struct Compiler {
     /// entry merely re-parses a fragment permissively, which cannot
     /// change the meaning of valid code.
     pub extend_method_fragments: HashSet<String>,
+    /// Fully-qualified names of generated `name$N` arity functions whose stored
+    /// source is a single `(args) => body` case. Tier-up/OSR must re-parse these
+    /// with `FragmentContext::ArityCase` (a top-level parse rejects the bare
+    /// arity list). Grows only.
+    pub arity_fragments: HashSet<String>,
     /// Set transiently by `build_osr_variant` so the per-function compile can
     /// snapshot the target function's specialized IR + loop info for OSR
     /// continuation construction. `None` outside an OSR build.
@@ -457,6 +462,11 @@ pub struct Compiler {
     pub function_counter_names: Vec<std::ffi::CString>,
     /// Multi-arity function metadata for static dispatch
     pub multi_arity_functions: HashMap<String, MultiArityInfo>,
+    /// Fully-qualified names of every defined protocol (e.g. "beagle.core/Length"),
+    /// so an `extend Type with Proto` can resolve an UNqualified protocol name to
+    /// its defining namespace (current namespace first, then beagle.core) instead
+    /// of silently defaulting to the current namespace and registering a dead impl.
+    pub defined_protocols: HashSet<String>,
     /// Dynamic variables: name -> (namespace_id, slot)
     pub dynamic_vars: HashMap<String, (usize, usize)>,
     /// When true, upsert_function defers jump table updates
@@ -553,11 +563,21 @@ impl Compiler {
         self.extend_method_fragments.insert(full_name);
     }
 
+    /// Record that `full_name` is a generated `name$N` arity function whose
+    /// stored source is a single `(args) => body` case (re-parsed under
+    /// `FragmentContext::ArityCase`). Called during `Ast::MultiArityFunction`
+    /// compilation for every arity it generates.
+    pub fn mark_arity_fragment(&mut self, full_name: String) {
+        self.arity_fragments.insert(full_name);
+    }
+
     /// The syntactic context `full_name`'s stored source fragment was
     /// originally defined in.
     fn fragment_context_for(&self, full_name: &str) -> crate::parser::FragmentContext {
         if self.extend_method_fragments.contains(full_name) {
             crate::parser::FragmentContext::ExtendMethod
+        } else if self.arity_fragments.contains(full_name) {
+            crate::parser::FragmentContext::ArityCase
         } else {
             crate::parser::FragmentContext::TopLevel
         }
@@ -3282,6 +3302,7 @@ impl CompilerThread {
                 arith_feedback_debug_names: Vec::new(),
                 specialized_names: HashSet::new(),
                 extend_method_fragments: HashSet::new(),
+                arity_fragments: HashSet::new(),
                 osr_capture: None,
                 specialization_originals: HashMap::new(),
                 function_counter_cache: MmapOptions::new(MmapOptions::page_size() * 64) // 256KB ≈ 32k functions
@@ -3302,6 +3323,7 @@ impl CompilerThread {
                 compiled_file_cache: HashSet::new(),
                 diagnostic_store,
                 multi_arity_functions: HashMap::new(),
+                defined_protocols: HashSet::new(),
                 dynamic_vars: HashMap::new(),
                 defer_function_installs: false,
                 deferred_updates: Vec::new(),

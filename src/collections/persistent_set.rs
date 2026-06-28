@@ -143,6 +143,61 @@ impl PersistentSet {
         Ok(new_set_gc)
     }
 
+    /// Remove an element, returning a new set (the same set if absent).
+    /// Delegates to the backing map's O(log32 n) native HAMT remove.
+    pub fn remove(
+        runtime: &mut Runtime,
+        stack_pointer: usize,
+        set_ptr: usize,
+        element: usize,
+    ) -> Result<GcHandle, Box<dyn Error>> {
+        let mut scope = HandleScope::new(runtime, stack_pointer);
+
+        let set_h = scope.alloc(set_ptr);
+        let element_h = scope.alloc(element);
+
+        let old_count = Self::count(set_h.to_gc_handle());
+
+        // Temporary map view of the set's (count, root) so we can use map remove.
+        let temp_map = scope.allocate_typed_zeroed(2, TYPE_ID_PERSISTENT_MAP)?;
+        // Re-read root AFTER allocation (GC may have updated set_h's fields).
+        let root_ptr = set_h.to_gc_handle().get_field(FIELD_ROOT);
+        temp_map.to_gc_handle().set_field(
+            FIELD_COUNT,
+            BuiltInTypes::construct_int(old_count as isize) as usize,
+        );
+        temp_map
+            .to_gc_handle()
+            .set_field_with_barrier(scope.runtime(), FIELD_ROOT, root_ptr);
+
+        let new_map = PersistentMap::without(
+            scope.runtime(),
+            stack_pointer,
+            temp_map.to_gc_handle(),
+            element_h.get(),
+        )?;
+
+        // Protect new_map before allocating the new set struct.
+        let new_map_h = scope.alloc(new_map.as_tagged());
+
+        let new_set = scope.allocate_typed_zeroed(2, TYPE_ID_PERSISTENT_SET)?;
+        let new_map_gc = new_map_h.to_gc_handle();
+        let new_count = PersistentMap::count(new_map_gc);
+
+        let new_set_gc = new_set.to_gc_handle();
+        new_set_gc.set_field(
+            FIELD_COUNT,
+            BuiltInTypes::construct_int(new_count as isize) as usize,
+        );
+        new_set_gc.set_field_with_barrier(
+            scope.runtime(),
+            FIELD_ROOT,
+            new_map_gc.get_field(FIELD_ROOT),
+        );
+
+        Ok(new_set_gc)
+    }
+
     /// Get all elements from the set as a PersistentVec.
     pub fn elements(
         runtime: &mut Runtime,

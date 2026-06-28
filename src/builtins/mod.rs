@@ -83,6 +83,7 @@ mod assertions;
 mod async_file;
 mod bindings;
 pub mod collections;
+pub mod tls;
 mod continuations;
 mod debugger;
 mod diagnostics;
