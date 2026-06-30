@@ -2220,8 +2220,48 @@ fn tcp-result-or-throw(result) {
     }
 }
 
-/// Return the shared global event loop, lazily creating a 4-worker threaded loop on first use (CAS-guarded against races).
+// The event loop the CURRENT thread's tasks are parked on, WITHOUT creating one:
+// this thread's private loop if it opted into one (use-own-io-loop!), else the
+// shared global loop if it exists, else null. The scheduler uses this to drive
+// the right loop while idle without forcing a loop into existence for pure-CPU
+// programs.
+/// This thread's active event loop (private or shared), or null if none exists yet.
+fn io-loop-peek() {
+    let mine = core/get-thread-io-loop()
+    if mine != null {
+        mine
+    } else {
+        deref(__io_loop_atom)
+    }
+}
+
+// Give the CURRENT OS thread its own dedicated event loop (its own I/O thread),
+// used for the rest of this thread's life. Call once, before any async I/O on the
+// thread. Each thread-per-core HTTP worker calls this so per-connection I/O is
+// core-local with no cross-worker event-loop contention.
+/// Create a private event loop for this thread and route this thread's async I/O to it.
+fn use-own-io-loop!() {
+    if core/get-thread-io-loop() == null {
+        core/set-thread-io-loop(core/event-loop-create-threaded(2))
+    }
+    null
+}
+
+/// Return this thread's event loop: its private loop if it opted into one
+/// (use-own-io-loop!), otherwise the shared global loop (lazily created, 4-worker
+/// threaded, CAS-guarded against races).
 fn get-io-loop() {
+    let mine = core/get-thread-io-loop()
+    if mine != null {
+        mine
+    } else {
+        get-shared-io-loop()
+    }
+}
+
+/// The process-wide shared event loop (used by every thread that didn't opt into
+/// its own via use-own-io-loop!).
+fn get-shared-io-loop() {
     let loop_id = deref(__io_loop_atom)
     if loop_id == null {
         // Use threaded event loop by default for concurrent I/O safety.
@@ -3000,7 +3040,7 @@ fn scheduler-loop(handler) {
             if length(tasks) == 0 {
                 break(null)
             }
-            let loop_id = deref(__io_loop_atom)
+            let loop_id = io-loop-peek()
             // Cleanups run by poll-tasks belong to no resumed flow.
             reset!(__current-cancel-token, null)
             let result = poll-tasks(tasks, loop_id)

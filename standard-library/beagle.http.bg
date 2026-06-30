@@ -1009,8 +1009,47 @@ fn serve(host, port, handler) {
 /// (`:read-timeout-ms`, `:max-header-bytes`, `:max-body-bytes`).
 fn serve-with(host, port, opts, handler) {
     let config = config-from-opts(opts)
+    let workers = worker-count(opts)
+    println("beagle.http serving on " ++ host ++ ":" ++ to-string(port) ++ " (" ++ to-string(workers) ++ " worker(s))")
+    serve-workers(host, port, config, handler, workers)
+}
+
+// Number of accept-loop workers the server runs. Each worker is its own OS thread
+// with its own cooperative scheduler and its own SO_REUSEPORT listener on the same
+// host:port; the kernel load-balances connections across them, so per-request work
+// runs in parallel across cores (thread-per-core). Read from the `:workers` opt,
+// defaulting to 1 (single-threaded — the historical behavior).
+//
+// CONCURRENCY NOTE: with >1 worker, request handlers run in PARALLEL across
+// workers. A handler that mutates state shared between connections must
+// synchronize it (atoms / compare-and-swap!) — the same expectation as any
+// multithreaded server. A single connection is still handled start-to-finish on
+// one worker, so per-connection state stays sequential and race-free.
+fn worker-count(opts) {
+    let n = core/get(opts, :workers, 1)
+    if n < 1 { 1 } else { n }
+}
+
+// Spawn `workers - 1` accept-loop OS threads, then run the final worker on the
+// calling thread so `serve` still blocks forever. Each worker binds its own
+// SO_REUSEPORT listener and runs an independent cooperative accept loop.
+fn serve-workers(host, port, config, handler, workers) {
+    let mut i = 1
+    while i < workers {
+        thread(fn() { serve-accept-loop(host, port, config, handler) })
+        i = i + 1
+    }
+    serve-accept-loop(host, port, config, handler)
+}
+
+// One worker: bind a (SO_REUSEPORT) listener and run the per-connection accept
+// loop. Runs under this thread's own cooperative scheduler AND its own event loop
+// (use-own-io-loop!), so per-connection I/O is core-local — N workers don't
+// contend on a single shared event loop's mutex (which otherwise makes more
+// workers SLOWER, not faster).
+fn serve-accept-loop(host, port, config, handler) {
+    async/use-own-io-loop!()
     let listener = socket/listen(host, port)
-    println("beagle.http serving on " ++ host ++ ":" ++ to-string(port))
     socket/on-connection(listener, fn(conn) {
         handle-connection(conn, handler, config)
     })

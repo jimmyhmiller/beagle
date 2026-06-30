@@ -1360,6 +1360,20 @@ impl Runtime {
             "Return the number of CPU cores available on the system.",
         )?;
 
+        // Per-thread event-loop override (thread-per-core servers).
+        self.add_builtin_function(
+            "beagle.core/get-thread-io-loop",
+            get_thread_io_loop as *const u8,
+            false,
+            0,
+        )?;
+        self.add_builtin_function(
+            "beagle.core/set-thread-io-loop",
+            set_thread_io_loop as *const u8,
+            false,
+            1,
+        )?;
+
         // Event loop builtins for async I/O
         self.add_builtin_function(
             "beagle.core/event-loop-create",

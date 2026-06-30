@@ -2425,11 +2425,11 @@ impl EventLoopState {
             }
             TcpOperation::Listen {
                 addr,
-                backlog: _,
+                backlog,
                 response_tx,
             } => {
                 trace!("tcp", "io thread: handle Listen on {}", addr);
-                match mio::net::TcpListener::bind(addr) {
+                match bind_reuse_port(addr, backlog as i32) {
                     Ok(listener) => {
                         let listener_id = self.next_socket_id();
                         trace!("tcp", "io thread: Listen ok listener_id={}", listener_id);
@@ -3143,6 +3143,116 @@ impl EventLoopState {
             });
         }
     }
+}
+
+/// Bind a TCP listener with SO_REUSEPORT (+ SO_REUSEADDR) set, so that N worker
+/// threads can each bind the SAME host:port and have the kernel load-balance
+/// incoming connections across them — the foundation of the thread-per-core HTTP
+/// server. `mio::net::TcpListener::bind` only sets SO_REUSEADDR, so we build the
+/// socket by hand (libc; no socket2 dependency), set the options BEFORE bind,
+/// then hand the fd to mio. macOS-only (matches the project target). For a single
+/// listener SO_REUSEPORT is effectively a no-op, so this is safe to use always.
+fn bind_reuse_port(
+    addr: std::net::SocketAddr,
+    backlog: i32,
+) -> std::io::Result<mio::net::TcpListener> {
+    use std::os::unix::io::FromRawFd;
+    // Close the raw fd on any early-return error path.
+    struct FdGuard(libc::c_int);
+    impl Drop for FdGuard {
+        fn drop(&mut self) {
+            if self.0 >= 0 {
+                unsafe { libc::close(self.0) };
+            }
+        }
+    }
+
+    let domain = match addr {
+        std::net::SocketAddr::V4(_) => libc::AF_INET,
+        std::net::SocketAddr::V6(_) => libc::AF_INET6,
+    };
+    let fd = unsafe { libc::socket(domain, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut guard = FdGuard(fd);
+
+    let one: libc::c_int = 1;
+    let optlen = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    for opt in [libc::SO_REUSEADDR, libc::SO_REUSEPORT] {
+        let ret = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                opt,
+                &one as *const libc::c_int as *const libc::c_void,
+                optlen,
+            )
+        };
+        if ret < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+
+    // Build the sockaddr and bind. macOS sockaddr_in/in6 carry a leading length byte.
+    let bind_ret = match addr {
+        std::net::SocketAddr::V4(v4) => {
+            let sin = libc::sockaddr_in {
+                sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: v4.port().to_be(),
+                sin_addr: libc::in_addr {
+                    s_addr: u32::from_ne_bytes(v4.ip().octets()),
+                },
+                sin_zero: [0; 8],
+            };
+            unsafe {
+                libc::bind(
+                    fd,
+                    &sin as *const libc::sockaddr_in as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                )
+            }
+        }
+        std::net::SocketAddr::V6(v6) => {
+            let sin6 = libc::sockaddr_in6 {
+                sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
+                sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                sin6_port: v6.port().to_be(),
+                sin6_flowinfo: v6.flowinfo(),
+                sin6_addr: libc::in6_addr {
+                    s6_addr: v6.ip().octets(),
+                },
+                sin6_scope_id: v6.scope_id(),
+            };
+            unsafe {
+                libc::bind(
+                    fd,
+                    &sin6 as *const libc::sockaddr_in6 as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+                )
+            }
+        }
+    };
+    if bind_ret < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let listen_ret = unsafe { libc::listen(fd, backlog.max(1)) };
+    if listen_ret < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    // mio requires non-blocking sockets.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    // Success: hand ownership of the fd to mio; defuse the guard so it isn't closed.
+    guard.0 = -1;
+    let std_listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
+    Ok(mio::net::TcpListener::from_std(std_listener))
 }
 
 /// Main loop for the dedicated event loop thread.

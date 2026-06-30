@@ -1,5 +1,29 @@
 use super::*;
 
+thread_local! {
+    /// Per-OS-thread event-loop override (a tagged Beagle loop id, or 0 = unset).
+    static THREAD_IO_LOOP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Return the event-loop id set for THIS OS thread, or Beagle `null` if none.
+/// Lets each thread-per-core HTTP worker drive its OWN event loop (no shared-loop
+/// mutex contention) while every other thread keeps using the shared global loop.
+/// The value is an opaque tagged loop id (from event-loop-create), passed through.
+pub extern "C" fn get_thread_io_loop() -> usize {
+    let v = THREAD_IO_LOOP.with(|c| c.get());
+    if v == 0 {
+        BuiltInTypes::null_value() as usize
+    } else {
+        v
+    }
+}
+
+/// Set this OS thread's event-loop override to `loop_id` (from event-loop-create).
+pub extern "C" fn set_thread_io_loop(loop_id: usize) -> usize {
+    THREAD_IO_LOOP.with(|c| c.set(loop_id));
+    BuiltInTypes::null_value() as usize
+}
+
 /// Always spawns a dedicated I/O thread.
 pub extern "C" fn event_loop_create(pool_size: usize) -> usize {
     let pool_size = BuiltInTypes::untag(pool_size);
