@@ -1,0 +1,40 @@
+namespace https_client_test
+
+// Skip: requires outbound network to a real HTTPS endpoint.
+//
+// Validates the async (sans-I/O) TLS client end to end: a real HTTPS GET (real
+// certificate verification + TLS 1.3 handshake), two CONCURRENT HTTPS requests
+// that interleave (the async TLS layer parks instead of blocking the thread), and
+// an HTTPS :connect-timeout that bounds an unreachable host (which the old
+// blocking TLS could not — it would freeze for the OS connect timeout, ~75s).
+// Run manually:  ./target/release/beag resources/https_client_test.bg
+
+use beagle.core as core
+use beagle.http as http
+use beagle.async as async
+
+test "async TLS: real HTTPS GET succeeds" {
+    let r = http/get("https://example.com/")
+    assert!(ok?(r))
+    assert-eq!(unwrap!(r).status, 200)
+    assert!(length(unwrap!(r).body) > 0)
+}
+
+test "async TLS: two concurrent HTTPS requests both succeed" {
+    let a = future(http/get("https://example.com/"))
+    let b = future(http/get("https://example.com/"))
+    let ra = async/await(a)
+    let rb = async/await(b)
+    assert!(ok?(ra))
+    assert!(ok?(rb))
+    assert-eq!(unwrap!(ra).status, 200)
+    assert-eq!(unwrap!(rb).status, 200)
+}
+
+test "async TLS: :connect-timeout bounds an unreachable HTTPS host" {
+    let start = core/time-now()
+    let r = http/get("https://192.0.2.1/x", {:connect-timeout 600})
+    let elapsed-ms = (core/time-now() - start) / 1000000
+    assert!(ok?(r) == false)        // a connect failure -> Result.Err
+    assert!(elapsed-ms < 4000)      // bounded, not the ~75s OS connect timeout
+}

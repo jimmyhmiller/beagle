@@ -1,0 +1,112 @@
+namespace bench_net_pool_speedup
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.http as http
+use beagle.text as text
+
+// Single-process micro-benchmark: connection-pooling speedup.
+//
+// One process runs BOTH tiny HTTP servers (on background threads) and the client
+// that does the timing. We issue N requests two ways against a local server and
+// time each:
+//
+//   pooled   : http/client-get(c, url)  -> reuses ONE keep-alive connection for
+//                                          all N requests (1 connection).
+//   one-shot : http/get(url)            -> fresh TCP connect + Connection: close
+//                                          on every request (N connections).
+//
+// Each phase gets its OWN server thread so the two measurements are independent
+// (no shared accept loop / phase-transition race):
+//   - the pooled server accepts exactly 1 connection and its keep-alive loop
+//     serves all N requests, ending when the client closes (client-close);
+//   - the one-shot server accepts exactly N connections (1 request each), then
+//     closes its listener and returns.
+// Both server threads do finite work and return, so the process EXITS cleanly.
+//
+// NOTE: the pooled phase runs FIRST. Doing the heavy one-shot phase (N cooperative
+// connect/close cycles) before the pooled phase intermittently wedges the pooled
+// connect under the cooperative scheduler; running pooled on a clean scheduler
+// first, then one-shot, is robust. Execution order does not affect either timing.
+
+// Spawn a server thread that accepts exactly `n-conns` connections, serves each
+// via the keep-alive loop, then closes its listener and returns. `ready` is set
+// true once it is listening. `counter` is bumped on every request served.
+fn start-server(host, port, n-conns, ready, counter) {
+    thread(fn() {
+        let listener = socket/listen(host, port)
+        reset!(ready, true)
+        let handler = fn(req) {
+            swap!(counter, fn(c) { c + 1 })
+            http/ok("ok")
+        }
+        let mut accepted = 0
+        while accepted < n-conns {
+            http/handle-connection(socket/accept(listener), handler, http/config-from-opts({}))
+            accepted = accepted + 1
+        }
+        socket/close-listener(listener)
+    })
+}
+
+fn wait-ready(ready) {
+    loop {
+        if deref(ready) { break(null) }
+        core/sleep(1)
+    }
+}
+
+fn main() {
+    let n = 400
+    let host = "127.0.0.1"
+
+    // ---- Phase 1: pooled (one reused keep-alive connection) ----
+    let port-b = 20000 + core/random-int(20000)
+    let ready-b = atom(false)
+    let served-b = atom(0)
+    // 1 connection; its keep-alive loop serves all N requests.
+    start-server(host, port-b, 1, ready-b, served-b)
+    wait-ready(ready-b)
+    let base-b = "http://${host}:${port-b}"
+    let c = http/client()
+    let start-b = core/time-now()
+    let mut j = 0
+    while j < n {
+        unwrap!(http/client-get(c, "${base-b}/pooled/${j}"))
+        j = j + 1
+    }
+    let pooled-ms = (core/time-now() - start-b) / 1000000
+    http/client-close(c)
+    println("pooled   (1 reused conn) : ${n} requests in ${pooled-ms} ms")
+
+    // ---- Phase 2: one-shot (one fresh connection per request) ----
+    let port-a = 20000 + core/random-int(20000)
+    let ready-a = atom(false)
+    let served-a = atom(0)
+    // N connections, one request each (Connection: close ends each keep-alive loop
+    // after one request so the server closes its side immediately).
+    start-server(host, port-a, n, ready-a, served-a)
+    wait-ready(ready-a)
+    // Pump the cooperative scheduler so the pooled phase's socket activity is fully
+    // drained before the one-shot phase starts its connect/close churn (outside the
+    // timed regions, so it does not affect the measurement).
+    core/sleep(10)
+    let base-a = "http://${host}:${port-a}"
+    let start-a = core/time-now()
+    let mut i = 0
+    while i < n {
+        unwrap!(http/get("${base-a}/oneshot/${i}", {:headers {"Connection" "close"}}))
+        i = i + 1
+    }
+    let oneshot-ms = (core/time-now() - start-a) / 1000000
+    println("one-shot (new conn each) : ${n} requests in ${oneshot-ms} ms")
+
+    println("")
+    println("single-process micro-benchmark (server threads + client, one process)")
+    println("pooled   requests served: ${deref(served-b)} over 1 connection")
+    println("one-shot requests served: ${deref(served-a)} over ${n} connections")
+    let speedup = (oneshot-ms * 1.0) / pooled-ms
+    println("pooled   total : ${pooled-ms} ms")
+    println("one-shot total : ${oneshot-ms} ms")
+    println("speedup (one-shot / pooled): ${text/fixed(speedup, 2)}x")
+}

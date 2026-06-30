@@ -1,0 +1,69 @@
+namespace http_read_timeout_test
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.http as http
+
+// The HTTP server reads each request through a per-read (idle) deadline. A client
+// that opens a connection, sends a partial request, then stalls gets a 408 at the
+// deadline (the timed reader cancels the pending read WITHOUT closing the socket,
+// so the server can still send the response) and is then dropped; a complete
+// request is served normally.
+//
+// Drives http/handle-connection directly (the per-connection server step) so the
+// server thread handles exactly two connections and exits — serve/serve-with loop
+// forever, which a test can't join. Concurrency of serve is covered elsewhere.
+
+fn status-of(resp) {
+    let sp1 = index-of(resp, " ")
+    if sp1 < 0 {
+        "no-status"
+    } else {
+        let rest = substring(resp, sp1 + 1, length(resp))
+        let sp2 = index-of(rest, " ")
+        if sp2 < 0 { rest } else { substring(rest, 0, sp2) }
+    }
+}
+
+fn main() {
+    let port = 20000 + core/random-int(40000)
+    let ready = atom(false)
+
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        reset!(ready, true)
+        let handler = fn(req) { http/ok("hello") }
+        let config = http/config-from-opts({:read-timeout-ms 400})
+        // First connection: a stalled partial request -> dropped at the deadline.
+        http/handle-connection(socket/accept(listener), handler, config)
+        // Second connection: a complete request -> served normally.
+        http/handle-connection(socket/accept(listener), handler, config)
+        socket/close-listener(listener)
+    })
+
+    loop {
+        if deref(ready) { break(null) }
+        core/sleep(1)
+    }
+
+    // case 1: stalled, incomplete request -> the server replies 408, then drops.
+    let c1 = socket/connect("127.0.0.1", port)
+    socket/write(c1, "GET /slow HTTP/1.1\r\nHost: x")   // no blank line; never finishes
+    let r1 = socket/read(c1, 1024)
+    println("case1-status: " ++ status-of(r1))
+    socket/close(c1)
+
+    // case 2: complete request -> 200.
+    let c2 = socket/connect("127.0.0.1", port)
+    socket/write(c2, "GET /ok HTTP/1.1\r\nHost: x\r\n\r\n")
+    let r2 = socket/read(c2, 1024)
+    println("case2-has-200: " ++ to-string(index-of(r2, "200") >= 0))
+    socket/close(c2)
+
+    println("done")
+}
+
+// @beagle.core.snapshot
+// case1-status: 408
+// case2-has-200: true
+// done

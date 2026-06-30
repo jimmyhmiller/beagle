@@ -83,7 +83,6 @@ mod assertions;
 mod async_file;
 mod bindings;
 pub mod collections;
-pub mod tls;
 mod continuations;
 mod debugger;
 mod diagnostics;
@@ -106,6 +105,7 @@ pub mod reset_shift;
 mod string_builder;
 mod strings;
 mod threads;
+pub mod tls;
 
 // ============================================================================
 // Re-exports

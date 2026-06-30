@@ -32,6 +32,7 @@ use beagle.string-builder as sb
 use beagle.core as core
 use beagle.url as url
 use beagle.tls as tls
+use beagle.async as async
 
 // ===========================================================================
 // Data types
@@ -251,153 +252,26 @@ fn with-content-type(resp, content-type) {
 }
 
 // ===========================================================================
-// Low-level socket line/byte reading
+// Connection readers
 // ===========================================================================
 //
-// socket/read(conn, n) returns up to n bytes as a string. All reading is done
-// in large chunks through a buffered connection wrapper (ConnBuf) so we never
-// pay one syscall per byte, and so we can correctly stop a line at its CRLF
-// while keeping any over-read bytes (which may belong to the next line, or to
-// the request body) for the following read. All progress is measured in BYTES,
-// not codepoints, so multi-byte UTF-8 bodies are read correctly.
+// HTTP reads bytes through socket's buffered Reader (socket/read-line,
+// socket/read-n, socket/read-all): one buffered byte layer shared with ws, so
+// neither protocol reimplements line/byte buffering. These two helpers build a
+// Reader over the right transport; everything below is protocol parsing on top.
 
-// Size of each socket/read chunk.
-let read-chunk-size = 4096
-
-// A buffered wrapper around a raw socket connection. `conn` is the raw socket;
-// `leftover` is an atom holding a string of bytes that were read from the
-// socket but not yet consumed (carried across read-line / read-n calls).
-/// A buffered wrapper over a raw socket connection, holding an atom of
-/// over-read leftover bytes carried across read calls.
-struct ConnBuf {
-    conn
-    leftover
-    tls       // Bool: true if `conn` is a beagle.tls handle, false for a raw socket
+// Wrap a raw socket connection in a buffered reader.
+/// Wrap a raw socket connection in a socket/Reader for buffered reads.
+fn conn-reader(conn) {
+    socket/reader(conn)
 }
 
-// Wrap a raw connection in a ConnBuf.
-/// Wrap a raw socket connection in a fresh ConnBuf with an empty leftover
-/// buffer.
-fn conn-buf(conn) {
-    ConnBuf { conn: conn, leftover: atom(""), tls: false }
-}
-
-// Wrap a beagle.tls connection handle in a ConnBuf (reads go through tls/read).
-/// Wrap a TLS connection handle in a fresh ConnBuf for HTTPS reads.
-fn conn-buf-tls(conn) {
-    ConnBuf { conn: conn, leftover: atom(""), tls: true }
-}
-
-// Slice string s by BYTE indices [start, end) and return the resulting string.
-/// Return the substring of s between BYTE indices [start, end); "" if
-/// end <= start.
-fn byte-slice(s, start, end) {
-    if end <= start {
-        ""
-    } else {
-        let b = sb/new(end - start)
-        sb/append-range!(b, s, start, end)
-        sb/to-string(b)
-    }
-}
-
-// Pull one more chunk from the socket into `leftover`. Returns true if any
-// bytes were appended, false at EOF.
-/// Pull one more socket chunk into the buffer's leftover; returns true if any
-/// bytes were appended, false at EOF.
-fn cb-fill!(cb) {
-    let data = if cb.tls {
-        tls/read(cb.conn, read-chunk-size)
-    } else {
-        socket/read(cb.conn, read-chunk-size)
-    }
-    if data == null || data == "" {
-        false
-    } else {
-        reset!(cb.leftover, deref(cb.leftover) ++ data)
-        true
-    }
-}
-
-// Read one CRLF- or LF-terminated line from the connection. The terminator is
-// stripped. Returns null at EOF before any bytes (so the caller can detect a
-// closed connection). A bare "\r" preceding "\n" is dropped. Bytes following
-// the line terminator are kept in the buffer for the next read.
-/// Read one CRLF/LF-terminated line (terminator stripped); returns null at EOF
-/// before any bytes. Over-read bytes stay buffered for the next read.
-fn read-line(cb) {
-    let mut done = false
-    let mut nl = -1
-    // Read chunks until we find a newline byte (10) in the buffer or hit EOF.
-    while done == false {
-        let buf = deref(cb.leftover)
-        nl = sb/index-byte(buf, 10, 0)
-        if nl >= 0 {
-            done = true
-        } else {
-            if cb-fill!(cb) == false {
-                done = true
-            }
-        }
-    }
-    let buf = deref(cb.leftover)
-    let total = byte-length(buf)
-    if nl < 0 {
-        // EOF without a newline: the remaining buffer is the final line.
-        if total == 0 {
-            null
-        } else {
-            reset!(cb.leftover, "")
-            strip-cr(buf)
-        }
-    } else {
-        let line = byte-slice(buf, 0, nl)
-        reset!(cb.leftover, byte-slice(buf, nl + 1, total))
-        strip-cr(line)
-    }
-}
-
-// Drop a trailing "\r" from a line (the CR of a CRLF terminator).
-/// Drop a single trailing CR (the "\r" of a CRLF terminator) from a line.
-fn strip-cr(line) {
-    let n = byte-length(line)
-    if n > 0 && sb/index-byte(line, 13, n - 1) == n - 1 {
-        byte-slice(line, 0, n - 1)
-    } else {
-        line
-    }
-}
-
-// Read exactly n bytes (or fewer at EOF) from the connection, returning a
-// string. Progress is measured in BYTES (not codepoints), so multi-byte UTF-8
-// bodies terminate correctly. Any bytes already in the buffer are consumed
-// first; over-read bytes are pushed back into the buffer.
-/// Read exactly n bytes (or fewer at EOF) from the connection as a string,
-/// measured in BYTES; over-read bytes stay buffered.
-fn read-n(cb, n) {
-    let builder = sb/new(n)
-    let mut done = false
-    while sb/length(builder) < n && done == false {
-        let buf = deref(cb.leftover)
-        let have = byte-length(buf)
-        if have > 0 {
-            let need = n - sb/length(builder)
-            if have <= need {
-                // Consume the whole buffer.
-                sb/append!(builder, buf)
-                reset!(cb.leftover, "")
-            } else {
-                // Consume `need` bytes, keep the rest buffered.
-                sb/append-range!(builder, buf, 0, need)
-                reset!(cb.leftover, byte-slice(buf, need, have))
-            }
-        } else {
-            if cb-fill!(cb) == false {
-                done = true
-            }
-        }
-    }
-    sb/to-string(builder)
+// Wrap a beagle.tls connection handle in a buffered reader (reads go through
+// tls/read instead of socket/read).
+/// Wrap a TLS connection handle in a socket/Reader whose pull thunk reads via
+/// tls/read, for buffered HTTPS reads.
+fn conn-reader-tls(conn) {
+    socket/reader-with(conn, fn(n) { tls/read(conn, n) })
 }
 
 // ===========================================================================
@@ -449,10 +323,19 @@ fn parse-header-line(line) {
 /// Read header lines into a PersistentMap (keys lowercased) until the blank
 /// line that ends the header block, or EOF.
 fn read-headers(cb) {
+    read-headers-max(cb, null)
+}
+
+// Read header lines with a per-line byte cap (null = unlimited). Each header
+// line goes through socket/read-line-max, so an oversized header line throws
+// socket/ReadLimitExceeded (mapped to a 431 by the server).
+/// Read header lines into a lowercased-key PersistentMap until the blank line or
+/// EOF, capping each line at `max-line` bytes (null = unlimited).
+fn read-headers-max(cb, max-line) {
     let mut headers = {}
     let mut done = false
     while done == false {
-        let line = read-line(cb)
+        let line = socket/read-line-max(cb, max-line)
         if line == null || line == "" {
             done = true
         } else {
@@ -514,14 +397,14 @@ fn parse-chunk-size(line) {
 // have the whole encoded body (e.g. a buffered client response).
 /// Decode a complete chunked-transfer-encoding body string into the actual body.
 fn decode-chunked(s) {
-    let out = sb/new(byte-length(s))
+    let out = sb/new(sb/byte-length(s))
     decode-chunked-into(s, 0, out)
     sb/to-string(out)
 }
 
 /// Internal recursive worker for decode-chunked.
 fn decode-chunked-into(s, pos, out) {
-    let total = byte-length(s)
+    let total = sb/byte-length(s)
     if pos >= total {
         null
     } else {
@@ -529,7 +412,7 @@ fn decode-chunked-into(s, pos, out) {
         if nl < 0 {
             null   // truncated
         } else {
-            let size = parse-chunk-size(byte-slice(s, pos, nl))
+            let size = parse-chunk-size(sb/byte-slice(s, pos, nl))
             if size <= 0 {
                 null   // final 0-size chunk (or malformed) -> stop
             } else {
@@ -553,26 +436,48 @@ fn decode-chunked-into(s, pos, out) {
 // returning the decoded body. Uses read-line (chunk-size) + read-n (chunk data).
 /// Read and decode a chunked-transfer-encoding body from the connection buffer.
 fn read-chunked-body(cb) {
+    read-chunked-body-max(cb, null, null)
+}
+
+// Read a chunked body with size caps (null = unlimited). `max-line` caps each
+// chunk-size/trailer line (oversized -> socket/ReadLimitExceeded -> 431);
+// `max-body` caps the accumulated decoded body AND each chunk's declared size,
+// throwing BodyTooLarge (-> 413) before allocating an oversized chunk.
+/// Read and decode a chunked body, capping chunk-size lines at `max-line` and the
+/// total/declared body at `max-body` (either null for unlimited).
+fn read-chunked-body-max(cb, max-line, max-body) {
     let out = sb/new(256)
-    read-chunked-loop(cb, out)
+    read-chunked-loop-max(cb, out, max-line, max-body)
     sb/to-string(out)
 }
 
 /// Internal read loop for read-chunked-body.
 fn read-chunked-loop(cb, out) {
-    let size-line = read-line(cb)
+    read-chunked-loop-max(cb, out, null, null)
+}
+
+/// Internal capped read loop for read-chunked-body-max.
+fn read-chunked-loop-max(cb, out, max-line, max-body) {
+    let size-line = socket/read-line-max(cb, max-line)
     if size-line == null {
         null
     } else {
         let size = parse-chunk-size(size-line)
         if size <= 0 {
             // Final chunk: consume the trailing blank line / trailers and stop.
-            read-line(cb)
+            socket/read-line-max(cb, max-line)
             null
         } else {
-            sb/append!(out, read-n(cb, size))
-            read-line(cb)   // consume the CRLF after the chunk data
-            read-chunked-loop(cb, out)
+            // Reject before allocating if this chunk would push the body over the
+            // cap (also stops a single huge declared chunk size from allocating).
+            if max-body != null && (sb/length(out) + size) > max-body {
+                let too-large = BodyTooLarge { limit: max-body }
+                throw(too-large)
+            } else {
+                sb/append!(out, socket/read-n(cb, size))
+                socket/read-line-max(cb, max-line)   // consume the CRLF after the chunk data
+                read-chunked-loop-max(cb, out, max-line, max-body)
+            }
         }
     }
 }
@@ -583,7 +488,23 @@ fn read-chunked-loop(cb, out) {
 /// Content-Length or chunked body if present) into a Request; null if no
 /// request line.
 fn read-request(cb) {
-    let line = read-line(cb)
+    read-request-limited(cb, null, null)
+}
+
+// Thrown by read-request-limited when a Content-Length body exceeds the cap
+// (mapped to a 413 by the server). `limit` is the configured cap.
+/// Error thrown when a request body exceeds the server's max-body-bytes cap.
+struct BodyTooLarge { limit }
+
+// Read a request with size caps. `max-header-bytes` caps each request/header line
+// (oversized -> socket/ReadLimitExceeded -> 431); `max-body-bytes` caps the body
+// declared by Content-Length (oversized -> BodyTooLarge -> 413). Either may be
+// null for no limit (read-request passes null/null for backward compatibility).
+/// Read and parse a request with per-line and body size caps (null = unlimited).
+/// Oversized headers throw socket/ReadLimitExceeded; an oversized Content-Length
+/// throws BodyTooLarge — the server maps these to 431 and 413.
+fn read-request-limited(cb, max-header-bytes, max-body-bytes) {
+    let line = socket/read-line-max(cb, max-header-bytes)
     if line == null || line == "" {
         null
     } else {
@@ -591,12 +512,12 @@ fn read-request(cb) {
         if rl == null {
             null
         } else {
-            let headers = read-headers(cb)
+            let headers = read-headers-max(cb, max-header-bytes)
             let te = core/get(headers, "transfer-encoding")
             let cl = core/get(headers, "content-length")
             let body = if te != null && index-of(lowercase(te), "chunked") >= 0 {
                 // Transfer-Encoding: chunked takes precedence over Content-Length.
-                read-chunked-body(cb)
+                read-chunked-body-max(cb, max-header-bytes, max-body-bytes)
             } else {
                 if cl == null {
                     ""
@@ -605,7 +526,12 @@ fn read-request(cb) {
                     if n == null || n <= 0 {
                         ""
                     } else {
-                        read-n(cb, n)
+                        if max-body-bytes != null && n > max-body-bytes {
+                            let too-large = BodyTooLarge { limit: max-body-bytes }
+                            throw(too-large)
+                        } else {
+                            socket/read-n(cb, n)
+                        }
                     }
                 }
             }
@@ -626,12 +552,20 @@ fn read-request(cb) {
 // Response serialization
 // ===========================================================================
 
-// Serialize a Response into the full HTTP/1.1 byte string. Always sets
-// Content-Length (from the body) and Connection: close, and a Date-free
-// minimal header set. User headers are emitted as-is (their lowercase keys).
-/// Serialize a Response to a full HTTP/1.1 string, always setting
-/// Content-Length and Connection: close and emitting the user headers.
+// Serialize a Response into the full HTTP/1.1 byte string with Connection: close.
+/// Serialize a Response to a full HTTP/1.1 string with `Connection: close`,
+/// setting Content-Length and emitting the user headers.
 fn serialize-response(resp) {
+    serialize-response-conn(resp, "close")
+}
+
+// Serialize a Response with an explicit Connection header value ("close" or
+// "keep-alive"). Always sets Content-Length (byte length of the body), skips any
+// user-supplied content-length/connection headers (we control both), and emits
+// the rest of the user headers as-is (lowercase keys).
+/// Serialize a Response to an HTTP/1.1 string with `Connection: <conn-value>`,
+/// setting Content-Length and emitting the user headers.
+fn serialize-response-conn(resp, conn-value) {
     let builder = sb/new(256 + length(resp.body))
     // Status line
     sb/append!(builder, "HTTP/1.1 ")
@@ -653,25 +587,17 @@ fn serialize-response(resp) {
         }
         i = i + 1
     }
-    // Content-Length (byte length of body) and Connection: close.
-    let body-len = byte-length(resp.body)
+    // Content-Length (byte length of body) and the Connection header.
+    let body-len = sb/byte-length(resp.body)
     sb/append!(builder, "Content-Length: ")
     sb/append-int!(builder, body-len)
     sb/append!(builder, "\r\n")
-    sb/append!(builder, "Connection: close\r\n")
+    sb/append!(builder, "Connection: ")
+    sb/append!(builder, conn-value)
+    sb/append!(builder, "\r\n")
     sb/append!(builder, "\r\n")
     sb/append!(builder, resp.body)
     sb/to-string(builder)
-}
-
-// Byte length of a string (UTF-8). We compute it via a string-builder so the
-// Content-Length is correct for non-ASCII bodies (codepoint count != bytes).
-/// Return the UTF-8 byte length of a string (codepoint count != bytes for
-/// non-ASCII), computed via a string-builder.
-fn byte-length(s) {
-    let b = sb/new(length(s))
-    sb/append!(b, s)
-    sb/length(b)
 }
 
 // ===========================================================================
@@ -914,24 +840,81 @@ fn default-not-found(req) {
 // Server
 // ===========================================================================
 
-// Handle one connection: read a request, run the handler, write the response,
-// close. Errors in the handler are turned into a 500 so the loop survives.
-/// Serve one connection: read the request, run the handler (handler errors
-/// become a 500 so the loop survives), write the response, and close.
-fn handle-connection(conn, handler) {
-    try {
-        let req = read-request(conn-buf(conn))
-        if req != null {
-            let resp = try {
-                handler(req)
-            } catch (e) {
-                status-response(500, "Internal Server Error: " ++ to-string(e))
-            }
-            socket/write(conn, serialize-response(resp))
-        }
-    } catch (e) {
-        null
+// Server resource limits, bundled so handle-connection takes one config value.
+//   read-timeout-ms   per-read idle deadline; a request that stalls longer is dropped
+//   max-header-bytes  cap on each request/header line (oversized -> 431)
+//   max-body-bytes    cap on a Content-Length body (oversized -> 413)
+/// HTTP server resource limits: per-read idle deadline plus header-line and body
+/// size caps. Build one with config-from-opts; serve/serve-with thread it down.
+struct ServerConfig {
+    read-timeout-ms
+    max-header-bytes
+    max-body-bytes
+}
+
+// Defaults: a 30s idle read deadline, 16 KB per header line, 10 MB body.
+let default-read-timeout-ms = 30000
+let default-max-header-bytes = 16384
+let default-max-body-bytes = 10485760
+
+// Build a ServerConfig from an options map, filling in defaults for missing keys.
+/// Build a ServerConfig from an `opts` map (`:read-timeout-ms`, `:max-header-bytes`,
+/// `:max-body-bytes`), defaulting any absent key.
+fn config-from-opts(opts) {
+    ServerConfig {
+        read-timeout-ms: core/get(opts, :read-timeout-ms, default-read-timeout-ms),
+        max-header-bytes: core/get(opts, :max-header-bytes, default-max-header-bytes),
+        max-body-bytes: core/get(opts, :max-body-bytes, default-max-body-bytes)
     }
+}
+
+// Map a request-reading error to the response to send, or null if we can't reply.
+// Oversized header -> 431, oversized body -> 413, read deadline -> 408. In all
+// cases the socket is still writable: the size-cap errors never had a pending
+// read, and the timed reader cancels the read WITHOUT closing the socket. Returns
+// null for any other error (just close).
+/// Map a read-phase error to its HTTP response (431 oversized headers, 413
+/// oversized body, 408 read timeout), or null when no response should be sent.
+fn request-error-response(e) {
+    if instance-of(e, socket/ReadLimitExceeded) {
+        status-response(431, "Request Header Fields Too Large")
+    } else {
+        if instance-of(e, BodyTooLarge) {
+            status-response(413, "Payload Too Large")
+        } else {
+            // Error.Timeout is an enum VARIANT — match it (instance-of accepts
+            // struct types only, and throws on enum variants).
+            match e {
+                Error.Timeout { operation } => status-response(408, "Request Timeout"),
+                _ => null
+            }
+        }
+    }
+}
+
+// Decide whether to keep the connection open after a request, per HTTP/1.1:
+// persistent by default for HTTP/1.1 (unless `Connection: close`), and only when
+// `Connection: keep-alive` is explicit for HTTP/1.0.
+/// True if the connection should be kept alive for another request after `req`.
+fn should-keep-alive?(req) {
+    let c = header(req, "connection")
+    let cl = if c == null { "" } else { lowercase(c) }
+    if req.version == "HTTP/1.1" {
+        cl != "close"
+    } else {
+        cl == "keep-alive"
+    }
+}
+
+// Serve one connection under `config`, looping over keep-alive requests. The SAME
+// buffered reader is reused across requests so any pipelined bytes carry over; the
+// per-read deadline doubles as the keep-alive idle timeout. Closes on exit.
+/// Serve a connection under `config` (a ServerConfig), handling HTTP/1.1
+/// keep-alive requests in a loop (handler errors -> 500; oversized headers/body
+/// -> 431/413; stalled read -> 408) until a close condition, then close.
+fn handle-connection(conn, handler, config) {
+    let reader = socket/reader-with-timeout(conn, config.read-timeout-ms)
+    serve-loop(fn(bytes) { socket/write(conn, bytes) }, reader, handler, config)
     try {
         socket/close(conn)
     } catch (e) {
@@ -940,32 +923,135 @@ fn handle-connection(conn, handler) {
     null
 }
 
-// Run a cooperative single-thread HTTP server. `handler` is a Request ->
-// Response function. This blocks forever, accepting and serving one
-// connection at a time on the calling thread (GC-safe). Listens, then loops.
-/// Run a cooperative single-thread HTTP server with the given handler
-/// (Request -> Response), serving one connection at a time on the calling
-/// thread (GC-safe). Blocks forever.
+// Serve HTTP/1.1 keep-alive requests over an abstract transport: `reader` is the
+// buffered reader (plain or TLS) and `write-fn` writes a response's bytes. Shared
+// by handle-connection (plain) and handle-tls-connection (TLS).
+/// Loop serving keep-alive requests via `reader`/`write-fn` until a close condition.
+fn serve-loop(write-fn, reader, handler, config) {
+    let mut keep-going = true
+    while keep-going {
+        keep-going = serve-one-request(write-fn, reader, handler, config)
+    }
+    null
+}
+
+// Read + handle + write one request on a persistent connection. Returns true to
+// keep the connection alive for another request, false to close it. A null
+// request (clean EOF / client closed) or a read error (with its 408/431/413
+// reply) ends the connection; a write failure (client gone) also ends it.
+/// Serve one request via `reader`, writing the response with `write-fn`; return
+/// whether to keep the connection alive.
+fn serve-one-request(write-fn, reader, handler, config) {
+    try {
+        let req = read-request-limited(reader, config.max-header-bytes, config.max-body-bytes)
+        if req == null {
+            false
+        } else {
+            let resp = try {
+                handler(req)
+            } catch (e) {
+                status-response(500, "Internal Server Error: " ++ to-string(e))
+            }
+            let alive = should-keep-alive?(req)
+            let conn-value = if alive { "keep-alive" } else { "close" }
+            write-fn(serialize-response-conn(resp, conn-value))
+            alive
+        }
+    } catch (e) {
+        // Oversized header -> 431, oversized body -> 413, read deadline -> 408
+        // (socket still writable: the timed reader cancels the read without
+        // closing). A write failure / other error -> no reply. End the connection.
+        let resp = request-error-response(e)
+        if resp != null {
+            try {
+                write-fn(serialize-response-conn(resp, "close"))
+            } catch (e2) {
+                null
+            }
+        }
+        false
+    }
+}
+
+// Serve one TLS connection: wrap the accepted+handshaken TlsConn with a buffered
+// reader (pulls via tls/read) and a tls/write writer, run the keep-alive loop,
+// then close. (HTTPS reads have no per-read deadline — TLS reads aren't socket
+// deadlines; the size caps still bound each request.)
+/// Serve HTTP/1.1 over an established TLS connection (from tls/accept), then close.
+fn handle-tls-connection(tls-conn, handler, config) {
+    let reader = socket/reader-with(tls-conn, fn(n) { tls/read(tls-conn, n) })
+    serve-loop(fn(bytes) { tls/write(tls-conn, bytes) }, reader, handler, config)
+    try {
+        tls/close(tls-conn)
+    } catch (e) {
+        null
+    }
+    null
+}
+
+// Run a cooperative HTTP server. `handler` is a Request -> Response function.
+// Each accepted connection is served as its own cooperative task (via
+// socket/on-connection), so a slow handler parks only its own connection and
+// never blocks others. Reads sequentially per connection; GC-safe. Blocks forever.
+/// Run a cooperative HTTP server with the given handler (Request -> Response).
+/// Each connection is handled concurrently as a cooperative task, so a slow
+/// client can't block others. Stalled requests are dropped and oversized ones
+/// rejected (431/413) using default limits. GC-safe; blocks forever.
 fn serve(host, port, handler) {
+    serve-with(host, port, {}, handler)
+}
+
+// Run a cooperative HTTP server with options. `opts` keys (all optional):
+//   :read-timeout-ms   per-read idle deadline (default 30000)
+//   :max-header-bytes  per header/request line cap (default 16384) -> 431
+//   :max-body-bytes    Content-Length body cap (default 10485760) -> 413
+/// Run a cooperative HTTP server, tuning resource limits via an `opts` map
+/// (`:read-timeout-ms`, `:max-header-bytes`, `:max-body-bytes`).
+fn serve-with(host, port, opts, handler) {
+    let config = config-from-opts(opts)
     let listener = socket/listen(host, port)
     println("beagle.http serving on " ++ host ++ ":" ++ to-string(port))
-    let mut running = true
-    while running {
-        let conn = socket/accept(listener)
-        if conn == null {
-            running = false
-        } else {
-            handle-connection(conn, handler)
-        }
-    }
-    socket/close-listener(listener)
-    null
+    socket/on-connection(listener, fn(conn) {
+        handle-connection(conn, handler, config)
+    })
 }
 
 // Convenience: serve a vector of Route with the default 404.
 /// Serve a vector of Route with the default 404 handler.
 fn serve-routes(host, port, routes) {
     serve(host, port, router(routes, default-not-found))
+}
+
+/// Run a cooperative HTTPS server: same as `serve`, but each accepted connection
+/// is wrapped in TLS (using the PEM `cert`/`key`) before the HTTP keep-alive loop.
+/// `cert` is a CERTIFICATE PEM, `key` a PKCS#8 PRIVATE KEY PEM. `handler` is a
+/// Request -> Response function. A connection whose TLS handshake fails is dropped.
+/// GC-safe; blocks forever.
+///
+/// Examples:
+///   serve-https("0.0.0.0", 8443, read-cert, read-key, fn(req) { ok("hi") })
+fn serve-https(host, port, cert, key, handler) {
+    serve-https-with(host, port, cert, key, {}, handler)
+}
+
+/// HTTPS server with a resource-limit `opts` map (same keys as serve-with).
+fn serve-https-with(host, port, cert, key, opts, handler) {
+    let config = config-from-opts(opts)
+    let tls-config = tls/server-config(cert, key)
+    let listener = socket/listen(host, port)
+    println("beagle.http serving HTTPS on " ++ host ++ ":" ++ to-string(port))
+    socket/on-connection(listener, fn(conn) {
+        let tls-conn = try {
+            tls/accept(conn, tls-config)
+        } catch (e) {
+            null
+        }
+        if tls-conn == null {
+            try { socket/close(conn) } catch (e) { null }
+        } else {
+            handle-tls-connection(tls-conn, handler, config)
+        }
+    })
 }
 
 // ===========================================================================
@@ -978,7 +1064,7 @@ fn serve-routes(host, port, routes) {
 /// Read and parse a full HTTP response (status line, headers, then body by
 /// Content-Length if present else until EOF) into a Response.
 fn read-response(cb) {
-    let status-line = read-line(cb)
+    let status-line = socket/read-line(cb)
     if status-line == null {
         null
     } else {
@@ -1000,9 +1086,9 @@ fn read-response(cb) {
             } else {
                 if cl != null {
                     let nn = core/parse-int(cl)
-                    if nn == null || nn <= 0 { "" } else { read-n(cb, nn) }
+                    if nn == null || nn <= 0 { "" } else { socket/read-n(cb, nn) }
                 } else {
-                    read-until-eof(cb)
+                    socket/read-all(cb)
                 }
             }
             Response {
@@ -1013,29 +1099,6 @@ fn read-response(cb) {
             }
         }
     }
-}
-
-// Read everything remaining on a connection until EOF.
-/// Read and return everything remaining on the connection until EOF, draining
-/// any already-buffered bytes first.
-fn read-until-eof(cb) {
-    let builder = sb/new(256)
-    // Drain anything already buffered first.
-    let buffered = deref(cb.leftover)
-    if buffered != "" {
-        sb/append!(builder, buffered)
-        reset!(cb.leftover, "")
-    }
-    let mut done = false
-    while done == false {
-        let data = socket/read(cb.conn, read-chunk-size)
-        if data == null || data == "" {
-            done = true
-        } else {
-            sb/append!(builder, data)
-        }
-    }
-    sb/to-string(builder)
 }
 
 // Perform an HTTP request and return the parsed Response.
@@ -1059,8 +1122,16 @@ fn read-until-eof(cb) {
 /// host argument constraint.
 // Build the raw HTTP/1.1 request string (request line, Host, user headers,
 // Content-Length, Connection: close, body). Shared by request + https-request.
-/// Build the HTTP/1.1 request bytes for a method/host/path/headers/body.
+/// Build the HTTP/1.1 request bytes for a method/host/path/headers/body, with
+/// `Connection: close` (one-shot). Pooled requests use build-request-conn.
 fn build-request(method, host, path, headers, body) {
+    build-request-conn(method, host, path, headers, body, "close")
+}
+
+// Like build-request but with an explicit Connection header value ("close" or
+// "keep-alive"); keep-alive lets the connection be pooled and reused.
+/// Build HTTP/1.1 request bytes with `Connection: <conn-value>`.
+fn build-request-conn(method, host, path, headers, body, conn-value) {
     let builder = sb/new(256 + length(body))
     sb/append!(builder, uppercase(method))
     sb/append!(builder, " ")
@@ -1085,24 +1156,127 @@ fn build-request(method, host, path, headers, body) {
         i = i + 1
     }
     sb/append!(builder, "Content-Length: ")
-    sb/append-int!(builder, byte-length(body))
+    sb/append-int!(builder, sb/byte-length(body))
     sb/append!(builder, "\r\n")
-    sb/append!(builder, "Connection: close\r\n")
+    sb/append!(builder, "Connection: ")
+    sb/append!(builder, conn-value)
+    sb/append!(builder, "\r\n")
     sb/append!(builder, "\r\n")
     sb/append!(builder, body)
     sb/to-string(builder)
 }
 
-/// Make an HTTP or HTTPS request to a full `url` and return the parsed Response.
-/// The URL scheme selects the transport (plain TCP for http, TLS for https) and
-/// the default port (80 / 443). `opts` is a map of options:
-///   :headers  a map of request headers (default {})
-///   :body     a request body string (default "")
+// Classify an error thrown during a client request into a Result.Err. A read
+// deadline produces a structured Error.Timeout (passed through); anything else
+// (connect refused, transport error, ...) becomes Error.IO carrying the message.
+/// Wrap a client-request error in a Result.Err: a timeout stays Error.Timeout,
+/// everything else becomes Error.IO with the error's message.
+// NOTE: this module defines its own `ok` (a 200 Response builder), which shadows
+// std's Result `ok`, so the client code constructs Result.Ok/Result.Err literals
+// directly rather than via the ok/err helpers.
+fn client-error(e) {
+    match e {
+        Error.Timeout { operation } => { Result.Err { error: e } },
+        _ => { Result.Err { error: Error.IO { message: to-string(e) } } }
+    }
+}
+
+// Turn a parsed response into a Result: null (no/garbled status line) is an error.
+/// Wrap a parsed response in Result.Ok, or Result.Err(Error.IO) if it was null.
+fn response-result(resp) {
+    if resp == null {
+        Result.Err { error: Error.IO { message: "malformed or empty HTTP response" } }
+    } else {
+        Result.Ok { value: resp }
+    }
+}
+
+// Default maximum number of redirects followed before giving up.
+let default-max-redirects = 5
+
+// Which 3xx statuses are followable redirects.
+/// True for a redirect status (301/302/303/307/308).
+fn redirect?(status) {
+    status == 301 || status == 302 || status == 303 || status == 307 || status == 308
+}
+
+// Resolve a redirect's Location against the request URL. Absolute Locations are
+// used as-is; "/path" is resolved against the scheme+authority; a bare relative
+// Location is resolved against the request path's directory.
+/// Resolve a redirect `location` (absolute, root-relative, or relative) against
+/// the request `base-url`, returning an absolute URL string.
+fn resolve-redirect-url(base-url, location) {
+    if index-of(location, "http://") == 0 || index-of(location, "https://") == 0 {
+        location
+    } else {
+        let u = url/parse-url(base-url)
+        let authority = u.scheme ++ "://" ++ u.host ++ (if u.port == null { "" } else { ":" ++ to-string(u.port) })
+        if index-of(location, "/") == 0 {
+            authority ++ location
+        } else {
+            // Relative to the directory of the base path (everything up to the
+            // last "/"; default "/").
+            let slash = url/last-index-of-char(u.path, 47)
+            let dir = if slash < 0 { "/" } else { substring(u.path, 0, slash + 1) }
+            authority ++ dir ++ location
+        }
+    }
+}
+
+// Return a copy of opts with any :body removed (for following a redirect with GET).
+/// Return `opts` without its :body entry (used when a redirect downgrades to GET).
+fn without-body(opts) {
+    dissoc(opts, :body)
+}
+
+/// Make an HTTP or HTTPS request to a full `url`, FOLLOWING redirects, returning a
+/// `Result`: `Result.Ok { value: Response }` or `Result.Err { error: Error.* }`
+/// (Error.IO for connect/transport, Error.Timeout for a read deadline). The URL
+/// scheme selects the transport (plain TCP for http, TLS for https) and default
+/// port (80 / 443). `opts` is a map of options:
+///   :headers          a map of request headers (default {})
+///   :body             a request body string (default "")
+///   :timeout          per-read deadline in ms for the response (default none; HTTP)
+///   :connect-timeout  deadline in ms for establishing the connection (HTTP)
+///   :max-redirects    redirects to follow (default 5; 0 disables following)
+///
+/// 301/302/303 are followed with GET (body dropped); 307/308 preserve the method
+/// and body. The final (non-redirect) response is returned.
 ///
 /// Examples:
 ///   request("GET", "https://example.com/", {})
-///   request("POST", "http://api.local/x", {:body "hi", :headers {"x-tok" "v"}})
+///   request("POST", "http://api.local/x", {:body "hi", :timeout 5000})
 fn request(method, url, opts) {
+    let max-redirects = core/get(opts, :max-redirects, default-max-redirects)
+    request-following(method, url, opts, max-redirects)
+}
+
+// Perform a request and follow redirects up to `redirects-left` times.
+/// Issue the request and follow redirects (up to `redirects-left`), returning the
+/// final Result.
+fn request-following(method, url, opts, redirects-left) {
+    let result = request-once(method, url, opts)
+    match result {
+        Result.Err { error } => result,
+        Result.Ok { value: resp } => {
+            let loc = header(resp, "location")
+            if redirects-left > 0 && redirect?(resp.status) && loc != null {
+                let next-url = resolve-redirect-url(url, loc)
+                // 307/308 preserve method + body; others downgrade to GET (no body).
+                let preserve = resp.status == 307 || resp.status == 308
+                let next-method = if preserve { method } else { "GET" }
+                let next-opts = if preserve { opts } else { without-body(opts) }
+                request-following(next-method, next-url, next-opts, redirects-left - 1)
+            } else {
+                result
+            }
+        }
+    }
+}
+
+// One HTTP/HTTPS request with no redirect following.
+/// Make a single HTTP/HTTPS request to `url` (no redirect following), returning a Result.
+fn request-once(method, url, opts) {
     let u = url/parse-url(url)
     let secure = lowercase(u.scheme) == "https"
     let port = if u.port == null {
@@ -1114,30 +1288,376 @@ fn request(method, url, opts) {
     let full-path = if u.query == null { base-path } else { base-path ++ "?" ++ u.query }
     let headers = core/get(opts, :headers, {})
     let body = core/get(opts, :body, "")
+    let timeout-ms = core/get(opts, :timeout, null)
+    let connect-timeout-ms = core/get(opts, :connect-timeout, null)
     let req-bytes = build-request(method, u.host, full-path, headers, body)
     if secure {
-        let conn = tls/connect(u.host, port)
-        tls/write(conn, req-bytes)
-        let resp = read-response(conn-buf-tls(conn))
-        tls/close(conn)
-        resp
+        request-tls(u.host, port, req-bytes, timeout-ms, connect-timeout-ms)
     } else {
-        let conn = socket/connect(u.host, port)
-        socket/write(conn, req-bytes)
-        let resp = read-response(conn-buf(conn))
-        socket/close(conn)
-        resp
+        request-plain(u.host, port, req-bytes, timeout-ms, connect-timeout-ms)
     }
 }
 
-/// HTTP/HTTPS GET — `get(url)` or `get(url, opts)`.
+// Perform a plaintext request, returning a Result. Connect failures, write/read
+// errors, and read/connect deadlines all become Result.Err; the connection is
+// always closed. `timeout-ms` bounds each response read; `connect-timeout-ms`
+// bounds the connect (both null = no deadline).
+/// Plaintext-transport half of request: returns Result.Ok(Response) or Result.Err.
+fn request-plain(host, port, req-bytes, timeout-ms, connect-timeout-ms) {
+    let connected = try {
+        let conn = if connect-timeout-ms == null {
+            socket/connect(host, port)
+        } else {
+            socket/connect-timeout(host, port, connect-timeout-ms)
+        }
+        Result.Ok { value: conn }
+    } catch (e) {
+        client-error(e)
+    }
+    match connected {
+        Result.Err { error } => connected,
+        Result.Ok { value: conn } => {
+            let outcome = try {
+                socket/write(conn, req-bytes)
+                let reader = if timeout-ms == null {
+                    conn-reader(conn)
+                } else {
+                    socket/reader-with-timeout(conn, timeout-ms)
+                }
+                response-result(read-response(reader))
+            } catch (e) {
+                client-error(e)
+            }
+            try {
+                socket/close(conn)
+            } catch (e) {
+                null
+            }
+            outcome
+        }
+    }
+}
+
+// Perform an HTTPS request, returning a Result. Same shape as request-plain.
+// Because the TLS layer is async (sans-I/O over the cooperative socket), the
+// `connect-timeout`/`timeout` deadlines are applied by force-cancelling the
+// parked connect/read with with-timeout! (Error.Timeout -> Result.Err{Timeout}).
+/// TLS-transport half of request: returns Result.Ok(Response) or Result.Err.
+fn request-tls(host, port, req-bytes, timeout-ms, connect-timeout-ms) {
+    let connected = try {
+        let conn = if connect-timeout-ms == null {
+            tls/connect(host, port)
+        } else {
+            async/with-timeout!(connect-timeout-ms, fn() { tls/connect(host, port) })
+        }
+        Result.Ok { value: conn }
+    } catch (e) {
+        client-error(e)
+    }
+    match connected {
+        Result.Err { error } => connected,
+        Result.Ok { value: conn } => {
+            let outcome = try {
+                tls/write(conn, req-bytes)
+                let resp = if timeout-ms == null {
+                    read-response(conn-reader-tls(conn))
+                } else {
+                    async/with-timeout!(timeout-ms, fn() { read-response(conn-reader-tls(conn)) })
+                }
+                response-result(resp)
+            } catch (e) {
+                client-error(e)
+            }
+            try {
+                tls/close(conn)
+            } catch (e) {
+                null
+            }
+            outcome
+        }
+    }
+}
+
+/// HTTP/HTTPS GET — `get(url)` or `get(url, opts)`. Returns a `Result`
+/// (Result.Ok { value: Response } | Result.Err { error: Error.* }); use `unwrap!`
+/// for the value-or-throw, or match on it. See `request` for the opts (`:headers`,
+/// `:body`, `:timeout`).
 ///
 /// Examples:
-///   get("https://example.com/")
-///   get("https://api.example.com/users", {:headers {"authorization" "Bearer t"}})
+///   unwrap!(get("https://example.com/")).body
+///   match get("http://api/x", {:timeout 5000}) {
+///     Result.Ok  { value }                    => value.body,
+///     Result.Err { error: Error.Timeout {} }  => "slow",
+///     Result.Err { error }                    => "failed"
+///   }
 fn get {
     (url) => request("GET", url, {})
     (url, opts) => request("GET", url, opts)
+}
+
+// ===========================================================================
+// Connection pooling — a Client session that reuses keep-alive connections
+// ===========================================================================
+//
+// The bare get/post/request open one connection per call and close it. A Client
+// keeps idle keep-alive connections in a pool keyed by origin (scheme://host:port)
+// and reuses them across requests — avoiding a fresh TCP (and TLS) handshake every
+// time. Works for HTTP and HTTPS alike (the async TLS layer pools like plain TCP).
+//
+// Reuse is safe because read-response frames the body exactly (Content-Length or
+// chunked), leaving the connection positioned at the next response. A connection
+// the server has since idle-closed surfaces as a transport error on reuse; the
+// request is then retried ONCE on a fresh connection (the stale one was closed
+// before processing, so even a POST is safe to retry).
+
+/// A pooled HTTP/HTTPS client: a connection pool keyed by origin plus the max
+/// number of idle connections kept per origin. Create with `client()`.
+struct Client {
+    pool
+    max-idle
+}
+
+/// A pooled connection: its origin key, whether it is TLS, the transport handle
+/// (TcpSocket or TlsConn), and the buffered reader over it (kept so the reader's
+/// buffer state carries across requests).
+struct ClientConn {
+    origin
+    secure
+    transport
+    reader
+}
+
+/// Create a connection-pooling Client (default 8 idle connections per origin).
+fn client() {
+    client-with(8)
+}
+
+/// Create a Client keeping up to `max-idle` idle connections per origin.
+fn client-with(max-idle) {
+    Client { pool: atom({}), max-idle: max-idle }
+}
+
+// The origin key a connection pools under: scheme://host:port.
+fn origin-key(scheme, host, port) {
+    scheme ++ "://" ++ host ++ ":" ++ to-string(port)
+}
+
+// Open a fresh connection to an origin (TLS or plain) as a ClientConn, honoring
+// connect-timeout-ms (null = none). Throws on connect/handshake failure.
+fn open-conn(origin, host, port, secure, connect-timeout-ms) {
+    if secure {
+        let t = if connect-timeout-ms == null {
+            tls/connect(host, port)
+        } else {
+            async/with-timeout!(connect-timeout-ms, fn() { tls/connect(host, port) })
+        }
+        ClientConn { origin: origin, secure: true, transport: t, reader: conn-reader-tls(t) }
+    } else {
+        let t = if connect-timeout-ms == null {
+            socket/connect(host, port)
+        } else {
+            socket/connect-timeout(host, port, connect-timeout-ms)
+        }
+        ClientConn { origin: origin, secure: false, transport: t, reader: conn-reader(t) }
+    }
+}
+
+// Write request bytes over a ClientConn (TLS or plain).
+fn cc-write(cc, bytes) {
+    if cc.secure {
+        tls/write(cc.transport, bytes)
+    } else {
+        socket/write(cc.transport, bytes)
+    }
+}
+
+// Close a ClientConn's transport (idempotent / error-tolerant).
+fn cc-close(cc) {
+    try {
+        if cc.secure {
+            tls/close(cc.transport)
+        } else {
+            socket/close(cc.transport)
+        }
+    } catch (e) {
+        null
+    }
+}
+
+// Atomically take an idle connection for `origin`, or null if none. The swap!
+// body's reset! is idempotent under CAS retry (the successful swap's value wins),
+// so each pooled connection is handed to exactly one caller.
+fn pool-checkout(client, origin) {
+    let got = atom(null)
+    swap!(client.pool, fn(p) {
+        let conns = core/get(p, origin, [])
+        let n = count(conns)
+        if n == 0 {
+            p
+        } else {
+            reset!(got, conns[n - 1])
+            assoc(p, origin, butlast(conns))
+        }
+    })
+    deref(got)
+}
+
+// Atomically return `cc` to the pool; returns false (caller should close it) if
+// the origin already holds max-idle idle connections.
+fn pool-checkin(client, cc) {
+    let added = atom(false)
+    swap!(client.pool, fn(p) {
+        let conns = core/get(p, cc.origin, [])
+        if count(conns) >= client.max-idle {
+            p
+        } else {
+            reset!(added, true)
+            assoc(p, cc.origin, push(conns, cc))
+        }
+    })
+    deref(added)
+}
+
+// A response is poolable (its connection reusable) only if the peer isn't closing
+// AND the body had a definite length, so the connection sits at the next response.
+fn response-poolable?(resp) {
+    let conn-h = core/get(resp.headers, "connection")
+    let conn-l = if conn-h == null { "" } else { lowercase(conn-h) }
+    let cl = core/get(resp.headers, "content-length")
+    let te = core/get(resp.headers, "transfer-encoding")
+    let chunked = te != null && index-of(lowercase(te), "chunked") >= 0
+    conn-l != "close" && (cl != null || chunked)
+}
+
+// Open a fresh connection wrapped as a Result (connect failure -> Result.Err).
+fn open-conn-result(origin, host, port, secure, connect-timeout-ms) {
+    try {
+        Result.Ok { value: open-conn(origin, host, port, secure, connect-timeout-ms) }
+    } catch (e) {
+        client-error(e)
+    }
+}
+
+// Send the request over `cc` and read one response; pool or close `cc` per the
+// response, returning a Result. Transport failures close `cc` and return Err.
+fn client-attempt(client, conn-result, req-bytes, timeout-ms) {
+    match conn-result {
+        Result.Err { error } => conn-result,
+        Result.Ok { value: cc } => {
+            let outcome = try {
+                cc-write(cc, req-bytes)
+                let resp = if timeout-ms == null {
+                    read-response(cc.reader)
+                } else {
+                    async/with-timeout!(timeout-ms, fn() { read-response(cc.reader) })
+                }
+                response-result(resp)
+            } catch (e) {
+                client-error(e)
+            }
+            match outcome {
+                Result.Err { error } => {
+                    cc-close(cc)
+                    outcome
+                },
+                Result.Ok { value: resp } => {
+                    if response-poolable?(resp) {
+                        if pool-checkin(client, cc) == false {
+                            cc-close(cc)
+                        } else {
+                            null
+                        }
+                    } else {
+                        cc-close(cc)
+                    }
+                    outcome
+                }
+            }
+        }
+    }
+}
+
+// One pooled request (no redirect following). Tries a reused connection first;
+// on a transport failure with a reused connection, retries ONCE on a fresh one.
+fn client-request-once(client, method, url, opts) {
+    let u = url/parse-url(url)
+    let secure = lowercase(u.scheme) == "https"
+    let port = if u.port == null {
+        if secure { 443 } else { 80 }
+    } else {
+        u.port
+    }
+    let origin = origin-key(u.scheme, u.host, port)
+    let base-path = if length(u.path) == 0 { "/" } else { u.path }
+    let full-path = if u.query == null { base-path } else { base-path ++ "?" ++ u.query }
+    let headers = core/get(opts, :headers, {})
+    let body = core/get(opts, :body, "")
+    let timeout-ms = core/get(opts, :timeout, null)
+    let connect-timeout-ms = core/get(opts, :connect-timeout, null)
+    let req-bytes = build-request-conn(method, u.host, full-path, headers, body, "keep-alive")
+
+    let pooled = pool-checkout(client, origin)
+    if pooled == null {
+        client-attempt(client, open-conn-result(origin, u.host, port, secure, connect-timeout-ms), req-bytes, timeout-ms)
+    } else {
+        let first = client-attempt(client, Result.Ok { value: pooled }, req-bytes, timeout-ms)
+        match first {
+            Result.Ok { value } => first,
+            Result.Err { error } => client-attempt(client, open-conn-result(origin, u.host, port, secure, connect-timeout-ms), req-bytes, timeout-ms)
+        }
+    }
+}
+
+// Pooled request with redirect following (mirrors request-following).
+fn client-request-redirects(client, method, url, opts, redirects-left) {
+    let result = client-request-once(client, method, url, opts)
+    match result {
+        Result.Err { error } => result,
+        Result.Ok { value: resp } => {
+            let loc = header(resp, "location")
+            if redirects-left > 0 && redirect?(resp.status) && loc != null {
+                let next-url = resolve-redirect-url(url, loc)
+                let preserve = resp.status == 307 || resp.status == 308
+                let next-method = if preserve { method } else { "GET" }
+                let next-opts = if preserve { opts } else { without-body(opts) }
+                client-request-redirects(client, next-method, next-url, next-opts, redirects-left - 1)
+            } else {
+                result
+            }
+        }
+    }
+}
+
+/// Make a pooled HTTP/HTTPS request through `client`, reusing a kept-alive
+/// connection when one is available. Same `opts`/Result shape as `request`
+/// (:headers, :body, :timeout, :connect-timeout, :max-redirects).
+fn client-request(client, method, url, opts) {
+    client-request-redirects(client, method, url, opts, core/get(opts, :max-redirects, default-max-redirects))
+}
+
+/// Pooled GET — `client-get(client, url)` or `client-get(client, url, opts)`.
+fn client-get {
+    (client, url) => client-request(client, "GET", url, {})
+    (client, url, opts) => client-request(client, "GET", url, opts)
+}
+
+/// Pooled POST — `client-post(client, url)` or `client-post(client, url, opts)`.
+fn client-post {
+    (client, url) => client-request(client, "POST", url, {})
+    (client, url, opts) => client-request(client, "POST", url, opts)
+}
+
+/// Close every idle connection in the pool and empty it. Call when done with the
+/// Client. In-flight requests (checked-out connections) are unaffected.
+fn client-close(client) {
+    let p = deref(client.pool)
+    reset!(client.pool, {})
+    for origin in keys(p) {
+        for cc in core/get(p, origin) {
+            cc-close(cc)
+        }
+    }
+    null
 }
 
 /// HTTP/HTTPS POST (body via `:body` in opts) — `post(url)` or `post(url, opts)`.

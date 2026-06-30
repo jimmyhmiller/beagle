@@ -1,0 +1,103 @@
+namespace nested_pattern_match_test
+
+// Regression coverage for nested patterns inside struct/enum field patterns:
+//   match r { Result.Err { error: HttpError.Timeout { operation } } => ... }
+// Previously the parser rejected a non-identifier after `field:` ("Expected
+// field name in pattern"); only `field` and `field: rename` were allowed.
+
+enum HttpError {
+    Timeout { operation },
+    Refused {}
+}
+
+struct Point { x, y }
+
+enum Wrap { W { inner } }
+
+fn classify(r) {
+    match r {
+        Result.Ok { value } => "ok:" ++ to-string(value),
+        Result.Err { error: HttpError.Timeout { operation } } => "timeout:" ++ operation,
+        Result.Err { error: HttpError.Refused {} } => "refused",
+        Result.Err { error } => "other:" ++ to-string(error)
+    }
+}
+
+fn describe(p) {
+    match p {
+        Point { x: 0, y } => "y-axis:" ++ to-string(y),
+        Point { x, y: 0 } => "x-axis:" ++ to-string(x),
+        Point { x: a, y: b } => "pt:" ++ to-string(a) ++ "," ++ to-string(b)
+    }
+}
+
+fn deep(r) {
+    match r {
+        Result.Ok { value: Wrap.W { inner: HttpError.Refused {} } } => "deep-refused",
+        Result.Ok { value: Wrap.W { inner: HttpError.Timeout { operation } } } => "deep-timeout:" ++ operation,
+        _ => "no"
+    }
+}
+
+test "nested enum inside Result.Err" {
+    assert-eq!(classify(Result.Ok { value: 42 }), "ok:42")
+    assert-eq!(classify(Result.Err { error: HttpError.Timeout { operation: "GET /x" } }), "timeout:GET /x")
+    assert-eq!(classify(Result.Err { error: HttpError.Refused {} }), "refused")
+}
+
+test "literal and rename field sub-patterns in structs" {
+    assert-eq!(describe(Point { x: 0, y: 7 }), "y-axis:7")
+    assert-eq!(describe(Point { x: 5, y: 0 }), "x-axis:5")
+    assert-eq!(describe(Point { x: 3, y: 4 }), "pt:3,4")
+}
+
+test "deeply nested enum-in-enum-in-Result" {
+    assert-eq!(deep(Result.Ok { value: Wrap.W { inner: HttpError.Refused {} } }), "deep-refused")
+    assert-eq!(deep(Result.Ok { value: Wrap.W { inner: HttpError.Timeout { operation: "z" } } }), "deep-timeout:z")
+    assert-eq!(deep(Result.Err { error: HttpError.Refused {} }), "no")
+}
+
+test "plain field binding and rename still work (no regression)" {
+    let r = Result.Ok { value: 99 }
+    match r {
+        Result.Ok { value } => assert-eq!(value, 99),
+        Result.Err { error } => assert!(false)
+    }
+    let p = Point { x: 1, y: 2 }
+    match p {
+        Point { x: a, y: b } => {
+            assert-eq!(a, 1)
+            assert-eq!(b, 2)
+        }
+    }
+}
+
+// A struct/enum literal used directly as the match scrutinee (no parens, no
+// intermediate binding) used to misparse: the first `{...}` was read as the
+// match body. The scrutinee parser now resolves the ambiguity by accepting a
+// struct literal only when its own body block follows.
+test "bare struct-literal scrutinee" {
+    match Point { x: 1, y: 2 } {
+        Point { x: a, y: b } => {
+            assert-eq!(a, 1)
+            assert-eq!(b, 2)
+        }
+    }
+    let label = match Point { x: 0, y: 7 } {
+        Point { x: 0, y } => "y-axis:" ++ to-string(y),
+        Point { x, y } => "pt"
+    }
+    assert-eq!(label, "y-axis:7")
+}
+
+test "bare enum-literal scrutinee, and common forms unaffected" {
+    // Bare enum-variant literal as scrutinee.
+    let e = match Wrap.W { inner: 5 } {
+        Wrap.W { inner } => inner
+    }
+    assert-eq!(e, 5)
+    // Identifier, call, and binary-expression scrutinees still parse.
+    let id = Wrap.W { inner: 3 }
+    assert-eq!(match id { Wrap.W { inner } => inner }, 3)
+    assert-eq!(match 1 + 1 { 2 => "two", _ => "no" }, "two")
+}

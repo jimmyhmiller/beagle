@@ -1,0 +1,53 @@
+namespace ws_client_test
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.ws as ws
+
+// The WebSocket CLIENT (ws/connect/send/receive/close) talks to the existing WS
+// SERVER in-process: the server accepts one connection and runs the echo frame
+// loop (handle-ws-connection with an identity on-message), and the client does the
+// upgrade handshake, exchanges masked frames, and reads the unmasked echoes. This
+// exercises the full client path — key generation, Sec-WebSocket-Accept check,
+// masked send, frame receive — with no network and no certificates.
+//
+// The server thread ends when the client's close frame closes the connection.
+
+fn main() {
+    let port = 20000 + core/random-int(20000)
+    let ready = atom(false)
+
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        reset!(ready, true)
+        let conn = socket/accept(listener)
+        // Echo: whatever the client sends comes straight back as a text frame.
+        ws/handle-ws-connection(conn, fn(c, payload) { payload }, 1048576)
+        socket/close-listener(listener)
+    })
+
+    loop {
+        if deref(ready) { break(null) }
+        core/sleep(1)
+    }
+
+    let c = ws/connect("ws://127.0.0.1:${port}/chat")
+    ws/send(c, "hello")
+    let r1 = ws/receive(c)
+    ws/send(c, "websocket world")
+    let r2 = ws/receive(c)
+    ws/send(c, "third message")
+    let r3 = ws/receive(c)
+
+    println("r1: " ++ r1)
+    println("r2: " ++ r2)
+    println("r3: " ++ r3)
+    ws/close(c)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// r1: hello
+// r2: websocket world
+// r3: third message
+// done

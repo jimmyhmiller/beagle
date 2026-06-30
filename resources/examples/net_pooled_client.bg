@@ -1,0 +1,87 @@
+namespace net_pooled_client
+
+// ===========================================================================
+// HTTP connection pooling + Result-based error handling
+// ===========================================================================
+//
+// This example shows the POOLED HTTP client (http/client()). Unlike the bare
+// http/get — which opens a fresh TCP connection per call and closes it — a
+// pooled Client keeps idle keep-alive connections in a pool keyed by origin
+// (scheme://host:port) and REUSES them across requests. That avoids paying for
+// a brand-new TCP handshake on every request to the same server, which is the
+// whole point of HTTP/1.1 keep-alive.
+//
+// To prove the reuse end-to-end we stand up a tiny local server with
+// http/handle-connection: it accepts ONE TCP connection and its keep-alive loop
+// serves EVERY request that arrives on that single connection. Because the
+// pooled client reuses one connection for all its GETs to this origin, the
+// server only ever needs that one accept — direct evidence the connection was
+// reused rather than reopened.
+//
+// Every client call returns a Result (Result.Ok{value: Response} or
+// Result.Err{error: Error.*}) so failures are explicit. We finish by hitting a
+// closed port and matching on the Result to handle the connection-refused case.
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.http as http
+
+fn main() {
+    // Random port so concurrent example runs don't collide.
+    let port = 20000 + core/random-int(20000)
+    let ready = atom(false)
+
+    // --- Server thread -----------------------------------------------------
+    // FINITE work: accept exactly one connection, let handle-connection's
+    // keep-alive loop serve every request on it, then close the listener and
+    // return so the process can exit cleanly (threads are non-daemon).
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        reset!(ready, true)
+        let handler = fn(req) { http/ok("you asked for " ++ req.path) }
+        // One accepted connection serves ALL the pooled client's requests.
+        http/handle-connection(socket/accept(listener), handler, http/config-from-opts({}))
+        socket/close-listener(listener)
+    })
+
+    // Wait for the server to be listening before we connect.
+    loop {
+        if deref(ready) { break(null) }
+        core/sleep(1)
+    }
+
+    // --- Pooled client -----------------------------------------------------
+    // Create one Client; its connection pool is reused across the calls below.
+    let c = http/client()
+    let base = "http://127.0.0.1:${port}"
+
+    // Three GETs to the SAME origin. The first opens a connection; the next two
+    // reuse the pooled keep-alive connection (no new handshake). The server
+    // sees all three on its single accepted connection.
+    for path in ["/alpha", "/beta", "/gamma"] {
+        match http/client-get(c, base ++ path) {
+            Result.Ok { value: resp } =>
+                println("GET ${path} -> ${resp.status}: ${resp.body}"),
+            Result.Err { error } =>
+                println("GET ${path} -> error: ${error}")
+        }
+    }
+
+    // --- Result-based error handling ---------------------------------------
+    // Hit a port with nothing listening. The request can't succeed, so we get a
+    // Result.Err and branch on it instead of crashing. Port 1 is reserved and
+    // unused, so this is a reliable "connection refused".
+    let bad = "http://127.0.0.1:1/nope"
+    match http/client-get(c, bad) {
+        Result.Ok { value: resp } =>
+            println("unexpected success: ${resp.status}"),
+        Result.Err { error: Error.IO { message } } =>
+            println("closed port -> Error.IO: connection refused"),
+        Result.Err { error } =>
+            println("closed port -> error: ${error}")
+    }
+
+    // Always release pooled connections when done with the Client.
+    http/client-close(c)
+    println("done")
+}

@@ -9,6 +9,7 @@ namespace beagle.socket
 use beagle.async as async
 use beagle.effect as effect
 use beagle.core as core
+use beagle.string-builder as sb
 
 // Create a TCP listener on the given host and port
 /// Create a TCP listener bound to `host` and `port`, returning a listener handle.
@@ -26,6 +27,25 @@ fn connect(host, port) {
     })
 }
 
+// Connect to a TCP server with a deadline
+/// Open a TCP connection to `host`:`port`, but give up after `ms` milliseconds.
+/// Returns the socket on success; throws `Error.Timeout` if the connect does not
+/// complete in time (the in-progress connect is torn down) or the usual error on
+/// connection failure. Enforced by the cooperative scheduler racing the connect
+/// against a timer.
+fn connect-timeout(host, port, ms) {
+    let result = perform async/Async.IOTimeout {
+        action: async/IOAction.TcpConnect { host: host, port: port },
+        ms: ms
+    }
+    if async/io-timeout?(result) {
+        let timeout-error = Error.Timeout { operation: "socket connect" }
+        throw(timeout-error)
+    } else {
+        async/tcp-result-or-throw(result)
+    }
+}
+
 // Accept a connection on a TCP listener (blocking)
 /// Block until a client connects to `listener`, returning the new socket. Throws on error.
 fn accept(listener) {
@@ -40,6 +60,54 @@ fn read(socket, n) {
     async/tcp-result-or-throw(perform async/Async.IO {
         action: async/IOAction.TcpRead { socket: socket, n: n }
     })
+}
+
+// Read up to n bytes with a deadline, WITHOUT closing the socket on timeout.
+/// Block reading up to `n` bytes from `socket`, but no longer than `ms`
+/// milliseconds. On data, returns the bytes read. On a deadline, the scheduler's
+/// race CANCELS the pending read but leaves the socket OPEN (so the caller may
+/// still write a response before closing) and `Error.Timeout` is thrown. The
+/// caller is responsible for eventually closing the socket. Use read-timeout for
+/// the drop-on-deadline variant.
+fn read-deadline(socket, n, ms) {
+    let result = perform async/Async.IOTimeout {
+        action: async/IOAction.TcpRead { socket: socket, n: n },
+        ms: ms
+    }
+    if async/io-timeout?(result) {
+        // (struct literal bound first: throw(...) parses its arg with struct
+        // creation disabled, like an if/match condition)
+        let timeout-error = Error.Timeout { operation: "socket read" }
+        throw(timeout-error)
+    } else {
+        async/tcp-result-or-throw(result)
+    }
+}
+
+// Read up to n bytes from a TCP socket with a deadline (blocking up to `ms`)
+/// Block reading up to `n` bytes from `socket`, but no longer than `ms`
+/// milliseconds. On data, returns the bytes read. On a slow/idle peer that sends
+/// nothing within the deadline, the socket is CLOSED (dropping the connection —
+/// the Slowloris defense) and `Error.Timeout` is thrown. Reads sequentially like
+/// socket/read; the deadline is enforced by the cooperative scheduler racing the
+/// read against a timer.
+fn read-timeout(socket, n, ms) {
+    try {
+        read-deadline(socket, n, ms)
+    } catch (e) {
+        try { close(socket) } catch (e2) { null }
+        throw(e)
+    }
+}
+
+// Wrap a raw socket connection in a buffered reader with a per-read deadline.
+/// Wrap `conn` in a socket/Reader whose every fill must receive data within `ms`
+/// milliseconds; a stalled read throws `Error.Timeout` but LEAVES THE SOCKET OPEN
+/// (the pending read is cancelled, not the connection), so the caller can send a
+/// response (e.g. HTTP 408) before closing. The idle/read timeout used by HTTP
+/// serving to defend against Slowloris.
+fn reader-with-timeout(conn, ms) {
+    reader-with(conn, fn(n) { read-deadline(conn, n, ms) })
 }
 
 // Write data to a TCP socket (blocking)
@@ -80,4 +148,216 @@ fn on-connection(listener, callback) {
         let conn = accept(listener)
         async/spawn(fn() { callback(conn) })
     }
+}
+
+// ============================================================================
+// Buffered Reader
+// ============================================================================
+// A single buffered byte reader over any transport, shared by the http and ws
+// protocol layers so neither has to reimplement byte buffering. `pull(n)` is the
+// only transport-specific piece: for a raw socket it is `read(conn, n)`; for TLS
+// the http client supplies `fn(n) { tls/read(conn, n) }`; a test harness can
+// supply a thunk that hands back canned bytes. All progress is measured in
+// BYTES (not codepoints), so multi-byte UTF-8 and binary payloads read correctly.
+
+// Bytes pulled from the transport per fill.
+let read-chunk-size = 4096
+
+/// A buffered reader over a transport. `conn` is the raw handle (so callers can
+/// also write/close it); `leftover` holds bytes pulled but not yet consumed;
+/// `len` is the byte length of `leftover` (tracked incrementally so read-line is
+/// O(n), never rescanning the whole buffer); `scan` is the byte offset already
+/// searched for a newline; `pull` pulls more bytes from the transport.
+struct Reader {
+    conn
+    leftover
+    len
+    scan
+    pull
+}
+
+/// Wrap a raw socket `conn` in a buffered reader (pulls bytes via socket/read).
+fn reader(conn) {
+    Reader {
+        conn: conn,
+        leftover: atom(""),
+        len: atom(0),
+        scan: atom(0),
+        pull: fn(n) { read(conn, n) }
+    }
+}
+
+/// Wrap `conn` in a buffered reader with a custom `pull(n) -> data` thunk.
+/// Use for non-socket transports (TLS: `fn(n) { tls/read(conn, n) }`) or for
+/// test harnesses that feed canned request/frame bytes.
+fn reader-with(conn, pull) {
+    Reader {
+        conn: conn,
+        leftover: atom(""),
+        len: atom(0),
+        scan: atom(0),
+        pull: pull
+    }
+}
+
+/// Pull one more chunk into the reader's buffer. Returns true if any bytes were
+/// appended, false at EOF. byte-length is computed only on the freshly pulled
+/// chunk (never the whole buffer), keeping the buffered reader O(n) overall.
+fn fill!(r) {
+    let data = r.pull(read-chunk-size)
+    if data == null || data == "" {
+        false
+    } else {
+        reset!(r.leftover, deref(r.leftover) ++ data)
+        reset!(r.len, deref(r.len) + sb/byte-length(data))
+        true
+    }
+}
+
+/// Drop a single trailing CR (the "\r" of a CRLF terminator) from a line.
+fn strip-cr(line) {
+    let n = sb/byte-length(line)
+    if n > 0 && sb/index-byte(line, 13, n - 1) == n - 1 {
+        sb/byte-slice(line, 0, n - 1)
+    } else {
+        line
+    }
+}
+
+/// Thrown by read-line-max when a single line grows past its byte limit before a
+/// terminator arrives. Defends against unbounded buffering from an endless or
+/// oversized line (a Slowloris/oversized-header vector). `limit` is the cap.
+struct ReadLimitExceeded { limit }
+
+/// Read one CRLF/LF-terminated line (terminator stripped). Returns null at EOF
+/// before any bytes (so callers can detect a closed connection). Over-read bytes
+/// stay buffered for the next read. O(n) in the line length: the newline search
+/// resumes from a tracked scan offset instead of rescanning from 0 on every fill
+/// (which made an unterminated line O(n^2) — a Slowloris vector).
+fn read-line(r) {
+    read-line-limited(r, null)
+}
+
+/// Like read-line, but throws ReadLimitExceeded if the line exceeds `max-bytes`
+/// before its terminator — so a client can't make the reader buffer unbounded
+/// memory with one endless line. The buffer is bounded to `max-bytes` + one chunk.
+fn read-line-max(r, max-bytes) {
+    read-line-limited(r, max-bytes)
+}
+
+/// Core of read-line / read-line-max. `max-bytes` is null for no limit, else the
+/// maximum unterminated line length (in bytes) before ReadLimitExceeded is thrown.
+fn read-line-limited(r, max-bytes) {
+    let mut nl = -1
+    let mut done = false
+    while done == false {
+        let buf = deref(r.leftover)
+        let from = deref(r.scan)
+        nl = sb/index-byte(buf, 10, from)
+        if nl >= 0 {
+            done = true
+        } else {
+            // No terminator yet. Abort before pulling more if the unterminated
+            // line already exceeds the cap (bounds memory to ~max-bytes + a chunk).
+            if max-bytes != null && deref(r.len) > max-bytes {
+                let limit-error = ReadLimitExceeded { limit: max-bytes }
+                throw(limit-error)
+            }
+            // Everything currently buffered has been searched; the next search
+            // can begin where the about-to-be-pulled bytes will land.
+            reset!(r.scan, deref(r.len))
+            if fill!(r) == false {
+                done = true
+            }
+        }
+    }
+    let buf = deref(r.leftover)
+    let total = deref(r.len)
+    // Also reject an oversized line that DID terminate (e.g. a huge header line
+    // that arrived complete in one chunk, so the unterminated-buffer check above
+    // never fired). `nl` is the line length in bytes (excluding the newline).
+    if max-bytes != null && nl >= 0 && nl > max-bytes {
+        let limit-error = ReadLimitExceeded { limit: max-bytes }
+        throw(limit-error)
+    }
+    if nl < 0 {
+        // EOF without a newline: the remaining buffer is the final line.
+        if total == 0 {
+            null
+        } else {
+            reset!(r.leftover, "")
+            reset!(r.len, 0)
+            reset!(r.scan, 0)
+            strip-cr(buf)
+        }
+    } else {
+        let line = sb/byte-slice(buf, 0, nl)
+        reset!(r.leftover, sb/byte-slice(buf, nl + 1, total))
+        reset!(r.len, total - (nl + 1))
+        reset!(r.scan, 0)
+        strip-cr(line)
+    }
+}
+
+/// Read exactly n bytes (or fewer at EOF) into a byte-faithful string-builder,
+/// consuming any buffered bytes first and pushing back over-read bytes. Returns
+/// the builder so binary callers (e.g. ws frame headers) can index bytes via
+/// sb/byte-at without a UTF-8 round-trip.
+fn read-n-buf(r, n) {
+    let builder = sb/new(n + 1)
+    let mut done = false
+    while sb/length(builder) < n && done == false {
+        let buf = deref(r.leftover)
+        let have = deref(r.len)
+        if have > 0 {
+            let need = n - sb/length(builder)
+            if have <= need {
+                // Consume the whole buffer.
+                sb/append!(builder, buf)
+                reset!(r.leftover, "")
+                reset!(r.len, 0)
+                reset!(r.scan, 0)
+            } else {
+                // Consume `need` bytes, keep the rest buffered.
+                sb/append-range!(builder, buf, 0, need)
+                reset!(r.leftover, sb/byte-slice(buf, need, have))
+                reset!(r.len, have - need)
+                reset!(r.scan, 0)
+            }
+        } else {
+            if fill!(r) == false {
+                done = true
+            }
+        }
+    }
+    builder
+}
+
+/// Read exactly n bytes (or fewer at EOF) from the reader as a String, measured
+/// in BYTES; over-read bytes stay buffered for the next read.
+fn read-n(r, n) {
+    sb/to-string(read-n-buf(r, n))
+}
+
+/// Read everything remaining on the connection until EOF, draining any
+/// already-buffered bytes first. Returns the bytes as a String.
+fn read-all(r) {
+    let builder = sb/new(256)
+    let buffered = deref(r.leftover)
+    if buffered != "" {
+        sb/append!(builder, buffered)
+        reset!(r.leftover, "")
+        reset!(r.len, 0)
+        reset!(r.scan, 0)
+    }
+    let mut done = false
+    while done == false {
+        let data = r.pull(read-chunk-size)
+        if data == null || data == "" {
+            done = true
+        } else {
+            sb/append!(builder, data)
+        }
+    }
+    sb/to-string(builder)
 }

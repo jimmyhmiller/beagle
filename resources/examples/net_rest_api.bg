@@ -1,0 +1,108 @@
+namespace net_rest_api
+
+// ===========================================================================
+// A small REST API SERVER — teaching example
+// ===========================================================================
+//
+// This program shows the whole shape of a Beagle HTTP service in one file:
+//
+//   1. Build a set of ROUTES with http/route(method, pattern, handler).
+//      Patterns support `:name` path params and a trailing `*name` wildcard.
+//   2. Combine them into a single handler with http/router(routes, not-found).
+//   3. Serve real TCP connections with http/handle-connection — one call per
+//      accepted socket, which runs the HTTP/1.1 keep-alive loop for you.
+//   4. Drive it from the same process with the http/get client, which returns
+//      a Result we unwrap to read the status + body.
+//
+// It is fully self-verifying: a background thread serves exactly three
+// connections and then shuts its listener down, main makes three requests, and
+// the whole program EXITS cleanly (no forever-running server to hang it).
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.http as http
+
+// ---------------------------------------------------------------------------
+// Handlers — each is just  fn(req) -> Response.
+// ---------------------------------------------------------------------------
+
+// GET /  — a friendly welcome page.
+fn welcome(req) {
+    http/ok("Welcome to the Beagle REST API!")
+}
+
+// GET /users/:id  — the router matched ":id" against the path segment and put
+// it in req.params. We echo it back. (req.params is a string->string map.)
+fn show-user(req) {
+    let id = core/get(req.params, "id")
+    http/ok("user #" ++ id)
+}
+
+// GET /search?q=...  — read a query-string parameter with http/query-param,
+// which URL-decodes it for us. Absent param -> null, so we supply a default.
+fn search(req) {
+    let q = http/query-param(req, "q")
+    let term = if q == null { "(nothing)" } else { q }
+    http/ok("you searched for: " ++ term)
+}
+
+// The routing table. The router tries these in order; on a path match with the
+// wrong method it answers 405, otherwise it falls through to default-not-found.
+fn build-handler() {
+    let routes = [
+        http/route("GET", "/", welcome),
+        http/route("GET", "/users/:id", show-user),
+        http/route("GET", "/search", search)
+    ]
+    http/router(routes, http/default-not-found)
+}
+
+// ---------------------------------------------------------------------------
+// A tiny client helper: GET a path, unwrap the Result, print status + body.
+// ---------------------------------------------------------------------------
+
+fn hit(port, path) {
+    let url = "http://127.0.0.1:" ++ to-string(port) ++ path
+    // http/get returns Result.Ok { value: Response } | Result.Err { error }.
+    // unwrap! gives us the Response or throws — fine for a self-contained demo.
+    let resp = unwrap!(http/get(url))
+    println(path ++ " -> " ++ to-string(resp.status) ++ " " ++ resp.body)
+}
+
+fn main() {
+    // A random high port keeps parallel test runs from colliding.
+    let port = 20000 + core/random-int(20000)
+    let ready = atom(false)
+
+    // --- Server thread -----------------------------------------------------
+    // It binds, signals readiness, then serves exactly THREE connections (one
+    // per client request below) and closes the listener. Doing finite work and
+    // returning is what lets the process exit instead of hanging.
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        let handler = build-handler()
+        reset!(ready, true)
+        let mut served = 0
+        while served < 3 {
+            // handle-connection runs the keep-alive loop for one socket and
+            // closes it when the client hangs up.
+            http/handle-connection(socket/accept(listener), handler, http/config-from-opts({}))
+            served = served + 1
+        }
+        socket/close-listener(listener)
+    })
+
+    // --- Wait for the server to be listening before we connect. -------------
+    loop {
+        if deref(ready) { break(null) }
+        core/sleep(1)
+    }
+
+    // --- Three client requests, one per route. -----------------------------
+    println("REST API demo on port " ++ to-string(port))
+    hit(port, "/")
+    hit(port, "/users/42")
+    hit(port, "/search?q=beagle%20lang")
+
+    println("done")
+}

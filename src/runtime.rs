@@ -1522,6 +1522,17 @@ pub enum TcpOperation {
     CloseListener {
         listener_id: usize,
     },
+    /// Abandon a pending read on a socket WITHOUT closing it, so the caller can
+    /// still write a response (e.g. an HTTP 408) and then close. Drops the
+    /// pending read and its readable-interest registration; keeps the stream.
+    CancelRead {
+        socket_id: usize,
+    },
+    /// Abandon an in-progress connect (its timer beat it). Found by op_id; the
+    /// connecting socket is deregistered and dropped so its fd doesn't leak.
+    CancelConnect {
+        op_id: usize,
+    },
 }
 
 /// Task submitted to a threaded event loop
@@ -2591,6 +2602,45 @@ impl EventLoopState {
                 self.pending_writes.remove(&socket_id);
                 if let Some(token) = self.socket_tokens.remove(&socket_id) {
                     self.token_to_socket.remove(&token.0);
+                }
+            }
+            TcpOperation::CancelRead { socket_id } => {
+                trace!("tcp", "io thread: handle CancelRead socket={}", socket_id);
+                // Drop the pending read so its result is never produced and it no
+                // longer blocks a write on the same socket. Keep the stream open.
+                self.pending_reads.remove(&socket_id);
+                // Recompute interest: deregister entirely if nothing else is
+                // pending (so we stop getting readable events), otherwise
+                // re-register for the remaining (write) interest only.
+                if self.socket_interest(socket_id).is_none() {
+                    if let Some(mut stream) = self.tcp_streams.remove(&socket_id) {
+                        let _ = self.poll_mut().registry().deregister(&mut stream);
+                        self.tcp_streams.insert(socket_id, stream);
+                    }
+                } else {
+                    let _ = self.update_socket_registration(socket_id);
+                }
+            }
+            TcpOperation::CancelConnect { op_id } => {
+                trace!("tcp", "io thread: handle CancelConnect op_id={}", op_id);
+                // Find the pending connect with this op_id (pending_ops is keyed by
+                // mio token) and tear it down so the connecting fd doesn't leak.
+                // If it already completed (the connect won the race narrowly), this
+                // finds nothing — a harmless no-op.
+                let token = self.pending_ops.iter().find_map(|(tok, op)| match op {
+                    PendingOperation::TcpConnect { op_id: oid, .. } if *oid == op_id => Some(*tok),
+                    _ => None,
+                });
+                if let Some(tok) = token {
+                    if let Some(PendingOperation::TcpConnect { socket_id, .. }) =
+                        self.pending_ops.remove(&tok)
+                    {
+                        if let Some(mut stream) = self.tcp_streams.remove(&socket_id) {
+                            let _ = self.poll_mut().registry().deregister(&mut stream);
+                        }
+                        self.socket_tokens.remove(&socket_id);
+                    }
+                    self.token_to_socket.remove(&tok);
                 }
             }
             TcpOperation::CloseListener { listener_id } => {

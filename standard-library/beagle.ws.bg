@@ -22,6 +22,8 @@ use beagle.base64 as base64
 use beagle.socket as socket
 use beagle.string-builder as sb
 use beagle.core as core
+use beagle.url as url
+use beagle.tls as tls
 
 // The RFC 6455 GUID concatenated to the client key before SHA-1.
 let WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -348,6 +350,152 @@ fn close-frame() {
     encode-frame(opcode-close(), "")
 }
 
+// Build a close control frame carrying a 2-byte big-endian status code (RFC 6455
+// §5.5.1) — e.g. 1000 normal, 1001 going away, 1009 message too big.
+/// Build a close frame whose payload is the 2-byte big-endian status `code`.
+fn close-frame-status(code) {
+    let payload = sb/new(2)
+    sb/append-byte!(payload, (code >> 8) & 0xFF)
+    sb/append-byte!(payload, code & 0xFF)
+    encode-frame(opcode-close(), sb/to-string(payload))
+}
+
+// ---------------------------------------------------------------------------
+// Client-side (masked) frame encoding
+// ---------------------------------------------------------------------------
+// RFC 6455 §5.3: every client->server frame MUST be masked with a fresh, random
+// 4-byte key; the payload is XORed with the key (key[i mod 4]) and the MASK bit
+// (0x80) is set on the length byte. A server that receives an unmasked frame
+// must fail the connection, so these encoders are required for a real WS client.
+
+// Encode a masked, FIN=1 client->server frame with an explicit 4-byte key. Kept
+// separate so tests can pass a known key; encode-frame-masked generates a random one.
+/// Encode a masked client->server frame for `opcode`/`payload` using the explicit
+/// 4-byte masking key m0..m3; returns a byte-faithful String for socket/write.
+fn encode-frame-masked-with-key(opcode, payload, m0, m1, m2, m3) {
+    let payload-buf = to-buf(payload)
+    let payload-len = sb/length(payload-buf)
+    let builder = sb/new(payload-len + 14)
+
+    // First byte: FIN (0x80) | opcode.
+    sb/append-byte!(builder, 0x80 | (opcode & 0x0F))
+
+    // Length byte(s), each with the MASK bit (0x80) set.
+    if payload-len < 126 {
+        sb/append-byte!(builder, 0x80 | payload-len)
+    } else {
+        if payload-len < 65536 {
+            sb/append-byte!(builder, 0x80 | 126)
+            sb/append-byte!(builder, (payload-len >>> 8) & 0xFF)
+            sb/append-byte!(builder, payload-len & 0xFF)
+        } else {
+            sb/append-byte!(builder, 0x80 | 127)
+            let mut shift = 56
+            while shift >= 0 {
+                sb/append-byte!(builder, (payload-len >>> shift) & 0xFF)
+                shift = shift - 8
+            }
+        }
+    }
+
+    // 4-byte masking key.
+    sb/append-byte!(builder, m0 & 0xFF)
+    sb/append-byte!(builder, m1 & 0xFF)
+    sb/append-byte!(builder, m2 & 0xFF)
+    sb/append-byte!(builder, m3 & 0xFF)
+
+    // XOR-masked payload, byte by byte (key[j mod 4]).
+    let mut j = 0
+    while j < payload-len {
+        let raw = buf-byte(payload-buf, j)
+        let mask-byte = if (j & 3) == 0 {
+            m0
+        } else {
+            if (j & 3) == 1 {
+                m1
+            } else {
+                if (j & 3) == 2 {
+                    m2
+                } else {
+                    m3
+                }
+            }
+        }
+        sb/append-byte!(builder, (raw ^ mask-byte) & 0xFF)
+        j = j + 1
+    }
+    sb/to-string(builder)
+}
+
+// Encode a masked client frame with a fresh random masking key.
+/// Encode a masked, FIN=1 client->server frame for `opcode`/`payload`, generating
+/// a fresh random 4-byte masking key (required of all client frames).
+fn encode-frame-masked(opcode, payload) {
+    encode-frame-masked-with-key(
+        opcode,
+        payload,
+        core/random-int(256),
+        core/random-int(256),
+        core/random-int(256),
+        core/random-int(256)
+    )
+}
+
+/// Encode a masked client text frame.
+fn text-frame-masked(payload) {
+    encode-frame-masked(opcode-text(), payload)
+}
+
+/// Encode a masked client binary frame.
+fn binary-frame-masked(payload) {
+    encode-frame-masked(opcode-binary(), payload)
+}
+
+/// Encode a masked client ping frame.
+fn ping-frame-masked(payload) {
+    encode-frame-masked(opcode-ping(), payload)
+}
+
+/// Encode a masked client pong frame.
+fn pong-frame-masked(payload) {
+    encode-frame-masked(opcode-pong(), payload)
+}
+
+/// Encode a masked client close frame (empty payload).
+fn close-frame-masked() {
+    encode-frame-masked(opcode-close(), "")
+}
+
+// ---------------------------------------------------------------------------
+// Close-frame status code / reason
+// ---------------------------------------------------------------------------
+
+// Extract the close status code from a parsed close Frame. RFC 6455 §5.5.1: an
+// empty close payload means "no status" — reported as 1005; otherwise the first
+// two payload bytes are the big-endian code (1000 normal, 1001 going away,
+// 1009 message too big, ...).
+/// Return the close status code from a close Frame (1005 if the payload carries
+/// no code).
+fn close-code(frame) {
+    let buf = to-buf(frame.payload)
+    if sb/length(buf) < 2 {
+        1005
+    } else {
+        (buf-byte(buf, 0) << 8) | buf-byte(buf, 1)
+    }
+}
+
+// The optional UTF-8 reason string following the 2-byte code in a close payload.
+/// Return the close reason text (the payload after the 2-byte code), or "" if absent.
+fn close-reason(frame) {
+    let total = sb/byte-length(frame.payload)
+    if total <= 2 {
+        ""
+    } else {
+        sb/byte-slice(frame.payload, 2, total)
+    }
+}
+
 // Opcode predicates for dispatching parsed frames.
 /// True if the parsed frame is a text frame.
 fn text?(frame) { frame.opcode == opcode-text() }
@@ -418,42 +566,39 @@ fn reassemble-helper(frames, i, cur-opcode, cur-payload, out) {
 // Streaming frame reads from a live socket
 // ===========================================================================
 
-// Read exactly n bytes (or fewer at EOF) from a connection into a string-
-// builder, which is byte-faithful. socket/read may return short, so we loop —
-// and we measure progress by the builder's byte length delta, NOT length(data)
-// (which would mis-decode high bytes).
-/// Read up to n bytes from conn into a byte-faithful string-builder, looping
-/// over short socket reads and stopping at EOF.
-fn read-exact-buf(conn, n) {
-    let builder = sb/new(n + 1)
-    let mut got = 0
-    let mut done = false
-    while got < n && done == false {
-        let data = socket/read(conn, n - got)
-        if data == null || data == "" {
-            done = true
-        } else {
-            let before = sb/length(builder)
-            sb/append!(builder, data)
-            let after = sb/length(builder)
-            if after == before {
-                done = true
-            } else {
-                got = after
-            }
-        }
-    }
-    builder
+// Byte-exact frame reads go through socket's buffered Reader (socket/read-n-buf),
+// the same byte layer the http parser uses — ws no longer reimplements it. The
+// reader buffers, so handshake over-reads are preserved into the frame loop.
+
+// Returned by read-frame-max when a frame declares a payload larger than the
+// configured cap — BEFORE the (huge) payload is read, so an oversized frame
+// can't make the server allocate unbounded memory. The server replies with a
+// 1009 (Message Too Big) close and ends the connection.
+/// Marker for a frame whose declared payload exceeds the max-frame cap. `limit`
+/// is the configured cap; `declared` is the frame's claimed payload length.
+struct FrameTooBig { limit, declared }
+
+/// True if a read-frame result is the oversized-frame marker.
+fn frame-too-big?(f) {
+    instance-of(f, FrameTooBig)
 }
 
 // Read one complete WebSocket frame off the socket and parse it. Returns a
 // Frame, or null at EOF (connection closed before a full header arrived).
-/// Read and parse one complete WebSocket frame off the socket; returns a Frame,
-/// or null at EOF (connection closed before a full header arrived).
-fn read-frame(conn) {
-    // read-exact returns the bytes already wrapped in a builder so we can read
-    // header bytes by index without tripping over UTF-8 decoding.
-    let head = read-exact-buf(conn, 2)
+/// Read and parse one complete WebSocket frame off the connection reader;
+/// returns a Frame, or null at EOF (connection closed before a full header
+/// arrived). `r` is a socket/Reader (shared with the handshake so no bytes are lost).
+fn read-frame(r) {
+    read-frame-max(r, null)
+}
+
+/// Like read-frame, but if the frame declares a payload larger than `max-frame`
+/// bytes (null = unlimited), returns a FrameTooBig marker WITHOUT reading the
+/// payload — so an oversized frame can't trigger an unbounded allocation.
+fn read-frame-max(r, max-frame) {
+    // socket/read-n-buf returns the bytes wrapped in a byte-faithful builder so
+    // we can read header bytes by index without tripping over UTF-8 decoding.
+    let head = socket/read-n-buf(r, 2)
     if sb/length(head) < 2 {
         null
     } else {
@@ -465,11 +610,11 @@ fn read-frame(conn) {
         let mut payload-len = len7
         let mut ext = sb/new(1)
         if len7 == 126 {
-            ext = read-exact-buf(conn, 2)
+            ext = socket/read-n-buf(r, 2)
             payload-len = (buf-byte(ext, 0) << 8) | buf-byte(ext, 1)
         } else {
             if len7 == 127 {
-                ext = read-exact-buf(conn, 8)
+                ext = socket/read-n-buf(r, 8)
                 let mut acc = 0
                 let mut i = 0
                 while i < 8 {
@@ -480,17 +625,23 @@ fn read-frame(conn) {
             }
         }
 
-        let mask = if masked { read-exact-buf(conn, 4) } else { sb/new(1) }
-        let payload = read-exact-buf(conn, payload-len)
+        // Enforce the frame cap BEFORE reading the mask/payload (don't allocate
+        // for an oversized frame; the caller closes 1009 and drops the connection).
+        if max-frame != null && payload-len > max-frame {
+            FrameTooBig { limit: max-frame, declared: payload-len }
+        } else {
+            let mask = if masked { socket/read-n-buf(r, 4) } else { sb/new(1) }
+            let payload = socket/read-n-buf(r, payload-len)
 
-        // Reassemble the whole frame into one builder and hand it to
-        // parse-frame, which owns the unmasking logic (single source of truth).
-        let whole = sb/new(2 + sb/length(ext) + sb/length(mask) + payload-len + 1)
-        sb/append-builder-range!(whole, head, 0, sb/length(head))
-        sb/append-builder-range!(whole, ext, 0, sb/length(ext))
-        sb/append-builder-range!(whole, mask, 0, sb/length(mask))
-        sb/append-builder-range!(whole, payload, 0, sb/length(payload))
-        parse-frame(sb/to-string(whole))
+            // Reassemble the whole frame into one builder and hand it to
+            // parse-frame, which owns the unmasking logic (single source of truth).
+            let whole = sb/new(2 + sb/length(ext) + sb/length(mask) + payload-len + 1)
+            sb/append-builder-range!(whole, head, 0, sb/length(head))
+            sb/append-builder-range!(whole, ext, 0, sb/length(ext))
+            sb/append-builder-range!(whole, mask, 0, sb/length(mask))
+            sb/append-builder-range!(whole, payload, 0, sb/length(payload))
+            parse-frame(sb/to-string(whole))
+        }
     }
 }
 
@@ -501,19 +652,22 @@ fn read-frame(conn) {
 // Perform the HTTP upgrade handshake on an accepted connection. Reads the HTTP
 // request; if it is a valid WebSocket upgrade, writes the 101 response and
 // returns true. Otherwise writes a 400 and returns false.
-/// Perform the HTTP upgrade handshake on conn: on a valid WebSocket upgrade,
-/// write the 101 response and return true; otherwise write a 400 and return false.
-fn do-handshake(conn) {
-    let req = http/read-request(conn)
+/// Perform the HTTP upgrade handshake using reader `r`: read the upgrade request
+/// through the SAME buffered reader the frame loop uses (so any bytes read past
+/// the request stay buffered for the first frame), and write via r.conn. On a
+/// valid WebSocket upgrade, write the 101 response and return true; otherwise
+/// write a 400 and return false.
+fn do-handshake(r) {
+    let req = http/read-request(r)
     if req == null {
         false
     } else {
         if is-websocket-upgrade?(req) {
             let resp = handshake-response(req)
-            socket/write(conn, http/serialize-response(resp))
+            socket/write(r.conn, http/serialize-response(resp))
             true
         } else {
-            socket/write(conn, http/serialize-response(http/status-response(400, "Expected WebSocket upgrade")))
+            socket/write(r.conn, http/serialize-response(http/status-response(400, "Expected WebSocket upgrade")))
             false
         }
     }
@@ -527,41 +681,57 @@ fn do-handshake(conn) {
 //   - close -> reply with a close frame and end the connection.
 // Everything runs on the calling thread (no thread-per-connection), so it is
 // GC-safe. Blocks forever.
-/// Cooperative single-thread WebSocket server: accept connections one at a time,
-/// upgrade each, and run its frame loop via on-message. GC-safe; blocks forever.
+// Default max WebSocket frame payload accepted by the server: 1 MB. An inbound
+// frame declaring more is rejected with a 1009 close (Message Too Big).
+let default-max-frame-bytes = 1048576
+
+/// Cooperative WebSocket server: each connection is upgraded and runs its frame
+/// loop as its own cooperative task (via socket/on-connection), so a slow client
+/// can't block others. A frame over the default size cap is rejected (close 1009).
+/// GC-safe; blocks forever.
 fn serve-ws(host, port, on-message) {
+    serve-ws-with(host, port, {}, on-message)
+}
+
+// Run a cooperative WebSocket server with options. `opts` keys:
+//   :max-frame-bytes  max inbound frame payload (default 1048576) -> close 1009
+/// Cooperative WebSocket server with an options map (`:max-frame-bytes`) plus the
+/// on-message handler. Like serve-ws, but lets you tune the max frame size.
+fn serve-ws-with(host, port, opts, on-message) {
+    let max-frame = core/get(opts, :max-frame-bytes, default-max-frame-bytes)
     let listener = socket/listen(host, port)
     println("beagle.ws serving on " ++ host ++ ":" ++ to-string(port))
-    let mut running = true
-    while running {
-        let conn = socket/accept(listener)
-        if conn == null {
-            running = false
-        } else {
-            handle-ws-connection(conn, on-message)
-        }
-    }
-    socket/close-listener(listener)
-    null
+    socket/on-connection(listener, fn(conn) {
+        handle-ws-connection(conn, on-message, max-frame)
+    })
 }
 
 // Handle a single upgraded connection's frame loop. Isolated in a try so one
 // bad client never takes down the accept loop.
 /// Run one upgraded connection's frame loop (text/binary -> on-message reply,
-/// ping -> pong, close -> close), isolated in a try so one bad client can't kill
-/// the accept loop; closes the connection on exit.
-fn handle-ws-connection(conn, on-message) {
+/// ping -> pong, close -> close, oversized frame -> close 1009), isolated in a
+/// try so one bad client can't kill the accept loop; closes the connection on exit.
+fn handle-ws-connection(conn, on-message, max-frame) {
     try {
-        if do-handshake(conn) {
+        // One buffered reader for the whole connection: the handshake and every
+        // frame read share it, so bytes read past the upgrade request are not lost.
+        let r = socket/reader(conn)
+        if do-handshake(r) {
             let mut open = true
             // Fragmentation state: cur-opcode is null unless mid-message.
             let mut cur-opcode = null
             let mut cur-payload = ""
             while open {
-                let frame = read-frame(conn)
+                let frame = read-frame-max(r, max-frame)
                 if frame == null {
                     open = false
                 } else {
+                    if frame-too-big?(frame) {
+                        // Oversized frame: tell the client (1009) and end. The
+                        // unread payload is dropped when the connection closes.
+                        socket/write(conn, close-frame-status(1009))
+                        open = false
+                    } else {
                     if close?(frame) {
                         // Control frames may arrive between data fragments; handle inline.
                         socket/write(conn, close-frame())
@@ -588,6 +758,7 @@ fn handle-ws-connection(conn, on-message) {
                             }
                         }
                     }
+                    }
                 }
             }
         }
@@ -600,6 +771,218 @@ fn handle-ws-connection(conn, on-message) {
         null
     }
     null
+}
+
+// ===========================================================================
+// Client
+// ===========================================================================
+//
+// A WebSocket CLIENT: opens a TCP (ws://) or TLS (wss://) connection, performs
+// the RFC 6455 HTTP Upgrade handshake (random Sec-WebSocket-Key, verifies the
+// server's Sec-WebSocket-Accept), then exchanges frames. Client->server frames
+// MUST be masked (handled by the *-frame-masked encoders); inbound server frames
+// are unmasked. Built on the async socket/TLS layers, so it parks like any other
+// I/O (concurrent, with-timeout-able).
+
+/// A live client WebSocket connection: the transport (TcpSocket or TlsConn), the
+/// buffered reader over it (shared with the frame loop), and whether it is TLS.
+struct WsConn {
+    transport
+    reader
+    secure
+}
+
+// A fresh Sec-WebSocket-Key: 16 random bytes, standard-base64-encoded (RFC 6455
+// §4.1). The server echoes base64(sha1(key ++ GUID)) in Sec-WebSocket-Accept.
+fn gen-ws-key() {
+    let b = sb/new(16)
+    let mut i = 0
+    while i < 16 {
+        sb/append-byte!(b, core/random-int(256))
+        i = i + 1
+    }
+    base64/encode(sb/to-string(b))
+}
+
+// Write raw bytes over the transport (TLS or plain).
+fn ws-write-raw(transport, secure, bytes) {
+    if secure {
+        tls/write(transport, bytes)
+    } else {
+        socket/write(transport, bytes)
+    }
+}
+
+// Close the transport (TLS or plain), tolerating errors.
+fn ws-close-transport(transport, secure) {
+    try {
+        if secure {
+            tls/close(transport)
+        } else {
+            socket/close(transport)
+        }
+    } catch (e) {
+        null
+    }
+}
+
+// Build the RFC 6455 client Upgrade request for host:port/path with key `key`.
+fn build-upgrade-request(host, port, path, key) {
+    let b = sb/new(256)
+    sb/append!(b, "GET ")
+    sb/append!(b, path)
+    sb/append!(b, " HTTP/1.1\r\n")
+    sb/append!(b, "Host: ")
+    sb/append!(b, host)
+    sb/append!(b, ":")
+    sb/append-int!(b, port)
+    sb/append!(b, "\r\n")
+    sb/append!(b, "Upgrade: websocket\r\n")
+    sb/append!(b, "Connection: Upgrade\r\n")
+    sb/append!(b, "Sec-WebSocket-Key: ")
+    sb/append!(b, key)
+    sb/append!(b, "\r\n")
+    sb/append!(b, "Sec-WebSocket-Version: 13\r\n")
+    sb/append!(b, "\r\n")
+    sb/to-string(b)
+}
+
+// Read the server's handshake response off `reader` and verify it is a valid 101
+// upgrade whose Sec-WebSocket-Accept matches our key. Returns true iff accepted.
+fn verify-handshake-response(reader, key) {
+    let status-line = socket/read-line(reader)
+    if status-line == null {
+        false
+    } else {
+        let headers = http/read-headers(reader)
+        let accept = core/get(headers, "sec-websocket-accept")
+        let is-101 = index-of(status-line, " 101") >= 0
+        is-101 && accept != null && accept == accept-key(key)
+    }
+}
+
+/// Open a client WebSocket connection to `url` (ws://host:port/path or
+/// wss://... for TLS), performing the upgrade handshake. Returns a WsConn.
+/// Throws if the connect, handshake, or Sec-WebSocket-Accept check fails.
+///
+/// Examples:
+///   let c = connect("ws://127.0.0.1:9001/chat")
+///   send(c, "hello")
+///   let reply = receive(c)
+///   close(c)
+fn connect(url) {
+    let u = url/parse-url(url)
+    let secure = lowercase(u.scheme) == "wss"
+    let port = if u.port == null {
+        if secure { 443 } else { 80 }
+    } else {
+        u.port
+    }
+    let path = if length(u.path) == 0 { "/" } else { u.path }
+    let full-path = if u.query == null { path } else { path ++ "?" ++ u.query }
+
+    let transport = if secure {
+        tls/connect(u.host, port)
+    } else {
+        socket/connect(u.host, port)
+    }
+    // A reader over the transport (TLS reads route through tls/read).
+    let reader = if secure {
+        socket/reader-with(transport, fn(n) { tls/read(transport, n) })
+    } else {
+        socket/reader(transport)
+    }
+
+    let key = gen-ws-key()
+    ws-write-raw(transport, secure, build-upgrade-request(u.host, port, full-path, key))
+
+    if verify-handshake-response(reader, key) {
+        WsConn { transport: transport, reader: reader, secure: secure }
+    } else {
+        ws-close-transport(transport, secure)
+        throw("beagle.ws/connect: handshake failed (server did not complete the WebSocket upgrade)")
+    }
+}
+
+/// Send `text` as a masked text frame over the client connection.
+fn send(c, text) {
+    ws-write-raw(c.transport, c.secure, text-frame-masked(text))
+}
+
+/// Send `data` as a masked binary frame over the client connection.
+fn send-binary(c, data) {
+    ws-write-raw(c.transport, c.secure, binary-frame-masked(data))
+}
+
+/// Send a masked ping frame carrying `payload`.
+fn ping(c, payload) {
+    ws-write-raw(c.transport, c.secure, ping-frame-masked(payload))
+}
+
+// Continuation accumulation: gather continuation frames until the FIN frame,
+// auto-answering any interleaved pings. Returns the full reassembled payload.
+fn receive-continuation(c, acc) {
+    let frame = read-frame(c.reader)
+    if frame == null {
+        acc
+    } else {
+        if ping?(frame) {
+            ws-write-raw(c.transport, c.secure, pong-frame-masked(frame.payload))
+            receive-continuation(c, acc)
+        } else {
+            if frame.fin {
+                acc ++ frame.payload
+            } else {
+                receive-continuation(c, acc ++ frame.payload)
+            }
+        }
+    }
+}
+
+/// Receive the next application message (text or binary payload, byte-faithful)
+/// from the connection, reassembling fragments. Control frames are handled
+/// transparently: a ping is auto-answered with a pong, a pong is ignored, and a
+/// close is acknowledged. Returns null when the peer closes or at EOF.
+fn receive(c) {
+    let frame = read-frame(c.reader)
+    if frame == null {
+        null
+    } else {
+        if ping?(frame) {
+            ws-write-raw(c.transport, c.secure, pong-frame-masked(frame.payload))
+            receive(c)
+        } else {
+            if pong?(frame) {
+                receive(c)
+            } else {
+                if close?(frame) {
+                    try {
+                        ws-write-raw(c.transport, c.secure, close-frame-masked())
+                    } catch (e) {
+                        null
+                    }
+                    null
+                } else {
+                    if frame.fin {
+                        frame.payload
+                    } else {
+                        receive-continuation(c, frame.payload)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Close the client WebSocket connection: send a masked close frame, then close
+/// the underlying transport.
+fn close(c) {
+    try {
+        ws-write-raw(c.transport, c.secure, close-frame-masked())
+    } catch (e) {
+        null
+    }
+    ws-close-transport(c.transport, c.secure)
 }
 
 // ===========================================================================

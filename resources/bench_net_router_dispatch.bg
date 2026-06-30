@@ -1,0 +1,125 @@
+namespace bench_net_router_dispatch
+
+// ---------------------------------------------------------------------------
+// Benchmark: HTTP router dispatch + response serialization (NO sockets).
+//
+// Single-process micro-benchmark. We build an http/router with ~10 routes
+// (a mix of static, ":param", and "*wildcard"), construct Request structs in a
+// loop, dispatch each through the router, and serialize the resulting Response
+// with http/serialize-response. Pure CPU work: routing + response building +
+// HTTP/1.1 serialization, no networking involved at all.
+// ---------------------------------------------------------------------------
+
+use beagle.core as core
+use beagle.http as http
+
+// Build a Request struct directly (no socket parse).
+fn make-req(method, path) {
+    http/Request {
+        method: method,
+        path: path,
+        query: "",
+        version: "HTTP/1.1",
+        headers: {},
+        body: "",
+        params: {}
+    }
+}
+
+fn build-router() {
+    let routes = [
+        http/route("GET", "/", fn(req) { http/ok("home") }),
+        http/route("GET", "/about", fn(req) { http/ok("about") }),
+        http/route("GET", "/health", fn(req) { http/ok("ok") }),
+        http/route("GET", "/users", fn(req) { http/ok("user list") }),
+        http/route("POST", "/users", fn(req) { http/with-status(http/ok("created"), 201) }),
+        http/route("GET", "/users/:id", fn(req) {
+            http/ok("user " ++ to-string(core/get(req.params, "id")))
+        }),
+        http/route("GET", "/users/:id/posts/:postId", fn(req) {
+            http/ok("post " ++ to-string(core/get(req.params, "postId")) ++
+                    " of user " ++ to-string(core/get(req.params, "id")))
+        }),
+        http/route("GET", "/posts/:slug", fn(req) {
+            http/ok("post " ++ to-string(core/get(req.params, "slug")))
+        }),
+        http/route("GET", "/static/*path", fn(req) {
+            http/ok("file " ++ to-string(core/get(req.params, "path")))
+        }),
+        http/route("DELETE", "/users/:id", fn(req) {
+            http/with-status(http/ok("deleted " ++ to-string(core/get(req.params, "id"))), 204)
+        })
+    ]
+    http/router(routes, http/default-not-found)
+}
+
+// A representative spread of requests that exercise every route kind, plus a
+// 404 and a 405 (path exists, wrong method).
+fn build-requests() {
+    [
+        make-req("GET", "/"),
+        make-req("GET", "/about"),
+        make-req("GET", "/health"),
+        make-req("GET", "/users"),
+        make-req("POST", "/users"),
+        make-req("GET", "/users/42"),
+        make-req("GET", "/users/42/posts/7"),
+        make-req("GET", "/posts/hello-world"),
+        make-req("GET", "/static/css/site.css"),
+        make-req("DELETE", "/users/99"),
+        make-req("GET", "/nope/missing"),
+        make-req("PUT", "/users")
+    ]
+}
+
+fn run(n, dispatch, reqs, req-count) {
+    let mut i = 0
+    let mut bytes = 0
+    while i < n {
+        let req = reqs[i % req-count]
+        let resp = dispatch(req)
+        let wire = http/serialize-response(resp)
+        bytes = bytes + length(wire)
+        i = i + 1
+    }
+    bytes
+}
+
+fn bench-once(label, n, dispatch, reqs, req-count) {
+    let start = core/time-now()
+    let bytes = run(n, dispatch, reqs, req-count)
+    let elapsed-ns = core/time-now() - start
+    let elapsed-ms = elapsed-ns / 1000000
+    let per-dispatch-us = (elapsed-ns / 1000) / n
+    let per-sec = if elapsed-ns > 0 { (n * 1000000000) / elapsed-ns } else { 0 }
+    println("  ${label}: ${n} dispatches in ${elapsed-ms} ms")
+    println("    ${per-sec} dispatches/sec, ${per-dispatch-us} us/dispatch, ${bytes} bytes serialized")
+    per-sec
+}
+
+fn main() {
+    println("=== HTTP router dispatch + response serialization benchmark ===")
+    println("Single-process micro-benchmark (no sockets): build Request structs,")
+    println("dispatch through an http/router of 10 routes, serialize each Response.")
+    println("")
+
+    let dispatch = build-router()
+    let reqs = build-requests()
+    let req-count = length(reqs)
+    let n = 20000
+
+    println("Routes: 10 (static + :param + *wildcard), request mix: ${req-count} kinds (incl. 404 + 405)")
+    println("")
+
+    // Warm up tier-up / JIT before measuring.
+    run(5000, dispatch, reqs, req-count)
+
+    println("Measured runs (N=${n} each):")
+    bench-once("run 1", n, dispatch, reqs, req-count)
+    bench-once("run 2", n, dispatch, reqs, req-count)
+    bench-once("run 3", n, dispatch, reqs, req-count)
+
+    println("")
+    println("Done.")
+    "done"
+}

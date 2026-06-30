@@ -269,6 +269,18 @@ struct TcpIoError {
     message
 }
 
+/// Sentinel value the cooperative scheduler resumes a deadlined TCP op with when
+/// its timer wins the race (the I/O did not complete in time). The underlying
+/// socket has already been closed (the losing I/O branch's cancel action), so
+/// the caller should treat the connection as dead. socket/read-timeout maps this
+/// into a thrown timeout error in the caller's stack.
+struct TcpIoTimeout {}
+
+/// True if `v` is the deadline-exceeded sentinel produced by a timed-out TCP op.
+fn io-timeout?(v) {
+    instance-of(v, TcpIoTimeout)
+}
+
 /// Describes a TCP I/O operation for the async handler to perform (listen, connect, accept, read, write, close).
 enum IOAction {
     // TCP operations
@@ -285,17 +297,37 @@ enum IOAction {
 // Cooperative Scheduler Data Types
 // ============================================================================
 
-/// A pending cooperative-scheduler operation: TCP I/O, file I/O, a timer, a spawned-task wait, or a new task to start.
+/// A pending cooperative-scheduler operation: TCP I/O, file I/O, a timer, a
+/// spawned-task wait, a new task to start, or a race over several branches
+/// (resume on the first branch that completes, cancelling the others).
 enum PendingOp {
     TcpIO { op_id, loop_id },
     FileIO { handle, loop_id },
     Timer { marker, loop_id },
     SpawnedTask { future },
-    NewTask { thunk }
+    NewTask { thunk },
+    Race { branches }
 }
 
-/// A scheduler task ready to run, pairing a continuation (resume) with the result to resume it with.
-struct ReadyTask { resume, result }
+/// One branch of a PendingOp.Race. `op` is the underlying PendingOp to poll;
+/// `cancel` is a thunk run if this branch LOSES (e.g. close a socket, cancel a
+/// timer) — or null for nothing to undo; `win` maps this branch's completion
+/// value into the value the parked continuation is resumed with — or null to
+/// resume with the raw completion value unchanged.
+struct RaceBranch { op, cancel, win }
+
+/// Sentinel returned by poll-pending-op when an operation has not completed yet.
+/// A single shared instance avoids a per-poll allocation; identity is checked
+/// with instance-of so it never collides with a real result value (which may
+/// legitimately be null).
+struct PollPending {}
+let poll-pending = PollPending {}
+
+/// A scheduler task ready to run: a continuation (resume), the result to resume
+/// it with, and the cancellation token of the flow it belongs to (null = the
+/// uncancellable root flow), carried so the scheduler can tag tasks the resumed
+/// flow goes on to park.
+struct ReadyTask { resume, result, token }
 // Internal sentinels the cooperative scheduler resumes an awaiting continuation
 // with so `await` can re-raise a rejected/cancelled future as a throw at the await
 // site, rather than returning the error as an ordinary value (or parking forever).
@@ -303,10 +335,20 @@ struct ReadyTask { resume, result }
 struct AwaitRejected { error }
 /// Sentinel: the awaited future was cancelled; `await` throws.
 struct AwaitCancelled {}
-/// A parked cooperative task: the PendingOp it waits on plus the continuation to resume when it completes.
-struct SchedulerTask { op, resume }
-/// Cooperative single-threaded async handler state: an atom of parked tasks plus the event-loop id.
-struct CooperativeHandler { tasks, loop_id }
+/// A parked cooperative task: the PendingOp it waits on, the continuation to
+/// resume when it completes, the cancellation `token` of its flow (null = the
+/// uncancellable root), and a `cleanup` thunk run if the flow is cancelled while
+/// parked here (close a socket, etc.; null = nothing to undo).
+struct SchedulerTask { op, resume, token, cleanup }
+/// Cooperative single-threaded async handler state: parked tasks, the event-loop
+/// id, and a ready-queue (batch from one poll, walked one-at-a-time by ready_idx).
+/// One resume per loop iteration so each can be a tail resume.
+struct CooperativeHandler { tasks, loop_id, ready, ready_idx }
+
+// The cancellation token of the flow the scheduler is currently resuming. Set by
+// scheduler-loop before each resume so that async ops the flow performs (which
+// park via stash-task) inherit the flow's token. null = the root flow.
+let __current-cancel-token = atom(null)
 
 // ============================================================================
 // Async Effect Enum
@@ -320,9 +362,16 @@ enum Async {
     AwaitAll { futures },
     AwaitFirst { futures },
     Cancel { future },
+    // Await a future against an `ms` deadline; on timeout, cancel `token`.
+    AwaitWithTimeout { future, token, ms },
 
     // Generic I/O - handler multiplexes across pending operations
     IO { action },
+
+    // I/O with a deadline: race `action` against an `ms`-millisecond timer.
+    // Resumes with the I/O result if it completes first, or a TcpIoTimeout
+    // sentinel if the timer fires first (in which case the I/O is cancelled).
+    IOTimeout { action, ms },
 
     // File operations
     ReadFile { path },
@@ -732,6 +781,17 @@ extend BlockingAsyncHandler with effect/Handler(Async) {
             // Generic IO operations
             Async.IO { action } => {
                 handle-io-action(action)
+            },
+
+            // Timed I/O races the op against a timer on the cooperative
+            // scheduler; the blocking handler has no scheduler to drive that, so
+            // this is unsupported here (a clear error, never a silently-ignored
+            // deadline). Use the default cooperative scheduler for read deadlines.
+            Async.IOTimeout { action, ms } => {
+                throw("Async.IOTimeout (timed reads) requires the cooperative scheduler; not available under the blocking handler")
+            },
+            Async.AwaitWithTimeout { future, token, ms } => {
+                throw("with-timeout requires the cooperative scheduler; not available under the blocking handler")
             },
 
             // File operations
@@ -1766,19 +1826,57 @@ fn spawn-in-scope(scope, thunk) {
 // Timeout Wrappers
 // ============================================================================
 
-// Run a thunk with a timeout (in milliseconds)
-/// Run thunk synchronously and report whether it finished within ms milliseconds. Does NOT interrupt thunk; it only measures elapsed time, returning TimeoutResult.Ok or TimedOut.
+// Run a thunk with a timeout (in milliseconds), truly interrupting it.
+/// Run `thunk` as a cooperative sub-computation bounded by `ms` milliseconds.
+/// Returns `TimeoutResult.Ok { value }` if it finishes in time, or
+/// `TimeoutResult.TimedOut {}` if not — in which case the sub-computation is
+/// FORCE-CANCELLED: whatever async op it was parked on (a socket read, a sleep,
+/// a child task) is cleaned up and its continuation discarded. If `thunk` itself
+/// throws, the error propagates out of with-timeout. Single-threaded cooperative:
+/// a tight CPU loop that never parks can't be interrupted (it blocks the thread).
 fn with-timeout(ms, thunk) {
-    let start = time-now()
-    let deadline_ns = start + (ms * 1000000)
+    let token = make-cancellation-token()
+    let future = perform Async.SpawnWithToken { thunk: thunk, token: token }
+    let outcome = perform Async.AwaitWithTimeout { future: future, token: token, ms: ms }
+    // `outcome` is TimedOut (timer won), AwaitRejected/AwaitCancelled (the thunk
+    // threw / was cancelled), or the thunk's plain return value (it finished).
+    match outcome {
+        TimeoutResult.TimedOut {} => outcome,
+        AwaitRejected { error } => throw(error),
+        AwaitCancelled {} => { TimeoutResult.TimedOut {} },
+        _ => { TimeoutResult.Ok { value: outcome } }
+    }
+}
 
-    let result = thunk()
-    let end = time-now()
+/// True if a with-timeout result is the TimedOut case.
+fn timed-out?(result) {
+    match result {
+        TimeoutResult.TimedOut {} => true,
+        _ => false
+    }
+}
 
-    if end > deadline_ns {
-        TimeoutResult.TimedOut {}
-    } else {
-        TimeoutResult.Ok { value: result }
+/// Run `thunk` bounded by `ms` milliseconds, returning its value or THROWING
+/// `Error.Timeout` if it timed out (the sub-computation is force-cancelled).
+/// Convenient when you want the timeout to propagate via try/catch rather than a
+/// TimeoutResult — e.g. so it folds into a Result-returning client.
+fn with-timeout!(ms, thunk) {
+    let outcome = with-timeout(ms, thunk)
+    match outcome {
+        TimeoutResult.Ok { value } => value,
+        TimeoutResult.TimedOut {} => {
+            let timeout-error = Error.Timeout { operation: "with-timeout" }
+            throw(timeout-error)
+        }
+    }
+}
+
+/// The value from a with-timeout result that finished in time, or null if it
+/// timed out. (Use with-timeout's match for the full Ok/TimedOut distinction.)
+fn timeout-value(result) {
+    match result {
+        TimeoutResult.Ok { value } => value,
+        _ => null
     }
 }
 
@@ -1833,6 +1931,15 @@ fn time-now() {
 ///   await(f)  // => result of compute()
 fn spawn(thunk) {
     perform Async.Spawn { thunk: thunk }
+}
+
+// Lowering target for the `future(expr)` special form: the compiler rewrites
+// `future(expr)` into `__make_future(fn() { expr })`, so this just spawns the
+// deferred expression as a cooperative task and returns its future. Lets users
+// write `future(http/get(url))` instead of `spawn(fn() { http/get(url) })`.
+/// Spawn a deferred-expression thunk as a cooperative task and return its future. (Lowering target for `future(expr)`.)
+fn __make_future(thunk) {
+    spawn(thunk)
 }
 
 // ============================================================================
@@ -2149,8 +2256,18 @@ fn get-io-loop-threaded() {
 
 /// Park a cooperative task: push a SchedulerTask (its pending op and continuation) onto the handler's task atom. Returns null.
 fn stash-task(tasks_atom, op, resume) {
+    stash-task-cancellable(tasks_atom, op, resume, null)
+}
+
+// Park a task with a `cleanup` thunk run if its flow is cancelled while parked
+// here (e.g. close the socket of a pending read). The flow's cancellation token
+// is read from __current-cancel-token (set by scheduler-loop for the flow being
+// resumed), so every op a flow performs inherits its token automatically.
+/// Park a task that, if its flow is cancelled while waiting, runs `cleanup`.
+fn stash-task-cancellable(tasks_atom, op, resume, cleanup) {
+    let token = deref(__current-cancel-token)
     swap!(tasks_atom, fn(t) {
-        push(t, SchedulerTask { op: op, resume: resume })
+        push(t, SchedulerTask { op: op, resume: resume, token: token, cleanup: cleanup })
     })
     null
 }
@@ -2180,6 +2297,35 @@ fn spawn-cooperative-task(tasks_atom, thunk) {
     future
 }
 
+// Spawn a cooperative task governed by an EXPLICIT cancellation token, so the
+// whole sub-computation (the thunk and every async op it parks on) can be force-
+// cancelled by cancelling `token`. The NewTask is stashed with the explicit token
+// (NOT the spawner's), and scheduler-loop publishes it while the thunk runs so
+// the thunk's parked ops inherit it. Used by with-timeout.
+/// Spawn a cooperative task under cancellation `token` and return its future;
+/// cancelling the token force-cancels the task and everything it parks on.
+fn spawn-cooperative-task-with-token(tasks_atom, thunk, token) {
+    let future = make-future(FutureState.Running {})
+    let state_atom = future.state_atom
+    swap!(tasks_atom, fn(t) {
+        push(t, SchedulerTask {
+            op: PendingOp.NewTask {
+                thunk: fn() {
+                    try {
+                        reset!(state_atom, FutureState.Resolved { value: thunk() })
+                    } catch (e) {
+                        reset!(state_atom, FutureState.Rejected { error: e })
+                    }
+                }
+            },
+            resume: null,
+            token: token,
+            cleanup: null
+        })
+    })
+    future
+}
+
 extend CooperativeHandler with effect/Handler(Async) {
     fn handle(self, op, resume) {
         // Resolve the shared I/O loop lazily: pure programs that never touch
@@ -2194,15 +2340,15 @@ extend CooperativeHandler with effect/Handler(Async) {
                         if listener_id < 0 {
                             throw("Failed to create TCP listener on " ++ host ++ ":" ++ to-string(port))
                         }
-                        resume(TcpListener { loop_id: loop_id, listener_id: listener_id })
+                        effect/resume-tail(resume, TcpListener { loop_id: loop_id, listener_id: listener_id })
                     },
                     IOAction.TcpClose { socket } => {
                         core/tcp-close(socket.loop_id, socket.socket_id)
-                        resume(null)
+                        effect/resume-tail(resume, null)
                     },
                     IOAction.TcpCloseListener { listener } => {
                         core/tcp-close-listener(listener.loop_id, listener.listener_id)
-                        resume(null)
+                        effect/resume-tail(resume, null)
                     },
 
                     // Asynchronous — submit and stash, do NOT resume
@@ -2212,15 +2358,82 @@ extend CooperativeHandler with effect/Handler(Async) {
                     },
                     IOAction.TcpRead { socket, n } => {
                         let op_id = core/tcp-read-async(loop_id, socket.socket_id, n, 0)
-                        stash-task(self.tasks, PendingOp.TcpIO { op_id: op_id, loop_id: loop_id }, resume)
+                        // If the flow is cancelled while parked here, close the
+                        // socket so the abandoned read doesn't leak its fd.
+                        stash-task-cancellable(self.tasks, PendingOp.TcpIO { op_id: op_id, loop_id: loop_id }, resume, fn() { core/tcp-close(loop_id, socket.socket_id) })
                     },
                     IOAction.TcpWrite { socket, data } => {
                         let op_id = core/tcp-write-async(loop_id, socket.socket_id, data, 0)
-                        stash-task(self.tasks, PendingOp.TcpIO { op_id: op_id, loop_id: loop_id }, resume)
+                        stash-task-cancellable(self.tasks, PendingOp.TcpIO { op_id: op_id, loop_id: loop_id }, resume, fn() { core/tcp-close(loop_id, socket.socket_id) })
                     },
                     IOAction.TcpConnect { host, port } => {
                         let op_id = core/tcp-connect-async(loop_id, host, port, 0)
-                        stash-task(self.tasks, PendingOp.TcpIO { op_id: op_id, loop_id: loop_id }, resume)
+                        // If cancelled mid-connect, tear down the connecting fd.
+                        stash-task-cancellable(self.tasks, PendingOp.TcpIO { op_id: op_id, loop_id: loop_id }, resume, fn() { core/tcp-cancel-connect(loop_id, op_id) })
+                    }
+                }
+            },
+
+            // Submit the I/O op AND a timer, then park on a race of the two. If
+            // the I/O finishes first, the timer branch loses and is cancelled
+            // (timer-cancel); the continuation resumes with the I/O result. If
+            // the timer fires first, the I/O branch loses and is cancelled
+            // (the socket is closed, dropping the pending read), and the
+            // continuation resumes with a TcpIoTimeout sentinel.
+            Async.IOTimeout { action, ms } => {
+                match action {
+                    IOAction.TcpRead { socket, n } => {
+                        let op_id = core/tcp-read-async(loop_id, socket.socket_id, n, 0)
+                        // Use op_id (unique per loop) as the timer marker so it
+                        // never collides with other outstanding timers.
+                        let timer_id = core/timer-set(loop_id, ms, op_id)
+                        if timer_id < 0 {
+                            throw("Failed to set read-timeout timer")
+                        }
+                        // `cancel` runs when THIS branch loses: if the read loses
+                        // (timer won) cancel the pending read but LEAVE THE SOCKET
+                        // OPEN (tcp-cancel-read) so the socket-level caller can
+                        // still write a response (e.g. an HTTP 408) before closing;
+                        // if the timer loses (read won) cancel the now-unneeded timer.
+                        let branches = [
+                            RaceBranch {
+                                op: PendingOp.TcpIO { op_id: op_id, loop_id: loop_id },
+                                cancel: fn() { core/tcp-cancel-read(loop_id, socket.socket_id) },
+                                win: null
+                            },
+                            RaceBranch {
+                                op: PendingOp.Timer { marker: op_id, loop_id: loop_id },
+                                cancel: fn() { core/timer-cancel(loop_id, timer_id) },
+                                win: fn(ignored) { TcpIoTimeout {} }
+                            }
+                        ]
+                        stash-task(self.tasks, PendingOp.Race { branches: branches }, resume)
+                    },
+                    IOAction.TcpConnect { host, port } => {
+                        let op_id = core/tcp-connect-async(loop_id, host, port, 0)
+                        let timer_id = core/timer-set(loop_id, ms, op_id)
+                        if timer_id < 0 {
+                            throw("Failed to set connect-timeout timer")
+                        }
+                        // If the connect loses (timer won) abandon the in-progress
+                        // connect (tcp-cancel-connect tears down the connecting fd);
+                        // if the timer loses (connect won) cancel the timer.
+                        let branches = [
+                            RaceBranch {
+                                op: PendingOp.TcpIO { op_id: op_id, loop_id: loop_id },
+                                cancel: fn() { core/tcp-cancel-connect(loop_id, op_id) },
+                                win: null
+                            },
+                            RaceBranch {
+                                op: PendingOp.Timer { marker: op_id, loop_id: loop_id },
+                                cancel: fn() { core/timer-cancel(loop_id, timer_id) },
+                                win: fn(ignored) { TcpIoTimeout {} }
+                            }
+                        ]
+                        stash-task(self.tasks, PendingOp.Race { branches: branches }, resume)
+                    },
+                    _ => {
+                        throw("Async.IOTimeout supports only IOAction.TcpRead and IOAction.TcpConnect")
                     }
                 }
             },
@@ -2341,34 +2554,64 @@ extend CooperativeHandler with effect/Handler(Async) {
                 stash-task(self.tasks, PendingOp.FileIO { handle: handle, loop_id: loop_id }, resume)
             },
 
-            // Threaded spawn — spawn thread immediately, resume with future
+            // Threaded spawn — spawn thread immediately, resume with future.
+            // TAIL resume: a synchronous `resume(...)` re-pushes a nested prompt
+            // (the resumed flow is then captured under it, not the scheduler
+            // handle — which breaks the scheduler's tail resume). A tail resume
+            // keeps the flow under the single scheduler prompt.
             Async.Spawn { thunk } => {
                 // Cooperative, awaitable, single-threaded — NOT an OS thread.
-                resume(spawn-cooperative-task(self.tasks, thunk))
+                effect/resume-tail(resume, spawn-cooperative-task(self.tasks, thunk))
             },
             Async.SpawnWithToken { thunk, token } => {
-                let future = handle-spawn-with-token-threaded(thunk, token)
-                resume(future)
+                // Cooperative (NOT an OS thread): the token governs forced cancel.
+                effect/resume-tail(resume, spawn-cooperative-task-with-token(self.tasks, thunk, token))
+            },
+
+            // Await a future OR an `ms` timer, whichever finishes first. If the
+            // future wins, resume with its (wrapped) value. If the timer wins,
+            // cancel the future's token (force-cancelling the whole sub-computation
+            // and cleaning up whatever it was parked on) and resume with TimedOut.
+            Async.AwaitWithTimeout { future, token, ms } => {
+                let marker = core/time-now()
+                let timer_id = core/timer-set(loop_id, ms, marker)
+                if timer_id < 0 {
+                    throw("Failed to set with-timeout timer")
+                }
+                let branches = [
+                    RaceBranch {
+                        op: PendingOp.SpawnedTask { future: future },
+                        cancel: fn() { cancel!(token) },
+                        win: null
+                    },
+                    RaceBranch {
+                        op: PendingOp.Timer { marker: marker, loop_id: loop_id },
+                        cancel: fn() { core/timer-cancel(loop_id, timer_id) },
+                        win: fn(ignored) { TimeoutResult.TimedOut {} }
+                    }
+                ]
+                stash-task(self.tasks, PendingOp.Race { branches: branches }, resume)
             },
 
             // Await — stash the future for cooperative polling
             Async.Await { future } => {
                 if future == null {
-                    resume(null)
+                    effect/resume-tail(resume, null)
                 } else {
                     stash-task(self.tasks, PendingOp.SpawnedTask { future: future }, resume)
                 }
             },
 
-            // Synchronous operations — handle immediately
+            // Synchronous operations — handle immediately (tail resume so the
+            // resumed flow stays under the scheduler prompt, not a nested one).
             Async.AwaitAll { futures } => {
-                resume(handle-await-all-threaded(futures))
+                effect/resume-tail(resume, handle-await-all-threaded(futures))
             },
             Async.AwaitFirst { futures } => {
-                resume(handle-await-first-threaded(futures))
+                effect/resume-tail(resume, handle-await-first-threaded(futures))
             },
             Async.Cancel { future } => {
-                resume(handle-cancel(future))
+                effect/resume-tail(resume, handle-cancel(future))
             }
         }
     }
@@ -2519,6 +2762,17 @@ extend ImplicitAsyncHandler with effect/Handler(Async) {
                 handle-io-action(action)
             },
 
+            // Timed I/O is a cooperative-scheduler feature (it parks on a race
+            // of the op vs a timer). This blocking-style handler has no park, so
+            // it is unsupported here — a clear error rather than a silently
+            // dropped deadline. Read deadlines run under the cooperative scheduler.
+            Async.IOTimeout { action, ms } => {
+                throw("Async.IOTimeout (timed reads) requires the cooperative scheduler; not available under this handler")
+            },
+            Async.AwaitWithTimeout { future, token, ms } => {
+                throw("with-timeout requires the cooperative scheduler; not available under this handler")
+            },
+
             // File operations - use async thread pool I/O where available
             Async.ReadFile { path } => {
                 handle-read-file-async(io_loop, path)
@@ -2607,63 +2861,117 @@ fn create-implicit-handler() {
 // Cooperative Scheduler Loop
 // ============================================================================
 
+// Poll a single PendingOp once. Returns the value the parked continuation
+// should resume with, or the shared `poll-pending` sentinel if the op has not
+// completed yet (checked with io-pending? / instance-of, never `== null`, since
+// a real completion value may legitimately be null).
+/// Poll one PendingOp; returns its completion value, or the poll-pending sentinel if not ready.
+fn poll-pending-op(op) {
+    match op {
+        PendingOp.TcpIO { op_id, loop_id } => {
+            let result_type = core/tcp-result-pop-for-op-id(loop_id, op_id)
+            if result_type != 0 {
+                decode-tcp-result(result_type, loop_id, op_id)
+            } else {
+                poll-pending
+            }
+        },
+        PendingOp.FileIO { handle, loop_id } => {
+            let result = poll-file-result(loop_id, handle)
+            if result != null {
+                result
+            } else {
+                poll-pending
+            }
+        },
+        PendingOp.Timer { marker, loop_id } => {
+            if core/timer-take-completed(loop_id, marker) == 1 {
+                async-ok(null)
+            } else {
+                poll-pending
+            }
+        },
+        PendingOp.SpawnedTask { future } => {
+            let state = deref(future.state_atom)
+            match state {
+                FutureState.Resolved { value } => value,
+                // Resume with a sentinel so `await` throws the error at the await
+                // site (rather than returning it as a value, breaking try/catch).
+                FutureState.Rejected { error } => { AwaitRejected { error: error } },
+                // Awaiting a cancelled future used to park forever; resume with a
+                // sentinel so `await` throws.
+                FutureState.Cancelled {} => { AwaitCancelled {} },
+                _ => poll-pending
+            }
+        },
+        // New tasks are always immediately ready to start; the thunk is the value.
+        PendingOp.NewTask { thunk } => thunk,
+        PendingOp.Race { branches } => poll-race(branches)
+    }
+}
+
+// Poll a race once: return the first ready branch's (possibly mapped) value,
+// cancelling every other branch, or poll-pending if none is ready yet. Branches
+// are polled in order, so an earlier branch wins a simultaneous completion
+// (the timeout helpers list the real I/O before the timer, preferring a result).
+/// Poll a race of branches; on the first ready branch, cancel the losers and return its value, else poll-pending.
+fn poll-race(branches) {
+    let n = count(branches)
+    let mut i = 0
+    let mut win-idx = 0 - 1
+    let mut win-val = poll-pending
+    while i < n && win-idx < 0 {
+        let branch = branches[i]
+        let r = poll-pending-op(branch.op)
+        if instance-of(r, PollPending) == false {
+            win-idx = i
+            win-val = if branch.win == null { r } else { branch.win(r) }
+        }
+        i = i + 1
+    }
+    if win-idx < 0 {
+        poll-pending
+    } else {
+        let mut j = 0
+        while j < n {
+            if j != win-idx {
+                let cancel = branches[j].cancel
+                if cancel != null {
+                    cancel()
+                }
+            }
+            j = j + 1
+        }
+        win-val
+    }
+}
+
+// True if a parked task's flow has been cancelled (e.g. its with-timeout fired).
+// A null token is the uncancellable root flow, so this is a cheap no-op for every
+// ordinary task — the forced-cancellation machinery only touches tokened flows.
+/// True if `task` belongs to a flow whose cancellation token has been cancelled.
+fn task-cancelled?(task) {
+    task.token != null && cancelled?(task.token)
+}
+
 // Poll all pending tasks, returning [ready_list, remaining_list]
-/// Poll every parked scheduler task once, returning [ready, remaining]: tasks whose op completed (paired with their result) and those still pending.
+/// Poll every parked scheduler task once, returning [ready, remaining]: tasks whose op completed (paired with their result) and those still pending. A task whose flow was cancelled is dropped (its cleanup run) instead of polled.
 fn poll-tasks(tasks, loop_id) {
     let mut ready = []
     let mut remaining = []
     for task in tasks {
-        match task.op {
-            PendingOp.TcpIO { op_id, loop_id: op_loop_id } => {
-                let result_type = core/tcp-result-pop-for-op-id(op_loop_id, op_id)
-                if result_type != 0 {
-                    let result = decode-tcp-result(result_type, op_loop_id, op_id)
-                    ready = push(ready, ReadyTask { resume: task.resume, result: result })
-                } else {
-                    remaining = push(remaining, task)
-                }
-            },
-            PendingOp.FileIO { handle, loop_id: op_loop_id } => {
-                let result = poll-file-result(op_loop_id, handle)
-                if result != null {
-                    ready = push(ready, ReadyTask { resume: task.resume, result: result })
-                } else {
-                    remaining = push(remaining, task)
-                }
-            },
-            PendingOp.Timer { marker, loop_id: op_loop_id } => {
-                let completed = core/timer-take-completed(op_loop_id, marker)
-                if completed == 1 {
-                    ready = push(ready, ReadyTask { resume: task.resume, result: async-ok(null) })
-                } else {
-                    remaining = push(remaining, task)
-                }
-            },
-            PendingOp.SpawnedTask { future } => {
-                let state = deref(future.state_atom)
-                match state {
-                    FutureState.Resolved { value } => {
-                        ready = push(ready, ReadyTask { resume: task.resume, result: value })
-                    },
-                    FutureState.Rejected { error } => {
-                        // Resume with a sentinel so `await` throws the error at the
-                        // await site (was: resumed with the raw error as a value,
-                        // silently breaking try/catch around await).
-                        ready = push(ready, ReadyTask { resume: task.resume, result: AwaitRejected { error: error } })
-                    },
-                    FutureState.Cancelled {} => {
-                        // Was missing entirely, so awaiting a cancelled future
-                        // parked forever; resume with a sentinel so `await` throws.
-                        ready = push(ready, ReadyTask { resume: task.resume, result: AwaitCancelled {} })
-                    },
-                    _ => {
-                        remaining = push(remaining, task)
-                    }
-                }
-            },
-            PendingOp.NewTask { thunk } => {
-                // New tasks are always immediately ready to start
-                ready = push(ready, ReadyTask { resume: null, result: thunk })
+        if task-cancelled?(task) {
+            // The flow was cancelled while parked here: run cleanup (close a
+            // socket, etc.) and DROP the task — its continuation is discarded.
+            if task.cleanup != null {
+                task.cleanup()
+            }
+        } else {
+            let result = poll-pending-op(task.op)
+            if instance-of(result, PollPending) {
+                remaining = push(remaining, task)
+            } else {
+                ready = push(ready, ReadyTask { resume: task.resume, result: result, token: task.token })
             }
         }
     }
@@ -2672,42 +2980,56 @@ fn poll-tasks(tasks, loop_id) {
 
 // Run the scheduler loop — polls for IO completions, resumes ready tasks
 /// Run the cooperative scheduler: repeatedly poll parked tasks, resume ready ones (and start new tasks), driving the event loop until no tasks remain.
+// Resumes AT MOST ONE ready task per iteration so each resume can be a tail
+// resume (`effect/resume-tail`), which reclaims the handler-body frame instead
+// of letting the resumed flow's next park capture it — the per-await
+// continuation chain that otherwise grows the heap without bound. A tail resume
+// teleports (does not return to a `for` loop), so the remaining ready tasks wait
+// in a persisted queue (their event-loop results are already consumed and
+// carried on each ReadyTask — they must NOT be re-polled). The single `handle`
+// is the last action in the loop body at a stable stack depth, so every flow is
+// captured under one prompt and the tail resume lands consistently.
 fn scheduler-loop(handler) {
     loop {
-        let tasks = deref(handler.tasks)
-        if length(tasks) == 0 {
-            break(null)
-        }
+        let ready = deref(handler.ready)
+        let idx = deref(handler.ready_idx)
 
-        // The I/O loop is created lazily on the first async op. If it doesn't
-        // exist yet, no task can be blocked on IO/timers.
-        let loop_id = deref(__io_loop_atom)
-
-        let result = poll-tasks(tasks, loop_id)
-        let ready = result[0]
-        let remaining = result[1]
-        reset!(handler.tasks, remaining)
-
-        if length(ready) == 0 {
-            // Nothing is runnable yet — wait for an IO/timer/future completion
-            // instead of busy-spinning. Drive the event loop if it exists,
-            // otherwise just yield briefly (e.g. waiting on a threaded future).
-            if loop_id != null {
-                core/event-loop-run-once(loop_id, 1)
+        if idx >= length(ready) {
+            // Ready batch exhausted — poll for more work.
+            let tasks = deref(handler.tasks)
+            if length(tasks) == 0 {
+                break(null)
+            }
+            let loop_id = deref(__io_loop_atom)
+            // Cleanups run by poll-tasks belong to no resumed flow.
+            reset!(__current-cancel-token, null)
+            let result = poll-tasks(tasks, loop_id)
+            let new_ready = result[0]
+            let remaining = result[1]
+            reset!(handler.tasks, remaining)
+            if length(new_ready) == 0 {
+                // Nothing runnable yet — drive the event loop instead of spinning.
+                if loop_id != null {
+                    core/event-loop-run-once(loop_id, 1)
+                } else {
+                    core/sleep(1)
+                }
             } else {
-                core/sleep(1)
+                reset!(handler.ready, new_ready)
+                reset!(handler.ready_idx, 0)
             }
         } else {
-            for item in ready {
+            // Dequeue and resume exactly one ready task.
+            let item = ready[idx]
+            reset!(handler.ready_idx, idx + 1)
+            // Publish the flow's token BEFORE the resume (a tail resume never
+            // returns to code after the `handle`, so each resume sets it itself).
+            reset!(__current-cancel-token, item.token)
+            handle effect/Handler(Async) with handler {
                 if item.resume == null {
-                    // New task — run the thunk (result is the thunk)
-                    handle effect/Handler(Async) with handler {
-                        item.result()
-                    }
+                    item.result()
                 } else {
-                    handle effect/Handler(Async) with handler {
-                        item.resume(item.result)
-                    }
+                    effect/resume-tail(item.resume, item.result)
                 }
             }
         }
@@ -2721,7 +3043,7 @@ fn scheduler-loop(handler) {
 // thread multiplexes many logical flows while each flow stays sequential.
 /// Run thunk under a fresh cooperative scheduler and return its value. The thunk is the root task; async ops park their continuation so other tasks progress on the same thread.
 fn run-cooperative(thunk) {
-    let handler = CooperativeHandler { tasks: atom([]), loop_id: null }
+    let handler = CooperativeHandler { tasks: atom([]), loop_id: null, ready: atom([]), ready_idx: atom(0) }
     let result_box = atom(null)
     stash-task(
         handler.tasks,

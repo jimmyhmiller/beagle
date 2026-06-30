@@ -1,0 +1,72 @@
+namespace socket_connect_timeout_test
+
+use beagle.core as core
+use beagle.socket as socket
+
+// socket/connect-timeout races a connect against a timer: it returns the socket
+// on success, throws on a refused/failed connect, and gives up (throwing
+// Error.Timeout) on a connect that doesn't complete in time — tearing down the
+// in-progress connect so its fd doesn't leak.
+//
+// case 1 — connect to a live local server, then round-trip a byte (proves the
+//          returned socket is a real, usable connection).
+// case 2 — connect to a port with no listener -> error (not a hang).
+// case 3 — connect to a blackholed address (TEST-NET 192.0.2.1) and confirm it
+//          returns within a few seconds rather than the OS ~75s connect timeout.
+//          (Outcome-robust: times out where the SYN is dropped, errors where it
+//          is refused — either way the connect is BOUNDED, which is the point.)
+
+fn main() {
+    let port = 20000 + core/random-int(20000)
+    let closed-port = 40000 + core/random-int(20000)
+    let ready = atom(false)
+
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        reset!(ready, true)
+        let conn = socket/accept(listener)
+        socket/write(conn, socket/read(conn, 64))   // echo
+        socket/close(conn)
+        socket/close-listener(listener)
+    })
+
+    loop {
+        if deref(ready) { break(null) }
+        core/sleep(1)
+    }
+
+    // case 1: success — connect-timeout returns a usable socket.
+    let c1 = socket/connect-timeout("127.0.0.1", port, 2000)
+    socket/write(c1, "ping")
+    println("case1-echo: " ++ socket/read(c1, 64))
+    socket/close(c1)
+
+    // case 2: nothing listening -> error (caught), not a hang.
+    let r2 = try {
+        let c = socket/connect-timeout("127.0.0.1", closed-port, 2000)
+        "connected"
+    } catch (e) {
+        "error"
+    }
+    println("case2-refused: " ++ r2)
+
+    // case 3: a blackholed SYN must not hang for the OS connect timeout (~75s);
+    // connect-timeout bounds it (it returns — by timeout or error — quickly).
+    let start = core/time-now()
+    let r3 = try {
+        let c = socket/connect-timeout("192.0.2.1", 80, 600)
+        "connected"
+    } catch (e) {
+        "bounded"
+    }
+    let elapsed-ms = (core/time-now() - start) / 1000000
+    println("case3-bounded: " ++ to-string(elapsed-ms < 4000))
+
+    println("done")
+}
+
+// @beagle.core.snapshot
+// case1-echo: ping
+// case2-refused: error
+// case3-bounded: true
+// done

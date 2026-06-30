@@ -374,6 +374,51 @@ pub extern "C" fn tcp_close(loop_id: usize, socket_id: usize) -> usize {
     }
 }
 
+/// Cancel a pending read on a TCP socket WITHOUT closing it. Drops the pending
+/// read so its result is never produced and it no longer blocks a write on the
+/// same socket; the socket stays open so the caller can write a response (e.g. an
+/// HTTP 408) and then close. Returns 1 on success, -1 if the loop is gone.
+pub extern "C" fn tcp_cancel_read(loop_id: usize, socket_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let socket_id = BuiltInTypes::untag(socket_id);
+    trace!(
+        "tcp",
+        "tcp_cancel_read: loop={} socket={}", loop_id, socket_id
+    );
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+    match event_loop.submit_tcp_op(crate::runtime::TcpOperation::CancelRead { socket_id }) {
+        Ok(()) => BuiltInTypes::Int.tag(1) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Cancel an in-progress connect (identified by its op_id) without affecting any
+/// other socket. Tears down the connecting fd so it doesn't leak when a connect
+/// deadline fires. Returns 1 on success, -1 if the loop is gone.
+pub extern "C" fn tcp_cancel_connect(loop_id: usize, op_id: usize) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let op_id = BuiltInTypes::untag(op_id);
+    trace!(
+        "tcp",
+        "tcp_cancel_connect: loop={} op_id={}", loop_id, op_id
+    );
+    let runtime = get_runtime().get_mut();
+
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::Int.tag(-1) as usize,
+    };
+    match event_loop.submit_tcp_op(crate::runtime::TcpOperation::CancelConnect { op_id }) {
+        Ok(()) => BuiltInTypes::Int.tag(1) as usize,
+        Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
 /// Close a TCP listener
 pub extern "C" fn tcp_close_listener(loop_id: usize, listener_id: usize) -> usize {
     let loop_id = BuiltInTypes::untag(loop_id);

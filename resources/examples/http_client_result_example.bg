@@ -1,0 +1,36 @@
+namespace http_client_result_example
+
+// Example: the HTTP client returns a Result, so a request that can fail reads
+// honestly. Two ergonomics, no per-function `get!`:
+//   - unwrap!(result)  -> the value, or throws the error (propagate / catch at edge)
+//   - match on Result.Ok / Result.Err { error: Error.* }  -> handle each case
+// The nested-pattern match (Error.Timeout inside Result.Err) is exactly the shape
+// you'd write by hand.
+
+use beagle.http as http
+use beagle.core as core
+
+// Handle-style: branch on the outcome, mapping failures to a fallback.
+fn fetch-quote(url) {
+    match http/get(url, {:timeout 3000}) {
+        Result.Ok { value: resp } => resp.body,
+        Result.Err { error: Error.Timeout { operation } } => "(upstream timed out)",
+        Result.Err { error: Error.IO { message } } => "(upstream unreachable: ${message})",
+        Result.Err { error } => "(failed: ${error})"
+    }
+}
+
+fn main() {
+    // A server we know isn't there: connection refused -> Result.Err(Error.IO).
+    println(fetch-quote("http://127.0.0.1:9/none"))
+
+    // Happy-path ergonomic when you just want the value (throws on failure):
+    let r = http/get("http://127.0.0.1:9/none")
+    let body = try {
+        unwrap!(r)
+        "got a body"
+    } catch (e) {
+        "unwrap! threw: ${e}"
+    }
+    println(body)
+}

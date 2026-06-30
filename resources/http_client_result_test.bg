@@ -1,0 +1,60 @@
+namespace http_client_result_test
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.http as http
+
+// The HTTP client returns a Result: Result.Ok { value: Response } on success,
+// Result.Err { error: Error.* } on failure (Error.Timeout for a read deadline,
+// Error.IO for a connection/transport failure). unwrap! / ok? / timeout? are the
+// general Result ergonomics (no per-function `get!`). The server is driven via
+// http/handle-connection directly so its thread handles a fixed number of
+// connections and exits (serve loops forever and prints a random-port banner).
+
+fn main() {
+    let port = 20000 + core/random-int(20000)
+    let closed-port = 40000 + core/random-int(20000)   // nothing listens here
+    let ready = atom(false)
+
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        reset!(ready, true)
+        let handler = fn(req) { http/ok("hello-" ++ req.path) }
+        // conn 1: a normal request, answered 200.
+        http/handle-connection(socket/accept(listener), handler, http/config-from-opts({}))
+        // conn 2: accepted but never answered -> the client read deadline fires.
+        let slow = socket/accept(listener)
+        core/sleep(2000)
+        socket/close(slow)
+        socket/close-listener(listener)
+    })
+
+    loop {
+        if deref(ready) { break(null) }
+        core/sleep(1)
+    }
+
+    // case 1: success -> Result.Ok; unwrap! gives the Response.
+    let r1 = http/get("http://127.0.0.1:${port}/hi")
+    println("case1-ok: " ++ to-string(ok?(r1)))
+    println("case1-status: " ++ to-string(unwrap!(r1).status))
+    println("case1-body: " ++ unwrap!(r1).body)
+
+    // case 2: the server never answers; a 500ms read deadline -> Err(Timeout).
+    let r2 = http/get("http://127.0.0.1:${port}/slow", {:timeout 500})
+    println("case2-timeout: " ++ to-string(timeout?(r2)))
+
+    // case 3: nothing listening -> Err (connection refused).
+    let r3 = http/get("http://127.0.0.1:${closed-port}/x")
+    println("case3-err: " ++ to-string(ok?(r3) == false))
+
+    println("done")
+}
+
+// @beagle.core.snapshot
+// case1-ok: true
+// case1-status: 200
+// case1-body: hello-/hi
+// case2-timeout: true
+// case3-err: true
+// done

@@ -1567,8 +1567,7 @@ impl PersistentMap {
                     let new_children_h = Self::clone_node_array(scope, children_h)?;
                     let new_children = new_children_h.to_gc_handle();
                     let ns = ns_h.to_gc_handle();
-                    new_children
-                        .set_field_with_barrier(scope.runtime(), index * 2, ns.as_tagged());
+                    new_children.set_field_with_barrier(scope.runtime(), index * 2, ns.as_tagged());
                     Self::make_bitmap_node(scope, bitmap, new_children_h)
                 }
                 None => Self::remove_bitmap_slot(scope, children_h, bitmap, bit, index),
@@ -1615,7 +1614,9 @@ impl PersistentMap {
         for i in 0..new_len {
             let slot = new_children.get_field(i);
             if slot != null_val {
-                scope.runtime().write_barrier(new_children.as_tagged(), slot);
+                scope
+                    .runtime()
+                    .write_barrier(new_children.as_tagged(), slot);
             }
         }
         Self::make_bitmap_node(scope, new_bitmap, new_children_h)

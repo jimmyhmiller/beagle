@@ -3867,6 +3867,7 @@ impl Parser {
     fn parse_call(&mut self, name: String, start_position: usize) -> ParseResult<Ast> {
         self.expect_open_paren()?;
         let mut args = Vec::new();
+        self.skip_whitespace();
         while !self.at_end() && !self.is_close_paren() {
             match self.parse_expression(0, true, true)? {
                 Some(arg) => {
@@ -3874,6 +3875,8 @@ impl Parser {
                     self.skip_whitespace();
                     if !self.is_close_paren() {
                         self.expect_comma()?;
+                        // Allow a trailing comma before the closing paren.
+                        self.skip_whitespace();
                     }
                 }
                 None => break,
@@ -4568,16 +4571,41 @@ impl Parser {
         })
     }
 
+    /// Parse a match scrutinee, resolving the struct-literal-vs-body ambiguity.
+    /// First speculatively parse allowing struct creation; keep that result only
+    /// if it leaves a `{` (the match body) ahead — i.e. the scrutinee was a
+    /// struct literal followed by its own body. Otherwise rewind and parse with
+    /// struct creation disabled, the conventional `match name { arms }` reading.
+    fn parse_match_scrutinee(&mut self) -> ParseResult<Ast> {
+        let saved = self.position;
+        if let Ok(Some(expr)) = self.parse_expression(1, true, true) {
+            self.skip_whitespace();
+            if matches!(self.current_token(), Token::OpenCurly) {
+                return Ok(expr);
+            }
+        }
+        // Rewind whatever the speculative parse consumed and parse conventionally.
+        self.position = saved;
+        self.parse_expression(1, true, false)?
+            .ok_or_else(|| ParseError::UnexpectedEof {
+                expected: "value after 'match'".to_string(),
+            })
+    }
+
     fn parse_match(&mut self) -> ParseResult<Ast> {
         let start_position = self.position;
         self.move_to_next_non_whitespace();
 
-        // Parse value to match on - same as if condition
-        let value = Box::new(self.parse_expression(1, true, false)?.ok_or_else(|| {
-            ParseError::UnexpectedEof {
-                expected: "value after 'match'".to_string(),
-            }
-        })?);
+        // Parse value to match on. Struct-literal scrutinees collide with the
+        // match body (`match Foo { ... }` — is the brace a struct literal or the
+        // arms?), so struct creation is normally disabled here. But a struct
+        // literal that carries its OWN body block is unambiguous:
+        // `match Foo { f: v } { arms }`. Detect that by first trying to parse the
+        // scrutinee WITH struct creation and accepting it only when a body `{`
+        // follows; otherwise fall back to the struct-creation-disabled parse
+        // (the common `match name { arms }` case). The flag only affects
+        // `Ident {`/`PropAccess {`, so non-struct scrutinees parse identically.
+        let value = Box::new(self.parse_match_scrutinee()?);
 
         // Expect '{'
         self.skip_whitespace();
@@ -5043,52 +5071,53 @@ impl Parser {
             };
             self.skip_whitespace();
 
-            // Check for rename syntax: field: binding
-            let binding_name = if matches!(self.current_token(), Token::Colon) {
+            // Check for `field: <thing>`. A bare identifier (or a reserved word
+            // used as a name) is a RENAME — `field: newname` binds the field to
+            // `newname`, preserving existing behavior. Anything else is a nested
+            // SUB-PATTERN (`field: Enum.Variant {..}`, `field: _`, `field: [a,b]`,
+            // `field: Struct {..}`, `field: 0`) that the field value is recursively
+            // tested and destructured against.
+            let (binding_name, sub_pattern) = if matches!(self.current_token(), Token::Colon) {
                 self.consume();
                 self.skip_whitespace();
 
                 match self.current_token() {
-                    Token::Atom((bind_start, bind_end)) => {
-                        let binding = String::from_utf8(
-                            self.source.as_bytes()[bind_start..bind_end].to_vec(),
-                        )
-                        .map_err(|_| ParseError::InvalidUtf8 {
-                            location: self.current_source_location(),
-                        })?;
-                        self.consume();
-                        self.skip_whitespace();
-                        Some(binding)
-                    }
+                    // Reserved words as rename targets — kept as plain renames.
                     Token::Future => {
                         self.consume();
                         self.skip_whitespace();
-                        Some("future".to_string())
+                        (Some("future".to_string()), None)
                     }
                     Token::Handle => {
                         self.consume();
                         self.skip_whitespace();
-                        Some("handle".to_string())
+                        (Some("handle".to_string()), None)
                     }
                     Token::Perform => {
                         self.consume();
                         self.skip_whitespace();
-                        Some("perform".to_string())
+                        (Some("perform".to_string()), None)
                     }
                     _ => {
-                        return Err(ParseError::InvalidPattern {
-                            message: "Expected binding name after ':'".to_string(),
-                            location: self.current_source_location(),
-                        });
+                        // Parse a full pattern. A bare identifier becomes a rename
+                        // (binding_name) so the existing compiler path is reused;
+                        // anything else is stored as a nested sub-pattern.
+                        let sub = self.parse_pattern()?;
+                        self.skip_whitespace();
+                        match sub {
+                            Pattern::Identifier { name, .. } => (Some(name), None),
+                            other => (None, Some(Box::new(other))),
+                        }
                     }
                 }
             } else {
-                None
+                (None, None)
             };
 
             fields.push(FieldPattern {
                 field_name,
                 binding_name,
+                sub_pattern,
                 token_range: TokenRange::new(field_start, self.position),
             });
 
@@ -5335,6 +5364,7 @@ impl Parser {
         let start_position = self.position;
         self.consume();
         let mut elements = Vec::new();
+        self.skip_whitespace();
         while !self.at_end() && !self.is_close_bracket() {
             let elem =
                 self.parse_expression(0, true, true)?
@@ -5345,6 +5375,9 @@ impl Parser {
             self.skip_whitespace();
             if !self.is_close_bracket() {
                 self.expect_comma()?;
+                // Allow a trailing comma: skip whitespace so the loop
+                // condition sees `]` rather than re-entering to parse it.
+                self.skip_whitespace();
             }
         }
         self.expect_close_bracket()?;
@@ -5428,6 +5461,10 @@ impl Parser {
             if self.is_comma() {
                 self.consume();
                 self.skip_whitespace();
+                // Allow a trailing comma before the closing brace.
+                if self.is_close_curly() {
+                    break;
+                }
             }
         }
 
@@ -5478,6 +5515,10 @@ impl Parser {
             if self.is_comma() {
                 self.consume();
                 self.skip_whitespace();
+                // Allow a trailing comma before the closing brace.
+                if self.is_close_curly() {
+                    break;
+                }
             }
         }
 
@@ -5643,6 +5684,7 @@ impl Parser {
                     // Now parse the function call arguments
                     self.consume(); // consume '('
                     let mut args = Vec::new();
+                    self.skip_whitespace();
                     while !self.at_end() && !self.is_close_paren() {
                         let arg = self.parse_expression(0, true, true)?.ok_or_else(|| {
                             ParseError::UnexpectedEof {
@@ -5653,6 +5695,8 @@ impl Parser {
                         self.skip_whitespace();
                         if !self.is_close_paren() {
                             self.expect_comma()?;
+                            // Allow a trailing comma before the closing paren.
+                            self.skip_whitespace();
                         }
                     }
                     self.expect_close_paren()?;
@@ -5678,6 +5722,7 @@ impl Parser {
                 let start_position = lhs.token_range().start;
                 self.consume();
                 let mut args = Vec::new();
+                self.skip_whitespace();
                 while !self.at_end() && !self.is_close_paren() {
                     let arg = self.parse_expression(0, true, true)?.ok_or_else(|| {
                         ParseError::UnexpectedEof {
@@ -5688,6 +5733,8 @@ impl Parser {
                     self.skip_whitespace();
                     if !self.is_close_paren() {
                         self.expect_comma()?;
+                        // Allow a trailing comma before the closing paren.
+                        self.skip_whitespace();
                     }
                 }
                 self.expect_close_paren()?;

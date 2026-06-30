@@ -1,0 +1,50 @@
+namespace https_server_test
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.tls as tls
+use beagle.http as http
+use beagle.fs as fs
+
+// HTTPS SERVING: the server wraps an accepted socket in TLS (tls/accept) and runs
+// the normal HTTP keep-alive loop over it (http/handle-tls-connection — the core
+// of http/serve-https). The client connects with tls/connect-insecure (self-signed
+// cert, no trust setup), sends a plain HTTP request over the TLS channel, and reads
+// the parsed response. Full HTTPS request/response, in-process, no network/public CA.
+
+fn main() {
+    let port = 20000 + core/random-int(20000)
+    let cert = unwrap!(fs/blocking-read-file("resources/test_tls_cert.pem"))
+    let key = unwrap!(fs/blocking-read-file("resources/test_tls_key.pem"))
+    let tls-config = tls/server-config(cert, key)
+    let config = http/config-from-opts({})
+    let ready = atom(false)
+
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        reset!(ready, true)
+        let plain = socket/accept(listener)
+        let conn = tls/accept(plain, tls-config)
+        http/handle-tls-connection(conn, fn(req) { http/ok("hello:" ++ req.path) }, config)
+        socket/close-listener(listener)
+    })
+
+    loop {
+        if deref(ready) { break(null) }
+        core/sleep(1)
+    }
+
+    let c = tls/connect-insecure("127.0.0.1", port)
+    tls/write(c, "GET /world HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+    let reader = socket/reader-with(c, fn(n) { tls/read(c, n) })
+    let resp = http/read-response(reader)
+    println("status: " ++ to-string(resp.status))
+    println("body: " ++ resp.body)
+    tls/close(c)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// status: 200
+// body: hello:/world
+// done

@@ -1,0 +1,108 @@
+namespace net_https_server
+
+// ===========================================================================
+// HTTPS server example
+// ---------------------------------------------------------------------------
+// A complete, self-contained HTTPS round-trip in a single process:
+//
+//   * a background thread runs a TLS-wrapped HTTP server that accepts ONE
+//     connection, serves it, then shuts its listener down and returns, and
+//   * main() acts as the client: it connects over TLS, sends a raw HTTP
+//     request, reads the parsed response, and prints the status + body.
+//
+// It uses the self-signed test certificate fixtures shipped with the repo
+// (resources/test_tls_cert.pem / resources/test_tls_key.pem). Because the
+// cert is self-signed, the client uses tls/connect-insecure, which SKIPS
+// certificate verification. That is fine for local development and tests,
+// but it offers no MITM protection -- in production use tls/connect, which
+// validates the server's certificate chain against the system trust store.
+//
+// The program is self-verifying: the server thread does a FINITE amount of
+// work (accept exactly one connection) so the process exits cleanly once
+// main() finishes -- no forever-loop server, which would hang the process.
+// ===========================================================================
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.tls as tls
+use beagle.http as http
+use beagle.fs as fs
+
+fn main() {
+    // Pick a random high port so concurrent runs don't collide.
+    let port = 20000 + core/random-int(20000)
+
+    // Load the self-signed cert + PKCS#8 private key. fs/blocking-read-file
+    // returns a Result, so unwrap! it (or it would throw on a missing file).
+    let cert = unwrap!(fs/blocking-read-file("resources/test_tls_cert.pem"))
+    let key = unwrap!(fs/blocking-read-file("resources/test_tls_key.pem"))
+
+    // Build the reusable TLS server config once (it can be shared across many
+    // accepted connections) and a default HTTP config for the keep-alive loop.
+    let tls-config = tls/server-config(cert, key)
+    let http-config = http/config-from-opts({})
+
+    // The handler: a plain Request -> Response function. TLS is transparent to
+    // it -- it sees decrypted requests and returns ordinary HTTP responses.
+    let handler = fn(req) {
+        http/with-header(
+            http/ok("Hello over HTTPS! You asked for: " ++ req.path),
+            "X-Served-By",
+            "beagle-tls-example"
+        )
+    }
+
+    // A flag the server raises once its listener is bound, so the client only
+    // tries to connect after the server is actually ready to accept.
+    let ready = atom(false)
+
+    // --- Server thread: accept ONE connection, serve it, then shut down. -----
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        reset!(ready, true)
+
+        // Accept a single plain TCP socket, then drive the server-side TLS
+        // handshake to wrap it. tls/accept returns a TlsConn that reads/writes
+        // exactly like a client connection.
+        let plain = socket/accept(listener)
+        let tls-conn = tls/accept(plain, tls-config)
+
+        // Run the HTTP keep-alive loop over the encrypted channel. This serves
+        // requests until the client closes the connection, then returns.
+        http/handle-tls-connection(tls-conn, handler, http-config)
+
+        // Finite work done: release the listening socket and let the thread
+        // function return so the process can exit cleanly.
+        socket/close-listener(listener)
+    })
+
+    // Wait for the server to be listening before we connect.
+    loop {
+        if deref(ready) { break(null) }
+        core/sleep(1)
+    }
+
+    // --- Client: connect over TLS and do one request/response round-trip. ----
+    // connect-insecure skips cert verification (DEV/TEST ONLY, self-signed).
+    let conn = tls/connect-insecure("127.0.0.1", port)
+
+    // Send a raw HTTP/1.1 request directly over the TLS stream. "Connection:
+    // close" tells the server's keep-alive loop to finish after this request.
+    tls/write(
+        conn,
+        "GET /secure-hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+
+    // Wrap the TLS connection in a buffered reader whose pull thunk reads from
+    // TLS, then parse a full HTTP response off it.
+    let reader = socket/reader-with(conn, fn(n) { tls/read(conn, n) })
+    let resp = http/read-response(reader)
+
+    println("status: " ++ to-string(resp.status))
+    println("header X-Served-By: " ++ to-string(core/get(resp.headers, "x-served-by")))
+    println("body: " ++ resp.body)
+
+    // Close the client side of the TLS connection.
+    tls/close(conn)
+    println("done")
+}

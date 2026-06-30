@@ -1433,6 +1433,18 @@ impl Runtime {
             2, // loop_id, socket_id
         )?;
         self.add_builtin_function(
+            "beagle.core/tcp-cancel-read",
+            tcp_cancel_read as *const u8,
+            false,
+            2, // loop_id, socket_id
+        )?;
+        self.add_builtin_function(
+            "beagle.core/tcp-cancel-connect",
+            tcp_cancel_connect as *const u8,
+            false,
+            2, // loop_id, op_id
+        )?;
+        self.add_builtin_function(
             "beagle.core/tcp-close-listener",
             tcp_close_listener as *const u8,
             false,
@@ -2744,33 +2756,83 @@ impl Runtime {
             use super::tls::*;
             self.reserve_namespace("beagle._tls".to_string());
 
+            // Sans-I/O rustls client: crypto on buffers, the socket lives in Beagle.
             self.add_builtin_with_doc(
-                "beagle._tls/connect",
-                tls_connect as *const u8,
+                "beagle._tls/client-create",
+                tls_client_create as *const u8,
                 true,
-                &["host", "port"],
-                "Open a TLS (HTTPS) connection to host:port, returning an integer handle, or -1 on failure. Internal: use beagle.tls.",
+                &["host"],
+                "Create rustls client state for SNI `host`, returning a handle or -1. Internal: use beagle.tls.",
             )?;
             self.add_builtin_with_doc(
-                "beagle._tls/write",
-                tls_write as *const u8,
-                true,
-                &["handle", "data"],
-                "Write data over a TLS connection; returns bytes written or -1. Internal: use beagle.tls.",
-            )?;
-            self.add_builtin_with_doc(
-                "beagle._tls/read",
-                tls_read as *const u8,
-                true,
-                &["handle", "n"],
-                "Read up to n plaintext bytes from a TLS connection ('' at end-of-stream). Internal: use beagle.tls.",
-            )?;
-            self.add_builtin_with_doc(
-                "beagle._tls/close",
-                tls_close as *const u8,
+                "beagle._tls/outgoing",
+                tls_outgoing as *const u8,
                 true,
                 &["handle"],
-                "Close a TLS connection. Internal: use beagle.tls.",
+                "Drain ciphertext rustls wants to send, as a byte string ('' if none). Internal: use beagle.tls.",
+            )?;
+            self.add_builtin_with_doc(
+                "beagle._tls/feed",
+                tls_feed as *const u8,
+                true,
+                &["handle", "ciphertext"],
+                "Hand received ciphertext to rustls and process it; 0 ok, -1 on TLS error. Internal: use beagle.tls.",
+            )?;
+            self.add_builtin_with_doc(
+                "beagle._tls/read-plain",
+                tls_read_plain as *const u8,
+                true,
+                &["handle", "n"],
+                "Read up to n decrypted plaintext bytes ('' if none buffered / EOF). Internal: use beagle.tls.",
+            )?;
+            self.add_builtin_with_doc(
+                "beagle._tls/write-plain",
+                tls_write_plain as *const u8,
+                true,
+                &["handle", "data"],
+                "Queue plaintext to encrypt (drain via outgoing); returns bytes or -1. Internal: use beagle.tls.",
+            )?;
+            self.add_builtin_with_doc(
+                "beagle._tls/is-handshaking",
+                tls_is_handshaking as *const u8,
+                false,
+                &["handle"],
+                "1 while the TLS handshake is in progress, 0 once complete, -1 invalid. Internal: use beagle.tls.",
+            )?;
+            self.add_builtin_with_doc(
+                "beagle._tls/close-notify",
+                tls_close_notify as *const u8,
+                false,
+                &["handle"],
+                "Queue a TLS close_notify (drain via outgoing before closing). Internal: use beagle.tls.",
+            )?;
+            self.add_builtin_with_doc(
+                "beagle._tls/destroy",
+                tls_destroy as *const u8,
+                false,
+                &["handle"],
+                "Drop the rustls connection state for `handle`. Internal: use beagle.tls.",
+            )?;
+            self.add_builtin_with_doc(
+                "beagle._tls/client-create-insecure",
+                tls_client_create_insecure as *const u8,
+                true,
+                &["host"],
+                "Create client state that SKIPS cert-chain verification (dev/test). Internal: use beagle.tls.",
+            )?;
+            self.add_builtin_with_doc(
+                "beagle._tls/server-config-create",
+                tls_server_config_create as *const u8,
+                true,
+                &["cert-der", "key-der"],
+                "Build a server config from cert DER + PKCS#8 key DER, returning a handle or -1. Internal: use beagle.tls.",
+            )?;
+            self.add_builtin_with_doc(
+                "beagle._tls/server-create",
+                tls_server_create as *const u8,
+                false,
+                &["config-handle"],
+                "Create a server connection for an accepted socket from a config handle. Internal: use beagle.tls.",
             )?;
         }
 

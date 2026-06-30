@@ -1,0 +1,66 @@
+namespace net_websocket_echo
+
+// WebSocket echo round-trip, entirely in one process.
+//
+// This example shows the two halves of Beagle's WebSocket API talking to each
+// other with no external server and no certificates:
+//
+//   * The SERVER side runs `ws/handle-ws-connection` on a single accepted
+//     socket. Its on-message callback is the identity function `fn(c, p) { p }`,
+//     so every message the client sends is echoed straight back as a frame.
+//
+//   * The CLIENT side (`ws/connect` / `ws/send` / `ws/receive` / `ws/close`)
+//     performs the RFC 6455 upgrade handshake, sends masked text frames, and
+//     reads back the server's echoes.
+//
+// main() runs under the cooperative async scheduler. We spawn the server on its
+// own thread, hand-shake via a `ready` atom so the client never races ahead of
+// `socket/listen`, exchange a few messages, then close — which ends the server's
+// frame loop and lets its thread return so the process exits cleanly.
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.ws as ws
+
+fn main() {
+    // Random high port so concurrent example runs never collide.
+    let port = 20000 + core/random-int(20000)
+
+    // Flipped to true once the server socket is actually listening.
+    let ready = atom(false)
+
+    // --- Server thread: accept ONE connection, echo until the client closes ---
+    // This does finite work: handle-ws-connection's loop ends when the client
+    // sends its close frame, then we close the listener and the thread returns.
+    // (Never call ws/serve-ws here — that loops forever and would hang the exit.)
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        reset!(ready, true)
+        let conn = socket/accept(listener)
+        // Identity on-message handler == an echo server.
+        ws/handle-ws-connection(conn, fn(c, payload) { payload }, 1048576)
+        socket/close-listener(listener)
+    })
+
+    // Wait for the server to bind before we dial it.
+    loop {
+        if deref(ready) { break(null) }
+        core/sleep(1)
+    }
+
+    // --- Client: connect, send/receive a few messages, print each pair ---
+    let c = ws/connect("ws://127.0.0.1:${port}/")
+
+    let messages = ["hello", "websocket world", "round-trip #3"]
+
+    for msg in messages {
+        ws/send(c, msg)
+        let reply = ws/receive(c)   // the server's echo of `msg`
+        println("sent: ${msg}  ->  received: ${reply}")
+    }
+
+    // Closing the client sends a close frame; the server's loop sees it,
+    // acknowledges, and returns — so the server thread finishes too.
+    ws/close(c)
+    println("done")
+}

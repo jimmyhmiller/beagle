@@ -1,0 +1,71 @@
+namespace with_timeout_test
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.async as async
+
+// async/with-timeout(ms, thunk) bounds an arbitrary sub-computation: it returns
+// TimeoutResult.Ok{value} if the thunk finishes in time, or TimeoutResult.TimedOut
+// if not — FORCE-CANCELLING the thunk (whatever async op it was parked on is
+// cleaned up and its continuation discarded). A thrown error propagates out.
+//
+// case 1 — a fast thunk completes -> Ok, timeout-value is its result.
+// case 2 — a thunk stalled on a plain socket read (no read deadline of its own)
+//          is interrupted at the deadline -> TimedOut, bounded well under the
+//          server's 3s hold (proving the parked read was actually cancelled).
+// case 3 — a throwing thunk propagates its error out of with-timeout.
+
+fn main() {
+    let port = 20000 + core/random-int(20000)
+    let ready = atom(false)
+
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        reset!(ready, true)
+        let conn = socket/accept(listener)
+        core/sleep(3000)   // hold the connection open and silent
+        socket/close(conn)
+        socket/close-listener(listener)
+    })
+
+    loop {
+        if deref(ready) { break(null) }
+        core/sleep(1)
+    }
+
+    // case 1: fast thunk -> Ok{42}
+    let r1 = async/with-timeout(1000, fn() { 40 + 2 })
+    println("case1-ok: " ++ to-string(async/timed-out?(r1) == false))
+    println("case1-value: " ++ to-string(async/timeout-value(r1)))
+
+    // case 2: a plain read with no deadline of its own, force-interrupted at 500ms.
+    let conn = socket/connect("127.0.0.1", port)
+    let start = core/time-now()
+    let r2 = async/with-timeout(500, fn() {
+        socket/read(conn, 1024)
+        "got-data"
+    })
+    let elapsed-ms = (core/time-now() - start) / 1000000
+    println("case2-timedout: " ++ to-string(async/timed-out?(r2)))
+    println("case2-bounded: " ++ to-string(elapsed-ms < 1500))
+    socket/close(conn)
+
+    // case 3: a thrown error propagates.
+    let r3 = try {
+        async/with-timeout(1000, fn() { throw("boom") })
+        "no-throw"
+    } catch (e) {
+        "threw"
+    }
+    println("case3-propagates: " ++ r3)
+
+    println("done")
+}
+
+// @beagle.core.snapshot
+// case1-ok: true
+// case1-value: 42
+// case2-timedout: true
+// case2-bounded: true
+// case3-propagates: threw
+// done

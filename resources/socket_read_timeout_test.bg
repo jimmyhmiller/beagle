@@ -1,0 +1,58 @@
+namespace socket_read_timeout_test
+
+use beagle.core as core
+use beagle.socket as socket
+
+// Exercises socket/read-timeout end to end through the cooperative scheduler's
+// new race-against-a-timer machinery:
+//   case 1 — the server accepts but never sends; the 500ms deadline fires, the
+//            read is cancelled (socket closed), and read-timeout throws.
+//   case 2 — the server responds immediately; the read wins the race well within
+//            the 3s deadline and returns the data (the timer is cancelled).
+// Outcome-based (not timing-based) so the snapshot is stable under load.
+
+fn main() {
+    let server_ready = atom(false)
+    let port = 20000 + core/random-int(40000)
+
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        reset!(server_ready, true)
+        // First client: a silent peer — never write, so the client's read deadline fires.
+        let conn1 = socket/accept(listener)
+        // Second client: respond immediately.
+        let conn2 = socket/accept(listener)
+        socket/write(conn2, "fast-data")
+        socket/close(conn2)
+        socket/close(conn1)
+        socket/close-listener(listener)
+    })
+
+    loop {
+        if deref(server_ready) { break(null) }
+        core/sleep(1)
+    }
+
+    // case 1: silent server, 500ms deadline -> timeout (throws)
+    let conn1 = socket/connect("127.0.0.1", port)
+    let r1 = try {
+        let got = socket/read-timeout(conn1, 1024, 500)
+        "NO-TIMEOUT(" ++ got ++ ")"
+    } catch (e) {
+        "timed-out"
+    }
+    println("case1: " ++ r1)
+
+    // case 2: server responds immediately, 3s deadline -> data wins the race
+    let conn2 = socket/connect("127.0.0.1", port)
+    let r2 = socket/read-timeout(conn2, 1024, 3000)
+    println("case2: " ++ r2)
+    socket/close(conn2)
+
+    println("done")
+}
+
+// @beagle.core.snapshot
+// case1: timed-out
+// case2: fast-data
+// done

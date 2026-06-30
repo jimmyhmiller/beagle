@@ -1,0 +1,65 @@
+namespace ws_frame_cap_test
+
+use beagle.socket as socket
+use beagle.ws as ws
+use beagle.string-builder as sb
+
+// Socket-free test of the WebSocket frame size cap. The pluggable reader
+// (socket/reader-with) lets us feed canned frame bytes with no real socket, so
+// the frame parser + cap can be unit-tested deterministically.
+
+// A reader that yields a fixed byte string once, then EOF. conn is unused (the
+// frame reader only pulls bytes), so null is fine.
+fn canned-reader(bytes) {
+    let remaining = atom(bytes)
+    socket/reader-with(null, fn(n) {
+        let b = deref(remaining)
+        reset!(remaining, "")
+        b
+    })
+}
+
+// FIN + binary opcode, 16-bit length form declaring 200 bytes (0x00C8), unmasked.
+fn oversized-frame-header() {
+    let b = sb/new(4)
+    sb/append-byte!(b, 0x82)
+    sb/append-byte!(b, 126)
+    sb/append-byte!(b, 0x00)
+    sb/append-byte!(b, 0xC8)
+    sb/to-string(b)
+}
+
+// FIN + text opcode, length 2, unmasked, payload "hi".
+fn small-text-frame() {
+    let b = sb/new(4)
+    sb/append-byte!(b, 0x81)
+    sb/append-byte!(b, 2)
+    sb/append-byte!(b, 104)
+    sb/append-byte!(b, 105)
+    sb/to-string(b)
+}
+
+test "oversized frame is rejected before the payload is read" {
+    let r = canned-reader(oversized-frame-header())
+    let f = ws/read-frame-max(r, 64)   // declares 200 > 64
+    assert!(ws/frame-too-big?(f))
+    assert-eq!(f.declared, 200)
+    assert-eq!(f.limit, 64)
+}
+
+test "a frame within the cap parses normally" {
+    let r = canned-reader(small-text-frame())
+    let f = ws/read-frame-max(r, 64)   // declares 2 <= 64
+    assert!(ws/frame-too-big?(f) == false)
+    assert-eq!(f.payload, "hi")
+}
+
+test "close-frame-status carries the 2-byte status code (1009)" {
+    let parsed = ws/parse-frame(ws/close-frame-status(1009))
+    assert!(ws/close?(parsed))
+    // Payload is the 2-byte big-endian code: 1009 = 0x03F1 -> bytes [3, 241].
+    let pb = sb/new(2)
+    sb/append!(pb, parsed.payload)
+    assert-eq!(sb/byte-at(pb, 0) & 0xFF, 3)
+    assert-eq!(sb/byte-at(pb, 1) & 0xFF, 241)
+}

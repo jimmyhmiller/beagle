@@ -1,0 +1,48 @@
+namespace tls_server_test
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.tls as tls
+use beagle.fs as fs
+
+// The sans-I/O TLS SERVER: tls/server-config(cert-pem, key-pem) builds a config,
+// tls/accept(plain-socket, config) wraps an accepted TCP connection in TLS
+// (server-side handshake), and the same read/write/close work as for a client.
+// The client uses tls/connect-insecure (skips cert verification) so the test's
+// self-signed cert needs no trust setup. A real TLS handshake + encrypted data
+// exchange runs entirely in-process — no network, no public CA.
+
+fn main() {
+    let port = 20000 + core/random-int(20000)
+    let cert = unwrap!(fs/blocking-read-file("resources/test_tls_cert.pem"))
+    let key = unwrap!(fs/blocking-read-file("resources/test_tls_key.pem"))
+    let config = tls/server-config(cert, key)
+    let ready = atom(false)
+
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        reset!(ready, true)
+        let plain = socket/accept(listener)
+        let conn = tls/accept(plain, config)
+        let req = tls/read(conn, 1024)
+        tls/write(conn, "PONG:" ++ req)
+        tls/close(conn)
+        socket/close-listener(listener)
+    })
+
+    loop {
+        if deref(ready) { break(null) }
+        core/sleep(1)
+    }
+
+    let c = tls/connect-insecure("127.0.0.1", port)
+    tls/write(c, "PING")
+    let resp = tls/read(c, 1024)
+    println("resp: " ++ resp)
+    tls/close(c)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// resp: PONG:PING
+// done

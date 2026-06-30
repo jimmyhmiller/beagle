@@ -733,8 +733,7 @@ impl PersistentVec {
             Some(h) => (h, shift),
             None => {
                 // Whole tree emptied: use a fresh empty node (shift stays small).
-                let empty_h =
-                    scope.allocate_typed_zeroed(0, TYPE_ID_PERSISTENT_VEC_NODE)?;
+                let empty_h = scope.allocate_typed_zeroed(0, TYPE_ID_PERSISTENT_VEC_NODE)?;
                 (empty_h, shift)
             }
         };
@@ -821,10 +820,7 @@ impl PersistentVec {
 
     /// Allocate a copy-on-write clone of a tree node (with write barriers for
     /// the copied heap pointers).
-    fn clone_node(
-        scope: &mut HandleScope<'_>,
-        node_h: Handle,
-    ) -> Result<Handle, Box<dyn Error>> {
+    fn clone_node(scope: &mut HandleScope<'_>, node_h: Handle) -> Result<Handle, Box<dyn Error>> {
         let node = node_h.to_gc_handle();
         let node_len = node.field_count();
         let new_node_h = scope.allocate_typed_zeroed(node_len, TYPE_ID_PERSISTENT_VEC_NODE)?;

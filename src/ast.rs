@@ -674,10 +674,15 @@ impl Pattern {
             Pattern::Identifier { name, .. } => vec![name.clone()],
             Pattern::EnumVariant { fields, .. } | Pattern::Struct { fields, .. } => fields
                 .iter()
-                .map(|f| {
-                    f.binding_name
-                        .clone()
-                        .unwrap_or_else(|| f.field_name.clone())
+                .flat_map(|f| match &f.sub_pattern {
+                    // A nested sub-pattern introduces whatever names it binds.
+                    Some(sub) => sub.binding_names(),
+                    // Otherwise the field binds to its rename (or the field name).
+                    None => vec![
+                        f.binding_name
+                            .clone()
+                            .unwrap_or_else(|| f.field_name.clone()),
+                    ],
                 })
                 .collect(),
             Pattern::Array { elements, rest, .. } => {
@@ -697,7 +702,14 @@ impl Pattern {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct FieldPattern {
     pub field_name: String,
+    /// Rename target for `field: name` — binds the field value to `name`.
+    /// Mutually exclusive with `sub_pattern` (a bare identifier after `:` is
+    /// treated as a rename, not a sub-pattern, to preserve existing behavior).
     pub binding_name: Option<String>,
+    /// Nested pattern for `field: <pattern>` where `<pattern>` is anything other
+    /// than a bare identifier (enum variant, struct, wildcard, array, literal).
+    /// The field value is recursively tested and destructured against it.
+    pub sub_pattern: Option<Box<Pattern>>,
     pub token_range: TokenRange,
 }
 
@@ -8041,6 +8053,48 @@ impl AstCompiler<'_> {
         }
     }
 
+    /// Read a single field off a struct/enum value via the property-access
+    /// builtin (handles old shape versions). Returns the field value register.
+    fn extract_field_value(
+        &mut self,
+        value_reg: Value,
+        field_name: &str,
+    ) -> Result<Value, CompileError> {
+        let (property_addr, _prior) = self.alloc_property_cache()?;
+        let property_location = self.ir.assign_new(Value::RawValue(property_addr));
+        let constant_ptr = self.string_constant(field_name.to_string());
+        let constant_ptr = self.ir.assign_new(constant_ptr);
+        self.call_builtin(
+            "beagle.builtin/property-access",
+            vec![value_reg, constant_ptr.into(), property_location.into()],
+        )
+    }
+
+    /// For each field with a nested sub-pattern, extract the field value and
+    /// recursively test it. Identifier/wildcard sub-patterns always match, so
+    /// they are skipped here (their binding happens in bind_pattern_variables).
+    fn compile_field_subpattern_tests(
+        &mut self,
+        fields: &[FieldPattern],
+        value_reg: Value,
+        no_match_label: Label,
+    ) -> Result<(), CompileError> {
+        for field_pattern in fields.iter() {
+            if let Some(sub) = &field_pattern.sub_pattern {
+                if matches!(
+                    sub.as_ref(),
+                    Pattern::Wildcard { .. } | Pattern::Identifier { .. }
+                ) {
+                    continue;
+                }
+                let sub = sub.clone();
+                let field_value = self.extract_field_value(value_reg, &field_pattern.field_name)?;
+                self.compile_pattern_test(&sub, field_value, no_match_label)?;
+            }
+        }
+        Ok(())
+    }
+
     fn compile_pattern_test(
         &mut self,
         pattern: &Pattern,
@@ -8055,6 +8109,7 @@ impl AstCompiler<'_> {
             Pattern::EnumVariant {
                 enum_name,
                 variant_name,
+                fields,
                 ..
             } => {
                 // Only heap objects can match an enum-variant pattern. Scalars
@@ -8103,9 +8158,13 @@ impl AstCompiler<'_> {
                 // Jump if family doesn't match
                 self.ir
                     .jump_if(no_match_label, Condition::NotEqual, result, Value::True);
+
+                // The variant matched; now recursively test any nested field
+                // sub-patterns (`Variant { f: SubPattern {..} }`).
+                self.compile_field_subpattern_tests(fields, value_reg, no_match_label)?;
                 Ok(())
             }
-            Pattern::Struct { name, .. } => {
+            Pattern::Struct { name, fields, .. } => {
                 // Only heap objects can match a struct pattern. Scalars
                 // (Int/Float/String/Bool/null) are NOT HeapObject-tagged; letting
                 // them through would untag + read_struct_id, dereferencing the raw
@@ -8151,6 +8210,10 @@ impl AstCompiler<'_> {
                 // Jump if family doesn't match
                 self.ir
                     .jump_if(no_match_label, Condition::NotEqual, result, Value::True);
+
+                // The struct matched; now recursively test any nested field
+                // sub-patterns (`Name { f: SubPattern {..} }`).
+                self.compile_field_subpattern_tests(fields, value_reg, no_match_label)?;
                 Ok(())
             }
             Pattern::Array {
@@ -8317,23 +8380,35 @@ impl AstCompiler<'_> {
                         vec![value_reg, constant_ptr.into(), property_location.into()],
                     )?;
 
-                    // Determine the variable name to bind to
-                    let binding_name = field_pattern
-                        .binding_name
-                        .as_ref()
-                        .unwrap_or(&field_pattern.field_name);
-
                     // Store to a unique local to preserve across subsequent field
-                    // extractions. Use a unique name so we don't clobber locals
-                    // from outer scopes that share the same name.
+                    // extractions (and any builtin calls a nested sub-pattern makes).
+                    // The name MUST be globally unique: nested matches of the same
+                    // variant/field would otherwise reuse the same local index (via
+                    // find_or_insert_local), so an inner `Foo.Bar { x: b }` would
+                    // clobber an outer `Foo.Bar { x: a }`. num_locals is monotonic,
+                    // so it disambiguates every extraction site within the function.
                     let reg = self.ir.assign_new(field_value);
-                    let unique_local_name = format!("__enum_field_{}_{}__", enum_name, fi);
+                    let unique_local_name =
+                        format!("__enum_field_{}_{}_{}__", enum_name, fi, self.ir.num_locals);
                     let local_index = self.find_or_insert_local(&unique_local_name);
                     self.ir.store_local(local_index, reg.into());
-                    self.insert_variable(
-                        binding_name.clone(),
-                        VariableLocation::Local(local_index),
-                    );
+
+                    if let Some(sub) = &field_pattern.sub_pattern {
+                        // Recursively bind names inside the nested sub-pattern.
+                        let sub = sub.clone();
+                        let field_reload = self.ir.load_local(local_index);
+                        self.bind_pattern_variables(&sub, field_reload)?;
+                    } else {
+                        // Bind the field to its rename (or the field name).
+                        let binding_name = field_pattern
+                            .binding_name
+                            .as_ref()
+                            .unwrap_or(&field_pattern.field_name);
+                        self.insert_variable(
+                            binding_name.clone(),
+                            VariableLocation::Local(local_index),
+                        );
+                    }
                 }
             }
             Pattern::Struct { name, fields, .. } => {
@@ -8359,23 +8434,35 @@ impl AstCompiler<'_> {
                         vec![value_reg, constant_ptr.into(), property_location.into()],
                     )?;
 
-                    // Determine the variable name to bind to
-                    let binding_name = field_pattern
-                        .binding_name
-                        .as_ref()
-                        .unwrap_or(&field_pattern.field_name);
-
                     // Store to a unique local to preserve across subsequent field
-                    // extractions. Use a unique name so we don't clobber locals
-                    // from outer scopes that share the same name.
+                    // extractions (and any builtin calls a nested sub-pattern makes).
+                    // The name MUST be globally unique: nested matches of the same
+                    // struct/field would otherwise reuse the same local index (via
+                    // find_or_insert_local), so an inner `Foo { x: b }` would clobber
+                    // an outer `Foo { x: a }`. num_locals is monotonic, so it
+                    // disambiguates every extraction site within the function.
                     let reg = self.ir.assign_new(field_value);
-                    let unique_local_name = format!("__struct_field_{}_{}__", name, fi);
+                    let unique_local_name =
+                        format!("__struct_field_{}_{}_{}__", name, fi, self.ir.num_locals);
                     let local_index = self.find_or_insert_local(&unique_local_name);
                     self.ir.store_local(local_index, reg.into());
-                    self.insert_variable(
-                        binding_name.clone(),
-                        VariableLocation::Local(local_index),
-                    );
+
+                    if let Some(sub) = &field_pattern.sub_pattern {
+                        // Recursively bind names inside the nested sub-pattern.
+                        let sub = sub.clone();
+                        let field_reload = self.ir.load_local(local_index);
+                        self.bind_pattern_variables(&sub, field_reload)?;
+                    } else {
+                        // Bind the field to its rename (or the field name).
+                        let binding_name = field_pattern
+                            .binding_name
+                            .as_ref()
+                            .unwrap_or(&field_pattern.field_name);
+                        self.insert_variable(
+                            binding_name.clone(),
+                            VariableLocation::Local(local_index),
+                        );
+                    }
                 }
             }
             Pattern::Array {

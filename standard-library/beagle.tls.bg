@@ -1,45 +1,116 @@
 namespace beagle.tls
 
-// TLS client over rustls (the Mozilla webpki root store, ring crypto).
+// TLS client over rustls (Mozilla webpki roots, ring crypto), SANS-I/O.
 //
-// These are SYNCHRONOUS/blocking calls: each connect/read/write blocks the
-// calling OS thread for the duration of the network I/O. That is fine for a
-// client request on the cooperative scheduler (the program is waiting on the
-// response anyway); run on a dedicated `thread()` if you need concurrency.
+// rustls runs purely on byte buffers; this layer owns an ASYNC socket
+// (beagle.socket) and shuttles ciphertext between it and rustls. Because all I/O
+// goes through the cooperative async socket layer, every TLS connect/read/write
+// PARKS like a plain TCP op — so HTTPS is concurrent and inherits read-timeout,
+// connect-timeout, and the general with-timeout, instead of blocking the thread.
 
 use beagle._tls as tls
+use beagle.socket as socket
 use beagle.string-builder as sb
+use beagle.base64 as base64
 
-/// Open a TLS connection to `host`:`port`, returning an opaque connection
-/// handle. Throws if the TCP connect, TLS handshake, or certificate
-/// verification fails.
+// Ciphertext pulled from the socket per round (one TLS record can be up to ~16KB).
+let tls-chunk = 16384
+
+/// A live TLS connection: the async socket plus the rustls connection handle.
+struct TlsConn {
+    sock
+    h
+}
+
+// Send any ciphertext rustls has queued (handshake records, app data, alerts).
+/// Drain rustls's outgoing ciphertext and write it to the socket.
+fn flush-outgoing(conn) {
+    let out = tls/outgoing(conn.h)
+    if length(out) > 0 {
+        socket/write(conn.sock, out)
+    } else {
+        null
+    }
+}
+
+// Drive the TLS handshake to completion: send our records, read the peer's,
+// repeat until rustls reports the handshake is done. Throws on a TLS error
+// (certificate verification failure, alert) or a premature close.
+/// Run the TLS handshake on `conn` (sends/receives records until complete).
+fn do-handshake(conn) {
+    flush-outgoing(conn)
+    while tls/is-handshaking(conn.h) == 1 {
+        let cipher = socket/read(conn.sock, tls-chunk)
+        if cipher == "" {
+            throw("beagle.tls: connection closed during handshake")
+        } else {
+            if tls/feed(conn.h, cipher) == -1 {
+                throw("beagle.tls: handshake or certificate verification failed")
+            } else {
+                flush-outgoing(conn)
+            }
+        }
+    }
+    null
+}
+
+/// Open a TLS connection to `host`:`port`, returning a TlsConn. Throws if the TCP
+/// connect, TLS handshake, or certificate verification fails. The connect and
+/// handshake reads run on the async socket, so they park (and can be bounded with
+/// socket/connect-timeout / with-timeout) rather than blocking the scheduler.
 ///
 /// Examples:
 ///   let c = connect("example.com", 443)
 fn connect(host, port) {
-    let h = tls/connect(host, port)
+    let sock = socket/connect(host, port)
+    let h = tls/client-create(host)
     if h == -1 {
-        throw("beagle.tls/connect: failed to connect to ${host}:${port} (DNS, refused, or certificate error)")
+        try { socket/close(sock) } catch (e) { null }
+        throw("beagle.tls/connect: invalid TLS server name '${host}'")
     } else {
-        h
+        let conn = TlsConn { sock: sock, h: h }
+        do-handshake(conn)
+        conn
     }
 }
 
-/// Write `data` (a string, byte-faithful) over the TLS connection. Returns the
-/// number of bytes written. Throws on a write error.
+/// Write `data` (a byte-faithful string) over the TLS connection: queue it as
+/// plaintext, then send the resulting ciphertext. Returns the number of plaintext
+/// bytes written. Throws on a write error.
 fn write(conn, data) {
-    let n = tls/write(conn, data)
+    let n = tls/write-plain(conn.h, data)
     if n == -1 {
         throw("beagle.tls/write: write failed (connection closed?)")
     } else {
+        flush-outgoing(conn)
         n
     }
 }
 
-/// Read up to `n` bytes of plaintext from the TLS connection, returning them as
-/// a byte-faithful string. Returns "" at end-of-stream.
+/// Read up to `n` bytes of plaintext from the TLS connection, as a byte-faithful
+/// string. Returns already-decrypted data immediately; otherwise pulls ciphertext
+/// from the socket (parking until it arrives) and decrypts until some plaintext is
+/// available or the peer closes ("" at end-of-stream).
 fn read(conn, n) {
-    tls/read(conn, n)
+    let mut result = tls/read-plain(conn.h, n)
+    let mut done = length(result) > 0
+    while done == false {
+        let cipher = socket/read(conn.sock, tls-chunk)
+        if cipher == "" {
+            done = true
+        } else {
+            if tls/feed(conn.h, cipher) == -1 {
+                throw("beagle.tls/read: TLS error")
+            } else {
+                flush-outgoing(conn)
+                result = tls/read-plain(conn.h, n)
+                if length(result) > 0 {
+                    done = true
+                }
+            }
+        }
+    }
+    result
 }
 
 /// Read everything until end-of-stream, returning the full body as a string.
@@ -61,7 +132,112 @@ fn read-all-into(conn, builder) {
     }
 }
 
-/// Close the TLS connection (sends a close_notify and releases the handle).
+/// Close the TLS connection: send a close_notify, then close the socket and drop
+/// the rustls state.
 fn close(conn) {
-    tls/close(conn)
+    tls/close-notify(conn.h)
+    try {
+        flush-outgoing(conn)
+    } catch (e) {
+        null
+    }
+    try {
+        socket/close(conn.sock)
+    } catch (e) {
+        null
+    }
+    tls/destroy(conn.h)
+    null
+}
+
+// ===========================================================================
+// Insecure client (dev/test)
+// ===========================================================================
+
+/// Open a TLS connection that SKIPS certificate-chain verification — it still
+/// performs the handshake and checks the signature, but does NOT validate the
+/// server's certificate against any trust roots. DEV/TEST ONLY: this defeats
+/// MITM protection (the equivalent of `curl -k`). Use `connect` in production.
+/// Returns the same TlsConn as `connect`.
+fn connect-insecure(host, port) {
+    let sock = socket/connect(host, port)
+    let h = tls/client-create-insecure(host)
+    if h == -1 {
+        try { socket/close(sock) } catch (e) { null }
+        throw("beagle.tls/connect-insecure: invalid TLS server name '${host}'")
+    } else {
+        let conn = TlsConn { sock: sock, h: h }
+        do-handshake(conn)
+        conn
+    }
+}
+
+// ===========================================================================
+// Server
+// ===========================================================================
+
+// Convert a Vec<Int> of byte values into a byte-faithful string (for DER bytes).
+fn bytes-to-string(bytes) {
+    let b = sb/new(count(bytes) + 1)
+    for byte in bytes {
+        sb/append-byte!(b, byte)
+    }
+    sb/to-string(b)
+}
+
+// Extract the DER bytes (as a byte-faithful string) of the PEM block labelled
+// `label` (e.g. "CERTIFICATE", "PRIVATE KEY") from a PEM string.
+fn pem-der(pem, label) {
+    let begin = "-----BEGIN " ++ label ++ "-----"
+    let end = "-----END " ++ label ++ "-----"
+    let bi = index-of(pem, begin)
+    if bi < 0 {
+        throw("beagle.tls: PEM is missing '${begin}'")
+    } else {
+        let ei = index-of(pem, end)
+        if ei < 0 {
+            throw("beagle.tls: PEM is missing '${end}'")
+        } else {
+            // base64/decode tolerates the embedded newlines in the body.
+            bytes-to-string(base64/decode(substring(pem, bi + length(begin), ei)))
+        }
+    }
+}
+
+/// Build a reusable TLS server config from a certificate and PKCS#8 private key,
+/// both as DER byte-faithful strings. Returns a config handle for `accept`.
+fn server-config-der(cert-der, key-der) {
+    let h = tls/server-config-create(cert-der, key-der)
+    if h == -1 {
+        throw("beagle.tls/server-config: invalid certificate or private key (need a single DER cert + a PKCS#8 DER key)")
+    } else {
+        h
+    }
+}
+
+/// Build a reusable TLS server config from PEM strings: `cert-pem` (a CERTIFICATE
+/// block) and `key-pem` (a PKCS#8 PRIVATE KEY block). Returns a config handle to
+/// pass to `accept`. Build it once and reuse it across accepted connections.
+///
+/// Examples:
+///   let cfg = server-config(read-file("cert.pem"), read-file("key.pem"))
+///   let tls-conn = accept(socket/accept(listener), cfg)
+fn server-config(cert-pem, key-pem) {
+    server-config-der(pem-der(cert-pem, "CERTIFICATE"), pem-der(key-pem, "PRIVATE KEY"))
+}
+
+/// Wrap a freshly accepted plain TCP socket in TLS using `config` (from
+/// server-config), driving the server-side handshake. Returns a TlsConn usable
+/// with read/write/close exactly like a client connection. Throws on a handshake
+/// failure (and closes the socket).
+fn accept(plain-socket, config) {
+    let h = tls/server-create(config)
+    if h == -1 {
+        try { socket/close(plain-socket) } catch (e) { null }
+        throw("beagle.tls/accept: unknown server config handle")
+    } else {
+        let conn = TlsConn { sock: plain-socket, h: h }
+        do-handshake(conn)
+        conn
+    }
 }

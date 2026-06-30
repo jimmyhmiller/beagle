@@ -3508,6 +3508,21 @@ fn unwrap-or(result, default) {
     }
 }
 
+/// Unwrap a Result, returning the value or THROWING the contained error. This is
+/// the general "I just want the value, and let the error propagate" unwrap — it
+/// composes with try/catch and resumable errors. Prefer this over per-function
+/// `!` variants. Use unwrap-or for a default, or unwrap for a print-and-null.
+///
+/// Examples:
+///   unwrap!(ok(42))                                  // => 42
+///   unwrap!(err(Error.NotFound { path: "/x" }))      // throws the error
+fn unwrap!(result) {
+    match result {
+        Result.Ok { value } => value,
+        Result.Err { error } => throw(error)
+    }
+}
+
 // Check if a result is a timeout error
 /// Check whether a Result is an Err carrying a Timeout error.
 fn timeout?(result) {

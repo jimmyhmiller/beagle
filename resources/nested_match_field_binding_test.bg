@@ -1,0 +1,60 @@
+namespace nested_match_field_binding_test
+
+// Regression: a match field binding was stored in a local keyed by
+// (enum/struct name, field index) — NOT unique — so a nested match of the same
+// variant/field clobbered the outer binding's slot. `Result.Ok { value: a }`
+// wrapping `Result.Ok { value: b }` left `a` pointing at `b`'s value. Fixed by
+// giving each extraction site a globally-unique temp local (ast.rs).
+
+enum Box {
+    Wrap { value }
+}
+
+struct Pair {
+    value
+}
+
+test "nested enum match of same field name keeps the outer binding" {
+    let outer = Box.Wrap { value: 42 }
+    let result = match outer {
+        Box.Wrap { value: a } => {
+            let inner = Box.Wrap { value: 99 }
+            let b = match inner {
+                Box.Wrap { value: v } => v
+            }
+            // a must still be 42, not clobbered to 99 by the inner match.
+            a + b
+        }
+    }
+    assert-eq!(result, 141)
+}
+
+test "nested struct match of same field name keeps the outer binding" {
+    let outer = Pair { value: 10 }
+    let result = match outer {
+        Pair { value: a } => {
+            let inner = Pair { value: 5 }
+            let b = match inner {
+                Pair { value: v } => v
+            }
+            a * 100 + b
+        }
+    }
+    assert-eq!(result, 1005)
+}
+
+test "nested Result.Ok matches (the connection-pooling pattern)" {
+    let conn = Result.Ok { value: "CONN" }
+    let result = match conn {
+        Result.Ok { value: cc } => {
+            let resp = Result.Ok { value: "RESP" }
+            match resp {
+                Result.Ok { value: body } => cc ++ ":" ++ body,
+                Result.Err { error } => "inner-err"
+            }
+        },
+        Result.Err { error } => "outer-err"
+    }
+    // cc must stay "CONN" after the inner Result.Ok { value: body } match.
+    assert-eq!(result, "CONN:RESP")
+}

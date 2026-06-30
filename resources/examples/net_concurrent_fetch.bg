@@ -1,0 +1,114 @@
+namespace net_concurrent_fetch
+
+// Example: fetch several HTTP endpoints CONCURRENTLY using futures.
+//
+// The key idea: `future(expr)` spawns a cooperative task that runs `expr`
+// without blocking the caller, and `async/await(fut)` waits for its result.
+// main() already runs under the cooperative async scheduler, so kicking off
+// several `future(http/get(...))` calls at once lets the requests interleave
+// on a SINGLE thread — no OS threads, no locks. While one request is parked
+// waiting on the network, the others make progress.
+//
+// To prove it, each request handler on the server sleeps a bit before replying.
+// If the four fetches ran one-after-another the total would be ~4x that sleep;
+// run concurrently it's closer to ~1x. We print the elapsed time so you can see.
+
+use beagle.core as core
+use beagle.http as http
+use beagle.socket as socket
+use beagle.async as async
+
+// How long each server handler "works" before replying. Concurrent fetches
+// overlap these delays; sequential ones would add them up.
+let HANDLER-DELAY-MS = 200
+
+// The server's request handler: returns a body that echoes the request path,
+// after a small artificial delay to simulate real work / network latency.
+fn make-handler() {
+    fn(req) {
+        // async/sleep PARKS this task on the cooperative scheduler (unlike
+        // core/sleep, which would block the whole thread). Parking lets the
+        // other in-flight connection handlers run while this one waits.
+        async/sleep(HANDLER-DELAY-MS)
+        http/ok("you asked for ${req.path}")
+    }
+}
+
+// Stand up a local server that serves exactly `n` connections, then shuts down.
+// Each `http/get` from a client opens its own connection, sends one request,
+// reads the response, and closes — so handling `n` connections == serving `n`
+// fetches.
+//
+// We accept each connection and hand it to its OWN `future(...)`, so the slow
+// (sleeping) handlers run concurrently on the server's cooperative scheduler
+// instead of one-after-another. After accepting all `n`, we await every handler
+// future so the thread does FINITE work and RETURNS — a forever-loop in a
+// non-daemon thread would hang the process after main exits.
+fn start-server(port, n, ready) {
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        let handler = make-handler()
+        let config = http/config-from-opts({})
+        reset!(ready, true)               // tell main we're accepting
+        let mut conns = []
+        let mut i = 0
+        // Accept all n connections, spawning a concurrent handler for each.
+        while i < n {
+            let conn = socket/accept(listener)
+            conns = push(conns, future(http/handle-connection(conn, handler, config)))
+            i = i + 1
+        }
+        // Wait for every connection to be fully served (finite), then shut down.
+        for f in conns {
+            async/await(f)
+        }
+        socket/close-listener(listener)   // finite work done; thread returns
+    })
+}
+
+fn main() {
+    let ready = atom(false)
+    let port = 20000 + core/random-int(20000)
+
+    // The four paths we'll fetch concurrently.
+    let paths = ["/alpha", "/beta", "/gamma", "/delta"]
+
+    // Server must serve one connection per fetch.
+    start-server(port, length(paths), ready)
+
+    // Wait until the server is actually accepting before we connect.
+    loop {
+        if deref(ready) { break(null) }
+        core/sleep(1)
+    }
+
+    let base = "http://127.0.0.1:${port}"
+    let start = core/time-now()
+
+    // Kick off ALL requests at once. Each `future(...)` starts immediately and
+    // returns a handle; none of them block here, so all four are in flight
+    // concurrently — interleaving on the cooperative scheduler.
+    let futures = map(fn(p) { future(http/get(base ++ p)) }, paths)
+
+    // Now await each future and collect the response bodies. By the time the
+    // first await returns, the others have been making progress too.
+    let bodies = map(fn(fut) {
+        let result = async/await(fut)          // Result.Ok{Response} | Result.Err
+        match result {
+            Result.Ok { value: resp } => resp.body,
+            Result.Err { error } => "(request failed: ${error})"
+        }
+    }, futures)
+
+    let elapsed-ms = (core/time-now() - start) / 1000000
+
+    println("Fetched ${length(paths)} endpoints concurrently:")
+    for body in bodies {
+        println("  ${body}")
+    }
+
+    // Four ~200ms handlers run concurrently finish in ~one delay, not four.
+    // (Sequential would be ~${4 * HANDLER-DELAY-MS}ms.)
+    println("elapsed: ${elapsed-ms}ms (concurrent, not ${length(paths) * HANDLER-DELAY-MS}ms sequential)")
+    println("future()/await gave us concurrency on ONE thread — no OS threads, no locks.")
+}

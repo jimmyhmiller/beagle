@@ -60,6 +60,28 @@ fn index-byte(s, byte, start) {
     string-index-byte(s, byte, start)
 }
 
+/// Return the UTF-8 byte length of a string. For non-ASCII strings the
+/// codepoint count (`length`) differs from the byte count; networking code
+/// must measure bodies and frames in BYTES, so this is the right length there.
+fn byte-length(s) {
+    let b = new(16)
+    append!(b, s)
+    length(b)
+}
+
+/// Slice the string `s` by BYTE indices [start, end), returning the substring.
+/// Returns "" when end <= start. Byte-faithful: safe for multi-byte UTF-8 and
+/// binary data where codepoint slicing would corrupt the bytes.
+fn byte-slice(s, start, end) {
+    if end <= start {
+        ""
+    } else {
+        let b = new(end - start)
+        append-range!(b, s, start, end)
+        to-string(b)
+    }
+}
+
 /// Append the decimal representation of an int.
 fn append-int!(sb, i) {
     string-builder-push-int!(sb, i)

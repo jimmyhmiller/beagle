@@ -1,0 +1,44 @@
+namespace read_timeout_example
+
+// Example: a read deadline that reads like ordinary sequential code.
+//
+// socket/read-timeout(conn, n, ms) blocks like socket/read, but if the peer
+// sends nothing within `ms` milliseconds the read is cancelled, the socket is
+// closed, and a timeout is thrown. No promises, no callbacks — the cooperative
+// scheduler races the read against a timer underneath. Many connections can be
+// deadlined at once on a single thread; a slow client only parks itself.
+
+use beagle.core as core
+use beagle.socket as socket
+
+fn read-with-deadline(conn) {
+    try {
+        let data = socket/read-timeout(conn, 1024, 2000)   // up to 2s
+        println("got ${length(data)} bytes")
+        data
+    } catch (e) {
+        // The slow peer has already been disconnected by the deadline.
+        println("client too slow — dropped: ${e}")
+        ""
+    }
+}
+
+fn main() {
+    let ready = atom(false)
+    let port = 20000 + core/random-int(40000)
+
+    // A deliberately slow peer: accept, wait past the deadline, then (too late) send.
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        reset!(ready, true)
+        let conn = socket/accept(listener)
+        core/sleep(4000)                  // 4s > the 2s deadline
+        socket/close(conn)
+        socket/close-listener(listener)
+    })
+    loop { if deref(ready) { break(null) } core/sleep(1) }
+
+    let conn = socket/connect("127.0.0.1", port)
+    read-with-deadline(conn)              // prints the "too slow" branch
+    println("done")
+}

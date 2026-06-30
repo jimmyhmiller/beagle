@@ -1,0 +1,95 @@
+namespace http_size_caps_test
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.http as http
+use beagle.string-builder as sb
+
+// The HTTP server bounds per-request memory with size caps:
+//   - a header/request line over :max-header-bytes  -> 431 (and the reader never
+//     buffers more than the cap + one chunk),
+//   - a Content-Length body over :max-body-bytes     -> 413 (rejected before the
+//     body is read).
+// A normal small request is served 200. Drives http/handle-connection directly so
+// the server thread handles exactly three connections and exits.
+
+fn status-of(resp) {
+    let sp1 = index-of(resp, " ")
+    if sp1 < 0 {
+        "no-status"
+    } else {
+        let rest = substring(resp, sp1 + 1, length(resp))
+        let sp2 = index-of(rest, " ")
+        if sp2 < 0 { rest } else { substring(rest, 0, sp2) }
+    }
+}
+
+fn repeat-a(n) {
+    let b = sb/new(n)
+    let mut i = 0
+    while i < n {
+        sb/append!(b, "A")
+        i = i + 1
+    }
+    sb/to-string(b)
+}
+
+fn main() {
+    let port = 20000 + core/random-int(40000)
+    let ready = atom(false)
+
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        reset!(ready, true)
+        let handler = fn(req) { http/ok("hello") }
+        // Tiny caps so the test stays small: 64-byte lines, 16-byte bodies.
+        let config = http/config-from-opts({
+            :max-header-bytes 64,
+            :max-body-bytes 16
+        })
+        http/handle-connection(socket/accept(listener), handler, config)
+        http/handle-connection(socket/accept(listener), handler, config)
+        http/handle-connection(socket/accept(listener), handler, config)
+        http/handle-connection(socket/accept(listener), handler, config)
+        socket/close-listener(listener)
+    })
+
+    loop {
+        if deref(ready) { break(null) }
+        core/sleep(1)
+    }
+
+    // case 1: a header line well over 64 bytes -> 431.
+    let c1 = socket/connect("127.0.0.1", port)
+    socket/write(c1, "GET /x HTTP/1.1\r\nX-Big: " ++ repeat-a(100) ++ "\r\n\r\n")
+    println("case1-header-too-large: " ++ status-of(socket/read(c1, 1024)))
+    socket/close(c1)
+
+    // case 2: Content-Length over 16 -> 413 (body not even sent).
+    let c2 = socket/connect("127.0.0.1", port)
+    socket/write(c2, "POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: 1000\r\n\r\n")
+    println("case2-body-too-large: " ++ status-of(socket/read(c2, 1024)))
+    socket/close(c2)
+
+    // case 3: a chunked body whose first chunk (0x20 = 32 bytes) exceeds the
+    // 16-byte cap -> 413, rejected before the chunk is even read.
+    let c3 = socket/connect("127.0.0.1", port)
+    socket/write(c3, "POST /x HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n20\r\n" ++ repeat-a(32) ++ "\r\n0\r\n\r\n")
+    println("case3-chunked-too-large: " ++ status-of(socket/read(c3, 1024)))
+    socket/close(c3)
+
+    // case 4: a normal small request -> 200.
+    let c4 = socket/connect("127.0.0.1", port)
+    socket/write(c4, "GET /ok HTTP/1.1\r\nHost: h\r\n\r\n")
+    println("case4-ok: " ++ status-of(socket/read(c4, 1024)))
+    socket/close(c4)
+
+    println("done")
+}
+
+// @beagle.core.snapshot
+// case1-header-too-large: 431
+// case2-body-too-large: 413
+// case3-chunked-too-large: 413
+// case4-ok: 200
+// done

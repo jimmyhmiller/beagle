@@ -1,0 +1,130 @@
+namespace bench_net_tls_overhead
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.tls as tls
+use beagle.http as http
+use beagle.fs as fs
+use beagle.text as text
+
+// =============================================================================
+// BENCHMARK: TLS overhead — plain HTTP vs HTTPS round-trip latency.
+//
+// SINGLE-PROCESS MICRO-BENCHMARK: the server threads and the client both live
+// in THIS process (loopback, cooperative async scheduler). Numbers reflect the
+// per-request cost ON THIS MACHINE of running the encrypted (TLS) transport vs
+// the plain TCP transport over an already-established keep-alive connection.
+// They are NOT a model of real network latency.
+//
+// To isolate TLS overhead, both protocols use the IDENTICAL code path: one
+// persistent keep-alive connection, the same raw "GET /ping" request bytes, the
+// same handler, and the same http/read-response parser. The ONLY difference is
+// the transport (plain socket vs tls/connect-insecure + tls/read/tls/write).
+// The TLS handshake happens once at connection setup and is excluded from the
+// per-request average (we measure N steady-state round-trips).
+// =============================================================================
+
+let N = 100
+
+fn handler(req) {
+    http/ok("pong")
+}
+
+// Send one raw keep-alive "GET /ping" and read the parsed response back over the
+// given reader, using `write-fn` to push the request bytes onto the transport.
+fn round-trip(write-fn, reader, path) {
+    write-fn("GET " ++ path ++ " HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
+    http/read-response(reader)
+}
+
+fn main() {
+    let cert = unwrap!(fs/blocking-read-file("resources/test_tls_cert.pem"))
+    let key = unwrap!(fs/blocking-read-file("resources/test_tls_key.pem"))
+    let tls-config = tls/server-config(cert, key)
+    let config = http/config-from-opts({})
+
+    let http-port = 20000 + core/random-int(20000)
+    let https-port = 20000 + core/random-int(20000)
+
+    let http-ready = atom(false)
+    let https-ready = atom(false)
+
+    // Plain HTTP server: accept ONE keep-alive connection, serve it until the
+    // client closes (finite: client makes N+warmup requests then closes), exit.
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", http-port)
+        reset!(http-ready, true)
+        let conn = socket/accept(listener)
+        http/handle-connection(conn, handler, config)
+        socket/close-listener(listener)
+    })
+
+    // HTTPS server: accept ONE connection, TLS-wrap it, serve keep-alive until
+    // the client closes, then exit.
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", https-port)
+        reset!(https-ready, true)
+        let plain = socket/accept(listener)
+        let conn = tls/accept(plain, tls-config)
+        http/handle-tls-connection(conn, handler, config)
+        socket/close-listener(listener)
+    })
+
+    loop {
+        if deref(http-ready) && deref(https-ready) { break(null) }
+        core/sleep(1)
+    }
+
+    // --- Plain HTTP: one persistent keep-alive socket, N round-trips ---
+    let http-sock = socket/connect("127.0.0.1", http-port)
+    let http-reader = socket/reader(http-sock)
+    let http-write = fn(bytes) { socket/write(http-sock, bytes) }
+
+    // warmup (excluded) to settle the connection / JIT
+    round-trip(http-write, http-reader, "/warmup")
+
+    let http-start = core/time-now()
+    let mut http-i = 0
+    let mut http-ok-count = 0
+    while http-i < N {
+        let resp = round-trip(http-write, http-reader, "/ping")
+        if resp != null && resp.status == 200 {
+            http-ok-count = http-ok-count + 1
+        }
+        http-i = http-i + 1
+    }
+    let http-elapsed-ms = (core/time-now() - http-start) / 1000000.0
+    socket/close(http-sock)
+
+    // --- HTTPS: one persistent TLS keep-alive connection, N round-trips ---
+    let tls-conn = tls/connect-insecure("127.0.0.1", https-port)
+    let tls-reader = socket/reader-with(tls-conn, fn(n) { tls/read(tls-conn, n) })
+    let tls-write = fn(bytes) { tls/write(tls-conn, bytes) }
+
+    round-trip(tls-write, tls-reader, "/warmup")
+
+    let https-start = core/time-now()
+    let mut https-i = 0
+    let mut https-ok-count = 0
+    while https-i < N {
+        let resp = round-trip(tls-write, tls-reader, "/ping")
+        if resp != null && resp.status == 200 {
+            https-ok-count = https-ok-count + 1
+        }
+        https-i = https-i + 1
+    }
+    let https-elapsed-ms = (core/time-now() - https-start) / 1000000.0
+    tls/close(tls-conn)
+
+    let http-avg = http-elapsed-ms / N
+    let https-avg = https-elapsed-ms / N
+    let overhead-ms = https-avg - http-avg
+    let overhead-pct = (overhead-ms / http-avg) * 100.0
+
+    println("== TLS overhead micro-benchmark (single process: server threads + client in-process, loopback) ==")
+    println("requests per protocol : ${N} (steady-state keep-alive round-trips; 1 warmup excluded; handshake excluded)")
+    println("http  : ${text/fixed(http-elapsed-ms, 3)} ms total, ${text/fixed(http-avg, 5)} ms/req avg (${http-ok-count}/${N} ok)")
+    println("https : ${text/fixed(https-elapsed-ms, 3)} ms total, ${text/fixed(https-avg, 5)} ms/req avg (${https-ok-count}/${N} ok)")
+    println("tls overhead : +${text/fixed(overhead-ms, 5)} ms/req (${text/fixed(overhead-pct, 1)}%)")
+    "done"
+}

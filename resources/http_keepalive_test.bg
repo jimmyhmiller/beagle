@@ -1,0 +1,55 @@
+namespace http_keepalive_test
+
+use beagle.core as core
+use beagle.socket as socket
+use beagle.http as http
+
+// The HTTP server keeps an HTTP/1.1 connection alive: multiple requests are
+// served on ONE TCP connection (Connection: keep-alive) until the client sends
+// Connection: close. Drives http/handle-connection directly on a single accepted
+// connection — its keep-alive loop serves every request on that connection.
+//
+// The client sends three requests on one socket and parses three responses with
+// http/read-response (each delimited by Content-Length). The first two are
+// keep-alive; the third sends Connection: close, ending the connection.
+
+fn main() {
+    let port = 20000 + core/random-int(20000)
+    let ready = atom(false)
+
+    thread(fn() {
+        let listener = socket/listen("127.0.0.1", port)
+        reset!(ready, true)
+        let handler = fn(req) { http/ok("got:" ++ req.path) }
+        // ONE connection; the keep-alive loop serves all three requests on it.
+        http/handle-connection(socket/accept(listener), handler, http/config-from-opts({}))
+        socket/close-listener(listener)
+    })
+
+    loop {
+        if deref(ready) { break(null) }
+        core/sleep(1)
+    }
+
+    let conn = socket/connect("127.0.0.1", port)
+    let reader = socket/reader(conn)
+
+    socket/write(conn, "GET /a HTTP/1.1\r\nHost: x\r\n\r\n")
+    let r1 = http/read-response(reader)
+    socket/write(conn, "GET /b HTTP/1.1\r\nHost: x\r\n\r\n")
+    let r2 = http/read-response(reader)
+    socket/write(conn, "GET /c HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    let r3 = http/read-response(reader)
+
+    println("r1: " ++ to-string(r1.status) ++ " " ++ r1.body ++ " conn=" ++ to-string(http/header(r1, "connection")))
+    println("r2: " ++ to-string(r2.status) ++ " " ++ r2.body)
+    println("r3: " ++ to-string(r3.status) ++ " " ++ r3.body ++ " conn=" ++ to-string(http/header(r3, "connection")))
+    socket/close(conn)
+    println("done")
+}
+
+// @beagle.core.snapshot
+// r1: 200 got:/a conn=keep-alive
+// r2: 200 got:/b
+// r3: 200 got:/c conn=close
+// done
