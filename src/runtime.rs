@@ -4815,6 +4815,17 @@ pub struct Runtime {
     // namespace manager? Shouldn't these functions
     // and things be under that?
     pub functions: crate::append_only_chunked::AppendOnlyChunked<Function>,
+    /// `name -> index into `functions`` for O(1) `get_function_by_name`. The
+    /// function table is append-only and redefinition overwrites a slot in place
+    /// (see `overwrite_function`), so an index never changes once assigned and a
+    /// cached index always reads the current pointer — no staleness. Populated
+    /// (first-write-wins, matching the old `iter().find()` first-match) as
+    /// functions are added; `get_function_by_name` falls back to a linear scan on
+    /// a miss, so a missed insert costs speed, never correctness. This removed a
+    /// measured hot spot: per `perform`/resume, effect dispatch and the
+    /// continuation trampoline looked functions up by name (O(n) string scan over
+    /// the whole table) on the HTTP hot path.
+    function_index_by_name: std::collections::HashMap<String, usize>,
     jump_table_reserved: Reserved,
     /// Committed jump-table pages, kept permanently writable and only ever
     /// appended (never removed or reordered). The pages hold a dense array of
@@ -4976,6 +4987,7 @@ impl Runtime {
             jump_table_base_ptr,
             jump_table_offset: 0,
             functions: crate::append_only_chunked::AppendOnlyChunked::new(),
+            function_index_by_name: std::collections::HashMap::new(),
             compiler_channel: None,
             compiler_thread: None,
             protocol_info: HashMap::new(),
@@ -9205,6 +9217,7 @@ impl Runtime {
             source_text: None,
             disk_location: None,
         });
+        self.register_function_name(name.unwrap_or("<Anonymous>"), index);
         debugger(Message {
             kind: "foreign_function".to_string(),
             data: Data::ForeignFunction {
@@ -9289,6 +9302,7 @@ impl Runtime {
             source_text: None,
             disk_location: None,
         });
+        self.register_function_name(name, index);
         let pointer = Self::get_function_pointer(
             self,
             self.functions
@@ -9350,6 +9364,7 @@ impl Runtime {
             source_text: None,
             disk_location: None,
         });
+        self.register_function_name(name, index);
         let pointer = Self::get_function_pointer(
             self,
             self.functions
@@ -9553,6 +9568,7 @@ impl Runtime {
             disk_location: None,
         };
         self.functions.push(function.clone());
+        self.register_function_name(name, index);
         Ok(function)
     }
 
@@ -9596,6 +9612,7 @@ impl Runtime {
             source_text,
             disk_location,
         });
+        self.register_function_name(name.unwrap_or("<Anonymous>"), index);
         let function_pointer = Self::get_function_pointer(
             self,
             self.functions
@@ -9840,7 +9857,59 @@ impl Runtime {
     }
 
     pub fn get_function_by_name(&self, name: &str) -> Option<&Function> {
+        // O(1) fast path via the name->index map; validated against the slot's
+        // actual name so a stale/wrong index can never return the wrong function.
+        if let Some(&idx) = self.function_index_by_name.get(name) {
+            if let Some(f) = self.functions.get(idx) {
+                if f.name == name {
+                    return Some(f);
+                }
+            }
+        }
+        // Fallback: linear scan (also covers any function added without going
+        // through `register_function_name`). First match, as before.
         self.functions.iter().find(|f| f.name == name)
+    }
+
+    /// Record `name -> index` for the O(1) lookup path. First-write-wins so the
+    /// mapped index matches `iter().find()`'s first-match for duplicate names.
+    fn register_function_name(&mut self, name: &str, index: usize) {
+        self.function_index_by_name
+            .entry(name.to_string())
+            .or_insert(index);
+    }
+
+    /// Like `get_function_by_name`, but caches the resolved (stable) INDEX in
+    /// `cache` (initialise to `usize::MAX`) so repeated lookups of a fixed name
+    /// on a hot path skip the name->index map and its string hash entirely.
+    /// Caching the index — not the pointer — is redefine-safe: the function table
+    /// is append-only and redefinition overwrites a slot's pointer in place
+    /// (`overwrite_function`), so a cached index always reads the CURRENT entry.
+    /// Used by per-`perform` effect dispatch (`beagle.effect/handle`,
+    /// `save_volatile_registers3`).
+    pub fn get_function_by_name_cached(
+        &self,
+        cache: &std::sync::atomic::AtomicUsize,
+        name: &str,
+    ) -> Option<&Function> {
+        use std::sync::atomic::Ordering;
+        let cached = cache.load(Ordering::Relaxed);
+        if cached != usize::MAX {
+            if let Some(f) = self.functions.get(cached) {
+                if f.name == name {
+                    return Some(f);
+                }
+            }
+        }
+        if let Some(&idx) = self.function_index_by_name.get(name) {
+            if let Some(f) = self.functions.get(idx) {
+                if f.name == name {
+                    cache.store(idx, Ordering::Relaxed);
+                    return Some(f);
+                }
+            }
+        }
+        self.get_function_by_name(name)
     }
 
     pub fn get_function_by_name_mut(&mut self, name: &str) -> Option<&mut Function> {

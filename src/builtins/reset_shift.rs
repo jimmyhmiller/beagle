@@ -171,6 +171,36 @@ pub fn take_tail_resume_public() -> bool {
     take_tail_resume()
 }
 
+/// Cached raw code pointers for the compiler-internal continuation trampolines
+/// (`read-sp-fp`, `return-jump`, `stack-switch`). `continuation_trampoline` runs
+/// on every effect resume — and the tail-resumptive cooperative scheduler
+/// resumes on every async op — so the old per-call `get_function_by_name` (an
+/// O(n) linear scan with string compares over every loaded function) was a
+/// measured hot spot under HTTP load. These trampolines are emitted once at
+/// startup, are never user-redefined, and never GC-move (they live in
+/// executable memory, not the GC heap), so resolving the pointer ONCE and
+/// caching it is safe.
+static READ_SP_FP_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static RETURN_JUMP_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static STACK_SWITCH_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[inline]
+fn cached_builtin_ptr(cache: &std::sync::atomic::AtomicUsize, name: &str) -> usize {
+    use std::sync::atomic::Ordering;
+    let cached = cache.load(Ordering::Relaxed);
+    if cached != 0 {
+        return cached;
+    }
+    let runtime = crate::get_runtime().get();
+    let entry = runtime
+        .get_function_by_name(name)
+        .unwrap_or_else(|| panic!("{name} trampoline not found"));
+    let ptr: *const u8 = entry.pointer.into();
+    let ptr = ptr as usize;
+    cache.store(ptr, Ordering::Relaxed);
+    ptr
+}
+
 /// Returns `true` if `pc` lies within the code range of
 /// `beagle.core/__reset__`. Used by `find_enclosing_reset_frame` to
 /// identify the prompt boundary during FP-chain walks.
@@ -2018,23 +2048,18 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
         sp: trampoline_sp,
         fp: trampoline_fp,
     } = {
-        let runtime = crate::get_runtime().get();
-        let fn_entry = runtime
-            .get_function_by_name("beagle.builtin/read-sp-fp")
-            .expect("read-sp-fp trampoline not found");
-        let read_sp_fp: extern "C" fn() -> SpFp =
-            unsafe { std::mem::transmute::<_, _>(fn_entry.pointer) };
+        let read_sp_fp: extern "C" fn() -> SpFp = unsafe {
+            std::mem::transmute::<usize, _>(cached_builtin_ptr(
+                &READ_SP_FP_PTR,
+                "beagle.builtin/read-sp-fp",
+            ))
+        };
         read_sp_fp()
     };
     // Read return-jump's pointer here, before we start writing dst,
     // so that the final call doesn't need any function lookups.
-    let return_jump_ptr: *const u8 = {
-        let runtime = crate::get_runtime().get();
-        let fn_entry = runtime
-            .get_function_by_name("beagle.builtin/return-jump")
-            .expect("return-jump trampoline not found");
-        fn_entry.pointer.into()
-    };
+    let return_jump_ptr: *const u8 =
+        cached_builtin_ptr(&RETURN_JUMP_PTR, "beagle.builtin/return-jump") as *const u8;
 
     // Cache the raw pointer to the gc_frame_top slot (now a field inside
     // this thread's MutatorState) before we enter the no-call critical
@@ -2132,12 +2157,11 @@ pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usiz
     });
     CONTINUATION_RESTORE_PLAN.with(|slot| slot.set(Box::into_raw(plan)));
 
-    let stack_switch: extern "C" fn(usize, usize) -> ! = {
-        let runtime = crate::get_runtime().get();
-        let fn_entry = runtime
-            .get_function_by_name("beagle.builtin/stack-switch")
-            .expect("stack-switch trampoline not found");
-        unsafe { std::mem::transmute::<_, _>(fn_entry.pointer) }
+    let stack_switch: extern "C" fn(usize, usize) -> ! = unsafe {
+        std::mem::transmute::<usize, _>(cached_builtin_ptr(
+            &STACK_SWITCH_PTR,
+            "beagle.builtin/stack-switch",
+        ))
     };
     let scratch_top = CONTINUATION_SCRATCH_STACK.with(|stack| {
         let mut stack = stack.borrow_mut();

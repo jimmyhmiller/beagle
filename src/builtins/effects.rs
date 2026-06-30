@@ -208,8 +208,16 @@ pub unsafe extern "C" fn perform_dispatch_and_return_tagged_runtime(
 
     let runtime = crate::get_runtime().get();
 
+    // Cache the stable indices of these two fixed dispatch functions so the
+    // per-`perform` hot path skips the name lookup + string hash. Index-based
+    // (not pointer-based) so it stays correct across live redefinition.
+    static HANDLE_FN_INDEX: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(usize::MAX);
+    static SAVE_VR_FN_INDEX: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(usize::MAX);
+
     let handle_fn_entry = runtime
-        .get_function_by_name("beagle.effect/handle")
+        .get_function_by_name_cached(&HANDLE_FN_INDEX, "beagle.effect/handle")
         .unwrap_or_else(|| unsafe {
             throw_runtime_error(
                 stack_pointer,
@@ -223,7 +231,7 @@ pub unsafe extern "C" fn perform_dispatch_and_return_tagged_runtime(
         .expect("handle dispatcher has no code pointer");
 
     let save_vr_fn_entry = runtime
-        .get_function_by_name("beagle.builtin/save_volatile_registers3")
+        .get_function_by_name_cached(&SAVE_VR_FN_INDEX, "beagle.builtin/save_volatile_registers3")
         .expect("save_volatile_registers3 trampoline not registered");
     let save_vr_ptr = runtime
         .get_pointer(save_vr_fn_entry)
