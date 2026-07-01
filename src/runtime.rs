@@ -3194,18 +3194,23 @@ fn bind_reuse_port(
         }
     }
 
-    // Build the sockaddr and bind. macOS sockaddr_in/in6 carry a leading length byte.
+    // Build the sockaddr and bind. BSD-derived sockaddr_in/in6 (macOS, the *BSDs)
+    // carry a leading `sin_len`/`sin6_len` byte that Linux's structs lack, so we
+    // zero-initialize and assign the common fields, then set the length byte only
+    // where it exists. Listing platform-specific fields in a struct literal would
+    // fail to compile on Linux (the x86-64 CI target).
     let bind_ret = match addr {
         std::net::SocketAddr::V4(v4) => {
-            let sin = libc::sockaddr_in {
-                sin_len: std::mem::size_of::<libc::sockaddr_in>() as u8,
-                sin_family: libc::AF_INET as libc::sa_family_t,
-                sin_port: v4.port().to_be(),
-                sin_addr: libc::in_addr {
-                    s_addr: u32::from_ne_bytes(v4.ip().octets()),
-                },
-                sin_zero: [0; 8],
+            let mut sin: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            sin.sin_family = libc::AF_INET as libc::sa_family_t;
+            sin.sin_port = v4.port().to_be();
+            sin.sin_addr = libc::in_addr {
+                s_addr: u32::from_ne_bytes(v4.ip().octets()),
             };
+            #[cfg(not(target_os = "linux"))]
+            {
+                sin.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
+            }
             unsafe {
                 libc::bind(
                     fd,
@@ -3215,16 +3220,18 @@ fn bind_reuse_port(
             }
         }
         std::net::SocketAddr::V6(v6) => {
-            let sin6 = libc::sockaddr_in6 {
-                sin6_len: std::mem::size_of::<libc::sockaddr_in6>() as u8,
-                sin6_family: libc::AF_INET6 as libc::sa_family_t,
-                sin6_port: v6.port().to_be(),
-                sin6_flowinfo: v6.flowinfo(),
-                sin6_addr: libc::in6_addr {
-                    s6_addr: v6.ip().octets(),
-                },
-                sin6_scope_id: v6.scope_id(),
+            let mut sin6: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+            sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            sin6.sin6_port = v6.port().to_be();
+            sin6.sin6_flowinfo = v6.flowinfo();
+            sin6.sin6_addr = libc::in6_addr {
+                s6_addr: v6.ip().octets(),
             };
+            sin6.sin6_scope_id = v6.scope_id();
+            #[cfg(not(target_os = "linux"))]
+            {
+                sin6.sin6_len = std::mem::size_of::<libc::sockaddr_in6>() as u8;
+            }
             unsafe {
                 libc::bind(
                     fd,
