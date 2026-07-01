@@ -8684,6 +8684,24 @@ impl Runtime {
                 Ordering::Greater => 1,
             };
         }
+        // Keywords: compare by their text, NOT by raw tagged pointer. Keywords are
+        // interned heap objects, so a raw-pointer comparison is neither lexicographic
+        // nor stable — a moving/compacting GC relocates keyword objects mid-sort, so
+        // the same two keywords can compare inconsistently across calls and corrupt
+        // the sort (observed under `gc-always`). Comparing bytes is stable and total.
+        let is_keyword = |v: usize| -> bool {
+            BuiltInTypes::get_kind(v) == BuiltInTypes::HeapObject
+                && HeapObject::from_tagged(v).get_type_id() == TYPE_ID_KEYWORD as usize
+        };
+        if is_keyword(a) && is_keyword(b) {
+            let ab = HeapObject::from_tagged(a).get_keyword_bytes().to_vec();
+            let bb = HeapObject::from_tagged(b).get_keyword_bytes().to_vec();
+            return match ab.cmp(&bb) {
+                Ordering::Less => -1,
+                Ordering::Equal => 0,
+                Ordering::Greater => 1,
+            };
+        }
         let as_num = |v: usize| -> Option<f64> {
             match BuiltInTypes::get_kind(v) {
                 BuiltInTypes::Int => Some(BuiltInTypes::untag_isize(v as isize) as f64),
