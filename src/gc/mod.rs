@@ -8,6 +8,16 @@ pub use crate::mmap_utils::get_page_size;
 pub mod compacting;
 pub mod finalizers;
 pub mod generational;
+// Vendored concurrent generational copying collector from the `gc-rust` project.
+// Self-contained (std-only). Not yet wired into the `Allocator` seam — see
+// docs/GCRUST_ADOPTION.md. Gated behind the `gcrust` feature.
+#[cfg(feature = "gcrust")]
+#[allow(dead_code, unused_imports)]
+pub mod gcrust;
+// Beagle-side adapter that drives the vendored gc-rust collector as an
+// `Allocator`. See docs/GCRUST_ADOPTION.md.
+#[cfg(feature = "gcrust")]
+pub mod gcrust_adapter;
 #[cfg(feature = "heap-dump")]
 pub mod heap_dump;
 pub mod mark_and_sweep;
@@ -144,6 +154,56 @@ pub trait Allocator {
     /// non-bump-pointer allocators stay correct.
     fn sync_allocator_frontier(&mut self, _alloc_ptr: usize) {}
 
+    // ── Thread-local allocation buffers (TLABs, gcrust only) ────────
+    //
+    // Under multi-threading the global alloc mutex serialises every allocation
+    // (and actively degrades: 4 threads allocate SLOWER in total than 1). TLABs
+    // fix this: each thread bumps a private slice of the young gen lock-free,
+    // taking the mutex only to refill (once per ~TLAB, not per object).
+    // `MutexAllocator` drives it; allocators that don't opt in return `None` and
+    // keep the per-object locked path.
+
+    /// Whether this allocator supports thread-local allocation buffers
+    /// (`grab_tlab*`/`tlab_bump`). When false, the runtime uses the plain
+    /// shared-nursery paths for multi-threaded allocation and for the
+    /// `ensure_space_for`/`allocate_no_gc` reservation. Default false.
+    fn supports_tlab(&self) -> bool {
+        false
+    }
+
+    /// Carve a fresh TLAB slice big enough for at least a `words`-payload object
+    /// from the young gen and return its `(start, end)` byte range. `None` means
+    /// "no TLAB" — the young gen can't grant one (→ GC), the object is too big
+    /// for a TLAB (→ caller falls back to a direct/tenured allocation), or this
+    /// allocator doesn't support TLABs. Called under the alloc mutex.
+    fn grab_tlab(&mut self, _words: usize) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// Like `grab_tlab`, but guarantees the returned slice is at least
+    /// `min_bytes` (used to reserve an exclusive region for a no-GC allocation
+    /// sequence). `None` if the young gen can't grant that much (caller GCs).
+    fn grab_tlab_sized(&mut self, _min_bytes: usize) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// Place one object of `words`/`kind` at the front of the TLAB window
+    /// `[alloc_ptr, alloc_end)`: write its header (zeroing the payload when
+    /// `zeroed`), and return `(object_ptr, new_alloc_ptr)`. `None` if it does
+    /// not fit the window (caller refills via `grab_tlab`). Pure w.r.t. the
+    /// allocator — it only writes the thread-private TLAB memory — so it needs
+    /// no lock. Default `None` = no TLAB support.
+    fn tlab_bump(
+        &self,
+        _alloc_ptr: usize,
+        _alloc_end: usize,
+        _words: usize,
+        _kind: BuiltInTypes,
+        _zeroed: bool,
+    ) -> Option<(usize, usize)> {
+        None
+    }
+
     /// Write barrier for generational GC.
     ///
     /// Called after writing a pointer value into a heap object's field.
@@ -188,4 +248,44 @@ pub trait Allocator {
     /// Default is a no-op: other allocators discover finalizables via their
     /// own per-object sweep walk.
     fn register_finalizable(&mut self, _tagged_ptr: usize) {}
+
+    // ── Concurrent collection (Phase 2, gcrust only) ────────────────
+    //
+    // A concurrent major cycle is driven by `Runtime::gc_impl` in three steps,
+    // straddling two short stop-the-world pauses with a concurrent trace
+    // between them:
+    //   1. `begin_concurrent` — called at STW#1 (all threads paused). Snapshots
+    //      + copies the roots, turns the concurrent write barrier on. Returns
+    //      `true` if a concurrent cycle has begun (then the driver resumes
+    //      threads and calls `concurrent_trace`); `false` means "not going
+    //      concurrent — do a normal stop-the-world `gc()` instead".
+    //   2. `concurrent_trace` — called with mutator threads RUNNING. Copies the
+    //      reachable graph from-space→to-space. Implementations must hold
+    //      whatever lock makes allocation exclusive for its duration so the
+    //      trace has exclusive allocator access (mutators block only on
+    //      allocation, not on mutation/card-marking).
+    //   3. `finish_concurrent` — called at STW#2 (threads re-paused, with FRESH
+    //      roots). Reconciles concurrent mutations and flips the spaces.
+    //
+    // Default impls make every non-gcrust collector stay stop-the-world.
+
+    /// Begin a concurrent cycle at STW#1; `false` = collect stop-the-world.
+    fn begin_concurrent(
+        &mut self,
+        _gc_frame_tops: &[usize],
+        _extra_roots: &[(*mut usize, usize)],
+    ) -> bool {
+        false
+    }
+
+    /// Concurrent trace (mutators running).
+    fn concurrent_trace(&mut self) {}
+
+    /// Finish a concurrent cycle at STW#2 with fresh roots.
+    fn finish_concurrent(
+        &mut self,
+        _gc_frame_tops: &[usize],
+        _extra_roots: &[(*mut usize, usize)],
+    ) {
+    }
 }

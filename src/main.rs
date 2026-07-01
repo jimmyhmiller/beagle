@@ -2281,7 +2281,9 @@ fn run_repl(args: CommandLineArguments) -> Result<(), Box<dyn Error>> {
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(feature = "compacting")] {
+    if #[cfg(feature = "gcrust")] {
+        pub type Alloc = MutexAllocator<crate::gc::gcrust_adapter::GcRustHeap>;
+    } else if #[cfg(feature = "compacting")] {
         pub type Alloc = MutexAllocator<CompactingHeap>;
     } else if #[cfg(feature = "mark-and-sweep")] {
         pub type Alloc = MutexAllocator<MarkAndSweep>;

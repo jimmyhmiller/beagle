@@ -1440,6 +1440,20 @@ impl Runtime {
             true,
             6, // stack_pointer, frame_pointer, loop_id, socket_id, data, future_atom
         )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/tcp-try-read",
+            tcp_try_read as *const u8,
+            true,
+            true,
+            5, // stack_pointer, frame_pointer, loop_id, socket_id, n
+        )?;
+        self.add_builtin_function_with_fp(
+            "beagle.core/tcp-try-write",
+            tcp_try_write as *const u8,
+            true,
+            true,
+            5, // stack_pointer, frame_pointer, loop_id, socket_id, data
+        )?;
         self.add_builtin_function(
             "beagle.core/tcp-close",
             tcp_close as *const u8,

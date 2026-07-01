@@ -1541,6 +1541,19 @@ pub struct TcpTask {
 }
 
 /// Event loop for async I/O operations using mio
+/// Outcome of a synchronous non-blocking I/O attempt (the ready-I/O fast path).
+pub enum TryIo {
+    /// Read completed: bytes read (empty = EOF/closed).
+    Ready(Vec<u8>),
+    /// Write completed: bytes written (may be a partial write).
+    Wrote(usize),
+    /// Not ready — caller falls back to the async/suspend path.
+    WouldBlock,
+    /// Socket gone or a hard error — caller falls back so the async path
+    /// surfaces the error uniformly.
+    Failed,
+}
+
 /// Always runs a dedicated I/O thread that handles polling and TCP operations.
 /// State is shared via Arc<Mutex<EventLoopState>> for access from both the
 /// I/O thread and calling threads.
@@ -1903,6 +1916,85 @@ impl EventLoop {
     pub fn current_result(&self) -> Option<TcpResult> {
         let tid = std::thread::current().id();
         self.current_results.lock().unwrap().get(&tid).cloned()
+    }
+
+    /// Ready-I/O fast path: attempt a non-blocking read directly on the socket,
+    /// WITHOUT submitting an async op or capturing a continuation. Returns the
+    /// bytes if data is immediately available (empty vec = EOF/closed);
+    /// `WouldBlock` (caller falls back to the async/suspend path); or `Failed`
+    /// (socket gone / hard error — caller also falls back so the async path
+    /// surfaces the error uniformly). Skipped if a read is already pending for
+    /// this socket (the event loop owns it), avoiding two readers on one stream.
+    pub fn try_read_sync(&self, socket_id: usize, n: usize) -> TryIo {
+        use std::io::Read;
+        let mut state = self.state.lock().unwrap();
+        if state.pending_reads.contains_key(&socket_id) {
+            return TryIo::WouldBlock;
+        }
+        if let Some(mut stream) = state.tcp_streams.remove(&socket_id) {
+            let mut buf = vec![0u8; n];
+            let r = stream.read(&mut buf);
+            state.tcp_streams.insert(socket_id, stream);
+            drop(state);
+            match r {
+                Ok(count) => {
+                    buf.truncate(count);
+                    TryIo::Ready(buf)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => TryIo::WouldBlock,
+                Err(_) => TryIo::Failed,
+            }
+        } else {
+            TryIo::Failed
+        }
+    }
+
+    /// Ready-I/O fast path for writes: attempt a single non-blocking write.
+    /// Returns `Wrote(count)` (count may be < data.len() on a partial write —
+    /// caller must send the remainder), `WouldBlock`, or `Failed`.
+    pub fn try_write_sync(&self, socket_id: usize, data: &[u8]) -> TryIo {
+        use std::io::Write;
+        let mut state = self.state.lock().unwrap();
+        if state.pending_writes.contains_key(&socket_id) {
+            return TryIo::WouldBlock;
+        }
+        if let Some(mut stream) = state.tcp_streams.remove(&socket_id) {
+            // Loop over partial writes so the common case (small response fits the
+            // send buffer) returns "all written" and the caller never needs to
+            // handle a remainder. A partial is only returned if the kernel buffer
+            // genuinely fills mid-write.
+            let mut total = 0usize;
+            let result = loop {
+                match stream.write(&data[total..]) {
+                    Ok(0) => break TryIo::Wrote(total),
+                    Ok(k) => {
+                        total += k;
+                        if total == data.len() {
+                            break TryIo::Wrote(total);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        break if total > 0 {
+                            TryIo::Wrote(total)
+                        } else {
+                            TryIo::WouldBlock
+                        };
+                    }
+                    Err(_) => {
+                        break if total > 0 {
+                            TryIo::Wrote(total)
+                        } else {
+                            TryIo::Failed
+                        };
+                    }
+                }
+            };
+            state.tcp_streams.insert(socket_id, stream);
+            drop(state);
+            result
+        } else {
+            TryIo::Failed
+        }
     }
 
     /// Set the current result for an op_id-specific inspection flow.
@@ -2910,6 +3002,38 @@ impl EventLoopState {
                                 op_id,
                             });
                         }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            // Thundering herd: when N workers each accept the SAME
+                            // shared listen socket (via dup'd fds — how we scale
+                            // accept across cores on macOS), a single connection
+                            // wakes several of them; one wins the accept() and the
+                            // rest get EAGAIN/WouldBlock. That is NORMAL, not an
+                            // error — re-arm this waiter for the next connection
+                            // instead of failing the accept.
+                            if let Some(mut listener) = self.tcp_listeners.remove(&listener_id) {
+                                let token = self.next_token();
+                                let registry = self.poll_mut().registry();
+                                let _ = registry
+                                    .register(&mut listener, token, Interest::READABLE)
+                                    .or_else(|_| {
+                                        registry.reregister(
+                                            &mut listener,
+                                            token,
+                                            Interest::READABLE,
+                                        )
+                                    });
+                                self.tcp_listeners.insert(listener_id, listener);
+                                self.token_to_listener.insert(token.0, listener_id);
+                                self.pending_ops.insert(
+                                    token.0,
+                                    PendingOperation::TcpAccept {
+                                        future_atom,
+                                        listener_id,
+                                        op_id,
+                                    },
+                                );
+                            }
+                        }
                         Err(e) => {
                             trace!(
                                 "tcp",
@@ -3145,18 +3269,62 @@ impl EventLoopState {
     }
 }
 
-/// Bind a TCP listener with SO_REUSEPORT (+ SO_REUSEADDR) set, so that N worker
-/// threads can each bind the SAME host:port and have the kernel load-balance
+/// Per-process map: `addr` string → a "master" listen fd kept alive for the
+/// process lifetime. The FIRST `bind_reuse_port(addr)` binds the socket and
+/// records a master dup here; EVERY later call for the same addr returns a fresh
+/// `dup()` of that master. See `bind_reuse_port` for why.
+static SHARED_LISTENERS: LazyLock<Mutex<HashMap<String, libc::c_int>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Bind a TCP listener so that N worker threads (each with its own event loop)
+/// can accept from the SAME underlying listen socket, and the kernel distributes
 /// incoming connections across them — the foundation of the thread-per-core HTTP
-/// server. `mio::net::TcpListener::bind` only sets SO_REUSEADDR, so we build the
-/// socket by hand (libc; no socket2 dependency), set the options BEFORE bind,
-/// then hand the fd to mio. macOS-only (matches the project target). For a single
-/// listener SO_REUSEPORT is effectively a no-op, so this is safe to use always.
+/// server.
+///
+/// IMPORTANT (macOS): `SO_REUSEPORT` on Darwin does NOT load-balance the way
+/// Linux does — N *independent* sockets bound to one port deliver every
+/// connection to a single one, leaving the other workers idle (verified: one
+/// worker at 95% CPU, three at 0%). The portable fix is to share ONE listen
+/// socket's accept queue via `dup()`: the first bind of an addr creates the
+/// socket; every later bind returns a dup of it. Multiple threads/event-loops
+/// accepting one shared accept queue ARE distributed by the kernel. So this
+/// function binds once per addr and hands out dups thereafter.
+///
+/// `mio::net::TcpListener::bind` only sets SO_REUSEADDR, so we build the socket
+/// by hand (libc; no socket2 dependency), set options BEFORE bind, then hand the
+/// fd to mio. macOS-oriented (matches the project target).
 fn bind_reuse_port(
     addr: std::net::SocketAddr,
     backlog: i32,
 ) -> std::io::Result<mio::net::TcpListener> {
     use std::os::unix::io::FromRawFd;
+
+    // Wrap an existing (already bound+listening) fd as a fresh non-blocking mio
+    // listener via `dup`. Shares the underlying socket's accept queue.
+    fn dup_as_listener(master_fd: libc::c_int) -> std::io::Result<mio::net::TcpListener> {
+        let dup_fd = unsafe { libc::dup(master_fd) };
+        if dup_fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let flags = unsafe { libc::fcntl(dup_fd, libc::F_GETFL, 0) };
+        if flags < 0 || unsafe { libc::fcntl(dup_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+        {
+            unsafe { libc::close(dup_fd) };
+            return Err(std::io::Error::last_os_error());
+        }
+        let std_listener = unsafe { std::net::TcpListener::from_raw_fd(dup_fd) };
+        Ok(mio::net::TcpListener::from_std(std_listener))
+    }
+
+    // Hold the map lock for the whole bind: the first-bind path must complete and
+    // record its master before a racing worker sees an empty map (else two real
+    // binds happen and sharing is lost). `bind`/`listen` are fast local syscalls.
+    let mut shared = SHARED_LISTENERS.lock().unwrap();
+    let key = addr.to_string();
+    if let Some(&master_fd) = shared.get(&key) {
+        return dup_as_listener(master_fd);
+    }
+
     // Close the raw fd on any early-return error path.
     struct FdGuard(libc::c_int);
     impl Drop for FdGuard {
@@ -3255,6 +3423,16 @@ fn bind_reuse_port(
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         return Err(std::io::Error::last_os_error());
     }
+
+    // First bind of this addr succeeded. Record a MASTER dup kept alive for the
+    // whole process, so every later worker binding this addr gets a dup sharing
+    // this socket's accept queue — even if this first listener is later dropped.
+    let master_fd = unsafe { libc::dup(fd) };
+    if master_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    shared.insert(key, master_fd);
+    drop(shared);
 
     // Success: hand ownership of the fd to mio; defuse the guard so it isn't closed.
     guard.0 = -1;
@@ -3919,21 +4097,42 @@ pub extern "C" fn jit_load_current_mutator_state() -> *mut MutatorState {
     current_mutator_state()
 }
 
+/// Registry of every live thread's `MutatorState` pointer, so the GC can
+/// invalidate all threads' TLABs after a collection (the young gen is reset, so
+/// every thread's cached `alloc_ptr/alloc_end` now points into freed space —
+/// each must be zeroed to force a fresh TLAB grab on the next allocation). A
+/// `RegisteredMutator` Drop removes+frees the entry on OS-thread exit, so the
+/// pointers here are always valid.
+static MUTATOR_REGISTRY: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+/// RAII owner of a thread's leaked `MutatorState`: registers the pointer on
+/// creation, deregisters and frees it on OS-thread exit.
+struct RegisteredMutator(*mut MutatorState);
+impl Drop for RegisteredMutator {
+    fn drop(&mut self) {
+        if let Ok(mut reg) = MUTATOR_REGISTRY.lock() {
+            reg.retain(|&p| p != self.0 as usize);
+        }
+        // SAFETY: this pointer was produced by `Box::into_raw` in
+        // `current_mutator_state` and is owned solely by this cell.
+        unsafe { drop(Box::from_raw(self.0)) };
+    }
+}
+
 thread_local! {
     /// Per-OS-thread MutatorState storage. Lazily initialized on first
-    /// access; lives until the OS thread exits (pthread destructor drops
-    /// the `Box`). Because the lifetime is tied to the OS thread — not
-    /// to Beagle's notion of "registered thread" — the pointer returned
-    /// by `current_mutator_state` is stable for every call on that
-    /// thread regardless of Beagle-level HashMap bookkeeping.
-    static OS_THREAD_MUTATOR: std::cell::OnceCell<Box<MutatorState>> =
+    /// access; lives until the OS thread exits. Because the lifetime is tied to
+    /// the OS thread — not to Beagle's notion of "registered thread" — the
+    /// pointer returned by `current_mutator_state` is stable for every call on
+    /// that thread regardless of Beagle-level HashMap bookkeeping.
+    static OS_THREAD_MUTATOR: std::cell::OnceCell<RegisteredMutator> =
         const { std::cell::OnceCell::new() };
 }
 
 /// Pointer to the current thread's MutatorState.
 ///
 /// Lazily allocates on first access per OS thread, then returns a pointer
-/// to a `Box<MutatorState>` whose heap address is stable for the rest of
+/// to a `MutatorState` whose heap address is stable for the rest of
 /// the thread's lifetime. Because it's keyed on the OS thread (not on
 /// Beagle's `thread_globals` registry), every Rust↔Beagle boundary can
 /// rely on this being valid — there's no bootstrap window, no
@@ -3941,14 +4140,34 @@ thread_local! {
 #[inline]
 pub fn current_mutator_state() -> *mut MutatorState {
     OS_THREAD_MUTATOR.with(|cell| {
-        let boxed = cell.get_or_init(|| Box::new(MutatorState::new()));
-        // SAFETY: the `Box` is stored inside the thread_local cell which
-        // outlives every caller on this thread; its heap allocation is
-        // stable for the thread's lifetime. We hand out a mutable raw
-        // pointer because callers (JIT code, the runtime) treat the
-        // MutatorState as an interior-mutable region.
-        (&**boxed as *const MutatorState) as *mut MutatorState
+        let reg = cell.get_or_init(|| {
+            let ptr = Box::into_raw(Box::new(MutatorState::new()));
+            if let Ok(mut r) = MUTATOR_REGISTRY.lock() {
+                r.push(ptr as usize);
+            }
+            RegisteredMutator(ptr)
+        });
+        reg.0
     })
+}
+
+/// Invalidate every live thread's TLAB after a collection reset the young gen:
+/// zero each `MutatorState`'s bump window so the next allocation takes the slow
+/// path and grabs a fresh TLAB from the reset young gen. Must be called at a
+/// safepoint (all mutators paused) so no thread is mid-bump.
+pub fn reset_all_tlabs() {
+    if let Ok(reg) = MUTATOR_REGISTRY.lock() {
+        for &p in reg.iter() {
+            let ms = p as *mut MutatorState;
+            // SAFETY: registry entries are valid until their thread exits (which
+            // also removes them under this same lock); all mutators are paused.
+            unsafe {
+                (*ms).alloc_ptr = 0;
+                (*ms).alloc_end = 0;
+                (*ms).tlab_start = 0;
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -4134,21 +4353,22 @@ impl Memory {
     /// `*mut usize`; the GC reads each cell, traces, and writes the
     /// forwarded value back through the same address — no snapshot or
     /// restore step is required because cell addresses never move.
-    pub fn run_gc(&mut self, gc_frame_tops: &[usize], binding_cells: &[*mut usize]) {
-        // Collect shadow stack entries and head_block roots from all threads as extra GC roots.
-        // Safety: world is stopped during GC, so no thread modifies handle_stack.
+    /// Assemble the "extra roots" the GC needs beyond the per-thread frame
+    /// chains: each thread's head_block + handle/shadow stack, plus the stable
+    /// namespace binding cells. Each is a `(slot_address, value)` pair the GC
+    /// updates in place. Safety: the world is stopped, so no thread mutates
+    /// these while we read them.
+    fn assemble_extra_roots(&self, binding_cells: &[*mut usize]) -> Vec<(*mut usize, usize)> {
         let mut extra_roots: Vec<(*mut usize, usize)> = {
             let thread_globals = self.thread_globals.lock().unwrap();
             let mut roots = Vec::new();
             for tg in thread_globals.values() {
-                // Add head_block as a GC root (so GlobalObjectBlock chain is traced)
+                // head_block as a GC root (so the GlobalObjectBlock chain is traced)
                 let head_block_value = tg.head_block.load(Ordering::SeqCst);
                 if BuiltInTypes::is_heap_pointer(head_block_value) {
-                    // Get a *mut usize to the AtomicUsize's inner value
                     let slot_addr = tg.head_block.as_ptr();
                     roots.push((slot_addr, head_block_value));
                 }
-
                 for i in 0..tg.handle_stack_top {
                     let value = tg.handle_stack[i];
                     if BuiltInTypes::is_heap_pointer(value) {
@@ -4159,22 +4379,20 @@ impl Memory {
             }
             roots
         };
-
-        // Binding cells live in a stable mmap region (BindingSpace).
-        // Each cell's address never moves, so we can hand the cell
-        // pointer to the GC directly and let it update the value in
-        // place.
+        // Binding cells live in a stable mmap region (their addresses never
+        // move); hand the cell pointer to the GC to update in place.
         for &cell in binding_cells {
             let value = unsafe { *cell };
             if BuiltInTypes::is_heap_pointer(value) {
                 extra_roots.push((cell, value));
             }
         }
+        extra_roots
+    }
 
-        self.heap.gc(gc_frame_tops, &extra_roots);
-
-        // Sync stack slots from updated head_block (GC may have moved the block)
-        // Direction: head_block → stack_base - 8
+    /// After a moving collection, re-publish each thread's (possibly relocated)
+    /// head_block into its stack slot at `stack_base - 8`.
+    fn sync_head_blocks(&self) {
         let thread_globals = self.thread_globals.lock().unwrap();
         for tg in thread_globals.values() {
             if tg.stack_base != 0 {
@@ -4184,6 +4402,37 @@ impl Memory {
                 }
             }
         }
+    }
+
+    pub fn run_gc(&mut self, gc_frame_tops: &[usize], binding_cells: &[*mut usize]) {
+        let extra_roots = self.assemble_extra_roots(binding_cells);
+        self.heap.gc(gc_frame_tops, &extra_roots);
+        self.sync_head_blocks();
+    }
+
+    /// Concurrent-GC STW#1 step: assemble roots and ask the collector to begin a
+    /// concurrent cycle. Returns `true` if it did (the caller must then resume
+    /// mutators, call [`concurrent_trace_gc`](Self::concurrent_trace_gc), and
+    /// finish with [`finish_concurrent_gc`](Self::finish_concurrent_gc)).
+    fn begin_concurrent_gc(
+        &mut self,
+        gc_frame_tops: &[usize],
+        binding_cells: &[*mut usize],
+    ) -> bool {
+        let extra_roots = self.assemble_extra_roots(binding_cells);
+        self.heap.begin_concurrent(gc_frame_tops, &extra_roots)
+    }
+
+    fn concurrent_trace_gc(&mut self) {
+        self.heap.concurrent_trace();
+    }
+
+    /// Concurrent-GC STW#2 step: re-assemble FRESH roots and finish the cycle
+    /// (reconcile + flip), then re-publish head_blocks.
+    fn finish_concurrent_gc(&mut self, gc_frame_tops: &[usize], binding_cells: &[*mut usize]) {
+        let extra_roots = self.assemble_extra_roots(binding_cells);
+        self.heap.finish_concurrent(gc_frame_tops, &extra_roots);
+        self.sync_head_blocks();
     }
 }
 
@@ -4880,6 +5129,12 @@ pub struct Runtime {
     pub registered_thread_count: AtomicUsize,
     pub thread_state: Arc<(Mutex<ThreadState>, Condvar)>,
     pub gc_lock: Mutex<()>,
+    /// True while a CONCURRENT gc cycle holds `gc_lock` with mutators running
+    /// (Phase 2). A thread that needs to GC then finds `gc_lock` held but
+    /// `is_paused == 0`, so `__pause` won't block it — instead it must block on
+    /// `gc_lock` (registered scannable) until the concurrent cycle finishes,
+    /// rather than spin-exhausting its allocation retries.
+    pub concurrent_gc_active: std::sync::atomic::AtomicBool,
     /// Tier-2 specializations compiled but not yet installed into the function
     /// table. Staged here by the compiler thread (which must NOT mutate the
     /// table while mutators read it locklessly), then applied by a coordinator
@@ -5071,6 +5326,7 @@ impl Runtime {
             },
             libraries: vec![],
             is_paused: AtomicUsize::new(0),
+            concurrent_gc_active: std::sync::atomic::AtomicBool::new(false),
             registered_thread_count: AtomicUsize::new(0),
             gc_lock: Mutex::new(()),
             pending_installs: Mutex::new(Vec::new()),
@@ -5898,6 +6154,36 @@ impl Runtime {
             return;
         }
 
+        // Multi-threaded: reserve an EXCLUSIVE thread-local region for the
+        // upcoming `allocate_no_gc` sequence. Once workers actually run in
+        // parallel, a shared-nursery reservation is a TOCTOU — another worker
+        // consumes the space between here and the allocs → `allocate_no_gc`
+        // panics. A private reservation (generous header slack) is race-free.
+        // The reservation is taken AFTER any GC so a GC can't zero it.
+        if self
+            .registered_thread_count
+            .load(std::sync::atomic::Ordering::Acquire)
+            != 0
+            && self.memory.heap.supports_tlab()
+        {
+            let need_bytes = (total_words + 32) * 8;
+            if self.memory.heap.reserve_no_gc_region(need_bytes) {
+                return;
+            }
+            self.run_gc(stack_pointer, frame_pointer);
+            if self.memory.heap.reserve_no_gc_region(need_bytes) {
+                return;
+            }
+            self.memory.heap.grow();
+            if self.memory.heap.reserve_no_gc_region(need_bytes) {
+                return;
+            }
+            // Reservation unsupported (a non-TLAB allocator) — fall through to
+            // the plain can_allocate path below.
+        }
+
+        // Single-threaded: the inline window is the whole nursery; ensuring the
+        // nursery can hold `total_words` is sufficient (no other mutator races).
         if !self
             .memory
             .heap
@@ -5922,7 +6208,25 @@ impl Runtime {
         words: usize,
         kind: BuiltInTypes,
     ) -> Result<usize, Box<dyn Error>> {
-        let result = self.memory.heap.try_allocate(words, kind);
+        // Multi-threaded: allocate from the EXCLUSIVE thread-local region that
+        // `ensure_space_for` reserved (bump only — no lock, no GC, no cross-
+        // thread race).
+        if self
+            .registered_thread_count
+            .load(std::sync::atomic::Ordering::Acquire)
+            != 0
+            && self.memory.heap.supports_tlab()
+        {
+            if let Some(obj) = self.memory.heap.alloc_from_region(words, kind, false) {
+                debug_assert_eq!(obj % 8, 0);
+                return Ok(kind.tag(obj as isize) as usize);
+            }
+            // No reserved region (a non-TLAB allocator, or the reservation
+            // wasn't taken) — fall through to the direct path below.
+        }
+
+        // Single-threaded: direct (non-TLAB) allocation from the nursery.
+        let result = self.memory.heap.try_allocate_direct(words, kind, false);
         match result {
             Ok(AllocateAction::Allocated(value)) => {
                 assert!(value.is_aligned());
@@ -6421,6 +6725,24 @@ impl Runtime {
             return;
         }
 
+        // DEBUG (BEAGLE_GC_PAUSE): time the full multi-thread stop-the-world
+        // window — coordination (pausing/resuming all threads) included, which
+        // the per-phase PauseGuards don't capture. This is the wall-time other
+        // workers lose per GC; the prize per-thread minors could recover.
+        struct StwTimer(Option<std::time::Instant>);
+        impl Drop for StwTimer {
+            fn drop(&mut self) {
+                if let Some(t) = self.0 {
+                    eprintln!("[pause] full-stw {}us", t.elapsed().as_micros());
+                }
+            }
+        }
+        let _stw = StwTimer(
+            std::env::var("BEAGLE_GC_PAUSE")
+                .is_ok()
+                .then(std::time::Instant::now),
+        );
+
         // Raw self pointer captured before `gc_lock` is held, so we can drain
         // staged tier-2 installs (a `&mut self` call) while the `lock`/`cvar`
         // borrow of `self.thread_state` is live below. Sound: every other
@@ -6433,7 +6755,27 @@ impl Runtime {
             match e {
                 TryLockError::WouldBlock => {
                     drop(locked);
-                    unsafe { __pause(0, frame_pointer) };
+                    // A CONCURRENT gc holds gc_lock with mutators running
+                    // (is_paused==0): `__pause` would return immediately and
+                    // this thread would spin its allocation retries to
+                    // exhaustion. Register as scannable (like an FFI call — the
+                    // collector scans our frozen frame) and BLOCK on gc_lock
+                    // until the cycle finishes, then retry. Gated on
+                    // `concurrent_gc_active` so the ordinary stop-the-world path
+                    // (concurrent GC off) is byte-for-byte unchanged: __pause.
+                    if !self.is_paused()
+                        && self
+                            .concurrent_gc_active
+                            .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        crate::builtins::register_c_call(0, frame_pointer);
+                        if let Ok(g) = self.gc_lock.lock() {
+                            drop(g);
+                        }
+                        crate::builtins::unregister_c_call();
+                    } else {
+                        unsafe { __pause(0, frame_pointer) };
+                    }
                 }
                 TryLockError::Poisoned(e) => {
                     eprintln!("Warning: Poisoned lock in GC: {:?}", e);
@@ -6535,7 +6877,109 @@ impl Runtime {
         // through the same address.
         let binding_cells = self.namespaces.collect_binding_cells();
 
-        self.memory.run_gc(&gc_frame_tops, &binding_cells);
+        // Concurrent major (Phase 2, gcrust + BEAGLE_GCRUST_CONCURRENT): if the
+        // collector begins a concurrent cycle at this STW#1 pause, resume the
+        // mutators, run the trace with them live, then re-pause for STW#2 to
+        // finish. `begin_concurrent` defaults to false for every other GC, so
+        // this whole branch is inert unless concurrent gcrust is active.
+        if self
+            .memory
+            .begin_concurrent_gc(&gc_frame_tops, &binding_cells)
+        {
+            // Mark the concurrent window: a mutator that needs to GC now (finds
+            // gc_lock held while is_paused==0) will block on gc_lock rather than
+            // spin its allocation retries to exhaustion.
+            self.concurrent_gc_active
+                .store(true, std::sync::atomic::Ordering::Release);
+            // Resume mutators for the concurrent trace (gc_lock stays held so
+            // no other GC can start; a nursery-full mutator will block on the
+            // alloc mutex the trace holds, not spin).
+            self.is_paused
+                .store(0, std::sync::atomic::Ordering::Release);
+            for thread in self.memory.threads.iter() {
+                thread.unpark();
+            }
+            {
+                let mut ts = lock.lock().expect("thread_state lock (concurrent resume)");
+                while ts.paused_threads() > 0 {
+                    let (s, t) = cvar
+                        .wait_timeout(ts, Duration::from_millis(1))
+                        .expect("cvar wait (concurrent resume)");
+                    ts = s;
+                    if t.timed_out() {
+                        for thread in self.memory.threads.iter() {
+                            thread.unpark();
+                        }
+                    }
+                }
+                ts.clear();
+            }
+
+            // The concurrent trace (mutators running; holds the alloc mutex).
+            self.memory.concurrent_trace_gc();
+
+            // Re-pause for STW#2.
+            let _ = self.is_paused.compare_exchange(
+                0,
+                1,
+                std::sync::atomic::Ordering::Release,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            let self_in = if current_thread_is_registered() { 1 } else { 0 };
+            let (roots2, cells2) = {
+                let mut ts = lock
+                    .lock()
+                    .expect("thread_state lock (concurrent re-pause)");
+                let mut need = self
+                    .registered_thread_count
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    .saturating_sub(self_in);
+                while ts.paused_threads() + ts.c_calling_stack_pointers.len() < need {
+                    let (s, _t) = cvar
+                        .wait_timeout(ts, Duration::from_millis(10))
+                        .expect("cvar wait (concurrent re-pause)");
+                    ts = s;
+                    need = self
+                        .registered_thread_count
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        .saturating_sub(self_in);
+                }
+                let mut roots2: Vec<usize> = Vec::new();
+                for (_tid, &(_fp, gft)) in ts.stack_pointers.iter() {
+                    if gft != 0 {
+                        roots2.push(gft);
+                    }
+                }
+                for (_tid, &(_fp, gft)) in ts.c_calling_stack_pointers.iter() {
+                    if gft != 0 {
+                        roots2.push(gft);
+                    }
+                }
+                drop(ts);
+                roots2.push(crate::builtins::get_gc_frame_top());
+                let cells2 = self.namespaces.collect_binding_cells();
+                (roots2, cells2)
+            };
+            self.memory.finish_concurrent_gc(&roots2, &cells2);
+            // The concurrent major reclaimed TENURED only — it does NOT evacuate
+            // the nursery. But GC is almost always triggered by the nursery
+            // being full, so without freeing it here the triggering allocation
+            // would still fail (allocate_no_gc panics / retries exhaust). Run a
+            // normal minor while the world is still stopped at STW#2 to promote
+            // nursery survivors into the freshly-compacted tenured space and
+            // empty the nursery.
+            self.memory.run_gc(&roots2, &cells2);
+            // Threads remain paused at STW#2; fall through to the normal resume.
+        } else {
+            self.memory.run_gc(&gc_frame_tops, &binding_cells);
+        }
+
+        // The young gen was just reset, so every thread's cached TLAB window
+        // (MutatorState.alloc_ptr/alloc_end) now points into freed space.
+        // Invalidate them all while the world is stopped so the next allocation
+        // on each thread grabs a fresh TLAB. (No-op for the single-thread inline
+        // path, which is re-armed from the frontier just below.)
+        crate::runtime::reset_all_tlabs();
 
         // World is stopped — also install any staged tier-2 specializations.
         // This is the fallback for the case where an install STW lost the race
@@ -6578,6 +7022,9 @@ impl Runtime {
         thread_state.clear();
 
         drop(locked);
+        // Concurrent window (if any) is over: gc_lock is released.
+        self.concurrent_gc_active
+            .store(false, std::sync::atomic::Ordering::Release);
 
         // GC may have reset the young-gen frontier (minor collection
         // clears the space). Refresh MutatorState so subsequent JIT

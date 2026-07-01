@@ -353,9 +353,10 @@ pub extern "C" fn tcp_write_async(
     let future_atom = BuiltInTypes::untag(future_atom);
     let runtime = get_runtime().get_mut();
 
-    // Get the data as bytes - handle both string literals and heap strings
-    let data_str = runtime.get_string(stack_pointer, data);
-    let data_bytes = data_str.as_bytes().to_vec();
+    // Get the data as bytes (single copy; handles literals, flat + cons strings).
+    // The async op OWNS the bytes (they outlive this call), so a Vec is required.
+    let _ = stack_pointer;
+    let data_bytes = runtime.get_string_bytes_vec(data);
 
     trace!(
         "tcp",
@@ -378,6 +379,83 @@ pub extern "C" fn tcp_write_async(
     }) {
         Ok(()) => BuiltInTypes::Int.tag(op_id as isize) as usize,
         Err(_) => BuiltInTypes::Int.tag(-1) as usize,
+    }
+}
+
+/// Ready-I/O fast path: attempt a non-blocking read directly on the socket,
+/// bypassing the async op + continuation capture entirely. Returns a Beagle
+/// string of the bytes read (empty string = EOF/closed) if data was immediately
+/// available, or boolean `false` if not ready / error (caller falls back to the
+/// async read, which suspends and surfaces errors uniformly). A successful read
+/// is always a string, so `false` is an unambiguous "go async" signal.
+pub extern "C" fn tcp_try_read(
+    stack_pointer: usize,
+    _frame_pointer: usize,
+    loop_id: usize,
+    socket_id: usize,
+    n: usize,
+) -> usize {
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let socket_id = BuiltInTypes::untag(socket_id);
+    let n = BuiltInTypes::untag(n) as usize;
+    let runtime = get_runtime().get_mut();
+    let outcome = {
+        let event_loop = match runtime.event_loops.get(loop_id) {
+            Some(el) => el,
+            None => return BuiltInTypes::false_value() as usize,
+        };
+        event_loop.try_read_sync(socket_id, n)
+    };
+    match outcome {
+        crate::runtime::TryIo::Ready(bytes) => {
+            let runtime = get_runtime().get_mut();
+            runtime
+                .allocate_string_from_bytes(stack_pointer, &bytes)
+                .map(|t| t.into())
+                .unwrap_or(BuiltInTypes::false_value() as usize)
+        }
+        _ => BuiltInTypes::false_value() as usize,
+    }
+}
+
+/// Ready-I/O fast path for writes: a single non-blocking write. Returns the
+/// tagged count of bytes written (>= 0, possibly a partial write — the caller
+/// sends the remainder), or boolean `false` if not ready / error (caller falls
+/// back to the async write).
+pub extern "C" fn tcp_try_write(
+    stack_pointer: usize,
+    _frame_pointer: usize,
+    loop_id: usize,
+    socket_id: usize,
+    data: usize,
+) -> usize {
+    let _ = stack_pointer;
+    let loop_id = BuiltInTypes::untag(loop_id);
+    let socket_id = BuiltInTypes::untag(socket_id);
+    let runtime = get_runtime().get();
+    // Copy the string bytes into an owned Vec: ONE copy (was two — `get_string`
+    // allocated a Rust String, then `.to_vec()` copied again). We deliberately
+    // do NOT slice the heap string across the write: this reads the bytes in a
+    // single safepoint-free step, so a moving GC can't relocate the string out
+    // from under the pending write.
+    let data_bytes = runtime.get_string_bytes_vec(data);
+    let event_loop = match runtime.event_loops.get(loop_id) {
+        Some(el) => el,
+        None => return BuiltInTypes::false_value() as usize,
+    };
+    let data_len = data_bytes.len();
+    let outcome = event_loop.try_write_sync(socket_id, &data_bytes);
+    match outcome {
+        // Common case: everything went out. Return `true` so the caller needs no
+        // length check or remainder slice.
+        crate::runtime::TryIo::Wrote(count) if count == data_len => {
+            BuiltInTypes::construct_boolean(true) as usize
+        }
+        // Partial (kernel buffer filled): return the tagged count so the caller
+        // sends the remainder via the async path.
+        crate::runtime::TryIo::Wrote(count) => BuiltInTypes::Int.tag(count as isize) as usize,
+        // Not ready / error: caller falls back to the async write.
+        _ => BuiltInTypes::false_value() as usize,
     }
 }
 

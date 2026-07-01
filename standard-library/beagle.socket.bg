@@ -57,9 +57,18 @@ fn accept(listener) {
 // Read up to n bytes from a TCP socket (blocking)
 /// Block reading up to `n` bytes from `socket`, returning the data read. Throws on error.
 fn read(socket, n) {
-    async/tcp-result-or-throw(perform async/Async.IO {
-        action: async/IOAction.TcpRead { socket: socket, n: n }
-    })
+    // Ready-I/O fast path: if bytes are already buffered, read them directly with
+    // NO async op and NO continuation capture (the common case under load). A
+    // successful read is always a string (empty = EOF); `false` means not-ready
+    // or error, so fall back to the async/suspend path which handles both.
+    let fast = core/tcp-try-read(socket.loop_id, socket.socket_id, n)
+    if fast == false {
+        async/tcp-result-or-throw(perform async/Async.IO {
+            action: async/IOAction.TcpRead { socket: socket, n: n }
+        })
+    } else {
+        fast
+    }
 }
 
 // Read up to n bytes with a deadline, WITHOUT closing the socket on timeout.
@@ -113,9 +122,26 @@ fn reader-with-timeout(conn, ms) {
 // Write data to a TCP socket (blocking)
 /// Block writing `data` to `socket`. Throws on error.
 fn write(socket, data) {
-    async/tcp-result-or-throw(perform async/Async.IO {
-        action: async/IOAction.TcpWrite { socket: socket, data: data }
-    })
+    // Ready-I/O fast path: try a direct non-blocking write with NO async op /
+    // continuation. `true` = fully written (the common case for responses that
+    // fit the send buffer); `false` = not ready or error (fall to async);
+    // otherwise an int = a partial write (kernel buffer filled) whose remainder
+    // is sent via the async path. Byte-faithful (uses byte-slice/byte-length).
+    let wrote = core/tcp-try-write(socket.loop_id, socket.socket_id, data)
+    if wrote == true {
+        null
+    } else {
+        if wrote == false {
+            async/tcp-result-or-throw(perform async/Async.IO {
+                action: async/IOAction.TcpWrite { socket: socket, data: data }
+            })
+        } else {
+            let rest = sb/byte-slice(data, wrote, sb/byte-length(data))
+            async/tcp-result-or-throw(perform async/Async.IO {
+                action: async/IOAction.TcpWrite { socket: socket, data: rest }
+            })
+        }
+    }
 }
 
 // Close a TCP socket

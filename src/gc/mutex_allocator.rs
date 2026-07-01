@@ -65,6 +65,143 @@ impl<Alloc: Allocator> MutexAllocator<Alloc> {
         self.alloc.sync_allocator_frontier(ms_alloc_ptr);
     }
 
+    /// Multi-threaded allocation via a thread-local allocation buffer (TLAB).
+    /// First tries a lock-free bump of the calling thread's current TLAB
+    /// (`MutatorState.alloc_ptr/alloc_end`); only on overflow does it take the
+    /// alloc mutex to carve a fresh TLAB. This removes the per-object mutex that
+    /// otherwise serialises (and degrades) parallel allocation.
+    fn tlab_allocate(
+        &mut self,
+        words: usize,
+        kind: BuiltInTypes,
+        zeroed: bool,
+    ) -> Result<AllocateAction, Box<dyn Error>> {
+        let ms = crate::runtime::current_mutator_state();
+        // 1. Lock-free bump within the current TLAB.
+        let (ptr, end) = unsafe { ((*ms).alloc_ptr, (*ms).alloc_end) };
+        if let Some((obj, new_ptr)) = self.alloc.tlab_bump(ptr, end, words, kind, zeroed) {
+            unsafe { (*ms).alloc_ptr = new_ptr };
+            return Ok(AllocateAction::Allocated(obj as *const u8));
+        }
+        // 2. TLAB full (or unarmed): refill under the lock.
+        let lock = self.mutex.lock().unwrap();
+        let slice = self.alloc.grab_tlab(words);
+        let result = match slice {
+            Some((start, tlab_end)) => {
+                // Place the first object at the front and arm the remainder as
+                // the thread's new TLAB.
+                let (obj, new_ptr) = self
+                    .alloc
+                    .tlab_bump(start, tlab_end, words, kind, zeroed)
+                    .expect("fresh TLAB must fit the object it was sized for");
+                unsafe {
+                    (*ms).alloc_ptr = new_ptr;
+                    (*ms).alloc_end = tlab_end;
+                    (*ms).tlab_start = start;
+                }
+                Ok(AllocateAction::Allocated(obj as *const u8))
+            }
+            // No TLAB available: young-gen exhausted, or object too big for a
+            // TLAB. Fall back to a direct per-object allocation (routes large
+            // objects to tenured; returns Gc when the young gen is full).
+            None => {
+                if zeroed {
+                    self.alloc.try_allocate_zeroed(words, kind)
+                } else {
+                    self.alloc.try_allocate(words, kind)
+                }
+            }
+        };
+        drop(lock);
+        result
+    }
+
+    /// Direct per-object allocation under the lock, bypassing TLABs. Used for
+    /// the `ensure_space_for`/`allocate_no_gc` sequence (which pre-reserves an
+    /// exact word count and must not waste it on TLAB slack) and as the
+    /// large-object / exhaustion fallback.
+    pub fn try_allocate_direct(
+        &mut self,
+        words: usize,
+        kind: BuiltInTypes,
+        zeroed: bool,
+    ) -> Result<AllocateAction, Box<dyn Error>> {
+        // Single-threaded: this must keep the inline frontier consistent exactly
+        // like the normal single-thread `try_allocate` path — absorb any inline
+        // bumps first (sync) and re-expose the frontier after (refresh).
+        // Otherwise the inner allocator's cursor and the MutatorState window
+        // diverge and later inline allocations overlap direct ones.
+        if self.registered_threads.load(Ordering::Acquire) == 0 {
+            self.sync_from_mutator_state();
+            let result = if zeroed {
+                self.alloc.try_allocate_zeroed(words, kind)
+            } else {
+                self.alloc.try_allocate(words, kind)
+            };
+            self.refresh_mutator_state();
+            return result;
+        }
+        // Multi-threaded: direct per-object allocation under the lock, bypassing
+        // this thread's TLAB (which stays armed and untouched).
+        let lock = self.mutex.lock().unwrap();
+        let result = if zeroed {
+            self.alloc.try_allocate_zeroed(words, kind)
+        } else {
+            self.alloc.try_allocate(words, kind)
+        };
+        drop(lock);
+        result
+    }
+
+    /// Reserve an EXCLUSIVE thread-local region of at least `bytes` for the
+    /// current thread's upcoming no-GC allocation sequence
+    /// (`ensure_space_for` + `allocate_no_gc`). Returns false if the young gen
+    /// can't grant it (caller GCs/grows and retries). Multi-thread only: makes
+    /// the reservation immune to other workers consuming the space (the TOCTOU
+    /// that crashes once workers actually run in parallel).
+    pub fn reserve_no_gc_region(&mut self, bytes: usize) -> bool {
+        let ms = crate::runtime::current_mutator_state();
+        unsafe {
+            let room = (*ms).alloc_end.saturating_sub((*ms).alloc_ptr);
+            if (*ms).alloc_ptr != 0 && room >= bytes {
+                return true; // current TLAB already has room
+            }
+        }
+        let lock = self.mutex.lock().unwrap();
+        let slice = self.alloc.grab_tlab_sized(bytes);
+        drop(lock);
+        match slice {
+            Some((start, end)) => {
+                unsafe {
+                    (*ms).alloc_ptr = start;
+                    (*ms).alloc_end = end;
+                    (*ms).tlab_start = start;
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Allocate one object from the current thread's reserved region (bump only,
+    /// no lock, no GC). Returns the untagged pointer, or None if it doesn't fit
+    /// (which means `ensure_space_for` under-reserved — a bug).
+    pub fn alloc_from_region(
+        &self,
+        words: usize,
+        kind: BuiltInTypes,
+        zeroed: bool,
+    ) -> Option<usize> {
+        let ms = crate::runtime::current_mutator_state();
+        unsafe {
+            let (obj, new_ptr) =
+                self.alloc
+                    .tlab_bump((*ms).alloc_ptr, (*ms).alloc_end, words, kind, zeroed)?;
+            (*ms).alloc_ptr = new_ptr;
+            Some(obj)
+        }
+    }
+
     /// Inline fast-path interop: after every `try_allocate*` call,
     /// push the inner allocator's new frontier back to the current
     /// thread's `MutatorState.alloc_ptr`/`alloc_end`, so subsequent
@@ -112,10 +249,9 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
             self.refresh_mutator_state();
             return result;
         }
-        let lock = self.mutex.lock().unwrap();
-        let result = self.alloc.try_allocate(bytes, kind);
-        drop(lock);
-        result
+        // Multi-threaded: allocate from this thread's TLAB (lock-free), taking
+        // the mutex only to refill.
+        self.tlab_allocate(bytes, kind, false)
     }
 
     fn try_allocate_zeroed(
@@ -129,10 +265,7 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
             self.refresh_mutator_state();
             return result;
         }
-        let lock = self.mutex.lock().unwrap();
-        let result = self.alloc.try_allocate_zeroed(words, kind);
-        drop(lock);
-        result
+        self.tlab_allocate(words, kind, true)
     }
 
     fn gc(&mut self, gc_frame_tops: &[usize], extra_roots: &[(*mut usize, usize)]) {
@@ -212,9 +345,39 @@ impl<Alloc: Allocator> Allocator for MutexAllocator<Alloc> {
         self.alloc.mark_card_unconditional(object_ptr);
     }
 
+    fn supports_tlab(&self) -> bool {
+        self.alloc.supports_tlab()
+    }
+
     fn register_finalizable(&mut self, tagged_ptr: usize) {
         let _lock = self.mutex.lock().unwrap();
         self.alloc.register_finalizable(tagged_ptr);
+    }
+
+    fn begin_concurrent(
+        &mut self,
+        gc_frame_tops: &[usize],
+        extra_roots: &[(*mut usize, usize)],
+    ) -> bool {
+        // Called at STW#1 (no contention). Lock for &mut access / consistency.
+        let _lock = self.mutex.lock().unwrap();
+        self.alloc.begin_concurrent(gc_frame_tops, extra_roots)
+    }
+
+    fn concurrent_trace(&mut self) {
+        // Hold the allocation mutex for the ENTIRE trace: this makes the
+        // allocator exclusive to the GC thread while mutators run, so mutators
+        // block only on `try_allocate` (allocation), never on mutation or the
+        // lock-free write barrier / card marking. That is what makes the trace
+        // sound without a read barrier.
+        let _lock = self.mutex.lock().unwrap();
+        self.alloc.concurrent_trace();
+    }
+
+    fn finish_concurrent(&mut self, gc_frame_tops: &[usize], extra_roots: &[(*mut usize, usize)]) {
+        // Called at STW#2 (no contention).
+        let _lock = self.mutex.lock().unwrap();
+        self.alloc.finish_concurrent(gc_frame_tops, extra_roots);
     }
 
     fn can_allocate(&self, words: usize, kind: BuiltInTypes) -> bool {
