@@ -1,10 +1,13 @@
 name: flake-repro
 
-# Reproduce the intermittent SIGSEGV in concurrent_card_table_barrier_test on
-# Linux-x86 + compacting (the only failing matrix cell). The crash needs
-# scheduler contention (it surfaced inside the full 550-test suite run, not in
-# isolation), so we oversubscribe the runner's few cores with parallel copies
-# AND loop the whole suite. Crash handler on to capture WHERE it dies.
+# Bisect the OSR-gated chain-corruption SIGSEGV on Linux-x86 + compacting.
+# A/B established: OSR-off = clean, OSR-on = crashes. These steps split
+# OSR-on into its component effects; the first crashing step localizes it:
+#   osr-codegen-only : OsrCheck emitted, counter decrements, trampoline NEVER
+#                      fires (threshold too high)   -> crash = back-edge codegen
+#   osr-one-trip     : trampoline fires once per loop (build request + gate),
+#                      never re-trips (recheck huge) -> crash = trampoline/build
+#   osr-full         : normal defaults               -> control (known to crash)
 # Temporary — delete once the flake is fixed.
 
 on:
@@ -24,49 +27,49 @@ jobs:
       - run: nproc
       - name: Build (compacting, backend-x86-64)
         run: cargo build --release --features compacting,backend-x86-64
-      - name: GC-chain hammer with OSR OFF (A/B vs the OSR-on steps below)
+      - name: osr-codegen-only (threshold huge; trampoline never fires)
         run: |
           T=stress/gc_chain_hammer.bg
-          for round in $(seq 1 25); do
-            pids=""; rm -f /tmp/orc_* /tmp/oout_*
+          for round in $(seq 1 30); do
+            pids=""; rm -f /tmp/rc_*
             for c in $(seq 1 8); do
-              ( BEAGLE_OSR=0 ./target/release/beag test $T > /tmp/oout_$c.log 2>&1; echo $? > /tmp/orc_$c ) &
+              ( BEAGLE_OSR_THRESHOLD=2000000000 ./target/release/beag test $T > /tmp/out_$c.log 2>&1; echo $? > /tmp/rc_$c ) &
               pids="$pids $!"
             done
             wait $pids
             for c in $(seq 1 8); do
-              if [ "$(cat /tmp/orc_$c 2>/dev/null)" != "0" ]; then
-                echo "### OSR-OFF CRASH: round $round copy $c ###"; cat /tmp/oout_$c.log; exit 1
+              if [ "$(cat /tmp/rc_$c 2>/dev/null)" != "0" ]; then
+                echo "### CODEGEN-ONLY CRASH: round $round copy $c ###"; cat /tmp/out_$c.log; exit 1
               fi
             done
-            echo "osr-off round $round: clean"
+            echo "codegen-only round $round: clean"
           done
-          echo "osr-off hammer clean"
-      - name: GC-chain hammer (6 threads x 700 gc-always iters + closure allocs, parallel)
+          echo "codegen-only clean"
+      - name: osr-one-trip (build fires once per loop; no re-trips)
         if: always()
         run: |
           T=stress/gc_chain_hammer.bg
-          for round in $(seq 1 25); do
-            pids=""; rm -f /tmp/hrc_* /tmp/hout_*
+          for round in $(seq 1 30); do
+            pids=""; rm -f /tmp/rc_*
             for c in $(seq 1 8); do
-              ( ./target/release/beag test $T > /tmp/hout_$c.log 2>&1; echo $? > /tmp/hrc_$c ) &
+              ( BEAGLE_OSR_RECHECK=2000000000 ./target/release/beag test $T > /tmp/out_$c.log 2>&1; echo $? > /tmp/rc_$c ) &
               pids="$pids $!"
             done
             wait $pids
             for c in $(seq 1 8); do
-              if [ "$(cat /tmp/hrc_$c 2>/dev/null)" != "0" ]; then
-                echo "### HAMMER CRASH: round $round copy $c ###"; cat /tmp/hout_$c.log; exit 1
+              if [ "$(cat /tmp/rc_$c 2>/dev/null)" != "0" ]; then
+                echo "### ONE-TRIP CRASH: round $round copy $c ###"; cat /tmp/out_$c.log; exit 1
               fi
             done
-            echo "hammer round $round: clean"
+            echo "one-trip round $round: clean"
           done
-          echo "hammer clean"
-      - name: Parallel stress (oversubscribe cores)
+          echo "one-trip clean"
+      - name: osr-full (control — known to crash eventually)
         if: always()
         run: |
-          T=resources/concurrent_card_table_barrier_test.bg
-          for round in $(seq 1 40); do
-            pids=""; rm -f /tmp/rc_* /tmp/out_*
+          T=stress/gc_chain_hammer.bg
+          for round in $(seq 1 30); do
+            pids=""; rm -f /tmp/rc_*
             for c in $(seq 1 8); do
               ( ./target/release/beag test $T > /tmp/out_$c.log 2>&1; echo $? > /tmp/rc_$c ) &
               pids="$pids $!"
@@ -74,18 +77,9 @@ jobs:
             wait $pids
             for c in $(seq 1 8); do
               if [ "$(cat /tmp/rc_$c 2>/dev/null)" != "0" ]; then
-                echo "### CRASH: round $round copy $c ###"; cat /tmp/out_$c.log; exit 1
+                echo "### FULL-OSR CRASH: round $round copy $c ###"; cat /tmp/out_$c.log; exit 1
               fi
             done
-            echo "round $round: 8 parallel copies clean"
+            echo "full round $round: clean"
           done
-          echo "parallel stress clean"
-      - name: Full suite loop
-        if: always()
-        run: |
-          for i in $(seq 1 6); do
-            echo "=== suite run $i ==="
-            cargo run --release --features compacting,backend-x86-64 -- test resources/ \
-              || { echo "### SUITE FAILED on run $i ###"; exit 1; }
-          done
-          echo "suite loop clean"
+          echo "full clean (crash is rare — rerun if all steps green)"
