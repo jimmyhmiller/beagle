@@ -1,9 +1,11 @@
 name: flake-repro
 
 # Reproduce the intermittent SIGSEGV in concurrent_card_table_barrier_test on
-# the Linux-x86 + compacting config (the only failing matrix cell), with the
-# crash-backtrace handler enabled so we capture WHERE it crashes instead of
-# "process produced no output". Temporary — delete once the flake is fixed.
+# Linux-x86 + compacting (the only failing matrix cell). The crash needs
+# scheduler contention (it surfaced inside the full 550-test suite run, not in
+# isolation), so we oversubscribe the runner's few cores with parallel copies
+# AND loop the whole suite. Crash handler on to capture WHERE it dies.
+# Temporary — delete once the flake is fixed.
 
 on:
   push:
@@ -13,17 +15,39 @@ on:
 jobs:
   repro:
     runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: full
+      BEAGLE_CRASH_BACKTRACE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - run: nproc
       - name: Build (compacting, backend-x86-64)
         run: cargo build --release --features compacting,backend-x86-64
-      - name: Loop the flaky test until it crashes (backtrace on)
+      - name: Parallel stress (oversubscribe cores)
         run: |
-          for i in $(seq 1 150); do
-            echo "=== iteration $i ==="
-            RUST_BACKTRACE=full BEAGLE_CRASH_BACKTRACE=1 \
-              ./target/release/beag test resources/concurrent_card_table_barrier_test.bg 2>&1 \
-              || { echo "### FAILED/CRASHED on iteration $i (exit $?) ###"; exit 1; }
+          T=resources/concurrent_card_table_barrier_test.bg
+          for round in $(seq 1 40); do
+            pids=""; rm -f /tmp/rc_* /tmp/out_*
+            for c in $(seq 1 8); do
+              ( ./target/release/beag test $T > /tmp/out_$c.log 2>&1; echo $? > /tmp/rc_$c ) &
+              pids="$pids $!"
+            done
+            wait $pids
+            for c in $(seq 1 8); do
+              if [ "$(cat /tmp/rc_$c 2>/dev/null)" != "0" ]; then
+                echo "### CRASH: round $round copy $c ###"; cat /tmp/out_$c.log; exit 1
+              fi
+            done
+            echo "round $round: 8 parallel copies clean"
           done
-          echo "no crash in 150 iterations"
+          echo "parallel stress clean"
+      - name: Full suite loop
+        if: always()
+        run: |
+          for i in $(seq 1 6); do
+            echo "=== suite run $i ==="
+            cargo run --release --features compacting,backend-x86-64 -- test resources/ \
+              || { echo "### SUITE FAILED on run $i ###"; exit 1; }
+          done
+          echo "suite loop clean"
