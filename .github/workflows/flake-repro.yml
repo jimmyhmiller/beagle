@@ -24,9 +24,9 @@ jobs:
       - run: nproc
       - name: Build (compacting, backend-x86-64)
         run: cargo build --release --features compacting,backend-x86-64
-      - name: Resume hammer (300 suspend/resume cycles per run, parallel)
+      - name: GC-chain hammer (6 threads x 700 gc-always iters + closure allocs, parallel)
         run: |
-          T=stress/resume_hammer.bg
+          T=stress/gc_chain_hammer.bg
           for round in $(seq 1 25); do
             pids=""; rm -f /tmp/hrc_* /tmp/hout_*
             for c in $(seq 1 8); do
