@@ -1245,6 +1245,29 @@ impl ThreadState {
     pub fn pause(&mut self, frame_pointer: usize) {
         let thread_id = thread::current().id();
         let gc_frame_top = crate::builtins::get_gc_frame_top();
+        // Diagnostic for the chain-corruption flake: validate the (fp, top)
+        // pair AT RECORDING TIME, on the pausing thread itself. If this fires,
+        // the pair was already garbage when recorded (stale TLS top / wrong
+        // safepoint fp) — the corruption is on the pausing thread's side. If
+        // scan-time corruption happens WITHOUT this firing, something wrote to
+        // the paused thread's stack between record and scan.
+        if gc_frame_top != 0 {
+            let header =
+                crate::types::Header::from_usize(unsafe { *(gc_frame_top as *const usize) });
+            if header.type_id != crate::collections::TYPE_ID_FRAME {
+                eprintln!(
+                    "[pause-stale-top] thread {:?} pausing with gc_frame_top {:#x} whose header \
+                     (type_id={} size={}) is NOT a frame; fp={:#x} [fp]={:#x} [fp+8]={:#x}",
+                    thread_id,
+                    gc_frame_top,
+                    header.type_id,
+                    header.size,
+                    frame_pointer,
+                    unsafe { *(frame_pointer as *const usize) },
+                    unsafe { *((frame_pointer + 8) as *const usize) },
+                );
+            }
+        }
         let prev = self
             .stack_pointers
             .insert(thread_id, (frame_pointer, gc_frame_top));

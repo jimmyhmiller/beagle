@@ -24,7 +24,26 @@ jobs:
       - run: nproc
       - name: Build (compacting, backend-x86-64)
         run: cargo build --release --features compacting,backend-x86-64
+      - name: GC-chain hammer with OSR OFF (A/B vs the OSR-on steps below)
+        run: |
+          T=stress/gc_chain_hammer.bg
+          for round in $(seq 1 25); do
+            pids=""; rm -f /tmp/orc_* /tmp/oout_*
+            for c in $(seq 1 8); do
+              ( BEAGLE_OSR=0 ./target/release/beag test $T > /tmp/oout_$c.log 2>&1; echo $? > /tmp/orc_$c ) &
+              pids="$pids $!"
+            done
+            wait $pids
+            for c in $(seq 1 8); do
+              if [ "$(cat /tmp/orc_$c 2>/dev/null)" != "0" ]; then
+                echo "### OSR-OFF CRASH: round $round copy $c ###"; cat /tmp/oout_$c.log; exit 1
+              fi
+            done
+            echo "osr-off round $round: clean"
+          done
+          echo "osr-off hammer clean"
       - name: GC-chain hammer (6 threads x 700 gc-always iters + closure allocs, parallel)
+        if: always()
         run: |
           T=stress/gc_chain_hammer.bg
           for round in $(seq 1 25); do
