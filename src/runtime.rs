@@ -6977,9 +6977,12 @@ impl Runtime {
         // The young gen was just reset, so every thread's cached TLAB window
         // (MutatorState.alloc_ptr/alloc_end) now points into freed space.
         // Invalidate them all while the world is stopped so the next allocation
-        // on each thread grabs a fresh TLAB. (No-op for the single-thread inline
-        // path, which is re-armed from the frontier just below.)
-        crate::runtime::reset_all_tlabs();
+        // on each thread grabs a fresh TLAB. Only TLAB allocators need this; for
+        // the others every MutatorState is already (0,0) in multi-thread mode, so
+        // gate it to keep the non-TLAB GC paths byte-for-byte unchanged.
+        if self.memory.heap.supports_tlab() {
+            crate::runtime::reset_all_tlabs();
+        }
 
         // World is stopped — also install any staged tier-2 specializations.
         // This is the fallback for the case where an install STW lost the race

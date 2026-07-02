@@ -1923,7 +1923,37 @@ fn cmd_test(test_args: TestArgs) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Best-effort crash diagnosis: on a fatal signal, print the signal and a Rust
+/// backtrace before dying (so a SIGSEGV during GC root scanning shows WHERE,
+/// instead of "process produced no output"). Gated by `BEAGLE_CRASH_BACKTRACE`
+/// so the default binary is unchanged; Beagle installs no other signal handlers,
+/// so there's nothing to conflict with. Not fully async-signal-safe, but we are
+/// already crashing.
+extern "C" fn crash_handler(sig: i32, _info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
+    let tid = format!("{:?}", std::thread::current().id());
+    let bt = std::backtrace::Backtrace::force_capture();
+    eprintln!("\n=== BEAGLE CRASH: signal {sig} on thread {tid} ===\n{bt}");
+    // SA_RESETHAND restored the default disposition; re-raise to die normally.
+    unsafe { libc::raise(sig) };
+}
+
+fn install_crash_handler() {
+    if std::env::var("BEAGLE_CRASH_BACKTRACE").is_err() {
+        return;
+    }
+    unsafe {
+        for sig in [libc::SIGSEGV, libc::SIGBUS, libc::SIGABRT, libc::SIGILL] {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = crash_handler as *const () as usize;
+            sa.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER | libc::SA_RESETHAND;
+            libc::sigemptyset(&mut sa.sa_mask);
+            libc::sigaction(sig, &sa, std::ptr::null_mut());
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+    install_crash_handler();
     let raw_args: Vec<String> = std::env::args().collect();
 
     // Bare file: beag file.bg [args...]
