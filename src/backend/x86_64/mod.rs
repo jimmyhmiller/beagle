@@ -64,6 +64,14 @@ impl CodegenBackend for X86_64Backend {
         self.inner.epilogue();
     }
 
+    fn save_scratch_and_flags(&mut self) {
+        self.inner.save_scratch_and_flags();
+    }
+
+    fn restore_scratch_and_flags(&mut self) {
+        self.inner.restore_scratch_and_flags();
+    }
+
     fn compile_to_bytes(&mut self) -> Vec<u8> {
         self.inner.compile_to_bytes()
     }

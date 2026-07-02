@@ -208,6 +208,16 @@ pub trait CodegenBackend: Sized {
     fn ret(&mut self);
     fn call(&mut self, register: Self::Register);
     fn call_builtin(&mut self, register: Self::Register);
+    /// Save CPU flags + the backend's scratch/temporary registers around
+    /// inline instrumentation emitted at loop back-edges (OsrCheck), so the
+    /// instrumentation is provably clobber-free no matter what the
+    /// surrounding codegen keeps live. Default no-op: backends whose
+    /// temporaries are guaranteed dead between IR instructions (ARM64's
+    /// X9/X10 discipline) don't need it; x86-64 overrides.
+    fn save_scratch_and_flags(&mut self) {}
+    /// Inverse of [`save_scratch_and_flags`]. Must be emitted on EVERY exit
+    /// path out of the guarded region.
+    fn restore_scratch_and_flags(&mut self) {}
     fn recurse(&mut self, label: Label);
     fn jump(&mut self, label: Label);
     fn jump_equal(&mut self, label: Label);

@@ -460,6 +460,10 @@ pub enum X86Asm {
     Pop {
         reg: X86Register,
     },
+    /// PUSHFQ — push RFLAGS
+    Pushf,
+    /// POPFQ — pop RFLAGS
+    Popf,
 
     // === Floating-point instructions (SSE2) ===
     /// ADDSD xmm, xmm
@@ -1006,6 +1010,9 @@ impl X86Asm {
                     vec![0x58 + reg.index]
                 }
             }
+
+            X86Asm::Pushf => vec![0x9C],
+            X86Asm::Popf => vec![0x9D],
 
             // === Floating-point instructions (SSE2) ===
             X86Asm::Addsd { dest, src } => {

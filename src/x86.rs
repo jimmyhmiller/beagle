@@ -582,6 +582,24 @@ impl LowLevelX86 {
         self.call(register);
     }
 
+    /// Save RFLAGS + the scratch registers (RAX, R10, R11) that inline
+    /// instrumentation (OsrCheck) clobbers at loop back-edges. 4 pushes =
+    /// 32 bytes, so RSP 16-byte alignment is preserved.
+    pub fn save_scratch_and_flags(&mut self) {
+        self.instructions.push(X86Asm::Pushf);
+        self.instructions.push(X86Asm::Push { reg: RAX });
+        self.instructions.push(X86Asm::Push { reg: R10 });
+        self.instructions.push(X86Asm::Push { reg: R11 });
+    }
+
+    /// Inverse of [`save_scratch_and_flags`].
+    pub fn restore_scratch_and_flags(&mut self) {
+        self.instructions.push(X86Asm::Pop { reg: R11 });
+        self.instructions.push(X86Asm::Pop { reg: R10 });
+        self.instructions.push(X86Asm::Pop { reg: RAX });
+        self.instructions.push(X86Asm::Popf);
+    }
+
     pub fn recurse(&mut self, label: Label) {
         self.instructions.push(X86Asm::CallRel {
             label_index: label.index,

@@ -4615,10 +4615,16 @@ impl Ir {
                     // sentinel (declined). On a real result, return it from
                     // this function (jump to the shared `exit` — the value is
                     // already in ret_reg); on the sentinel, fall through to
-                    // the back-edge. Safe to clobber caller-saved regs here:
-                    // the loop's live values live in callee-saved X19-X27
-                    // (the allocator pool), preserved across the extern-"C"
-                    // trampoline call.
+                    // the back-edge.
+                    //
+                    // The fast path saves/restores CPU flags + the backend's
+                    // scratch registers: unlike TierUpCheck (function entry,
+                    // where volatiles are provably dead), this sits at a loop
+                    // LATCH, where the surrounding codegen may keep scratch
+                    // state live — clobbering it here corrupted live values
+                    // (the Linux-x86 gc-chain SIGSEGV flake). No-op on
+                    // backends whose scratch discipline makes it unnecessary.
+                    backend.save_scratch_and_flags();
                     let addr_reg = backend.temporary_register();
                     let cnt_reg = backend.temporary_register();
                     let zero_reg = backend.temporary_register();
@@ -4630,12 +4636,24 @@ impl Ir {
                     backend.compare(cnt_reg, zero_reg);
                     backend.free_temporary_register(zero_reg);
 
+                    let slow = backend.new_label("osr_slow");
                     let after = backend.new_label("osr_after");
-                    backend.jump_not_equal(after);
+                    // Branch consumes the counter compare BEFORE any restore
+                    // (restoring flags would destroy it).
+                    backend.jump_equal(slow);
+                    // Fast path (counter nonzero): restore and continue.
+                    backend.restore_scratch_and_flags();
+                    backend.jump(after);
 
                     // Threshold reached: osr_trampoline(key, counter_addr, sp, fp).
                     // counter_addr lets the trampoline re-arm the counter (so a
                     // later trip can transfer once F_osr finishes building).
+                    // Restore FIRST: the extern-C call clobbers caller-saved
+                    // registers under its own ABI contract (loop values live in
+                    // the callee-saved allocator pool), and on a transfer the
+                    // result must stay in ret_reg for the exit path.
+                    backend.write_label(slow);
+                    backend.restore_scratch_and_flags();
                     let arg0 = backend.arg(0);
                     let arg1 = backend.arg(1);
                     let arg2 = backend.arg(2);
