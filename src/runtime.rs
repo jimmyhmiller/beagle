@@ -9064,20 +9064,6 @@ impl Runtime {
                 let heap_object = HeapObject::from_tagged(value);
                 let type_id = heap_object.get_type_id();
 
-                // Check if this is a type descriptor (negative id_field at index 1)
-                // Type descriptors have struct_id=1 (Struct base type) and id_field < 0
-                let fields_size = heap_object.fields_size() / 8;
-                if fields_size >= 2 {
-                    let id_field = heap_object.get_field(1);
-                    if BuiltInTypes::get_kind(id_field) == BuiltInTypes::Int {
-                        let id_value = BuiltInTypes::untag_isize(id_field as isize);
-                        if id_value < 0 {
-                            // This is a type descriptor - return it as-is
-                            return Ok(value);
-                        }
-                    }
-                }
-
                 match type_id {
                     val if val == TYPE_ID_RAW_ARRAY as usize => "Array",
                     val if val == TYPE_ID_STRING as usize
@@ -9093,6 +9079,27 @@ impl Runtime {
                     val if val == TYPE_ID_MULTI_ARITY_FUNCTION as usize => "MultiArityFunction",
                     val if val == TYPE_ID_CONTINUATION as usize => "Continuation",
                     _ => {
+                        // Check if this is a type descriptor (negative id_field at
+                        // index 1). Type descriptors are ordinary structs, so this
+                        // check must run ONLY on the struct arm: the builtin arms
+                        // above hold RAW DATA in their bodies. Running it on every
+                        // heap object read string BYTES as a tagged field — any
+                        // string whose first 8 data bytes decoded as a negative
+                        // tagged Int (byte0 % 8 == 0 && byte7 >= 0x80: ~6% of
+                        // random 16-byte strings) was returned as "its own type
+                        // descriptor", so instance-of(s, String) was false and
+                        // e.g. base64/encode threw on random WebSocket keys.
+                        let fields_size = heap_object.fields_size() / 8;
+                        if fields_size >= 2 {
+                            let id_field = heap_object.get_field(1);
+                            if BuiltInTypes::get_kind(id_field) == BuiltInTypes::Int {
+                                let id_value = BuiltInTypes::untag_isize(id_field as isize);
+                                if id_value < 0 {
+                                    // This is a type descriptor - return it as-is
+                                    return Ok(value);
+                                }
+                            }
+                        }
                         // Custom struct (type_id == 0 or other) - use struct_id
                         let struct_type_id = heap_object.get_struct_id();
                         let struct_value = self

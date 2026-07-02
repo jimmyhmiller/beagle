@@ -1,0 +1,48 @@
+namespace type_of_raw_bytes_test
+
+// Regression: type-of ran its "is this a type descriptor?" heuristic on EVERY
+// heap object, reading field 1 as a tagged value. For strings (and other
+// builtin objects) field 1 is RAW DATA — a string whose first 8 bytes decoded
+// as a negative tagged Int (byte0 % 8 == 0 && byte7 >= 0x80, ~6% of random
+// 16-byte strings) was returned as "its own type descriptor": instance-of
+// (s, String) was false, base64/encode treated the string as a Vec and threw
+// on random WebSocket keys (flaky ws_client_test). The check now runs only on
+// the struct arm.
+
+use beagle.string-builder as sb
+use beagle.base64 as base64
+
+fn bytes-to-string(bytes) {
+    let b = sb/new(16)
+    for x in bytes { sb/append-byte!(b, x) }
+    sb/to-string(b)
+}
+
+struct Point { x, y }
+
+test "type-of is String for strings whose bytes decode as a negative tagged Int" {
+    // byte0 = 0 (low 3 bits clear) + byte7 = 207 (high bit set): the exact
+    // shape that used to pass the descriptor heuristic.
+    let bad = bytes-to-string([0, 191, 166, 91, 167, 141, 15, 207])
+    assert!(instance-of(bad, String))
+    assert-eq!(type-of(bad), String)
+
+    // Same trigger inside a 16-byte string (the gen-ws-key shape).
+    let bad16 = bytes-to-string([240, 142, 41, 227, 155, 105, 15, 254, 224, 186, 22, 8, 218, 183, 126, 154])
+    assert!(instance-of(bad16, String))
+
+    // base64/encode must take the String branch and round-trip the bytes.
+    let encoded = base64/encode(bad)
+    assert-eq!(base64/decode(encoded), [0, 191, 166, 91, 167, 141, 15, 207])
+}
+
+test "type descriptors and structs still classify correctly" {
+    // The heuristic still has to work where it matters: descriptors return
+    // themselves, structs return their descriptor.
+    assert-eq!(type-of(String), String)
+    assert-eq!(type-of(Int), Int)
+    let p = Point { x: 1, y: 2 }
+    assert!(instance-of(p, Point))
+    assert!(struct?(p))
+    assert-eq!(type-of(p), Point)
+}
