@@ -3,6 +3,7 @@ namespace worker_thread_io_check_test
 use beagle.core as core
 use beagle.socket as socket
 use beagle.channel as chan
+use beagle.test-async as ta
 
 // ============================================================================
 // §2.1 STEP 0 — gating capability check.
@@ -65,6 +66,11 @@ test "worker threads spawned from a test body can do socket I/O" {
     })
 
     // Test body: ONLY a channel receive (pure-atom spin — no async effect).
-    let got = chan/receive(result_ch)
+    // WATCHDOGGED: if either worker dies (e.g. a one-off connect failure on a
+    // loaded CI runner — observed EINVAL on a GitHub macOS runner), the bare
+    // receive would spin until the runner's 300s kill with no diagnostics.
+    // The watchdog fails the test promptly instead; the thread's uncaught
+    // exception (already printed to stdout) then explains WHY.
+    let got = ta/receive-within(result_ch, 30000, "worker-io result")
     assert-eq!(got, "ping")
 }
