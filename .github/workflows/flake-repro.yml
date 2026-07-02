@@ -24,7 +24,26 @@ jobs:
       - run: nproc
       - name: Build (compacting, backend-x86-64)
         run: cargo build --release --features compacting,backend-x86-64
+      - name: Resume hammer (300 suspend/resume cycles per run, parallel)
+        run: |
+          T=stress/resume_hammer.bg
+          for round in $(seq 1 25); do
+            pids=""; rm -f /tmp/hrc_* /tmp/hout_*
+            for c in $(seq 1 8); do
+              ( ./target/release/beag test $T > /tmp/hout_$c.log 2>&1; echo $? > /tmp/hrc_$c ) &
+              pids="$pids $!"
+            done
+            wait $pids
+            for c in $(seq 1 8); do
+              if [ "$(cat /tmp/hrc_$c 2>/dev/null)" != "0" ]; then
+                echo "### HAMMER CRASH: round $round copy $c ###"; cat /tmp/hout_$c.log; exit 1
+              fi
+            done
+            echo "hammer round $round: clean"
+          done
+          echo "hammer clean"
       - name: Parallel stress (oversubscribe cores)
+        if: always()
         run: |
           T=resources/concurrent_card_table_barrier_test.bg
           for round in $(seq 1 40); do

@@ -1,0 +1,33 @@
+namespace resume_hammer
+// gc-always
+use beagle.channel as chan
+
+struct W { n, tag }
+let w_atom = atom(W { n: 0, tag: 99 })
+
+fn churn(i) { if i <= 0 { 0 } else { let _ = W { n: i, tag: 7 } churn(i - 1) } }
+
+test "hammer suspend/resume under gc-always churn" {
+    let ch = chan/make-channel()
+    // Feeder thread: sends slowly-ish so main usually BLOCKS on receive
+    // (blocking receive = continuation capture + later tail-resume).
+    thread(fn() {
+        let mut j = 0
+        while j < 300 {
+            churn(3)
+            chan/send!(ch, j)
+            j = j + 1
+        }
+    })
+    thread(fn() { churn(600) })
+    let mut i = 0
+    let mut bad = 0
+    while i < 300 {
+        let v = chan/receive(ch)   // usually suspends -> resume path
+        let w = deref(w_atom)
+        if w.tag != 99 { bad = bad + 1 }
+        swap!(w_atom, fn(prev) { W { n: v, tag: 99 } })
+        i = i + 1
+    }
+    assert-eq!(bad, 0)
+}
