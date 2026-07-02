@@ -6622,6 +6622,8 @@ impl Runtime {
     }
 
     pub fn gc_impl(&mut self, frame_pointer: usize) {
+        // Diagnostic ordering for the corrupt-GC-chain dumps (restore-trace).
+        crate::builtins::reset_shift::GC_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // The tier-2 install drain must never allocate Beagle heap: it runs
         // inside this collector holding `install_apply_lock` (and, on the
         // multi-thread path, `gc_lock` + `is_paused`), so a re-entrant

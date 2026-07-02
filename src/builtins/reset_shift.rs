@@ -201,7 +201,20 @@ pub struct RestoreTraceEntry {
     pub caller_gc_header: usize,
     pub new_gc_frame_top: usize,
     pub tail_resume: bool,
+    /// Global GC count at restore time. Compared against the count at crash
+    /// time: equal ⇒ the crashing GC is the FIRST since this restore (the
+    /// restore or its window corrupted the chain); greater ⇒ the chain
+    /// survived earlier GCs and was corrupted later.
+    pub gc_count: usize,
 }
+
+/// Bumped once per collection (gc_impl). Diagnostic ordering only.
+pub static GC_EPOCH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Set while a thread is inside the continuation-restore critical path
+/// (trampoline entry → return_jump). If a corruption panic fires while this
+/// is nonzero, a GC ran DURING a restore — the smoking gun for a
+/// restore-vs-GC race. Counts nested/concurrent restores across threads.
+pub static IN_RESTORE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub const RESTORE_TRACE_LEN: usize = 16;
 static RESTORE_TRACE: std::sync::Mutex<([RestoreTraceEntry; RESTORE_TRACE_LEN], usize)> =
@@ -220,6 +233,7 @@ impl RestoreTraceEntry {
             caller_gc_header: 0,
             new_gc_frame_top: 0,
             tail_resume: false,
+            gc_count: 0,
         }
     }
 }
@@ -246,17 +260,20 @@ pub fn dump_restore_trace(addr: usize) {
     entries.sort_by_key(|e| e.seq);
     let me = unsafe { libc::pthread_self() as u64 };
     eprintln!(
-        "[restore-trace] {} recent continuation restores (current pthread {:#x}):",
+        "[restore-trace] {} recent restores (current pthread {:#x}, gc_epoch={}, threads_in_restore_now={}):",
         entries.len(),
-        me
+        me,
+        GC_EPOCH.load(std::sync::atomic::Ordering::Relaxed),
+        IN_RESTORE.load(std::sync::atomic::Ordering::Acquire),
     );
     for e in entries {
         let in_copy = addr >= e.dst && addr < e.dst + e.seg_size;
         let near_result = e.result_ptr != 0 && addr.abs_diff(e.result_ptr) <= 64;
         eprintln!(
-            "[restore-trace]   seq={} thread={:#x} tail={} dst={:#x}..{:#x} innermost_off={:#x} outermost_off={:#x} result_ptr={:#x} caller_gc_header={:#x} new_top={:#x}{}{}{}",
+            "[restore-trace]   seq={} thread={:#x} gc_count={} tail={} dst={:#x}..{:#x} innermost_off={:#x} outermost_off={:#x} result_ptr={:#x} caller_gc_header={:#x} new_top={:#x}{}{}{}",
             e.seq,
             e.thread,
+            e.gc_count,
             e.tail_resume,
             e.dst,
             e.dst + e.seg_size,
@@ -2090,6 +2107,7 @@ pub unsafe fn return_from_shift_runtime_inner(
 /// mutated, so each invocation copies fresh bytes to a fresh
 /// destination.
 pub unsafe extern "C" fn continuation_trampoline(closure_ptr: usize, value: usize) -> ! {
+    IN_RESTORE.fetch_add(1, std::sync::atomic::Ordering::Release);
     // Extract the continuation from the closure's free variables.
     // Closure layout: header(8) + fn_ptr(8) + num_free(8) + num_locals(8) + free_var[0]...
     let untagged_closure = BuiltInTypes::untag(closure_ptr);
@@ -2507,7 +2525,9 @@ unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target:
         caller_gc_header,
         new_gc_frame_top: innermost_fp_in_dst - 8,
         tail_resume,
+        gc_count: GC_EPOCH.load(std::sync::atomic::Ordering::Relaxed),
     });
+    IN_RESTORE.fetch_sub(1, std::sync::atomic::Ordering::Release);
 
     let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
         unsafe { std::mem::transmute(return_jump_ptr) };
