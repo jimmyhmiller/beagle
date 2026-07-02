@@ -6852,24 +6852,35 @@ impl Runtime {
             + thread_state.c_calling_stack_pointers.len();
         usdt_probes::fire_stw_all_paused(num_paused, total_threads);
 
-        // Collect gc_frame_top values from all paused threads.
+        // Collect gc_frame_top values from all paused threads. Record each
+        // top's SOURCE in the diagnostic side-table so a corrupt-chain panic
+        // can say WHOSE top was garbage (paused entry / c_calling entry / the
+        // initiator's own TLS) — the discriminator for stale-top bugs.
         let mut gc_frame_tops: Vec<usize> = Vec::new();
+        let mut root_sources: Vec<(usize, String)> = Vec::new();
 
-        for (_tid, &(_fp, gc_frame_top)) in thread_state.stack_pointers.iter() {
+        for (tid, &(fp, gc_frame_top)) in thread_state.stack_pointers.iter() {
             if gc_frame_top != 0 {
                 gc_frame_tops.push(gc_frame_top);
+                root_sources.push((gc_frame_top, format!("paused {tid:?} fp={fp:#x}")));
             }
         }
         // Also include threads in C calls (FFI)
-        for (_tid, &(_fp, gc_frame_top)) in thread_state.c_calling_stack_pointers.iter() {
+        for (tid, &(fp, gc_frame_top)) in thread_state.c_calling_stack_pointers.iter() {
             if gc_frame_top != 0 {
                 gc_frame_tops.push(gc_frame_top);
+                root_sources.push((gc_frame_top, format!("c_calling {tid:?} fp={fp:#x}")));
             }
         }
 
         // Main thread (us — the GC-initiating thread)
         let main_gc_frame_top = crate::builtins::get_gc_frame_top();
         gc_frame_tops.push(main_gc_frame_top);
+        root_sources.push((
+            main_gc_frame_top,
+            format!("initiator TLS {:?}", thread::current().id()),
+        ));
+        crate::gc::stack_walker::set_gc_root_sources(root_sources);
 
         drop(thread_state);
 

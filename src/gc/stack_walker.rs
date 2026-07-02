@@ -20,6 +20,17 @@ use std::collections::HashSet;
 /// This means captured continuation frames are naturally excluded from scanning
 /// (they were unlinked when captured), and restored frames are included (they were
 /// re-linked during restoration).
+/// Diagnostic side-table: (gc_frame_top, source description) for every chain
+/// top the current GC collected — filled by gc_impl each STW, read only by the
+/// corrupt-chain panic path so it can say WHOSE reported top was garbage.
+static GC_ROOT_SOURCES: std::sync::Mutex<Vec<(usize, String)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_gc_root_sources(sources: Vec<(usize, String)>) {
+    if let Ok(mut guard) = GC_ROOT_SOURCES.lock() {
+        *guard = sources;
+    }
+}
+
 pub struct StackWalker;
 
 impl StackWalker {
@@ -61,6 +72,27 @@ impl StackWalker {
         // restore's copy range / being a splice target is what matters.
         let at_frame = recent_headers.first().copied().unwrap_or(corrupt_value);
         crate::builtins::reset_shift::dump_restore_trace(at_frame);
+        // Who reported each chain top this GC? The walk START (oldest recent
+        // header) matching a source pinpoints WHOSE top was garbage.
+        let walk_start = recent_headers
+            .iter()
+            .filter(|&&h| h != 0)
+            .next_back()
+            .copied()
+            .unwrap_or(0);
+        if let Ok(sources) = GC_ROOT_SOURCES.lock() {
+            eprintln!("[gc-chain-corrupt] chain tops this GC (walk started at {walk_start:#x}):");
+            for (top, src) in sources.iter() {
+                eprintln!(
+                    "[gc-chain-corrupt]   top={top:#x} from {src}{}",
+                    if *top == walk_start {
+                        "  <-- THE CORRUPT CHAIN"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
     }
 
     /// Collect all heap pointers from the GC frame chain for a single thread.
