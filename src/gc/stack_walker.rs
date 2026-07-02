@@ -27,6 +27,42 @@ impl StackWalker {
         header.size as usize
     }
 
+    /// Fatal-path diagnostics for a corrupt GC frame chain: the walk path that
+    /// led here, what the corrupt value points at if it's a tagged heap
+    /// pointer, and the recent continuation-restore trace (restores rewrite
+    /// prev links and splice the chain — the prime suspect for corruption).
+    fn dump_corruption_context(corrupt_value: usize, recent_headers: &[usize]) {
+        let visited: Vec<String> = recent_headers
+            .iter()
+            .filter(|&&h| h != 0)
+            .map(|h| format!("{h:#x}"))
+            .collect();
+        eprintln!(
+            "[gc-chain-corrupt] walk path (innermost..this): {}",
+            visited.join(" <- ")
+        );
+        if BuiltInTypes::is_heap_pointer(corrupt_value) {
+            let untagged = BuiltInTypes::untag(corrupt_value);
+            if untagged.is_multiple_of(8) && untagged != 0 {
+                let header = Header::from_usize(unsafe { *(untagged as *const usize) });
+                eprintln!(
+                    "[gc-chain-corrupt] corrupt value {:#x} is a tagged heap pointer: header type_id={} type_data={} size={} opaque={} marked={}",
+                    corrupt_value,
+                    header.type_id,
+                    header.type_data,
+                    header.size,
+                    header.opaque,
+                    header.marked
+                );
+            }
+        }
+        // Flag ring entries against the frame we were AT (recent_headers[0])
+        // — that's the frame whose prev link is corrupt, so containment in a
+        // restore's copy range / being a splice target is what matters.
+        let at_frame = recent_headers.first().copied().unwrap_or(corrupt_value);
+        crate::builtins::reset_shift::dump_restore_trace(at_frame);
+    }
+
     /// Collect all heap pointers from the GC frame chain for a single thread.
     /// `gc_frame_top` is the address of the topmost frame's header (or 0 for empty).
     pub fn collect_stack_roots(gc_frame_top: usize) -> Vec<(usize, usize)> {
@@ -49,6 +85,10 @@ impl StackWalker {
         let mut header_addr = gc_frame_top;
         let mut frames_seen = 0usize;
         let mut seen_headers = HashSet::new();
+        // Last few headers visited, for corruption diagnostics: shows the walk
+        // path INTO a corrupt link (e.g. restored continuation frames → a stale
+        // splice target).
+        let mut recent_headers: [usize; 6] = [0; 6];
 
         #[cfg(feature = "debug-gc")]
         eprintln!(
@@ -58,6 +98,8 @@ impl StackWalker {
 
         while header_addr != 0 {
             frames_seen += 1;
+            recent_headers.rotate_right(1);
+            recent_headers[0] = header_addr;
             if frames_seen > 100_000 {
                 panic!(
                     "BUG: runaway GC frame chain scan starting at {:#x} — probable cycle or corrupted prev pointer",
@@ -65,6 +107,7 @@ impl StackWalker {
                 );
             }
             if !seen_headers.insert(header_addr) {
+                Self::dump_corruption_context(header_addr, &recent_headers);
                 panic!(
                     "BUG: cycle in GC frame chain at {:#x} — repeated frame header",
                     header_addr
@@ -77,6 +120,7 @@ impl StackWalker {
             // address; either way we'd SIGSEGV on the read below. Surface
             // something the user can act on instead of a raw SEGV.
             if !header_addr.is_multiple_of(8) {
+                Self::dump_corruption_context(header_addr, &recent_headers);
                 panic!(
                     "BUG: unaligned GC frame header address {:#x} — chain starting at {:#x} is corrupt (frames_seen={})",
                     header_addr, gc_frame_top, frames_seen
@@ -200,6 +244,7 @@ impl StackWalker {
                 }
                 #[cfg(debug_assertions)]
                 crate::builtins::dump_gc_chain_trace();
+                Self::dump_corruption_context(prev_value, &recent_headers);
                 panic!(
                     "BUG: misaligned GC prev pointer {:#x} from frame header {:#x}",
                     prev_value, header_addr

@@ -184,6 +184,106 @@ static READ_SP_FP_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomi
 static RETURN_JUMP_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static STACK_SWITCH_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Diagnostic ring of recent continuation restores, dumped by the GC stack
+/// walker's corrupt-prev-chain panic so we can see whether the corrupt slot
+/// was inside a restore's copy range, was a result-value write target, or was
+/// a stale splice target. Written once per resume (a handful of word stores
+/// next to a whole-segment memcpy — negligible), read only on the fatal path.
+#[derive(Clone, Copy, Default)]
+pub struct RestoreTraceEntry {
+    pub seq: usize,
+    pub thread: u64,
+    pub dst: usize,
+    pub seg_size: usize,
+    pub innermost_offset: usize,
+    pub outermost_offset: usize,
+    pub result_ptr: usize,
+    pub caller_gc_header: usize,
+    pub new_gc_frame_top: usize,
+    pub tail_resume: bool,
+}
+
+pub const RESTORE_TRACE_LEN: usize = 16;
+static RESTORE_TRACE: std::sync::Mutex<([RestoreTraceEntry; RESTORE_TRACE_LEN], usize)> =
+    std::sync::Mutex::new(([RestoreTraceEntry::default_const(); RESTORE_TRACE_LEN], 0));
+
+impl RestoreTraceEntry {
+    const fn default_const() -> Self {
+        RestoreTraceEntry {
+            seq: 0,
+            thread: 0,
+            dst: 0,
+            seg_size: 0,
+            innermost_offset: 0,
+            outermost_offset: 0,
+            result_ptr: 0,
+            caller_gc_header: 0,
+            new_gc_frame_top: 0,
+            tail_resume: false,
+        }
+    }
+}
+
+fn record_restore_trace(mut e: RestoreTraceEntry) {
+    if let Ok(mut guard) = RESTORE_TRACE.lock() {
+        let (ring, seq) = &mut *guard;
+        *seq += 1;
+        e.seq = *seq;
+        e.thread = unsafe { libc::pthread_self() as u64 };
+        ring[*seq % RESTORE_TRACE_LEN] = e;
+    }
+}
+
+/// Dump the restore ring, flagging entries whose copy range / result write /
+/// splice target relate to `addr` (the corrupt frame header). Called from the
+/// stack walker's fatal diagnostics.
+pub fn dump_restore_trace(addr: usize) {
+    let Ok(guard) = RESTORE_TRACE.lock() else {
+        return;
+    };
+    let (ring, _) = &*guard;
+    let mut entries: Vec<&RestoreTraceEntry> = ring.iter().filter(|e| e.seq != 0).collect();
+    entries.sort_by_key(|e| e.seq);
+    let me = unsafe { libc::pthread_self() as u64 };
+    eprintln!(
+        "[restore-trace] {} recent continuation restores (current pthread {:#x}):",
+        entries.len(),
+        me
+    );
+    for e in entries {
+        let in_copy = addr >= e.dst && addr < e.dst + e.seg_size;
+        let near_result = e.result_ptr != 0 && addr.abs_diff(e.result_ptr) <= 64;
+        eprintln!(
+            "[restore-trace]   seq={} thread={:#x} tail={} dst={:#x}..{:#x} innermost_off={:#x} outermost_off={:#x} result_ptr={:#x} caller_gc_header={:#x} new_top={:#x}{}{}{}",
+            e.seq,
+            e.thread,
+            e.tail_resume,
+            e.dst,
+            e.dst + e.seg_size,
+            e.innermost_offset,
+            e.outermost_offset,
+            e.result_ptr,
+            e.caller_gc_header,
+            e.new_gc_frame_top,
+            if in_copy {
+                "  <-- ADDR IN COPY RANGE"
+            } else {
+                ""
+            },
+            if near_result {
+                "  <-- ADDR NEAR RESULT WRITE"
+            } else {
+                ""
+            },
+            if e.caller_gc_header == addr {
+                "  <-- ADDR IS SPLICE TARGET"
+            } else {
+                ""
+            },
+        );
+    }
+}
+
 #[inline]
 fn cached_builtin_ptr(cache: &std::sync::atomic::AtomicUsize, name: &str) -> usize {
     use std::sync::atomic::Ordering;
@@ -2391,6 +2491,23 @@ unsafe extern "C" fn continuation_restore_on_scratch(_stack_top: usize, _target:
         // read stale SP/FP from a dangling record.
         unsafe { restore_side_state_into_live_stacks(side_state_ptr, dst) };
     }
+
+    record_restore_trace(RestoreTraceEntry {
+        seq: 0,
+        thread: 0,
+        dst,
+        seg_size,
+        innermost_offset,
+        outermost_offset,
+        result_ptr: if result_local_offset != 0 {
+            (innermost_fp_in_dst as isize).wrapping_add(result_local_offset) as usize
+        } else {
+            0
+        },
+        caller_gc_header,
+        new_gc_frame_top: innermost_fp_in_dst - 8,
+        tail_resume,
+    });
 
     let return_jump: extern "C" fn(usize, usize, usize, usize, *const usize, usize) -> ! =
         unsafe { std::mem::transmute(return_jump_ptr) };
