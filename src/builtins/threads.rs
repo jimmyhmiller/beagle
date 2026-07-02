@@ -28,20 +28,24 @@ pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) ->
     trace!("scheduler", "pause: entering GC safepoint");
     let pause_start = std::time::Instant::now();
 
-    // Use frame_pointer passed from Beagle code for FP-chain stack walking
-    pause_current_thread(frame_pointer, runtime);
+    // Use frame_pointer passed from Beagle code for FP-chain stack walking.
+    // The insert is GATED on a stop-the-world actually being active; if it
+    // returns false we never registered, so there is nothing to park for or
+    // to unregister (see pause_current_thread for the blink-entry race this
+    // prevents).
+    if pause_current_thread(frame_pointer, runtime) {
+        // Memory barrier to ensure all writes are visible before parking
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
 
-    // Memory barrier to ensure all writes are visible before parking
-    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        while runtime.is_paused() {
+            // Park can unpark itself even if I haven't called unpark
+            thread::park();
+        }
 
-    while runtime.is_paused() {
-        // Park can unpark itself even if I haven't called unpark
-        thread::park();
+        // Apparently, I can't count on this not unparking
+        // I need some other mechanism to know that things are ready
+        unpause_current_thread(runtime);
     }
-
-    // Apparently, I can't count on this not unparking
-    // I need some other mechanism to know that things are ready
-    unpause_current_thread(runtime);
 
     let pause_duration_ns = pause_start.elapsed().as_nanos() as u64;
     trace!(
@@ -60,13 +64,37 @@ pub unsafe extern "C" fn __pause(_stack_pointer: usize, frame_pointer: usize) ->
     BuiltInTypes::null_value() as usize
 }
 
-pub fn pause_current_thread(frame_pointer: usize, runtime: &mut Runtime) {
+/// Register this thread as paused for the active stop-the-world. Returns
+/// `false` — WITHOUT registering — when no STW is active at insert time.
+///
+/// The gate closes the "blink entry" soundness hole (the Linux-x86 chain
+/// corruption SIGSEGV): a thread could observe `is_paused == 1` for STW #N at
+/// a safepoint, get descheduled BEFORE inserting its entry, and insert only
+/// after #N fully finished (whose drain didn't wait for it — no entry yet).
+/// The next STW then counted that transient entry as "paused" and scanned its
+/// recorded gc_frame_top while the owner — which saw `is_paused == 0` and
+/// removed the entry — kept running and reused that stack region. Scanning a
+/// running thread's stack = walking garbage.
+///
+/// Checking `is_paused` while holding the thread_state lock orders the check
+/// against the initiator: the initiator CASes `is_paused = 1` BEFORE taking
+/// this lock to count entries, so an entry inserted under the gate is always
+/// counted by the STW it actually belongs to, and that STW's resume drain
+/// (`paused_threads() > 0` wait) holds `gc_lock` until the entry is removed —
+/// no entry can ever leak into a later STW.
+pub fn pause_current_thread(frame_pointer: usize, runtime: &mut Runtime) -> bool {
     let thread_state = runtime.thread_state.clone();
     let (lock, condvar) = &*thread_state;
     let mut state = lock.lock().unwrap();
+    if !runtime.is_paused() {
+        // The STW that sent us here already ended (or hasn't started): do NOT
+        // create a blink entry for a stop-the-world that isn't running.
+        return false;
+    }
     state.pause(frame_pointer);
     condvar.notify_one();
     drop(state);
+    true
 }
 
 pub fn unpause_current_thread(runtime: &mut Runtime) {
