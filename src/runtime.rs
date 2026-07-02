@@ -7356,7 +7356,16 @@ impl Runtime {
 
     pub fn register_temporary_root(&mut self, root: usize) -> usize {
         // Use the handle root mechanism which is backed by Memory.thread_globals
-        self.add_handle_root(root).unwrap_or(0)
+        self.add_handle_root(root).unwrap_or_else(|| {
+            // 0 is a REAL slot id: returning it as a failure sentinel silently
+            // leaves `root` unrooted (GC frees/moves it under the caller) and a
+            // later unregister removes someone ELSE's root 0. Fail loudly.
+            panic!(
+                "register_temporary_root: could not allocate a root slot for {root:#x} \
+                 (GlobalObjectBlock allocation failed — heap full?). \
+                 Continuing would silently drop a GC root."
+            )
+        })
     }
 
     pub fn unregister_temporary_root(&mut self, id: usize) -> usize {
