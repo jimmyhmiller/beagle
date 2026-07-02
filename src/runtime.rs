@@ -1228,10 +1228,24 @@ pub struct CallbackInfo {
 unsafe impl Send for CallbackInfo {}
 unsafe impl Sync for CallbackInfo {}
 
+/// A paused thread's snapshot, recorded by `pause()` at the safepoint.
+/// `ret_at_record` (the return address read from `[fp+8]` at record time) and
+/// `epoch_at_record` (GC_EPOCH) exist for the chain-corruption diagnostics:
+/// on a scan-time validation failure they say WHICH function the thread was
+/// paused in and whether the entry is fresh (memory mutated while parked) or
+/// stale (a drain hole let an old entry leak into this GC).
+#[derive(Clone, Copy)]
+pub struct PausedThread {
+    pub frame_pointer: usize,
+    pub gc_frame_top: usize,
+    pub ret_at_record: usize,
+    pub epoch_at_record: usize,
+}
+
 pub struct ThreadState {
-    /// (frame_pointer, gc_frame_top) for each paused thread, keyed by ThreadId.
+    /// Snapshot for each paused thread, keyed by ThreadId.
     /// Using HashMap ensures each thread has exactly one entry and unpause removes the correct one.
-    pub stack_pointers: HashMap<ThreadId, (usize, usize)>,
+    pub stack_pointers: HashMap<ThreadId, PausedThread>,
     // TODO: I probably don't want to do this here. This requires taking a mutex
     // not really ideal for c calls.
     pub c_calling_stack_pointers: HashMap<ThreadId, (usize, usize)>,
@@ -1268,9 +1282,21 @@ impl ThreadState {
                 );
             }
         }
-        let prev = self
-            .stack_pointers
-            .insert(thread_id, (frame_pointer, gc_frame_top));
+        let ret_at_record = if frame_pointer != 0 {
+            unsafe { *((frame_pointer + 8) as *const usize) }
+        } else {
+            0
+        };
+        let prev = self.stack_pointers.insert(
+            thread_id,
+            PausedThread {
+                frame_pointer,
+                gc_frame_top,
+                ret_at_record,
+                epoch_at_record: crate::builtins::reset_shift::GC_EPOCH
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            },
+        );
         debug_assert!(prev.is_none(), "Thread {:?} double-paused", thread_id);
     }
 
@@ -6882,10 +6908,48 @@ impl Runtime {
         let mut gc_frame_tops: Vec<usize> = Vec::new();
         let mut root_sources: Vec<(usize, String)> = Vec::new();
 
-        for (tid, &(fp, gc_frame_top)) in thread_state.stack_pointers.iter() {
-            if gc_frame_top != 0 {
-                gc_frame_tops.push(gc_frame_top);
-                root_sources.push((gc_frame_top, format!("paused {tid:?} fp={fp:#x}")));
+        for (tid, snap) in thread_state.stack_pointers.iter() {
+            if snap.gc_frame_top != 0 {
+                // Scan-time validation: the pausing thread validated this top
+                // AT RECORD (pause-stale-top probe). If it is garbage NOW, the
+                // memory changed between record and scan — dump everything
+                // that discriminates stale-entry vs mutated-while-parked.
+                let header = crate::types::Header::from_usize(unsafe {
+                    *(snap.gc_frame_top as *const usize)
+                });
+                if header.type_id != crate::collections::TYPE_ID_FRAME {
+                    let current_epoch = crate::builtins::reset_shift::GC_EPOCH
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let fn_name = self
+                        .get_function_containing_pointer(snap.ret_at_record as *const u8)
+                        .map(|(f, off)| format!("{}+{:#x}", f.name, off))
+                        .unwrap_or_else(|| "?".to_string());
+                    eprintln!(
+                        "[scan-stale-top] paused {tid:?} top={:#x} no longer a frame \
+                         (type_id={} raw_header={:#x}); recorded fp={:#x} ret={:#x} ({fn_name}) \
+                         epoch_at_record={} current_epoch={} ({})",
+                        snap.gc_frame_top,
+                        header.type_id,
+                        unsafe { *(snap.gc_frame_top as *const usize) },
+                        snap.frame_pointer,
+                        snap.ret_at_record,
+                        snap.epoch_at_record,
+                        current_epoch,
+                        if snap.epoch_at_record == current_epoch {
+                            "FRESH entry — memory MUTATED while thread parked"
+                        } else {
+                            "STALE entry — leaked from an earlier GC"
+                        },
+                    );
+                }
+                gc_frame_tops.push(snap.gc_frame_top);
+                root_sources.push((
+                    snap.gc_frame_top,
+                    format!(
+                        "paused {tid:?} fp={:#x} ret={:#x} rec_epoch={}",
+                        snap.frame_pointer, snap.ret_at_record, snap.epoch_at_record
+                    ),
+                ));
             }
         }
         // Also include threads in C calls (FFI)
@@ -6981,9 +7045,9 @@ impl Runtime {
                         .saturating_sub(self_in);
                 }
                 let mut roots2: Vec<usize> = Vec::new();
-                for (_tid, &(_fp, gft)) in ts.stack_pointers.iter() {
-                    if gft != 0 {
-                        roots2.push(gft);
+                for snap in ts.stack_pointers.values() {
+                    if snap.gc_frame_top != 0 {
+                        roots2.push(snap.gc_frame_top);
                     }
                 }
                 for (_tid, &(_fp, gft)) in ts.c_calling_stack_pointers.iter() {
