@@ -223,6 +223,21 @@ pub extern "C" fn run_thread(_unused: usize) -> usize {
     // We're still registered but we're in C code now, not Beagle code.
     // If GC starts, it will wait for us to pause, but we can't pause from C.
     // Solution: register as c_calling so GC counts us and proceeds.
+    //
+    // INVARIANT: a thread whose Beagle code fully returned must have an empty
+    // GC frame chain. register_c_call snapshots the TLS gc_frame_top into the
+    // c_calling entry, and every GC between here and unregister (a window that
+    // deliberately spans in-flight GCs via the is_paused wait below) walks that
+    // top. A nonzero residue here means some frame skipped its epilogue unlink
+    // — the walker would then scan popped/reused stack memory.
+    let leftover_top = crate::builtins::get_gc_frame_top();
+    if leftover_top != 0 {
+        eprintln!(
+            "[thread-exit-stale-top] thread {:?} exiting with nonzero gc_frame_top {:#x} — \
+             frame chain not fully unlinked; GC would scan dead stack",
+            my_thread_id, leftover_top
+        );
+    }
     {
         let (lock, condvar) = &*runtime.thread_state.clone();
         let mut state = lock.lock().unwrap();
