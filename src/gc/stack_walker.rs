@@ -43,10 +43,25 @@ impl StackWalker {
     /// pointer, and the recent continuation-restore trace (restores rewrite
     /// prev links and splice the chain — the prime suspect for corruption).
     fn dump_corruption_context(corrupt_value: usize, recent_headers: &[usize]) {
+        // Print each visited node WITH its header word: distinguishes "was a
+        // frame, now stale" (TYPE_ID_FRAME header still present) from "never a
+        // frame" (arbitrary memory the chain top pointed into).
         let visited: Vec<String> = recent_headers
             .iter()
             .filter(|&&h| h != 0)
-            .map(|h| format!("{h:#x}"))
+            .map(|&h| {
+                if h.is_multiple_of(8) {
+                    let hdr = Header::from_usize(unsafe { *(h as *const usize) });
+                    format!(
+                        "{h:#x}(hdr: type_id={} size={} raw={:#x})",
+                        hdr.type_id,
+                        hdr.size,
+                        unsafe { *(h as *const usize) }
+                    )
+                } else {
+                    format!("{h:#x}(unaligned)")
+                }
+            })
             .collect();
         eprintln!(
             "[gc-chain-corrupt] walk path (innermost..this): {}",
